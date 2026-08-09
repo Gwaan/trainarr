@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+/* =========================================================================
+   Design system « Night Track » — source unique des tokens.
+   Cf. .claude/rules/design.md : aucune couleur ni typo hors de ce bloc.
+   ========================================================================= */
+@theme {
+  /* Fonds (du plus profond au plus élevé) */
+  --color-bg: #0a0e16;
+  --color-surface: #0f1420;
+  --color-surface-2: #141b2b;
+  --color-border: #1a2233;
+
+  /* Texte */
+  --color-fg: #e9edf4;
+  --color-fg-muted: #aab3c2;
+  --color-fg-faint: #7a8598;
+
+  /* Accent — UN SEUL, ne jamais en introduire d'autre */
+  --color-accent: #ff4d00;
+  --color-accent-soft: rgba(255, 77, 0, 0.12);
+
+  /* Sémantique (≠ accent, réservé aux états) */
+  --color-positive: #a3e635;
+  --color-warning: #fbbf24;
+  --color-negative: #f87171;
+
+  /* Zones cardio — graphes uniquement */
+  --color-zone-1: #64748b;
+  --color-zone-2: #38bdf8;
+  --color-zone-3: #a3e635;
+  --color-zone-4: #fbbf24;
+  --color-zone-5: #ff4d00;
+
+  /* Typographie — auto-hébergée via next/font, aucune fonte système */
+  --font-sans: var(--font-archivo);
+  --font-mono: var(--font-jetbrains-mono);
+
+  /* Rayons : 10px cards, 8px boutons — cohérent partout */
+  --radius-card: 10px;
+  --radius-button: 8px;
+
+  /* Motion : 120–180 ms, ease-out */
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
+}
+
+/* Valeurs chiffrées : mono + tabular-nums, c'est la signature visuelle. */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Label de section : uppercase, 0.68rem, tracking 0.1em, fg-faint. */
+@utility eyebrow {
+  font-size: 0.68rem;
+  line-height: 1.1;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
+}
+
+@layer base {
+  /* Tailwind v4 : la bordure par défaut est `currentColor`, on la ramène au token. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border);
+  }
+
+  html {
+    /* Dark-first par identité : pas de mode clair à ce stade. */
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+    scrollbar-color: var(--color-surface-2) transparent;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
+
+  /* Focus visible sur tous les interactifs, sans exception. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background-color: var(--color-accent);
+    color: var(--color-bg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
