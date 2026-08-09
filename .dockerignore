@@ -1,0 +1,32 @@
+# dépendances et artefacts de build (réinstallés/rebuild dans l'image)
+node_modules
+.next
+out
+build
+coverage
+
+# VCS et outillage local
+.git
+.gitignore
+.github
+.claude
+.vscode
+.idea
+
+# secrets — jamais dans le contexte de build (sauf le template documenté)
+.env
+.env.*
+!.env.example
+
+# documentation et divers
+*.md
+LICENSE
+.DS_Store
+*.log
+*.pem
+*.tsbuildinfo
+
+# infra (non nécessaire à l'intérieur de l'image)
+Dockerfile
+.dockerignore
+docker-compose.yml

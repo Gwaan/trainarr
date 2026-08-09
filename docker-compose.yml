@@ -1,0 +1,54 @@
+name: trainarr
+
+services:
+  app:
+    container_name: trainarr
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Toutes les variables (DATABASE_URL, clés Strava/IA) viennent de .env — jamais du repo.
+    env_file: .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app-staging
+
+  db:
+    container_name: trainarr-db
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trainarr}
+      # La base est jointe au réseau partagé app-staging : tout container de ce
+      # réseau peut l'atteindre. Renseigner un vrai mot de passe dans .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requis}
+      POSTGRES_DB: ${POSTGRES_DB:-trainarr}
+    volumes:
+      - trainarr-db-data:/var/lib/postgresql/data
+    # Non exposé sur l'hôte : seul le réseau interne y accède.
+    # Décommenter pour inspecter la base depuis la machine hôte (psql, drizzle-kit).
+    # ports: ["5432:5432"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-trainarr} -d ${POSTGRES_DB:-trainarr}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-staging
+
+volumes:
+  trainarr-db-data:
+
+networks:
+  # Réseau partagé du homelab, géré hors de ce stack (Komodo).
+  # À créer une seule fois s'il n'existe pas : docker network create app-staging
+  app-staging:
+    external: true
