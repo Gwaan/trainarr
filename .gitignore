@@ -1,0 +1,28 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# env & secrets — JAMAIS de token/PAT/clé API dans le repo
+.env*
+!.env.example
+
+# claude local
+.claude/settings.local.json
+
+# misc
+.DS_Store
+*.pem
+*.log
+*.tsbuildinfo

@@ -1,0 +1,60 @@
+@AGENTS.md
+
+# Trainarr
+
+Appli de running self-hosted qui remplace Runna (plans d'entraînement) et Runalyze (analytics), avec un coach IA. Utilisateur unique (Gwen), pas de multi-tenant. Langue de l'UI : français.
+
+## Stack
+
+- **Next.js 16 (App Router, Turbopack)** + TypeScript strict + React 19 — full-stack, pas de backend séparé. Node.js ≥ 20.9.
+- **PostgreSQL + pgvector** (Drizzle ORM) — activités, plans, séries temporelles, embeddings RAG
+- **Coach IA multi-provider** : abstraction unique compatible OpenAI — llama.cpp local (`llama-server`), Claude API, ou toute API compatible. Jamais de couplage direct à un provider dans le code métier.
+- **Sync Strava** (OAuth + webhooks) comme source de données principale ; import FIT prévu ensuite
+- Déploiement : Docker Compose (container `trainarr` sur le port 3000 + Postgres/pgvector), livraison auto via webhook Komodo sur push.
+
+## Commandes (pnpm)
+
+```bash
+pnpm dev              # dev server (Turbopack)
+pnpm build            # build de prod
+pnpm lint             # eslint directement (`next lint` n'existe plus en v16)
+pnpm typecheck        # tsc --noEmit
+pnpm test             # vitest
+pnpm exec drizzle-kit generate   # génère une migration après modif du schéma
+pnpm exec drizzle-kit migrate    # applique les migrations
+```
+
+- **Toujours pnpm, jamais npm/yarn/npx** (utiliser `pnpm exec` / `pnpm dlx`).
+- `next build` ne lance plus le lint en v16 : toujours exécuter `pnpm typecheck` **et** `pnpm lint` avant de considérer une tâche terminée.
+- La doc officielle en markdown : ajouter `.md` à toute URL nextjs.org/docs (version-matched).
+
+## Architecture
+
+```
+src/
+├── app/                  # routes uniquement (pages, layouts, route handlers)
+│   └── <route>/_components, _lib   # code colocalisé propre à la route
+├── components/           # composants UI partagés
+├── data/                 # Data Access Layer (server-only) — SEUL accès DB + auth
+├── lib/
+│   ├── ai/               # abstraction provider LLM + outils du coach
+│   ├── strava/           # OAuth, sync, webhooks
+│   └── metrics/          # calculs physio purs (VO2max, TRIMP, ATL/CTL/TSB)
+├── config/               # env validé par Zod (fail fast au build)
+└── proxy.ts              # interception réseau (ex-middleware.ts, déprécié en v16)
+```
+
+Flux d'une mutation : Server Action mince → valide (Zod) → délègue au DAL (`src/data/`) qui porte auth + accès DB → `updateTag()`/`revalidatePath()`. La logique métier vit dans des services testables, jamais dans les actions ni les composants.
+
+## Mode de travail (orchestration)
+
+- **Session principale = Fable 5 (effort high)** : analyse, plan, découpage en tâches, vérification finale, commits. Elle n'implémente directement que le trivial (config, renommage, une ligne).
+- **Implémentation = sous-agent `implementer` (Opus 5, effort high)** : une tâche bornée et entièrement spécifiée par prompt (fichiers, contrats, critères de done). Tâches indépendantes lancées en parallèle ; les installations de dépendances restent centralisées côté orchestrateur pour éviter les conflits de lockfile.
+- **Avant commit** : l'orchestrateur relance typecheck/lint/tests lui-même (ne pas croire un rapport sur parole), et passe le sous-agent `reviewer` sur les diffs significatifs.
+
+## Règles critiques
+
+- **JAMAIS de secret dans le repo** : ni PAT GitHub, ni tokens Strava, ni clés API. Tout passe par `.env.local` (gitignoré) et n'est lu que dans `src/config/` + le DAL. Vérifier avant chaque commit.
+- Les données d'entraînement sont la source de vérité : ne jamais inventer ou approximer des métriques physio — si un calcul manque de données, le dire.
+- Design : direction **Night Track** verrouillée, tokens dans `.claude/rules/design.md` — aucune couleur ni typo hors système.
+- Règles détaillées par domaine dans `.claude/rules/` (nextjs, security, typescript, design, ai-coach, data-strava).
