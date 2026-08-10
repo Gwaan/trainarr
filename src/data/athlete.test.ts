@@ -304,6 +304,21 @@ describe('createAthlete', () => {
     await expect(createAthlete(VALID_INPUT)).rejects.toBeInstanceOf(AthleteAlreadyExistsError);
   });
 
+  it("reconnaît la violation même emballée par drizzle", async () => {
+    // Forme réelle en production : `DrizzleQueryError` ne porte pas le code, il
+    // faut remonter sa `cause` — sans ça l'onboarding concurrent remontait une
+    // panne brute au lieu du cas métier.
+    queryState.insertError = Object.assign(new Error('Failed query: insert into "athlete" ...'), {
+      name: 'DrizzleQueryError',
+      cause: Object.assign(new Error('duplicate key value'), {
+        code: '23505',
+        constraint_name: 'athlete_singleton',
+      }),
+    });
+
+    await expect(createAthlete(VALID_INPUT)).rejects.toBeInstanceOf(AthleteAlreadyExistsError);
+  });
+
   it("laisse remonter une panne qui n'est pas une violation d'unicité", async () => {
     queryState.insertError = Object.assign(new Error('connection terminated'), { code: '08006' });
 

@@ -14,16 +14,19 @@ import type { BannerTone } from "@/components/banner";
 /**
  * Formulations validées pour chaque issue.
  *
- * `updated` : ce fichier avait déjà été importé (même empreinte) — l'activité
- * existante a été retrouvée, pas dupliquée.
+ * - `updated` : ce fichier avait déjà été importé (même empreinte) — l'activité
+ *   existante a été retrouvée, pas dupliquée ;
+ * - `merged` : cette séance était déjà en base, importée depuis un **autre**
+ *   fichier. Le mot compte : rien n'a été créé, et rien n'a été écrasé non plus.
  */
 const STATUS_LABELS: Record<FitUploadStatus, { one: string; many: string }> = {
   created: { one: "importée", many: "importées" },
   updated: { one: "mise à jour", many: "mises à jour" },
+  merged: { one: "déjà connue, complétée", many: "déjà connues, complétées" },
 };
 
 /** Ordre de lecture du récapitulatif, du cas le plus courant au plus rare. */
-const STATUS_ORDER: readonly FitUploadStatus[] = ["created", "updated"];
+const STATUS_ORDER: readonly FitUploadStatus[] = ["created", "updated", "merged"];
 
 export type FitUploadFailure = { name: string; error: string };
 

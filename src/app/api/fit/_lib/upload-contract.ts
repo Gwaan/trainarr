@@ -27,7 +27,7 @@ const MAX_FILE_NAME_LENGTH = 120;
  * Issue d'un import réussi, alignée sur `IngestReport['status']` de
  * `@/lib/fit/ingest` (le route handler ne compilerait pas si elle divergeait).
  */
-export const fitUploadStatusSchema = z.enum(['created', 'updated']);
+export const fitUploadStatusSchema = z.enum(['created', 'updated', 'merged']);
 export type FitUploadStatus = z.infer<typeof fitUploadStatusSchema>;
 
 /**

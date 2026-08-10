@@ -36,6 +36,20 @@
       "when": 1786370994439,
       "tag": "0004_athlete_singleton",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786393338076,
+      "tag": "0005_dedupe_activities_by_session",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786394710026,
+      "tag": "0006_activities_session_unique",
+      "breakpoints": true
     }
   ]
 }

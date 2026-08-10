@@ -5,6 +5,7 @@ import { asc, eq } from 'drizzle-orm';
 import { toCivilDate } from '@/lib/dates/civil';
 
 import { db } from './db/client';
+import { isUniqueViolation } from './db/errors';
 import { ATHLETE_SEXES, athlete, type Athlete, type AthleteSex } from './db/schema';
 
 /**
@@ -260,18 +261,6 @@ export async function hasAthlete(): Promise<boolean> {
 /*
  * Écritures.
  */
-
-/**
- * `23505` — `unique_violation` dans la table des codes d'erreur Postgres
- * (annexe A de la documentation). Le pilote `postgres` expose ce code sur
- * l'erreur qu'il lève ; on ne lit jamais le message, qui est localisable.
- */
-const PG_UNIQUE_VIOLATION = '23505';
-
-function isUniqueViolation(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('code' in error)) return false;
-  return error.code === PG_UNIQUE_VIOLATION;
-}
 
 /**
  * Crée le profil de l'athlète (onboarding).

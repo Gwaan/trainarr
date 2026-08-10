@@ -4,6 +4,7 @@ import { summarizeFitUpload } from './fit-upload-summary';
 
 const created = (name: string) => ({ name, ok: true, status: 'created' }) as const;
 const updated = (name: string) => ({ name, ok: true, status: 'updated' }) as const;
+const merged = (name: string) => ({ name, ok: true, status: 'merged' }) as const;
 const failed = (name: string, error: string) => ({ name, ok: false, error }) as const;
 
 describe('summarizeFitUpload', () => {
@@ -41,6 +42,12 @@ describe('summarizeFitUpload', () => {
     const summary = summarizeFitUpload([updated('a.fit'), updated('b.fit')]);
 
     expect(summary?.title).toBe('2 activités mises à jour');
+  });
+
+  it('distingue une séance déjà connue d’un même fichier redéposé', () => {
+    const summary = summarizeFitUpload([created('a.fit'), updated('b.fit'), merged('c.fit')]);
+
+    expect(summary?.title).toBe('1 activité importée, 1 mise à jour, 1 déjà connue, complétée');
   });
 
   it('reste neutre et compte les échecs quand le lot est partiel', () => {

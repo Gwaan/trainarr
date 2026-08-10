@@ -162,19 +162,72 @@ absorbée sans log. Trois règles en découlent, à ne pas défaire :
 
 ## Idempotence
 
-- Clé unique : `activities.fit_file_hash` (SHA-256 du fichier). Redéposer le même
-  fichier retombe sur la même ligne, jamais un doublon — c'est la contrainte
-  unique, pas une lecture préalable, qui le garantit.
+**Deux clés, pas une** — parce qu'un même entraînement peut arriver sous
+plusieurs fichiers d'octets différents :
+
+1. **Empreinte du fichier** : `activities.fit_file_hash` (SHA-256), unique.
+   Redéposer le *même fichier* retombe sur la même ligne.
+2. **Séance** : `(athlete_id, started_at, sport_type)`, unique
+   (`activities_athlete_started_at_sport_unique`). Rapproche le *même
+   entraînement* arrivé sous un autre fichier. Le DAL cherche d'abord une séance
+   du même athlète, du même sport, dans une fenêtre de ±60 s
+   (`SESSION_MATCH_WINDOW_MS` — deux exports d'une même sortie peuvent dater le
+   départ à quelques secondes d'écart) ; la plus proche en temps l'emporte.
+   Le sport fait partie de la clé : un enchaînement (natation puis course)
+   démarre légitimement à la seconde où la discipline précédente s'arrête.
+
+Dans les deux cas c'est **la contrainte unique, pas la lecture préalable**, qui
+porte l'idempotence : en `READ COMMITTED` deux ingestions simultanées lisent
+toutes les deux une base sans doublon. `upsertActivityFromFit` attrape donc la
+violation `23505` de l'index de séance et rejoue le rapprochement sur la ligne
+que la course a créée. L'index porte les mêmes critères que la recherche, à la
+fenêtre temporelle près : ce qu'il rejette est toujours rapprochable, et le seul
+cas restant (transaction concurrente annulée entre-temps) échoue
+explicitement — jamais de silence, jamais de doublon.
+
+**Lire un code d'erreur Postgres passe par `src/data/db/errors.ts`.** Depuis
+drizzle-orm 0.45, l'erreur du pilote remonte enveloppée dans un
+`DrizzleQueryError` : un `error.code === '23505'` lu sur l'erreur de surface ne
+matche jamais, et le rattrapage ne s'exécute pas. Les helpers remontent la
+chaîne `cause` (profondeur bornée) — ne jamais relire `code` à la main.
+
+### L'incident qui motive tout ça
+
+Chaque séance existait en **trois exemplaires** en base. Trois activités
+dupliquées en amont sur intervals.icu (depuis corrigées) avaient produit trois
+fichiers FIT aux octets différents pour une seule sortie : trois empreintes,
+donc trois lignes, avec un `started_at` strictement identique. La leçon n'est pas
+« intervals.icu a eu un bug » mais **l'amont n'est jamais fiable** : la seule
+défense est une clé qui décrit la séance, pas le transport. La migration
+`0005_dedupe_activities_by_session` a nettoyé l'existant avant que `0006` ne
+pose l'index : ligne gardienne = celle qui **porte des séries** d'abord, la
+mieux renseignée ensuite, plus petit `id` en dernier ; complétée par les
+scalaires des autres, `planned_sessions` repointées, et **les canaux qui lui
+manquaient transférés depuis les doublons** avant leur suppression. L'ordre des
+critères n'est pas cosmétique : un exemplaire « résumé seul » aurait gagné sur
+un exemplaire porteur des séries si le compte de colonnes passait devant.
+
+### Ce qu'un réimport écrit
+
 - Un réimport ne **complète que les trous** des colonnes de `activities`
   (`null`) : une valeur déjà en base, ou un nom corrigé à la main, n'est jamais
-  écrasé.
-- **Les séries temporelles, elles, sont intégralement remplacées** à chaque
-  ingestion (`saveActivityStreams`, upsert sur `(activity_id, type)` + purge des
-  types disparus). La règle est la même vue de plus haut : ne jamais perdre ce
-  que seul l'humain produit, toujours rafraîchir ce que seul le fichier produit.
-  Un stream n'est pas éditable dans l'appli ; ne réécrire que les activités
-  dépourvues de séries rendait toute correction du parseur inopérante sur
-  l'historique.
+  écrasé. Un rapprochement par séance ne touche **pas** `fit_file_hash` : le
+  premier fichier reste l'origine canonique de la ligne.
+- **Les séries temporelles dépendent du type de rapprochement** :
+  - création ou **même fichier** → **remplacement intégral**
+    (`saveActivityStreams`, upsert sur `(activity_id, type)` + purge des types
+    disparus). Ne jamais perdre ce que seul l'humain produit, toujours
+    rafraîchir ce que seul le fichier produit ; un stream n'est pas éditable
+    dans l'appli, et ne réécrire que les activités dépourvues de séries rendait
+    toute correction du parseur inopérante sur l'historique.
+  - **même séance, autre fichier** → écriture **seulement si l'activité n'a
+    aucune série** (`hasActivityStreams`). Un doublon venu d'une autre source
+    n'est pas une meilleure version de la séance : rien ne dit qu'il porte les
+    mêmes canaux (une même sortie réexportée peut avoir perdu sa FC en chemin),
+    il n'a donc aucun titre à écraser des séries saines.
+- Les trois issues remontent jusqu'à l'UI (`IngestReport.status`) :
+  `created` / `updated` (même fichier) / `merged` (même séance) — un import qui
+  ne crée rien doit le dire, pas se faire passer pour une mise à jour.
 - Le parseur (`src/lib/fit/parse.ts`) est pur : octets → structure. Aucun accès
   base, fichier ou réseau. Ce qu'il a dû écarter part dans `warnings`, jamais
   masqué.

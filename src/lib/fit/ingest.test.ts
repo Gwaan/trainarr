@@ -10,6 +10,7 @@ const { mocks } = vi.hoisted(() => ({
     getAthleteId: vi.fn(),
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
+    hasActivityStreams: vi.fn(),
   },
 }));
 
@@ -24,6 +25,7 @@ vi.mock('@/data/athlete', () => ({
 vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
   saveActivityStreams: mocks.saveActivityStreams,
+  hasActivityStreams: mocks.hasActivityStreams,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -64,8 +66,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.parseFitActivity.mockReturnValue(PARSED);
   mocks.getAthleteId.mockResolvedValue(1);
-  mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: true });
+  mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'created' });
   mocks.saveActivityStreams.mockResolvedValue(undefined);
+  mocks.hasActivityStreams.mockResolvedValue(false);
 });
 
 describe('ingestFitBuffer', () => {
@@ -75,10 +78,12 @@ describe('ingestFitBuffer', () => {
     expect(mocks.parseFitActivity).toHaveBeenCalledWith(BUFFER);
     expect(mocks.upsertActivityFromFit).toHaveBeenCalledWith(PARSED, 1);
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
+    // Création : la question « a-t-elle déjà des séries ? » ne se pose même pas.
+    expect(mocks.hasActivityStreams).not.toHaveBeenCalled();
   });
 
   it('rapporte `updated` quand le fichier avait déjà été importé', async () => {
-    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: false });
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-file' });
 
     await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
   });
@@ -87,12 +92,36 @@ describe('ingestFitBuffer', () => {
     // Le fichier avait déjà été ingéré : même empreinte, donc `updated`. Les
     // séries doivent malgré tout être réécrites — sinon une correction du
     // parseur resterait sans effet sur l'historique, ce qui était le bug.
-    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: false });
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-file' });
     mocks.parseFitActivity.mockReturnValue(REPARSED);
+    // Même avec des séries en place : le même fichier, relu, les rafraîchit.
+    mocks.hasActivityStreams.mockResolvedValue(true);
 
     await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
 
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, REPARSED.streams);
+  });
+
+  it('rapporte `merged` et préserve les séries quand la séance en a déjà', async () => {
+    // Doublon amont : un autre fichier décrit la séance déjà en base. Il n'est
+    // pas une meilleure version d'elle-même — il n'écrase pas des séries saines.
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
+    mocks.parseFitActivity.mockReturnValue(REPARSED);
+    mocks.hasActivityStreams.mockResolvedValue(true);
+
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 42 });
+
+    expect(mocks.hasActivityStreams).toHaveBeenCalledWith(42);
+    expect(mocks.saveActivityStreams).not.toHaveBeenCalled();
+  });
+
+  it('écrit les séries d’un rapprochement de séance quand l’activité n’en a aucune', async () => {
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
+    mocks.hasActivityStreams.mockResolvedValue(false);
+
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 42 });
+
+    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
   });
 
   it('échoue explicitement si aucun athlète n’est enregistré', async () => {

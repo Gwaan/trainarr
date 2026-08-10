@@ -65,13 +65,35 @@ export const athlete = pgTable(
 );
 
 /**
+ * Nom de l'index unique qui interdit deux activités du même sport au même
+ * instant pour le même athlète.
+ *
+ * Le sport fait partie de la clé, exactement comme dans la recherche de séance
+ * du DAL : un enchaînement (natation puis course) démarre légitimement à la
+ * seconde où la discipline précédente s'arrête. Sans lui, ce cas violerait
+ * l'index sans être rapprochable — l'import échouerait définitivement.
+ *
+ * Exporté parce que le DAL le lit : quand l'insertion d'un import FIT se heurte à
+ * cet index (course entre deux ingestions simultanées de la même séance), c'est
+ * ce nom-là qui distingue la collision « même séance » de celle sur
+ * `fit_file_hash`, laquelle est déjà absorbée par un `ON CONFLICT`.
+ */
+export const ACTIVITIES_SESSION_UNIQUE_INDEX = 'activities_athlete_started_at_sport_unique';
+
+/**
  * Une séance.
  *
- * Un seul canal d'import — le fichier FIT déposé dans le dossier surveillé —
- * donc une seule clé d'idempotence : `fit_file_hash`, unique et **nullable**
- * (une ligne peut naître autrement qu'en lisant un fichier). Postgres autorise
- * plusieurs `NULL` dans une contrainte `UNIQUE` : ces lignes-là ne se
- * collisionnent pas entre elles.
+ * **Deux clés d'idempotence**, et non une seule :
+ *
+ * 1. `fit_file_hash` (SHA-256 du fichier), unique et **nullable** — une ligne
+ *    peut naître autrement qu'en lisant un fichier ; Postgres autorise plusieurs
+ *    `NULL` dans une contrainte `UNIQUE`, ces lignes-là ne se collisionnent pas
+ *    entre elles. Elle protège du redépôt du **même fichier**.
+ * 2. `(athlete_id, started_at)`, unique — elle protège de la **même séance**
+ *    arrivée sous plusieurs fichiers d'octets différents. Cas vécu : trois
+ *    doublons créés en amont sur intervals.icu ont produit trois fichiers FIT
+ *    distincts, donc trois empreintes distinctes, donc trois lignes pour une
+ *    seule sortie. Un athlète ne peut pas démarrer deux séances au même instant.
  */
 export const activities = pgTable(
   'activities',
@@ -100,7 +122,25 @@ export const activities = pgTable(
     createdAt: createdAt(),
   },
   (table) => [
-    index('activities_athlete_started_at_idx').on(table.athleteId, table.startedAt.desc()),
+    /**
+     * Backstop de la déduplication au niveau séance. Le DAL cherche d'abord une
+     * séance voisine avant d'insérer, mais en `READ COMMITTED` deux ingestions
+     * simultanées du même entraînement lisent toutes les deux une base sans
+     * doublon : c'est la contrainte, et non la lecture préalable, qui porte
+     * l'idempotence. `upsertActivityFromFit` traduit la violation `23505` en
+     * rapprochement (cf. {@link ACTIVITIES_SESSION_UNIQUE_INDEX}).
+     *
+     * Il sert **aussi** de chemin d'accès aux lectures par athlète ordonnées
+     * dans le temps : son préfixe `(athlete_id, started_at)` est celui de
+     * l'ancien `activities_athlete_started_at_idx`, que la migration 0006
+     * supprime pour cela — un btree se parcourt dans les deux sens, le `DESC`
+     * de l'ancien index n'apportait rien de plus.
+     */
+    uniqueIndex(ACTIVITIES_SESSION_UNIQUE_INDEX).on(
+      table.athleteId,
+      table.startedAt,
+      table.sportType,
+    ),
   ],
 );
 

@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, notInArray, sql } from 'drizzle-orm';
 
 import { isoWeekNumber, isoWeekStart, toCivilDate } from '@/lib/dates/civil';
 import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
@@ -27,7 +27,9 @@ import {
 
 import { getAthleteProfile } from './athlete';
 import { db } from './db/client';
+import { uniqueViolationConstraint } from './db/errors';
 import {
+  ACTIVITIES_SESSION_UNIQUE_INDEX,
   ACTIVITY_STREAM_TYPES,
   activities,
   activityStreams,
@@ -617,17 +619,48 @@ export async function saveActivityStreams(
   });
 }
 
+/**
+ * `true` si l'activité porte au moins une série temporelle.
+ *
+ * Sert la politique de streams de l'ingestion (`src/lib/fit/ingest.ts`) : un
+ * fichier rapproché **par séance** (autre source, autres octets) ne réécrit les
+ * séries que si l'activité n'en a aucune. Un doublon amont n'est pas une
+ * meilleure version du même entraînement — il n'a donc aucun titre à écraser des
+ * séries saines, alors que le redépôt du fichier d'origine, lui, doit toujours
+ * les rafraîchir.
+ */
+export async function hasActivityStreams(activityId: number): Promise<boolean> {
+  const rows = await db
+    .select({ id: activityStreams.id })
+    .from(activityStreams)
+    .where(eq(activityStreams.activityId, activityId))
+    .limit(1);
+  return rows.length > 0;
+}
+
 /** Colonnes nullables qu'un redépôt du même fichier peut venir combler. */
 type CompletableColumns = Pick<
   Activity,
   'elevationGainM' | 'avgHrBpm' | 'maxHrBpm' | 'avgPaceSecPerKm' | 'avgCadenceSpm'
 >;
 
+/**
+ * Comment l'import s'est rattaché à la base.
+ *
+ * - `created` : aucune correspondance, la ligne vient d'être insérée ;
+ * - `same-file` : ce **fichier** avait déjà été importé (même empreinte) ;
+ * - `same-session` : cette **séance** était déjà en base, importée depuis un
+ *   fichier différent (autre source, octets différents).
+ *
+ * Les deux derniers ne se confondent pas : ils appellent des politiques de
+ * séries temporelles opposées (cf. `src/lib/fit/ingest.ts`).
+ */
+export type FitUpsertOutcome = 'created' | 'same-file' | 'same-session';
+
 /** Résultat d'un import, du point de vue de la ligne d'activité. */
 export type FitUpsertResult = {
   activityId: number;
-  /** `true` si la ligne n'existait pas et vient d'être insérée. */
-  created: boolean;
+  outcome: FitUpsertOutcome;
 };
 
 /**
@@ -706,17 +739,103 @@ const FIT_HASH_CONFLICT_SET = {
 };
 
 /**
+ * Tolérance d'horodatage entre deux fichiers décrivant la même séance.
+ *
+ * Les doublons observés en base partagent un `started_at` **strictement**
+ * identique, mais rien ne le garantit en général : deux exports d'une même
+ * sortie (montre, application téléphone, retraitement d'un service tiers)
+ * peuvent placer le départ à quelques secondes d'écart selon qu'ils datent le
+ * premier `record`, le premier fix GPS ou l'appui sur le bouton. Une minute est
+ * assez large pour absorber cet écart et bien trop courte pour confondre deux
+ * séances réelles : personne n'enchaîne deux entraînements du même sport à
+ * moins d'une minute d'intervalle.
+ */
+export const SESSION_MATCH_WINDOW_MS = 60_000;
+
+/**
+ * L'activité déjà en base qui décrit la même séance que ce fichier, `null` si
+ * aucune.
+ *
+ * Trois critères : le même athlète, le même sport, et un départ dans la fenêtre
+ * {@link SESSION_MATCH_WINDOW_MS}. Le sport en fait partie parce qu'un
+ * enchaînement (natation puis course) peut légitimement démarrer à la seconde où
+ * la discipline précédente s'arrête.
+ *
+ * La plus proche en temps l'emporte, et à écart égal la plus ancienne ligne :
+ * le rapprochement ne doit pas dépendre de l'ordre que Postgres a servi.
+ */
+async function findSessionMatch(
+  athleteId: number,
+  sportType: string,
+  startedAt: Date,
+): Promise<Activity | null> {
+  const instant = startedAt.getTime();
+  const candidates = await db
+    .select()
+    .from(activities)
+    .where(
+      and(
+        eq(activities.athleteId, athleteId),
+        eq(activities.sportType, sportType),
+        gte(activities.startedAt, new Date(instant - SESSION_MATCH_WINDOW_MS)),
+        lte(activities.startedAt, new Date(instant + SESSION_MATCH_WINDOW_MS)),
+      ),
+    );
+
+  let closest: Activity | null = null;
+  let closestGapMs = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const gapMs = Math.abs(candidate.startedAt.getTime() - instant);
+    const tie = gapMs === closestGapMs && closest !== null && candidate.id < closest.id;
+    if (gapMs < closestGapMs || tie) {
+      closest = candidate;
+      closestGapMs = gapMs;
+    }
+  }
+  return closest;
+}
+
+/**
+ * Comble les trous de la ligne existante avec ce qu'apporte le fichier.
+ *
+ * `fit_file_hash` n'en fait jamais partie : le premier fichier importé reste
+ * l'origine canonique de la ligne, y compris quand un second fichier vient s'y
+ * rattacher par la séance.
+ */
+async function completeExistingRow(
+  existing: Activity,
+  values: CompletableColumns,
+): Promise<void> {
+  const completion = completableFields(existing, values);
+  if (Object.keys(completion).length === 0) return;
+  await db.update(activities).set(completion).where(eq(activities.id, existing.id));
+}
+
+/**
  * Insère ou met à jour l'activité décrite par un fichier FIT.
  *
- * Deux chemins, dans cet ordre :
+ * Trois chemins, dans cet ordre :
  *
  * 1. **Déjà importée depuis ce même fichier** (`fit_file_hash` connu) → seuls les
  *    trous de la ligne sont comblés (cf. {@link completableFields}) ; rien de ce
  *    qui est déjà renseigné n'est écrasé.
- * 2. Sinon → insertion. Le `ON CONFLICT (fit_file_hash)` couvre la course entre
- *    deux imports simultanés du même fichier, avec la même politique qu'en 1 :
- *    c'est la contrainte unique, et non la lecture préalable, qui porte
- *    l'idempotence.
+ * 2. **Même séance, autre fichier** (cf. {@link findSessionMatch}) → même
+ *    politique de complétion, mais l'empreinte n'est pas touchée. C'est le cas
+ *    des doublons créés en amont : trois activités sur intervals.icu pour une
+ *    seule sortie ont donné trois fichiers aux octets différents, que
+ *    l'empreinte seule ne pouvait pas rapprocher.
+ * 3. Sinon → insertion. Deux contraintes la protègent des courses entre imports
+ *    simultanés : `ON CONFLICT (fit_file_hash)` pour le même fichier, et
+ *    l'index unique `(athlete_id, started_at, sport_type)` pour la même séance —
+ *    dont la violation est rattrapée ici et rejouée comme un rapprochement.
+ *    C'est la contrainte, et non la lecture préalable, qui porte l'idempotence.
+ *    L'index porte les mêmes trois critères que {@link findSessionMatch}, à la
+ *    fenêtre temporelle près : ce qu'il rejette est donc toujours rapprochable.
+ *
+ * @throws {Error} si l'index de séance a rejeté l'insertion sans qu'aucune
+ * séance ne soit ensuite trouvable — la transaction concurrente a été annulée
+ * entre les deux. Rarissime, mais jamais silencieux : le fichier part dans
+ * `failed/` avec son motif plutôt que d'être perdu ou dupliqué.
  */
 export async function upsertActivityFromFit(
   parsed: ParsedFitActivity,
@@ -732,23 +851,43 @@ export async function upsertActivityFromFit(
 
   const existing = sameFile[0];
   if (existing) {
-    const completion = completableFields(existing, values);
-    if (Object.keys(completion).length > 0) {
-      await db.update(activities).set(completion).where(eq(activities.id, existing.id));
-    }
-
-    return { activityId: existing.id, created: false };
+    await completeExistingRow(existing, values);
+    return { activityId: existing.id, outcome: 'same-file' };
   }
 
-  const rows = await db
-    .insert(activities)
-    .values({ athleteId, fitFileHash: parsed.fileHash, ...values })
-    .onConflictDoUpdate({ target: activities.fitFileHash, set: FIT_HASH_CONFLICT_SET })
-    .returning({ id: activities.id });
+  const sameSession = await findSessionMatch(athleteId, values.sportType, values.startedAt);
+  if (sameSession) {
+    await completeExistingRow(sameSession, values);
+    return { activityId: sameSession.id, outcome: 'same-session' };
+  }
+
+  let rows: Array<{ id: number }>;
+  try {
+    rows = await db
+      .insert(activities)
+      .values({ athleteId, fitFileHash: parsed.fileHash, ...values })
+      .onConflictDoUpdate({ target: activities.fitFileHash, set: FIT_HASH_CONFLICT_SET })
+      .returning({ id: activities.id });
+  } catch (error) {
+    if (uniqueViolationConstraint(error) !== ACTIVITIES_SESSION_UNIQUE_INDEX) throw error;
+
+    // Course : une ingestion concurrente a inséré la séance entre notre lecture
+    // et notre écriture. On rejoue le chemin 2 sur la ligne qu'elle a créée.
+    const raced = await findSessionMatch(athleteId, values.sportType, values.startedAt);
+    if (raced === null) {
+      throw new Error(
+        `Course perdue sur l'index de séance à l'instant ${values.startedAt.toISOString()}, mais aucune séance correspondante en base : le fichier ${parsed.fileHash.slice(0, 12)} n'a pas pu être rattaché.`,
+        { cause: error },
+      );
+    }
+
+    await completeExistingRow(raced, values);
+    return { activityId: raced.id, outcome: 'same-session' };
+  }
 
   const row = rows[0];
   if (!row) {
     throw new Error(`Upsert de l'activité FIT ${parsed.fileHash} sans ligne retournée.`);
   }
-  return { activityId: row.id, created: true };
+  return { activityId: row.id, outcome: 'created' };
 }

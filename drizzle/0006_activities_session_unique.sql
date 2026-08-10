@@ -1,0 +1,2 @@
+DROP INDEX "activities_athlete_started_at_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "activities_athlete_started_at_sport_unique" ON "activities" USING btree ("athlete_id","started_at","sport_type");

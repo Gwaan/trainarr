@@ -21,6 +21,9 @@ next-env.d.ts
 # claude local
 .claude/settings.local.json
 
+# worktrees git locaux, hors historique
+.dev/
+
 # misc
 .DS_Store
 *.pem

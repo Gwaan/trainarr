@@ -3,20 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ParsedFitActivity } from '@/lib/fit/parse';
 
 import { completableFields, upsertActivityFromFit } from './activities';
-import { activities, type Activity } from './db/schema';
+import { ACTIVITIES_SESSION_UNIQUE_INDEX, activities, type Activity } from './db/schema';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
 
 /**
  * Aucune base de données : les écritures sont enregistrées, les lectures servent
- * les jeux de lignes déclarés par le test — ici une seule, la recherche par
- * empreinte.
+ * les jeux de lignes déclarés par le test, dans l'ordre où le DAL les demande —
+ * d'abord la recherche par empreinte, puis celle par séance.
  */
 const { dbState } = vi.hoisted(() => ({
   dbState: {
     selectQueue: [] as unknown[][],
     returning: [] as unknown[],
+    /** Erreur levée par l'insertion, pour rejouer une course en base. */
+    insertError: null as unknown,
     inserts: [] as Array<{ table: unknown; values: unknown }>,
     conflicts: [] as unknown[],
     updates: [] as Array<{ table: unknown; values: unknown }>,
@@ -55,7 +57,10 @@ vi.mock('./db/client', () => {
             dbState.conflicts.push(config);
             return chain;
           },
-          returning: () => Promise.resolve(dbState.returning),
+          returning: () =>
+            dbState.insertError === null
+              ? Promise.resolve(dbState.returning)
+              : Promise.reject(dbState.insertError),
           then: (onFulfilled, onRejected) =>
             Promise.resolve(undefined).then(onFulfilled, onRejected),
         };
@@ -90,7 +95,7 @@ const PARSED: ParsedFitActivity = {
   warnings: [],
 };
 
-/** Ligne déjà en base, issue d'un import antérieur du même fichier. */
+/** Ligne déjà en base, issue par défaut d'un import antérieur du même fichier. */
 function existingRow(overrides: Partial<Activity> = {}): Activity {
   return {
     id: 7,
@@ -112,9 +117,33 @@ function existingRow(overrides: Partial<Activity> = {}): Activity {
   };
 }
 
+/**
+ * La même séance, arrivée sous un autre fichier : octets différents donc
+ * empreinte différente — c'est le doublon que seule la clé de séance rapproche.
+ */
+function otherFileRow(overrides: Partial<Activity> = {}): Activity {
+  return existingRow({ id: 9, fitFileHash: 'c'.repeat(64), ...overrides });
+}
+
+/**
+ * Violation d'unicité telle qu'elle **remonte réellement** : drizzle enveloppe
+ * l'erreur du pilote dans un `DrizzleQueryError` qui ne porte ni `code` ni nom
+ * de contrainte — tout est dans la `cause`.
+ */
+function uniqueViolation(constraintName: string): unknown {
+  return Object.assign(new Error('Failed query: insert into "activities" ...'), {
+    name: 'DrizzleQueryError',
+    cause: Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505',
+      constraint_name: constraintName,
+    }),
+  });
+}
+
 beforeEach(() => {
   dbState.selectQueue = [];
   dbState.returning = [{ id: 42 }];
+  dbState.insertError = null;
   dbState.inserts = [];
   dbState.conflicts = [];
   dbState.updates = [];
@@ -155,12 +184,12 @@ describe('completableFields', () => {
 });
 
 describe('upsertActivityFromFit', () => {
-  it('crée l’activité quand aucune ligne ne porte cette empreinte', async () => {
-    dbState.selectQueue = [[]];
+  it('crée l’activité quand ni l’empreinte ni la séance ne sont connues', async () => {
+    dbState.selectQueue = [[], []];
 
     await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
       activityId: 42,
-      created: true,
+      outcome: 'created',
     });
 
     const insert = dbState.inserts[0];
@@ -227,7 +256,7 @@ describe('upsertActivityFromFit', () => {
 
     await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
       activityId: 7,
-      created: false,
+      outcome: 'same-file',
     });
 
     // Rien à compléter : pas d'écriture du tout.
@@ -252,13 +281,115 @@ describe('upsertActivityFromFit', () => {
 
     await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
       activityId: 7,
-      created: false,
+      outcome: 'same-file',
     });
 
     expect(dbState.inserts).toEqual([]);
     expect(dbState.updates).toHaveLength(1);
     expect(dbState.updates[0]?.table).toBe(activities);
     expect(dbState.updates[0]?.values).toEqual({ elevationGainM: 120.5 });
+  });
+
+  it('privilégie l’empreinte sur la séance quand les deux correspondent', async () => {
+    // Deux lignes pourraient accueillir cet import ; celle qui vient du *même*
+    // fichier gagne, l'autre n'est même pas consultée.
+    dbState.selectQueue = [[existingRow()], [otherFileRow()]];
+
+    await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
+      activityId: 7,
+      outcome: 'same-file',
+    });
+  });
+
+  it('rapproche la même séance venue d’un autre fichier, sans toucher l’empreinte', async () => {
+    // Le doublon amont : même athlète, même sport, même instant, autres octets.
+    dbState.selectQueue = [[], [otherFileRow({ avgHrBpm: 152 })]];
+
+    await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
+      activityId: 9,
+      outcome: 'same-session',
+    });
+
+    // Aucune insertion : la séance existait déjà, sous une autre empreinte.
+    expect(dbState.inserts).toEqual([]);
+    expect(dbState.updates).toHaveLength(1);
+    // Seuls les trous sont comblés, et `fitFileHash` n'en fait jamais partie :
+    // le premier fichier importé reste l'origine canonique de la ligne.
+    expect(dbState.updates[0]?.values).toEqual({
+      elevationGainM: 120.5,
+      maxHrBpm: 171,
+      avgPaceSecPerKm: 300,
+      avgCadenceSpm: 176.4,
+    });
+  });
+
+  it('retient la séance la plus proche en temps parmi plusieurs candidates', async () => {
+    dbState.selectQueue = [
+      [],
+      [
+        otherFileRow({ id: 9, startedAt: new Date('2026-08-02T06:30:40.000Z') }),
+        otherFileRow({ id: 11, startedAt: new Date('2026-08-02T06:30:05.000Z') }),
+        otherFileRow({ id: 13, startedAt: new Date('2026-08-02T06:29:30.000Z') }),
+      ],
+    ];
+
+    await expect(upsertActivityFromFit(PARSED, 1)).resolves.toMatchObject({
+      activityId: 11,
+      outcome: 'same-session',
+    });
+  });
+
+  it('rattrape la course perdue sur l’index de séance et fusionne', async () => {
+    // Aucune correspondance à la lecture, mais une ingestion concurrente a
+    // inséré la séance entre-temps : c'est la contrainte qui tranche.
+    dbState.selectQueue = [[], [], [otherFileRow()]];
+    dbState.insertError = uniqueViolation(ACTIVITIES_SESSION_UNIQUE_INDEX);
+
+    await expect(upsertActivityFromFit(PARSED, 1)).resolves.toEqual({
+      activityId: 9,
+      outcome: 'same-session',
+    });
+
+    expect(dbState.updates).toHaveLength(1);
+    expect(dbState.updates[0]?.values).toEqual({
+      elevationGainM: 120.5,
+      avgHrBpm: 149,
+      maxHrBpm: 171,
+      avgPaceSecPerKm: 300,
+      avgCadenceSpm: 176.4,
+    });
+  });
+
+  it('rattrape la course même si le pilote n’emballe pas son erreur', async () => {
+    // Robustesse aux deux formes : l'erreur nue doit rester reconnue si une
+    // version de drizzle cesse d'envelopper.
+    dbState.selectQueue = [[], [], [otherFileRow()]];
+    dbState.insertError = Object.assign(new Error('duplicate key value'), {
+      code: '23505',
+      constraint_name: ACTIVITIES_SESSION_UNIQUE_INDEX,
+    });
+
+    await expect(upsertActivityFromFit(PARSED, 1)).resolves.toMatchObject({
+      activityId: 9,
+      outcome: 'same-session',
+    });
+  });
+
+  it('n’absorbe pas une violation d’unicité venue d’une autre contrainte', async () => {
+    dbState.selectQueue = [[], []];
+    dbState.insertError = uniqueViolation('activities_fit_file_hash_unique');
+
+    await expect(upsertActivityFromFit(PARSED, 1)).rejects.toThrowError(/Failed query/);
+  });
+
+  it('échoue explicitement si la course perdue ne laisse aucune séance derrière', async () => {
+    // L'index et la recherche partagent les mêmes critères : ce qu'il rejette
+    // est normalement toujours rapprochable. Reste le cas où la transaction
+    // concurrente a été annulée entre-temps — jamais de silence.
+    dbState.selectQueue = [[], [], []];
+    dbState.insertError = uniqueViolation(ACTIVITIES_SESSION_UNIQUE_INDEX);
+
+    await expect(upsertActivityFromFit(PARSED, 1)).rejects.toThrowError(/Course perdue/);
   });
 
   it('n’invente pas d’allure quand la distance est nulle', async () => {

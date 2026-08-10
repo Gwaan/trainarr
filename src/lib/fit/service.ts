@@ -332,6 +332,20 @@ async function removeOrphanPart(inboxDir: string, name: string): Promise<void> {
  * Surveillance du dossier.
  */
 
+/**
+ * Ce qu'annonce le journal pour chaque issue d'ingestion. Table exhaustive :
+ * un nouveau statut d'`IngestReport` ne compile pas tant qu'il n'a pas sa ligne.
+ *
+ * `merged` mérite son libellé propre — c'est la seule issue où le fichier
+ * ingéré n'est *pas* celui qui a créé l'activité, et donc la seule qui signale
+ * un doublon amont.
+ */
+const INGEST_STATUS_LABELS = {
+  created: 'importée',
+  updated: 'déjà importée, complétée',
+  merged: 'même séance qu’une activité existante, complétée',
+} as const satisfies Record<IngestReport['status'], string>;
+
 /** Importe un fichier puis le range. Ne relance jamais : un fichier fautif ne doit pas tuer le service. */
 async function handleFile(inboxDir: string, name: string): Promise<void> {
   let report: IngestReport;
@@ -346,7 +360,7 @@ async function handleFile(inboxDir: string, name: string): Promise<void> {
     return;
   }
 
-  log(`${name} → ${report.status} (activité ${report.activityId})`);
+  log(`${name} → ${INGEST_STATUS_LABELS[report.status]} (activité ${report.activityId})`);
   await archive(inboxDir, PROCESSED_DIR, name, null);
 }
 
