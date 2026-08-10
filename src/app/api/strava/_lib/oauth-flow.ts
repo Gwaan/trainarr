@@ -44,14 +44,19 @@ export function isForeignConnection(
 /**
  * Retour à la page des activités avec l'issue du flux.
  *
- * L'origine vient de la requête et non de `APP_BASE_URL` : la redirection doit
- * fonctionner même quand la configuration est incomplète (cas `unconfigured`).
+ * `Location` volontairement **relative** : derrière le reverse proxy, l'origine
+ * vue par Next est son adresse d'écoute interne (`0.0.0.0:3000`), pas le domaine
+ * public — une URL absolue construite depuis `request.nextUrl.origin` envoyait
+ * le navigateur sur `https://0.0.0.0:3000`. Une Location relative (RFC 7231,
+ * gérée par tous les navigateurs) le laisse sur le domaine courant, et
+ * fonctionne aussi quand `APP_BASE_URL` manque (cas `unconfigured`).
  */
 export function redirectToActivities(
-  request: NextRequest,
+  _request: NextRequest,
   status: StravaFlowStatus,
 ): NextResponse {
-  const target = new URL('/activities', request.nextUrl.origin);
-  target.searchParams.set('strava', status);
-  return NextResponse.redirect(target, 307);
+  return new NextResponse(null, {
+    status: 307,
+    headers: { Location: `/activities?strava=${status}` },
+  });
 }
