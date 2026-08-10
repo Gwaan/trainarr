@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { computeHrZones } from './hr-zones';
+import { computeHrZones, hrZoneOf } from './hr-zones';
 
 const MAX_HR = 200;
 
@@ -168,5 +168,24 @@ describe('computeHrZones', () => {
     expect(computeHrZones([], [], MAX_HR)).toEqual([]);
     // Un instant unique n'a pas de durée.
     expect(computeHrZones([150], [0], MAX_HR)).toEqual([]);
+  });
+});
+
+describe('hrZoneOf', () => {
+  it('applique les mêmes bornes que le découpage complet', () => {
+    // 120 = 60 %, 140 = 70 %, 160 = 80 %, 180 = 90 % de 200.
+    expect(hrZoneOf(119, MAX_HR)).toBe(1);
+    expect(hrZoneOf(120, MAX_HR)).toBe(2);
+    expect(hrZoneOf(140, MAX_HR)).toBe(3);
+    expect(hrZoneOf(160, MAX_HR)).toBe(4);
+    expect(hrZoneOf(180, MAX_HR)).toBe(5);
+    // Au-delà de la FC max renseignée, on reste en Z5 : pas de sixième zone.
+    expect(hrZoneOf(210, MAX_HR)).toBe(5);
+  });
+
+  it('ne devine aucune zone sans FC max exploitable', () => {
+    expect(hrZoneOf(150, null)).toBeNull();
+    expect(hrZoneOf(150, 0)).toBeNull();
+    expect(hrZoneOf(0, MAX_HR)).toBeNull();
   });
 });

@@ -9,6 +9,7 @@ function sample(overrides: Partial<SeriesSample> & { timeS: number }): SeriesSam
     hrBpm: null,
     altitudeM: null,
     cadenceSpm: null,
+    strideM: null,
     ...overrides,
   };
 }
@@ -27,6 +28,7 @@ function activity(
       paceSecPerKm: paceAt(second),
       altitudeM: 100,
       cadenceSpm: 170,
+      strideM: 1.18,
     }),
   );
 }
@@ -86,6 +88,27 @@ describe('resamplePoints', () => {
 
     for (const point of resamplePoints(points)) {
       expect(source.has(point)).toBe(true);
+    }
+  });
+
+  it('porte la foulée sur les points retenus, trous compris', () => {
+    // La foulée n'est pas un canal d'extrema : elle voyage sur les points
+    // choisis pour l'allure et la FC, avec ses `null` là où la cadence se tait.
+    const points = Array.from({ length: 5_000 }, (_, second) =>
+      sample({
+        timeS: second,
+        hrBpm: 140 + (second % 20),
+        paceSecPerKm: 300,
+        cadenceSpm: second % 5 === 0 ? 170 : null,
+        strideM: second % 5 === 0 ? 1.18 : null,
+      }),
+    );
+    const reduced = resamplePoints(points);
+
+    expect(reduced.some((point) => point.strideM === 1.18)).toBe(true);
+    expect(reduced.some((point) => point.strideM === null)).toBe(true);
+    for (const point of reduced) {
+      expect(point.strideM).toBe(point.cadenceSpm === null ? null : 1.18);
     }
   });
 

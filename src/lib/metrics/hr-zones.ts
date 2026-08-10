@@ -55,6 +55,23 @@ function zoneOf(percentOfMax: number): HrZoneNumber {
 }
 
 /**
+ * Zone d'une fréquence cardiaque, aux mêmes bornes que {@link computeHrZones}.
+ *
+ * Exportée pour que l'affichage (colorer une tranche d'histogramme dans la rampe
+ * des zones) lise les seuils **ici** au lieu de les redéclarer : deux jeux de
+ * bornes qui divergent feraient mentir la couleur.
+ *
+ * `null` quand la zone n'est pas déterminable — FC max absente ou absurde,
+ * mesure nulle ou négative : rien n'est deviné.
+ */
+export function hrZoneOf(bpm: number, maxHrBpm: number | null): HrZoneNumber | null {
+  if (maxHrBpm === null || !Number.isFinite(maxHrBpm) || maxHrBpm <= 0) return null;
+  if (!Number.isFinite(bpm) || bpm <= 0) return null;
+
+  return zoneOf((bpm / maxHrBpm) * 100);
+}
+
+/**
  * Temps passé dans chacune des 5 zones, pondéré par la durée réellement
  * représentée par chaque échantillon (cf. `cappedSampleDurationsS`) — compter
  * les points supposerait un enregistrement à 1 Hz constant, ce que ne fait

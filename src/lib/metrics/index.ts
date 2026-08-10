@@ -20,4 +20,18 @@ export {
   isPartialSplit,
   type Split,
 } from './splits';
-export { computeHrZones, type HrZoneNumber, type ZoneTime } from './hr-zones';
+export { computeHrZones, hrZoneOf, type HrZoneNumber, type ZoneTime } from './hr-zones';
+export { strideLengthM, strideSeries } from './stride';
+export {
+  computeTimeDistribution,
+  hrDistribution,
+  paceDistribution,
+  type DistributionBin,
+  type DistributionOptions,
+} from './distribution';
+export { computeDecoupling, type Decoupling, type HalfStats } from './decoupling';
+export {
+  BEST_SEGMENT_TARGETS_M,
+  computeBestSegments,
+  type BestSegment,
+} from './best-segments';

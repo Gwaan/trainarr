@@ -12,8 +12,8 @@
  *
  * - **LTTB** (Largest Triangle Three Buckets, Steinarsson 2013) : excellent
  *   rendu visuel, mais il choisit **un** point par bucket en fonction d'**une**
- *   série. Nos points portent cinq canaux alignés (allure, FC, altitude,
- *   cadence, distance) : le point idéal pour l'allure ne l'est pas pour la FC,
+ *   série. Nos points portent six canaux alignés (allure, FC, altitude,
+ *   cadence, foulée, distance) : le point idéal pour l'allure ne l'est pas pour la FC,
  *   et faire tourner LTTB par canal donnerait des axes X différents — donc plus
  *   de curseur commun ni de tooltip unique entre les graphes.
  * - **Min/max par bucket** : on découpe la série en buckets d'index, et on
@@ -29,9 +29,15 @@
  *
  * Les extrema sont cherchés sur **l'allure et la FC** — les deux canaux que la
  * page lit pour juger la séance, et les deux que la consigne impose de
- * préserver. Altitude et cadence voyagent sur les points ainsi retenus : leur
- * profil reste juste (ces séries varient lentement), sans dépenser du budget de
- * points pour leurs extrema propres.
+ * préserver. Altitude, cadence et foulée voyagent sur les points ainsi retenus :
+ * leur profil reste juste (ces séries varient lentement), sans dépenser du
+ * budget de points pour leurs extrema propres.
+ *
+ * La foulée ne rejoint volontairement pas les canaux d'extrema : elle est le
+ * quotient de la vitesse par la cadence, donc ses pics accompagnent ceux de
+ * l'allure — déjà retenus — et l'y ajouter réduirait d'un tiers le nombre de
+ * buckets (le budget de points étant fixe) au détriment des deux séries que la
+ * page lit vraiment.
  *
  * ## Ce que la fonction ne fait pas
  *
@@ -51,6 +57,8 @@ export type SeriesSample = {
   hrBpm: number | null;
   altitudeM: number | null;
   cadenceSpm: number | null;
+  /** Longueur de foulée en mètres (vitesse ÷ cadence), `null` si l'une manque. */
+  strideM: number | null;
 };
 
 /** Budget de points envoyés au client pour les graphes d'une activité. */
