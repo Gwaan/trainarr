@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Assets servis tels quels, dont le worker MapLibre recopié depuis
+    // node_modules par `scripts/copy-maplibre-worker.mjs` : du code minifié
+    // tiers, à ne pas linter.
+    "public/**",
   ]),
 ]);
 

@@ -24,6 +24,9 @@ next-env.d.ts
 # worktrees git locaux, hors historique
 .dev/
 
+# worker maplibre recopié depuis node_modules à chaque dev/build
+/public/maplibre/
+
 # misc
 .DS_Store
 *.pem

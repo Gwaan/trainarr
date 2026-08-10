@@ -1,9 +1,28 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { LngLatBounds, MapLibreMap, type StyleSpecification } from "maplibre-gl";
+import {
+  LngLatBounds,
+  MapLibreMap,
+  setWorkerUrl,
+  type StyleSpecification,
+} from "maplibre-gl";
 
 import "maplibre-gl/dist/maplibre-gl.css";
+
+/**
+ * MapLibre déduit l'URL de son worker de `import.meta.url` et renonce
+ * silencieusement si ce n'est pas une URL `http(s)` — or Turbopack y écrit un
+ * `file:///ROOT/...`. Le worker démarrait donc sur une URL vide, c'est-à-dire
+ * sur le HTML de la page : mort-né, sans une ligne en console. Le fond raster,
+ * chargé sur le thread principal, s'affichait ; la trace GeoJSON, elle, est
+ * tuilée dans le worker et n'arrivait jamais.
+ *
+ * Le fichier est recopié dans `public/maplibre/` par
+ * `scripts/copy-maplibre-worker.mjs` (lancé par `pnpm dev` et `pnpm build`),
+ * avec le chunk partagé qu'il importe à côté de lui.
+ */
+setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
 
 /** Un point de la trace, dans l'ordre du DAL : `[latitude, longitude]`. */
 export type LatLng = readonly [number, number];

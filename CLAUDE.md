@@ -51,6 +51,7 @@ Flux d'une mutation : Server Action mince → valide (Zod) → délègue au DAL 
 - **Session principale = Fable 5 (effort high)** : analyse, plan, découpage en tâches, vérification finale, commits. Elle n'implémente directement que le trivial (config, renommage, une ligne).
 - **Implémentation = sous-agent `implementer` (Opus 5, effort high)** : une tâche bornée et entièrement spécifiée par prompt (fichiers, contrats, critères de done). Tâches indépendantes lancées en parallèle ; les installations de dépendances restent centralisées côté orchestrateur pour éviter les conflits de lockfile.
 - **Avant commit** : l'orchestrateur relance typecheck/lint/tests lui-même (ne pas croire un rapport sur parole), et passe le sous-agent `reviewer` sur les diffs significatifs.
+- **Commit + push à chaque fin d'implémentation complète** (vérifiée : typecheck, lint, tests, build si pertinent) — sans attendre qu'on le demande. Le déploiement est automatique via webhook Komodo sur push : un correctif validé mais non poussé n'existe pas pour l'utilisateur. Une implémentation incomplète ou non vérifiée ne se committe pas.
 
 ## Règles critiques
 
