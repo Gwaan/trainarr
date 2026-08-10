@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_FIT_FILE_BYTES } from './limits';
 import {
+  ORPHAN_PART_MAX_AGE_MS,
   decideFileAction,
   fileKey,
   isFitFile,
@@ -186,5 +187,58 @@ describe('planScan', () => {
       { name: 'bombe.fit', key: fileKey(huge), reason: expect.stringContaining('800 Mo') },
     ]);
     expect(plan.toReject[0]?.reason).toContain('25 Mo');
+  });
+});
+
+describe('balayage des .part orphelins', () => {
+  /** Horloge fixe : les tests raisonnent en âge relatif, pas en date absolue. */
+  const NOW = 1_800_000_000_000;
+
+  const scanAt = (files: ScannedFile[], now: number) =>
+    planScan(files, { sizes: new Map(), handled: new Set(), now });
+
+  it('laisse en place un .part récent : un dépôt WebDAV est peut-être en cours', () => {
+    const plan = scanAt([file('run.fit.part', 1_024, NOW - 60_000)], NOW);
+
+    expect(plan.orphanParts).toEqual([]);
+  });
+
+  it('laisse en place un .part pile à la limite d’âge', () => {
+    const plan = scanAt([file('run.fit.part', 1_024, NOW - ORPHAN_PART_MAX_AGE_MS)], NOW);
+
+    expect(plan.orphanParts).toEqual([]);
+  });
+
+  it('désigne pour suppression un .part immobile depuis plus de 15 minutes', () => {
+    // Reliquat d'un envoi interrompu : il condamne le nom canonique à jamais,
+    // chaque nouveau dépôt homonyme prenant un suffixe jusqu'au 409 permanent.
+    const plan = scanAt([file('run.fit.part', 1_024, NOW - ORPHAN_PART_MAX_AGE_MS - 1)], NOW);
+
+    expect(plan.orphanParts).toEqual(['run.fit.part']);
+  });
+
+  it('ne compte jamais un .part comme un fichier FIT', () => {
+    const stale = file('run.fit.part', 4_096, NOW - 24 * 60 * 60 * 1_000);
+
+    const plan = planScan([stale], {
+      sizes: new Map([['run.fit.part', 4_096]]),
+      handled: new Set(),
+      now: NOW,
+    });
+
+    expect(plan.toIngest).toEqual([]);
+    expect(plan.toReject).toEqual([]);
+    // Ni dans la mémoire des tailles : le `.part` n'est pas un candidat.
+    expect([...plan.sizes]).toEqual([]);
+  });
+
+  it('ne touche pas aux .fit du même scan', () => {
+    const plan = planScan(
+      [file('run.fit.part', 1_024, NOW - 60 * 60 * 1_000), file('a.fit', 4_096, NOW)],
+      { sizes: new Map([['a.fit', 4_096]]), handled: new Set(), now: NOW },
+    );
+
+    expect(plan.orphanParts).toEqual(['run.fit.part']);
+    expect(plan.toIngest.map((item) => item.name)).toEqual(['a.fit']);
   });
 });

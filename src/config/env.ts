@@ -27,6 +27,17 @@ const envSchema = z.object({
   STRAVA_CLIENT_ID: z.string().min(1).optional(),
   STRAVA_CLIENT_SECRET: z.string().min(1).optional(),
   STRAVA_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
+
+  // Import FIT — boîte de dépôt partagée avec le service `fit-watcher`.
+  // Même défaut que `scripts/fit-watcher.ts` : en Docker, c'est le point de
+  // montage du volume trainarr-fit-inbox.
+  FIT_INBOX_DIR: z.string().min(1).default('/data/fit-inbox'),
+
+  // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).
+  // Optionnels, mais tant que les deux ne sont pas renseignés le dépôt répond
+  // 503 : il n'existe pas d'état « ouvert sans authentification ».
+  WEBDAV_USERNAME: z.string().min(1).optional(),
+  WEBDAV_PASSWORD: z.string().min(1).optional(),
 });
 
 export type Env = Readonly<z.infer<typeof envSchema>>;

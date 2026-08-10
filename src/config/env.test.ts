@@ -57,7 +57,8 @@ describe('parseEnv — cas nominal', () => {
     });
 
     expect(Object.keys(env)).not.toContain('GITHUB_PAT');
-    expect(Object.keys(env).sort()).toEqual(['AI_PROVIDER', 'DATABASE_URL']);
+    // La variable fournie mise à part, il ne reste que les clés à valeur par défaut.
+    expect(Object.keys(env).sort()).toEqual(['AI_PROVIDER', 'DATABASE_URL', 'FIT_INBOX_DIR']);
   });
 
   it('retourne un objet figé', () => {

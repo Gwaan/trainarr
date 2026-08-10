@@ -19,13 +19,13 @@
  * Usage : `pnpm fit:watch`.
  */
 
-import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import { z } from 'zod';
 
 import { ingestFitBuffer, type IngestReport } from '@/lib/fit/ingest';
-import { planScan, type ScannedFile } from '@/lib/fit/watch-plan';
+import { ORPHAN_PART_MAX_AGE_MS, planScan, type ScannedFile } from '@/lib/fit/watch-plan';
 
 const PROCESSED_DIR = 'processed';
 const FAILED_DIR = 'failed';
@@ -157,6 +157,23 @@ async function archive(
   }
 }
 
+/**
+ * Supprime un temporaire de réception abandonné par un envoi WebDAV interrompu.
+ *
+ * Ne propage rien : un `.part` récalcitrant ne doit pas empêcher le scan
+ * d'ingérer les fichiers du même tour. Il sera reproposé au tour suivant.
+ */
+async function removeOrphanPart(inboxDir: string, name: string): Promise<void> {
+  try {
+    await rm(join(inboxDir, name), { force: true });
+    log(
+      `${name} → temporaire abandonné supprimé (immobile depuis plus de ${ORPHAN_PART_MAX_AGE_MS / 60_000} minutes).`,
+    );
+  } catch (error) {
+    logError(`${name} → suppression du temporaire abandonné impossible : ${errorMessage(error)}`);
+  }
+}
+
 /*
  * Traitement.
  */
@@ -203,9 +220,20 @@ async function main(): Promise<void> {
 
   while (!stopping) {
     try {
-      const plan = planScan(await scanInbox(config.FIT_INBOX_DIR), { sizes, handled });
+      const plan = planScan(await scanInbox(config.FIT_INBOX_DIR), {
+        sizes,
+        handled,
+        now: Date.now(),
+      });
       sizes = plan.sizes;
       handled = plan.handled;
+
+      // Reliquats d'envois interrompus : ils réservent un nom que plus personne
+      // ne viendra écrire, et que le dépôt WebDAV refuse donc de réutiliser.
+      for (const name of plan.orphanParts) {
+        if (stopping) break;
+        await removeOrphanPart(config.FIT_INBOX_DIR, name);
+      }
 
       // Hors gabarit : archivés sans jamais être ouverts — c'est tout l'objet du
       // contrôle de taille, un fichier démesuré ne doit pas entrer en mémoire.

@@ -7,12 +7,18 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Toutes les variables (DATABASE_URL, clés Strava/IA) viennent de .env — jamais du repo.
+    # Toutes les variables (DATABASE_URL, clés Strava/IA, identifiants WebDAV)
+    # viennent de .env — jamais du repo.
     env_file: .env
     environment:
       # Le code fixe déjà le fuseau de l'athlète (src/config/time.ts) ; ceci
       # aligne aussi les logs et tout code tiers sur la même heure locale.
       TZ: ${TZ:-Europe/Paris}
+      # Même valeur que pour fit-watcher : les deux services partagent le volume,
+      # l'appli y dépose (WebDAV sur /dav), le watcher y puise.
+      FIT_INBOX_DIR: /data/fit-inbox
+    volumes:
+      - trainarr-fit-inbox:/data/fit-inbox
     ports:
       # Port hôte paramétrable : sur le réseau app-staging, les autres services
       # (reverse proxy, Komodo) joignent le container sur 3000 quoi qu'il arrive.
@@ -27,11 +33,12 @@ services:
     networks:
       - app-staging
 
-  # Applique les migrations Drizzle puis sort. Service dédié plutôt qu'un
-  # `migrate && node server.js` dans le container applicatif : le build standalone
-  # n'expose pas drizzle-orm sous forme de package installable (il est bundlé dans
-  # les chunks de l'app), l'image de runtime reste donc minimale, et la migration
-  # tourne une fois par déploiement — pas à chaque redémarrage du serveur.
+  # Prépare le déploiement puis sort : propriété du volume d'import, migrations
+  # Drizzle. Service dédié plutôt qu'un `migrate && node server.js` dans le
+  # container applicatif : le build standalone n'expose pas drizzle-orm sous forme
+  # de package installable (il est bundlé dans les chunks de l'app), l'image de
+  # runtime reste donc minimale, et la migration tourne une fois par déploiement —
+  # pas à chaque redémarrage du serveur.
   migrate:
     container_name: trainarr-migrate
     build:
@@ -43,13 +50,27 @@ services:
     env_file: .env
     environment:
       TZ: ${TZ:-Europe/Paris}
+    # Monté uniquement pour le chown ci-dessous : ce container-ci n'écrit aucun FIT.
+    volumes:
+      - trainarr-fit-inbox:/data/fit-inbox
+    # Le `chown` du Dockerfile ne couvre qu'un volume nommé **neuf** : Docker n'en
+    # recopie la propriété qu'à l'initialisation. Sur un volume déjà créé (toute
+    # mise à jour du stack), le répertoire reste à root et l'appli, qui tourne en
+    # uid 1001, part en EACCES sur chaque PUT WebDAV. Ce service-ci tourne en root
+    # et s'achève avant `app` comme avant `fit-watcher` : c'est le seul endroit
+    # d'où la correction est déterministe. Le chown est idempotent et instantané
+    # sur quelques fichiers.
+    command:
+      - sh
+      - -c
+      - chown -R 1001:1001 /data/fit-inbox && exec node_modules/.bin/tsx src/data/db/migrate.ts
     depends_on:
       db:
         condition: service_healthy
     networks:
       - app-staging
 
-  # Surveille le dossier d'import FIT et ingère les fichiers déposés par WebDAV.
+  # Surveille le dossier d'import FIT et ingère les fichiers déposés sur /dav.
   # Process séparé du serveur Next : c'est une boucle longue durée, elle n'a rien
   # à faire dans le cycle de vie des requêtes HTTP.
   fit-watcher:
@@ -72,34 +93,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    networks:
-      - app-staging
-
-  # Point de dépôt des fichiers FIT (montre → WebDAV → volume partagé → watcher).
-  # Aucun port publié : l'accès depuis l'extérieur passe par le reverse proxy du
-  # homelab, qui apporte TLS — l'authentification WebDAV est en clair sans lui.
-  webdav:
-    container_name: trainarr-webdav
-    # Version épinglée (tag + digest) : c'est le seul container exposé en
-    # écriture sur Internet, une image tierce ne doit pas changer sous nos pieds
-    # au prochain `docker compose pull`.
-    image: hacdias/webdav:v5.14.2@sha256:ee6471cec865a9ea819dfd8912570fa80885749c525a85cd96fa22840b192bee
-    restart: unless-stopped
-    # Pas d'`env_file` ici, contrairement aux autres services : il injecterait
-    # DATABASE_URL et les secrets Strava/IA dans le container le plus exposé de
-    # la stack. Seules ses deux variables lui sont passées, substituées dans
-    # webdav.yml au démarrage ; `:?` fait échouer le déploiement si elles
-    # manquent, plutôt que de démarrer un WebDAV sans identifiants valides.
-    environment:
-      WEBDAV_USERNAME: ${WEBDAV_USERNAME:?WEBDAV_USERNAME requis}
-      WEBDAV_PASSWORD: ${WEBDAV_PASSWORD:?WEBDAV_PASSWORD requis}
-      TZ: ${TZ:-Europe/Paris}
-    command: ["-c", "/config.yml"]
-    volumes:
-      - ./webdav.yml:/config.yml:ro
-      # Même volume que le watcher, monté à la racine servie : ce que WebDAV
-      # écrit dans /data, le watcher le voit dans /data/fit-inbox.
-      - trainarr-fit-inbox:/data
     networks:
       - app-staging
 
@@ -132,8 +125,10 @@ services:
 
 volumes:
   trainarr-db-data:
-  # Boîte de dépôt des fichiers FIT, partagée entre webdav (écriture) et
-  # fit-watcher (lecture puis rangement dans processed/ ou failed/).
+  # Boîte de dépôt des fichiers FIT, partagée entre app (écriture : le point
+  # WebDAV /dav, cf. src/lib/fit/dav.ts) et fit-watcher (lecture puis rangement
+  # dans processed/ ou failed/). `migrate` le monte aussi, le temps d'en fixer la
+  # propriété à l'uid 1001 sous lequel tournent les deux autres.
   trainarr-fit-inbox:
 
 networks:

@@ -2,10 +2,10 @@
  * Logique de décision du dossier surveillé — fonctions pures, sans I/O.
  *
  * Le service qui les utilise (`scripts/fit-watcher.ts`) se contente de lister le
- * répertoire, d'appeler `planScan`, puis d'ingérer, de refuser et de déplacer les
- * fichiers qu'on lui désigne. Tout ce qui se raisonne (extension, upload en
- * cours, fichier déjà traité, fichier hors gabarit) vit ici pour rester testable
- * sans système de fichiers.
+ * répertoire, d'appeler `planScan`, puis d'ingérer, de refuser, de supprimer et
+ * de déplacer les fichiers qu'on lui désigne. Tout ce qui se raisonne (extension,
+ * upload en cours, fichier déjà traité, fichier hors gabarit, temporaire
+ * abandonné) vit ici pour rester testable sans système de fichiers.
  */
 
 import { MAX_FIT_FILE_BYTES, toMegabytes } from './limits';
@@ -37,6 +37,22 @@ export type ScanContext = {
 /** `true` pour un fichier `.fit`, quelle que soit la casse de l'extension. */
 export function isFitFile(name: string): boolean {
   return name.toLowerCase().endsWith('.fit');
+}
+
+/**
+ * Suffixe des fichiers en cours de réception WebDAV (cf. `lib/fit/dav.ts`), et
+ * âge à partir duquel un tel fichier n'est plus une réception mais un reliquat.
+ *
+ * Un quart d'heure : très au-delà du temps d'envoi d'un FIT de quelques Mo, et
+ * assez court pour libérer le nom avant que les homonymes suivants n'épuisent
+ * les cent suffixes de collision du dépôt.
+ */
+const PART_SUFFIX = '.part';
+export const ORPHAN_PART_MAX_AGE_MS = 15 * 60 * 1_000;
+
+/** `true` pour un fichier temporaire de réception WebDAV. */
+export function isPartFile(name: string): boolean {
+  return name.endsWith(PART_SUFFIX);
 }
 
 /**
@@ -106,21 +122,41 @@ export type ScanPlan = {
    * indéfiniment sur un service qui tourne des mois.
    */
   handled: Set<string>;
+  /**
+   * Temporaires de réception abandonnés, à supprimer. Un `.part` laissé par un
+   * envoi interrompu ne disparaît jamais de lui-même et bloque le nom canonique
+   * qu'il réserve : les dépôts suivants du même nom prennent un suffixe, jusqu'à
+   * ce que le dépôt réponde 409 en permanence. Les `.part` récents ne sont pas
+   * de la liste — ce sont des réceptions en cours.
+   */
+  orphanParts: string[];
 };
 
 /** Applique `decideFileAction` à un scan complet. */
 export function planScan(
   files: readonly ScannedFile[],
-  previous: { sizes: ReadonlyMap<string, number>; handled: ReadonlySet<string> },
+  previous: {
+    sizes: ReadonlyMap<string, number>;
+    handled: ReadonlySet<string>;
+    /** Horloge du scan, injectable pour les tests. */
+    now?: number;
+  },
 ): ScanPlan {
   const plan: ScanPlan = {
     toIngest: [],
     toReject: [],
     sizes: new Map(),
     handled: new Set(),
+    orphanParts: [],
   };
 
+  const now = previous.now ?? Date.now();
+
   for (const file of files) {
+    if (isPartFile(file.name)) {
+      if (now - file.mtimeMs > ORPHAN_PART_MAX_AGE_MS) plan.orphanParts.push(file.name);
+      continue;
+    }
     if (!isFitFile(file.name)) continue;
 
     plan.sizes.set(file.name, file.sizeBytes);

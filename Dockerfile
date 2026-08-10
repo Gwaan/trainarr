@@ -70,6 +70,18 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Boîte de dépôt des fichiers FIT : le serveur y écrit lui-même désormais (point
+# WebDAV /dav). Le répertoire est créé et donné à `nextjs` **dans l'image** :
+# Docker recopie propriétaire et permissions du chemin de l'image lorsqu'il
+# initialise un volume nommé **vide**.
+#
+# Défense en profondeur seulement : cette recopie n'a lieu qu'à la création du
+# volume, et uniquement pour le service qui le monte en premier. Sur un volume
+# existant, elle ne s'applique pas du tout. La garantie, elle, vient du service
+# `migrate` de docker-compose.yml, qui chown le volume en root avant que `app` et
+# `fit-watcher` ne démarrent.
+RUN mkdir -p /data/fit-inbox && chown -R nextjs:nodejs /data
+
 USER nextjs
 
 EXPOSE 3000
