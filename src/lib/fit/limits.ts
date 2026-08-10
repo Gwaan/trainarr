@@ -3,8 +3,8 @@
  *
  * Module volontairement isolé et sans dépendance : les trois entrées d'import
  * s'y réfèrent — la route `POST /api/fit/upload`, l'écran d'import (composant
- * client) et le service de surveillance `scripts/fit-watcher.ts`, qui ne doit
- * rien importer de `src/app/`.
+ * client) et le service d'import `src/lib/fit/service.ts`, qui ne doit rien
+ * importer de `src/app/`.
  */
 
 /**

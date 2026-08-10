@@ -1,7 +1,7 @@
 /**
  * Logique de décision du rapatriement intervals.icu — fonctions pures, sans I/O.
  *
- * Le poller (`scripts/fit-watcher.ts`) se contente de lister les activités
+ * Le poller (`src/lib/fit/service.ts`) se contente de lister les activités
  * distantes et les fichiers déjà présents, d'appeler {@link planPollWindow} puis
  * {@link planPoll}, et de télécharger ce qu'on lui désigne. Tout ce qui se
  * raisonne (fenêtre interrogée, nom déterministe, activité déjà rapatriée,
@@ -254,6 +254,59 @@ export function nextPollDelayMs(retryAfterS: number | null, pollIntervalS: numbe
 }
 
 /*
+ * Compte rendu d'un cycle.
+ */
+
+/** Ce qu'un cycle de rapatriement a produit, tel que le poller le mesure. */
+export type PollCycleOutcome = {
+  /** Délai imposé par l'API avant le prochain cycle, en secondes. */
+  retryAfterS: number | null;
+  /** Activités renvoyées par l'API. `null` si le cycle a échoué avant de lister. */
+  listed: number | null;
+  /** Activités que ce cycle a entrepris de rapatrier (hors plafond de cycle). */
+  planned: number;
+  /** Fichiers effectivement déposés dans la boîte d'import. */
+  deposited: number;
+  /** Activités éligibles laissées au cycle suivant par le plafond. */
+  remaining: number;
+  /** `true` si la fenêtre interrogée couvrait tout l'historique. */
+  backfill: boolean;
+};
+
+/**
+ * La ligne de journal que ce cycle mérite, ou `null` s'il n'a rien à dire.
+ *
+ * Deux exigences en tension, arbitrées ici :
+ *
+ * - un service qui tourne des mois ne doit pas noyer ses journaux d'une ligne
+ *   par minute disant « rien de neuf » ;
+ * - un athlète qui vient de démarrer le service doit **immédiatement** savoir
+ *   s'il fonctionne. Le premier cycle parle donc toujours, même pour dire qu'il
+ *   n'a rien trouvé — c'est la réponse à « est-ce que ça marche ? ».
+ *
+ * Les échecs, eux, sont journalisés à part par le poller au moment du catch : ce
+ * qui remonte ici d'un cycle en échec est un complément, pas la seule trace.
+ */
+export function pollCycleSummary(cycleNumber: number, outcome: PollCycleOutcome): string | null {
+  const scope = outcome.backfill ? 'historique complet' : 'fenêtre glissante';
+
+  if (outcome.listed === null) {
+    // L'erreur elle-même a déjà été journalisée ; on ne la répète pas, on situe
+    // seulement le cycle qui vient d'échouer.
+    return cycleNumber === 1 ? 'premier cycle : échec, cf. la ligne précédente.' : null;
+  }
+
+  if (cycleNumber === 1) {
+    return `premier cycle (${scope}) : ${outcome.listed} activités listées, ${outcome.planned} à rapatrier, ${outcome.deposited} déposées.`;
+  }
+
+  if (outcome.planned === 0 && outcome.deposited === 0) return null;
+
+  const rest = outcome.remaining > 0 ? `, reste ~${outcome.remaining} au prochain cycle` : '';
+  return `cycle (${scope}) : ${outcome.deposited} déposées sur ${outcome.planned} à rapatrier${rest}.`;
+}
+
+/*
  * Mémoires du poller.
  */
 
@@ -295,13 +348,82 @@ export function shouldLogOnce(seen: Set<string>, activityId: string): boolean {
  * Activation du poller.
  */
 
-/** Les deux variables d'environnement sans lesquelles le poller ne démarre pas. */
-export function missingIntervalsSettings(settings: {
+/**
+ * Identifiant d'athlète à utiliser quand la configuration n'en donne pas.
+ *
+ * `0` n'est pas un athlète : c'est le raccourci officiel de l'API pour « celui à
+ * qui appartient la clé ». Documenté dans le cookbook d'intervals.icu (« Note
+ * that the athlete id in the path is '0'. This indicates that the athlete ID
+ * that the access_token or API key belongs to should be used. »,
+ * <https://forum.intervals.icu/t/intervals-icu-api-integration-cookbook/80090>),
+ * où `GET /api/v1/athlete/0/activities` est l'exemple donné. La clé suffit donc
+ * à configurer le rapatriement — un identifiant explicite reste accepté.
+ */
+export const OWNER_ATHLETE_ID = '0';
+
+/** Identifiant nominal : le `i` de l'URL intervals.icu, puis des chiffres. */
+const ATHLETE_ID_PATTERN = /^i\d+$/;
+/** Même identifiant, saisi sans son préfixe — l'erreur de recopie la plus courante. */
+const BARE_ATHLETE_ID_PATTERN = /^\d+$/;
+
+export type AthleteIdResult =
+  | { ok: true; athleteId: string }
+  | { ok: false; reason: string };
+
+/**
+ * Identifiant d'athlète tel que l'API l'attend, à partir de ce que
+ * l'utilisateur a écrit dans son `.env`.
+ *
+ * Volontairement tolérant : espaces autour de la valeur, préfixe `i` oublié,
+ * `0`/`i0` pour désigner le propriétaire de la clé. Une variable mal recopiée
+ * est une faute d'inattention, pas une raison de priver l'athlète de son
+ * rapatriement — et encore moins d'empêcher l'application de démarrer, d'où un
+ * résultat plutôt qu'une exception.
+ */
+export function normalizeAthleteId(raw: string | undefined): AthleteIdResult {
+  const value = raw?.trim() ?? '';
+  if (value === '') return { ok: true, athleteId: OWNER_ATHLETE_ID };
+  // `0` comme `i0` : le raccourci « propriétaire de la clé », sous ses deux
+  // graphies plausibles. L'API attend la forme nue.
+  if (value === '0' || value === 'i0') return { ok: true, athleteId: OWNER_ATHLETE_ID };
+  if (ATHLETE_ID_PATTERN.test(value)) return { ok: true, athleteId: value };
+  if (BARE_ATHLETE_ID_PATTERN.test(value)) return { ok: true, athleteId: `i${value}` };
+
+  return {
+    ok: false,
+    // La valeur est échappée : elle vient d'un fichier de configuration et part
+    // dans les journaux.
+    reason: `INTERVALS_ATHLETE_ID illisible (${JSON.stringify(value)}) — attendu i123456, 123456, ou vide pour le propriétaire de la clé`,
+  };
+}
+
+export type PollerActivation =
+  /** Les deux valeurs dont le poller a besoin, prêtes à l'emploi. */
+  | { active: true; athleteId: string; apiKey: string }
+  /** Motif exact, à journaliser tel quel : c'est la réponse à « pourquoi ça ne tourne pas ? ». */
+  | { active: false; reason: string };
+
+/**
+ * Le poller démarre-t-il, et sinon pourquoi.
+ *
+ * Une seule variable est indispensable, la clé API. Un identifiant d'athlète
+ * illisible désactive le poller **seul** — l'appli, elle, continue de servir et
+ * le dossier d'import continue d'être surveillé.
+ *
+ * La clé est rendue avec le résultat plutôt que relue par l'appelant : c'est ce
+ * qui lui évite d'avoir à re-prouver au typage qu'elle est bien définie.
+ */
+export function planPollerActivation(settings: {
   athleteId: string | undefined;
   apiKey: string | undefined;
-}): string[] {
-  const missing: string[] = [];
-  if (settings.athleteId === undefined) missing.push('INTERVALS_ATHLETE_ID');
-  if (settings.apiKey === undefined) missing.push('INTERVALS_API_KEY');
-  return missing;
+}): PollerActivation {
+  const apiKey = settings.apiKey?.trim() ?? '';
+  if (apiKey === '') {
+    return { active: false, reason: 'INTERVALS_API_KEY manquante' };
+  }
+
+  const athlete = normalizeAthleteId(settings.athleteId);
+  if (!athlete.ok) return { active: false, reason: athlete.reason };
+
+  return { active: true, athleteId: athlete.athleteId, apiKey };
 }

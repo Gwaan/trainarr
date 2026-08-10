@@ -4,8 +4,8 @@
  * La montre (HealthFit) envoie ses fichiers en WebDAV sur `https://<domaine>/dav`.
  * Plutôt qu'un container dédié exposé en écriture sur Internet, `src/proxy.ts`
  * intercepte ce préfixe et délègue ici : les requêtes n'atteignent jamais le
- * routeur Next, et le fichier atterrit dans `FIT_INBOX_DIR`, où `fit-watcher`
- * le récupère.
+ * routeur Next, et le fichier atterrit dans `FIT_INBOX_DIR`, où le service
+ * d'import (`src/lib/fit/service.ts`, même process) le récupère.
  *
  * On n'implémente que le sous-ensemble dont un *client de dépôt* a besoin —
  * OPTIONS, PROPFIND, MKCOL, PUT — et rien de plus : pas de listage réel, pas de
@@ -96,7 +96,7 @@ export type DavDeps = {
    * Internet ne doit jamais s'ouvrir par défaut d'attention.
    */
   credentials: DavCredentials | null;
-  /** Répertoire de dépôt, celui que `fit-watcher` surveille. */
+  /** Répertoire de dépôt, celui que le service d'import surveille. */
   inboxDir: string;
   fs: DavFileSystem;
 };

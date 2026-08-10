@@ -41,15 +41,23 @@ Montre → HealthFit (iPhone)
            └──────────────►  FIT_INBOX_DIR  ← volume trainarr-fit-inbox
                                    │  scan périodique
                                    ▼
-                            fit-watcher   → ingestion, puis processed/ ou failed/
+                        service d'import  → ingestion, puis processed/ ou failed/
 ```
+
+Tout cela tourne dans **un seul container applicatif** : le dépôt WebDAV, le
+poller et le watcher vivent dans le process du serveur Next, démarrés au boot par
+`src/instrumentation.ts`. Leurs journaux sont donc ceux de l'appli
+(`docker logs trainarr`), préfixés `[fit]` et `[fit/intervals]`.
 
 - **HealthFit** est configuré une fois pour envoyer chaque séance en WebDAV vers
   `https://<domaine>/dav`. Tant que `WEBDAV_USERNAME` et `WEBDAV_PASSWORD` ne
   sont pas renseignés, le dépôt répond 503 (jamais ouvert sans authentification).
-- Le **watcher** (`pnpm fit:watch`, ou le service `trainarr-fit-watcher` en
-  Docker) n'ingère un fichier que si sa taille est stable sur deux scans, puis le
-  range dans `processed/` ou dans `failed/` avec un `.err.txt` expliquant le rejet.
+- Le **watcher** n'ingère un fichier que si sa taille est stable sur deux scans
+  (`FIT_WATCH_INTERVAL_S`, 30 s par défaut), puis le range dans `processed/` ou
+  dans `failed/` avec un `.err.txt` expliquant le rejet.
+- **Rien de tout cela ne peut faire tomber le serveur** : une inbox inaccessible,
+  une clé refusée ou une exception imprévue désactivent ou relancent la boucle
+  concernée en le journalisant — l'application continue de servir.
 - L'**import manuel** reste possible depuis la page « Activités » (bouton ou
   glisser-déposer de `.fit`).
 - L'idempotence repose sur l'empreinte SHA-256 du fichier : redéposer le même
@@ -58,9 +66,9 @@ Montre → HealthFit (iPhone)
 ### Rapatriement depuis intervals.icu (optionnel)
 
 Si HealthFit synchronise déjà les séances vers [intervals.icu](https://intervals.icu),
-le service `fit-watcher` peut y récupérer les fichiers d'activité **originaux**
-et les déposer lui-même dans la boîte d'import. C'est un filet : une séance que
-l'envoi WebDAV a manquée arrive quand même.
+Trainarr peut y récupérer les fichiers d'activité **originaux** et les déposer
+lui-même dans la boîte d'import. C'est un filet : une séance que l'envoi WebDAV a
+manquée arrive quand même.
 
 Configuration, une fois :
 
@@ -69,25 +77,39 @@ Configuration, une fois :
 2. Dans intervals.icu, **Settings → Developer Settings**, générer une clé API.
    C'est un secret : elle ne va que dans `.env.local` (dev) ou `.env` (Docker),
    jamais dans le repo.
-3. Relever l'identifiant d'athlète dans l'URL intervals.icu — la forme `i123456`,
-   préfixe `i` compris.
-4. Renseigner les variables suivantes, puis redémarrer `fit-watcher` :
+3. Renseigner `INTERVALS_API_KEY`, puis redémarrer l'application. **C'est tout** :
+   l'identifiant d'athlète est facultatif.
 
 | Variable | Rôle | Défaut |
 |---|---|---|
-| `INTERVALS_ATHLETE_ID` | Identifiant d'athlète (`i` + chiffres) | — |
-| `INTERVALS_API_KEY` | Clé API personnelle | — |
+| `INTERVALS_API_KEY` | Clé API personnelle — **seule variable requise** | — |
+| `INTERVALS_ATHLETE_ID` | Identifiant d'athlète, si l'on veut en viser un autre que soi | le propriétaire de la clé |
 | `INTERVALS_POLL_INTERVAL_S` | Intervalle entre deux cycles, en secondes | `60` |
 | `INTERVALS_LOOKBACK_DAYS` | Profondeur de la fenêtre glissante, en jours | `30` |
 
-Tant que `INTERVALS_ATHLETE_ID` **et** `INTERVALS_API_KEY` ne sont pas tous deux
-renseignés, le rapatriement reste inactif — le watcher le signale au démarrage et
-fonctionne comme avant.
+Sans `INTERVALS_ATHLETE_ID`, l'API est interrogée sur l'athlète `0`, que
+intervals.icu résout en « celui à qui appartient la clé ». Si la variable est
+renseignée, les deux graphies sont acceptées (`i123456` comme `123456`) ; une
+valeur illisible désactive **le poller seul**, en disant laquelle et pourquoi.
+
+Tant que `INTERVALS_API_KEY` n'est pas renseignée, le rapatriement reste inactif —
+l'appli le signale au démarrage et le reste de l'import fonctionne normalement.
+
+Au démarrage, une ligne dit dans quel état on est :
+
+```
+[fit] service FIT démarré — inbox: /data/fit-inbox (scan toutes les 30 s), poll intervals.icu: actif (60 s, athlète 0, par tranches de 50)
+[fit] service FIT démarré — inbox: /data/fit-inbox (scan toutes les 30 s), poll intervals.icu: inactif (INTERVALS_API_KEY manquante)
+```
+
+Le premier cycle du poller annonce toujours son résultat (`premier cycle
+(historique complet) : 237 activités listées, 50 à rapatrier, 50 déposées.`) ;
+ensuite, seuls les cycles qui trouvent du travail ou échouent parlent.
 
 Une activité déjà rapatriée n'est jamais retéléchargée : le fichier déposé
 s'appelle `intervals-<id>.fit`, et sa présence dans la boîte, dans `processed/`
 ou dans `failed/` suffit à le savoir. Une séance saisie à la main sur
-intervals.icu n'a pas de fichier : le watcher le note une fois et passe.
+intervals.icu n'a pas de fichier : c'est noté une fois, puis on passe.
 
 **Le premier démarrage rapatrie tout l'historique.** Tant qu'aucune séance n'a
 été récupérée, le poller demande l'intégralité des activités du compte plutôt que
@@ -123,6 +145,9 @@ docker compose up -d --build
 
 Le container applicatif s'appelle `trainarr` et écoute sur le port 3000 ; la base
 tourne dans `trainarr-db`. Les deux rejoignent le réseau partagé `app-staging`.
+Un troisième container, `trainarr-migrate`, applique les migrations puis sort —
+**il n'y a pas d'autre container applicatif** : l'import FIT tourne dans
+`trainarr`, et `docker logs trainarr` montre tout.
 
 La livraison est automatisée par un webhook GitHub vers Komodo, déclenché à chaque
 push sur la branche configurée.

@@ -14,8 +14,10 @@ services:
       # Le code fixe déjà le fuseau de l'athlète (src/config/time.ts) ; ceci
       # aligne aussi les logs et tout code tiers sur la même heure locale.
       TZ: ${TZ:-Europe/Paris}
-      # Même valeur que pour fit-watcher : les deux services partagent le volume,
-      # l'appli y dépose (WebDAV sur /dav), le watcher y puise.
+      # Fixé ici et non dans .env : le chemin doit coïncider avec le point de
+      # montage ci-dessous, et compose est le seul à connaître les deux. Un seul
+      # container applicatif : c'est ce process-ci qui dépose (WebDAV sur /dav),
+      # scanne et ingère (cf. src/instrumentation.ts).
       FIT_INBOX_DIR: /data/fit-inbox
     volumes:
       - trainarr-fit-inbox:/data/fit-inbox
@@ -56,8 +58,8 @@ services:
     # Le `chown` du Dockerfile ne couvre qu'un volume nommé **neuf** : Docker n'en
     # recopie la propriété qu'à l'initialisation. Sur un volume déjà créé (toute
     # mise à jour du stack), le répertoire reste à root et l'appli, qui tourne en
-    # uid 1001, part en EACCES sur chaque PUT WebDAV. Ce service-ci tourne en root
-    # et s'achève avant `app` comme avant `fit-watcher` : c'est le seul endroit
+    # uid 1001, part en EACCES sur chaque PUT WebDAV comme sur chaque scan. Ce
+    # service-ci tourne en root et s'achève avant `app` : c'est le seul endroit
     # d'où la correction est déterministe. Le chown est idempotent et instantané
     # sur quelques fichiers.
     command:
@@ -67,32 +69,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - app-staging
-
-  # Surveille le dossier d'import FIT et ingère les fichiers déposés sur /dav.
-  # Process séparé du serveur Next : c'est une boucle longue durée, elle n'a rien
-  # à faire dans le cycle de vie des requêtes HTTP.
-  fit-watcher:
-    container_name: trainarr-fit-watcher
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: worker
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      TZ: ${TZ:-Europe/Paris}
-      # Fixé ici et non dans .env : le chemin doit coïncider avec le point de
-      # montage ci-dessous, et compose est le seul à connaître les deux.
-      FIT_INBOX_DIR: /data/fit-inbox
-    volumes:
-      - trainarr-fit-inbox:/data/fit-inbox
-    depends_on:
-      db:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     networks:
       - app-staging
 
@@ -125,10 +101,11 @@ services:
 
 volumes:
   trainarr-db-data:
-  # Boîte de dépôt des fichiers FIT, partagée entre app (écriture : le point
-  # WebDAV /dav, cf. src/lib/fit/dav.ts) et fit-watcher (lecture puis rangement
-  # dans processed/ ou failed/). `migrate` le monte aussi, le temps d'en fixer la
-  # propriété à l'uid 1001 sous lequel tournent les deux autres.
+  # Boîte de dépôt des fichiers FIT. Un seul service applicatif la monte : `app`
+  # y écrit (point WebDAV /dav, cf. src/lib/fit/dav.ts), la scanne et range les
+  # fichiers ingérés dans processed/ ou failed/ (src/lib/fit/service.ts).
+  # `migrate` la monte aussi, le temps d'en fixer la propriété à l'uid 1001 sous
+  # lequel `app` tourne.
   trainarr-fit-inbox:
 
 networks:

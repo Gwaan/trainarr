@@ -8,14 +8,18 @@ import {
   isSafeActivityId,
   MAX_DOWNLOADS_PER_CYCLE,
   MAX_SLEEP_MS,
-  missingIntervalsSettings,
   nextPollDelayMs,
+  normalizeAthleteId,
+  OWNER_ATHLETE_ID,
   planPoll,
+  planPollerActivation,
   planPollWindow,
+  pollCycleSummary,
   purgeExpiredWithoutFile,
   shouldLogOnce,
   WITHOUT_FILE_TTL_MS,
   type PollCandidate,
+  type PollCycleOutcome,
 } from './poll-plan';
 
 function activity(id: string, source: string | null = 'UPLOAD'): PollCandidate {
@@ -301,24 +305,127 @@ describe('shouldLogOnce', () => {
   });
 });
 
-describe('missingIntervalsSettings', () => {
-  it('ne signale rien quand tout est renseigné', () => {
-    expect(missingIntervalsSettings({ athleteId: 'i123456', apiKey: 'cle' })).toEqual([]);
+describe('normalizeAthleteId', () => {
+  it("retient l'identifiant nominal tel quel", () => {
+    expect(normalizeAthleteId('i123456')).toEqual({ ok: true, athleteId: 'i123456' });
   });
 
-  it('nomme précisément la variable manquante', () => {
-    expect(missingIntervalsSettings({ athleteId: undefined, apiKey: 'cle' })).toEqual([
-      'INTERVALS_ATHLETE_ID',
-    ]);
-    expect(missingIntervalsSettings({ athleteId: 'i123456', apiKey: undefined })).toEqual([
-      'INTERVALS_API_KEY',
-    ]);
+  it('ajoute le préfixe « i » oublié', () => {
+    expect(normalizeAthleteId('123456')).toEqual({ ok: true, athleteId: 'i123456' });
   });
 
-  it('nomme les deux quand les deux manquent', () => {
-    expect(missingIntervalsSettings({ athleteId: undefined, apiKey: undefined })).toEqual([
-      'INTERVALS_ATHLETE_ID',
-      'INTERVALS_API_KEY',
-    ]);
+  it('ignore les espaces autour de la valeur', () => {
+    expect(normalizeAthleteId('  i123456 ')).toEqual({ ok: true, athleteId: 'i123456' });
+    expect(normalizeAthleteId('\t123456\n')).toEqual({ ok: true, athleteId: 'i123456' });
+  });
+
+  it("retombe sur le propriétaire de la clé quand rien n'est donné", () => {
+    expect(normalizeAthleteId(undefined)).toEqual({ ok: true, athleteId: OWNER_ATHLETE_ID });
+    expect(normalizeAthleteId('')).toEqual({ ok: true, athleteId: OWNER_ATHLETE_ID });
+    expect(normalizeAthleteId('   ')).toEqual({ ok: true, athleteId: OWNER_ATHLETE_ID });
+  });
+
+  it('accepte les deux graphies du raccourci « propriétaire de la clé »', () => {
+    expect(normalizeAthleteId('0')).toEqual({ ok: true, athleteId: '0' });
+    // L'API attend la forme nue : `i0` est normalisé, pas transmis tel quel.
+    expect(normalizeAthleteId('i0')).toEqual({ ok: true, athleteId: '0' });
+  });
+
+  it('refuse une valeur illisible sans lever', () => {
+    const result = normalizeAthleteId('https://intervals.icu/athlete/i123456');
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain('INTERVALS_ATHLETE_ID');
+    // La valeur fautive est échappée : elle vient d'un fichier de configuration
+    // et part dans les journaux.
+    expect(result.reason).toContain('"https://intervals.icu/athlete/i123456"');
+  });
+});
+
+describe('planPollerActivation', () => {
+  it('active le poller avec la seule clé API', () => {
+    expect(planPollerActivation({ athleteId: undefined, apiKey: 'cle' })).toEqual({
+      active: true,
+      athleteId: OWNER_ATHLETE_ID,
+      apiKey: 'cle',
+    });
+  });
+
+  it("respecte l'identifiant d'athlète quand il est donné", () => {
+    expect(planPollerActivation({ athleteId: 'i123456', apiKey: '  cle  ' })).toEqual({
+      active: true,
+      athleteId: 'i123456',
+      // La clé est rendue détourée : le poller n'a pas à s'en soucier.
+      apiKey: 'cle',
+    });
+  });
+
+  it('nomme la clé manquante', () => {
+    const activation = planPollerActivation({ athleteId: 'i123456', apiKey: undefined });
+
+    expect(activation.active).toBe(false);
+    if (activation.active) return;
+    expect(activation.reason).toBe('INTERVALS_API_KEY manquante');
+  });
+
+  it('traite une clé vide comme absente', () => {
+    expect(planPollerActivation({ athleteId: 'i1', apiKey: '   ' }).active).toBe(false);
+  });
+
+  it("désactive le poller seul quand l'identifiant est illisible", () => {
+    const activation = planPollerActivation({ athleteId: 'athlète-de-gwen', apiKey: 'cle' });
+
+    expect(activation.active).toBe(false);
+    if (activation.active) return;
+    expect(activation.reason).toContain('INTERVALS_ATHLETE_ID');
+  });
+});
+
+describe('pollCycleSummary', () => {
+  function outcome(overrides: Partial<PollCycleOutcome> = {}): PollCycleOutcome {
+    return {
+      retryAfterS: null,
+      listed: 0,
+      planned: 0,
+      deposited: 0,
+      remaining: 0,
+      backfill: false,
+      ...overrides,
+    };
+  }
+
+  it('parle toujours au premier cycle, même sans rien à faire', () => {
+    const line = pollCycleSummary(1, outcome({ listed: 237 }));
+
+    expect(line).not.toBeNull();
+    expect(line).toContain('premier cycle');
+    expect(line).toContain('237');
+  });
+
+  it('se tait sur un cycle suivant qui ne trouve rien', () => {
+    expect(pollCycleSummary(2, outcome({ listed: 237 }))).toBeNull();
+  });
+
+  it('parle dès qu’un cycle a du travail', () => {
+    const line = pollCycleSummary(9, outcome({ listed: 237, planned: 50, deposited: 50, remaining: 12 }));
+
+    expect(line).toContain('50');
+    expect(line).toContain('reste ~12');
+  });
+
+  it("situe le premier cycle en échec plutôt que de laisser un silence", () => {
+    expect(pollCycleSummary(1, outcome({ listed: null }))).toContain('premier cycle');
+  });
+
+  it("ne répète pas les cycles en échec suivants — l'erreur est déjà journalisée", () => {
+    expect(pollCycleSummary(2, outcome({ listed: null }))).toBeNull();
+  });
+
+  it('distingue backfill et fenêtre glissante', () => {
+    expect(pollCycleSummary(1, outcome({ listed: 5, backfill: true }))).toContain(
+      'historique complet',
+    );
+    expect(pollCycleSummary(1, outcome({ listed: 5 }))).toContain('fenêtre glissante');
   });
 });

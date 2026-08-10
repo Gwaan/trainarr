@@ -24,25 +24,28 @@ const envSchema = z.object({
   AI_MODEL: z.string().min(1).optional(),
   AI_API_KEY: z.string().min(1).optional(),
 
-  // Import FIT — boîte de dépôt partagée avec le service `fit-watcher`.
-  // Même défaut que `scripts/fit-watcher.ts` : en Docker, c'est le point de
-  // montage du volume trainarr-fit-inbox.
+  // Import FIT — boîte de dépôt du service d'ingestion, qui tourne dans le
+  // process de l'application (cf. src/instrumentation.ts et src/lib/fit/service.ts).
+  // En Docker, c'est le point de montage du volume trainarr-fit-inbox.
   FIT_INBOX_DIR: z.string().min(1).default('/data/fit-inbox'),
+  // Intervalle entre deux scans du dossier, en secondes. C'est aussi le délai
+  // minimal avant qu'un fichier soit jugé complet : sa taille doit être
+  // identique sur deux scans consécutifs.
+  FIT_WATCH_INTERVAL_S: z.coerce.number().int().positive().default(30),
 
   // Rapatriement automatique depuis intervals.icu (cf. src/lib/intervals/).
-  // Lues par le service `fit-watcher`, qui a sa propre copie du schéma comme
-  // pour FIT_INBOX_DIR — elles sont déclarées ici pour que la configuration de
-  // l'application reste décrite d'un seul endroit.
-  // Le poller ne démarre que si l'identifiant d'athlète ET la clé sont donnés.
-  // Tant qu'aucune séance n'a été rapatriée, il demande tout l'historique (par
-  // tranches, sur plusieurs cycles) ; ensuite seulement la fenêtre glissante de
-  // INTERVALS_LOOKBACK_DAYS jours.
-  INTERVALS_ATHLETE_ID: z
-    .string()
-    .regex(/^i\d+$/, {
-      error: "identifiant d'athlète intervals.icu attendu, de la forme i123456",
-    })
-    .optional(),
+  // Le poller ne démarre que si la clé API est renseignée. Tant qu'aucune séance
+  // n'a été rapatriée, il demande tout l'historique (par tranches, sur plusieurs
+  // cycles) ; ensuite seulement la fenêtre glissante de INTERVALS_LOOKBACK_DAYS
+  // jours.
+  //
+  // INTERVALS_ATHLETE_ID est **optionnelle** : omise, le poller interroge
+  // l'athlète 0, que l'API résout en « le propriétaire de la clé ». Et son
+  // format n'est volontairement PAS validé ici : une valeur illisible ne doit
+  // désactiver que le poller, jamais empêcher l'application de démarrer — la
+  // normalisation et le diagnostic vivent dans `planPollerActivation`
+  // (src/lib/intervals/poll-plan.ts).
+  INTERVALS_ATHLETE_ID: z.string().min(1).optional(),
   INTERVALS_API_KEY: z.string().min(1).optional(),
   INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(60),
   INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),

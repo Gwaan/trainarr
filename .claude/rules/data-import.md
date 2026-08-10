@@ -9,6 +9,32 @@ paths:
 
 # Données & import FIT
 
+## Un seul container applicatif
+
+Les boucles d'ingestion et de rapatriement tournent **dans le process du serveur
+Next**, démarrées par `src/instrumentation.ts` (`register()`, runtime Node
+uniquement). Il n'existe pas de container `fit-watcher` : `docker logs trainarr`
+montre tout, préfixé `[fit]` et `[fit/intervals]`.
+
+Ce qu'implique cette cohabitation, et qui n'est pas négociable :
+
+- **Rien de l'import ne peut emporter le serveur HTTP.** Chaque boucle est
+  enrobée d'un dernier recours qui journalise et relance après délai ; une
+  configuration illisible ou une inbox inaccessible désactive le service en le
+  disant, l'appli continue de servir.
+- La configuration vient de `src/config/env.ts` comme le reste de
+  l'application — aucun chargement de `.env` par un script, aucune lecture de
+  `process.env` hors `src/config/`. **Une exception, documentée** :
+  `src/instrumentation.ts` lit `process.env.NEXT_RUNTIME` — le fichier est
+  compilé pour tous les runtimes (Edge compris) et ne peut donc pas importer
+  `src/config/env` (`server-only`) ; `NEXT_RUNTIME` est une constante de build,
+  pas de la configuration.
+- **L'arrêt doit être synchrone.** Next installe son propre gestionnaire de
+  SIGTERM qui termine par `process.exit(143)` : vérifié, une continuation
+  asynchrone de 5 ms n'a déjà plus la main. `stop()` lève le drapeau d'arrêt et
+  annule les appels en vol sans attendre. La sûreté vient d'ailleurs (`.part` +
+  renommage atomique, empreinte SHA-256), pas d'une fermeture propre.
+
 ## Canal d'import
 
 Le fichier FIT est le **seul** format d'entrée des données d'entraînement : quelle
@@ -20,7 +46,7 @@ que soit la route empruntée, tout finit dans la même boîte de dépôt
   fichiers atterrissent dans la boîte de dépôt (`FIT_INBOX_DIR`, volume partagé).
 - **Chemin intervals.icu** : voir la section dédiée plus bas — même boîte de
   dépôt, même watcher.
-- **Watcher** (`scripts/fit-watcher.ts`) : scanne le dossier à intervalle fixe,
+- **Watcher** (`src/lib/fit/service.ts`) : scanne le dossier à intervalle fixe,
   n'ingère qu'un fichier dont la taille est stable sur deux passes (sinon
   l'upload est encore en cours), puis le range dans `processed/` ou `failed/`
   avec un `.err.txt` explicatif. Aucun fichier n'est supprimé en silence.
@@ -40,7 +66,7 @@ les fichiers **originaux** et les remet dans le circuit normal :
 Montre → HealthFit (iPhone) → intervals.icu
                                    │  API HTTP (Basic auth)
                                    ▼
-                         poller (dans fit-watcher)
+                      poller (dans le process de l'appli)
                                    │  écrit intervals-<id>.fit
                                    ▼
                             FIT_INBOX_DIR
@@ -54,6 +80,16 @@ parse rien et ne touche jamais à la base. Le watcher parle à la base. Les deux
 se croisent que par le répertoire — et par le `.part` → rename, qui garantit que
 le watcher ne voit jamais un `.fit` à moitié écrit.
 
+- **Identifiant d'athlète facultatif** : `INTERVALS_API_KEY` suffit. Sans
+  `INTERVALS_ATHLETE_ID`, l'API est interrogée sur l'athlète `0`, raccourci
+  officiel pour « le propriétaire de la clé » (cookbook intervals.icu : « Note
+  that the athlete id in the path is '0'. This indicates that the athlete ID
+  that the access_token or API key belongs to should be used. »). La variable,
+  si elle est donnée, est normalisée sans indulgence coupable : espaces retirés,
+  préfixe `i` ajouté si oublié, `i0` ramené à `0`. **Un format invalide ne fait
+  jamais échouer le démarrage** — il désactive le poller seul, avec son motif
+  (d'où l'absence de regex dans `src/config/env.ts` : la validation vit dans
+  `planPollerActivation`, qui retourne un résultat au lieu de lever).
 - `client.ts` : appels HTTP, pur, `fetch` injectable. Auth Basic, utilisateur
   littéral `API_KEY`, mot de passe = la clé (Settings → Developer Settings).
   Endpoints utilisés : `GET /api/v1/athlete/{id}/activities?oldest=yyyy-MM-dd`
@@ -102,8 +138,27 @@ le watcher ne voit jamais un `.fit` à moitié écrit.
   ligne d'erreur : c'est une sortie propre.
 - **La clé API ne sort jamais** : ni dans un message d'erreur, ni dans un log,
   ni dans une URL — elle ne vit que dans l'en-tête `Authorization`.
-- Le poller ne démarre que si `INTERVALS_ATHLETE_ID` **et** `INTERVALS_API_KEY`
-  sont renseignés ; sinon il le dit au démarrage et se tait.
+- Le poller ne démarre que si `INTERVALS_API_KEY` est renseignée ; sinon il le
+  dit au démarrage et se tait.
+
+## Le silence est un bug (incident, corrigé)
+
+Le poller a déjà tourné des minutes entières sans rien journaliser ni rapatrier,
+alors que 237 activités attendaient. Cause : une `IntervalsAbortError` était
+interprétée comme « arrêt du service en cours » d'après son seul type, donc
+absorbée sans log. Trois règles en découlent, à ne pas défaire :
+
+1. **Le silence ne se déduit jamais du type d'une erreur.** Une erreur n'est tue
+   que si le drapeau d'arrêt est *effectivement* levé au moment du catch — c'est
+   tout l'objet de `classifyPollError` (`src/lib/intervals/poll-errors.ts`), pur
+   et testé. Tout le reste, abort compris, se journalise avec son type **et** son
+   message.
+2. **Un cycle qui trouve du travail ou échoue laisse toujours une trace.** Un
+   cycle vide se tait pour ne pas noyer les journaux — sauf le premier après un
+   démarrage, qui annonce toujours son résultat (`pollCycleSummary`). C'est la
+   réponse à « est-ce que ça marche ? ».
+3. **Le premier log au boot dit l'état**, pas seulement que le service existe :
+   inbox utilisée, cadence, poller actif ou inactif *et pourquoi*.
 
 ## Idempotence
 

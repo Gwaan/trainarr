@@ -37,23 +37,6 @@ COPY src/data/db/migrate.ts ./src/data/db/migrate.ts
 # télécharger pnpm au démarrage du container, ce qui suppose un accès réseau.
 CMD ["node_modules/.bin/tsx", "src/data/db/migrate.ts"]
 
-# --- worker : services longue durée exécutés hors du serveur Next -------------
-# Même approche que `migrator` (réutilise la couche `deps`, exécute du TypeScript
-# via tsx) mais ce container-ci ne sort pas : il surveille le dossier d'import FIT.
-#
-# `--conditions=react-server` : le watcher importe le DAL, dont les modules
-# commencent par `import 'server-only'`. Hors de cette condition d'export, ce
-# paquet lève volontairement à l'import. C'est exactement le drapeau que Next
-# positionne pour ses modules serveur.
-FROM base AS worker
-ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-# tsconfig.json est nécessaire : tsx y lit l'alias `@/*`.
-COPY package.json tsconfig.json ./
-COPY src ./src
-COPY scripts ./scripts
-CMD ["node_modules/.bin/tsx", "--conditions=react-server", "scripts/fit-watcher.ts"]
-
 # --- runner : image finale minimale, sans pnpm ni sources ---------------------
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -70,16 +53,16 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Boîte de dépôt des fichiers FIT : le serveur y écrit lui-même désormais (point
-# WebDAV /dav). Le répertoire est créé et donné à `nextjs` **dans l'image** :
-# Docker recopie propriétaire et permissions du chemin de l'image lorsqu'il
-# initialise un volume nommé **vide**.
+# Boîte de dépôt des fichiers FIT : ce container y écrit (point WebDAV /dav),
+# la lit et la range (service d'import, cf. src/lib/fit/service.ts). Le
+# répertoire est créé et donné à `nextjs` **dans l'image** : Docker recopie
+# propriétaire et permissions du chemin de l'image lorsqu'il initialise un volume
+# nommé **vide**.
 #
 # Défense en profondeur seulement : cette recopie n'a lieu qu'à la création du
-# volume, et uniquement pour le service qui le monte en premier. Sur un volume
-# existant, elle ne s'applique pas du tout. La garantie, elle, vient du service
-# `migrate` de docker-compose.yml, qui chown le volume en root avant que `app` et
-# `fit-watcher` ne démarrent.
+# volume. Sur un volume existant, elle ne s'applique pas du tout. La garantie,
+# elle, vient du service `migrate` de docker-compose.yml, qui chown le volume en
+# root avant que `app` ne démarre.
 RUN mkdir -p /data/fit-inbox && chown -R nextjs:nodejs /data
 
 USER nextjs

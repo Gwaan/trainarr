@@ -1,7 +1,7 @@
 /**
  * Logique de décision du dossier surveillé — fonctions pures, sans I/O.
  *
- * Le service qui les utilise (`scripts/fit-watcher.ts`) se contente de lister le
+ * Le service qui les utilise (`src/lib/fit/service.ts`) se contente de lister le
  * répertoire, d'appeler `planScan`, puis d'ingérer, de refuser, de supprimer et
  * de déplacer les fichiers qu'on lui désigne. Tout ce qui se raisonne (extension,
  * upload en cours, fichier déjà traité, fichier hors gabarit, temporaire

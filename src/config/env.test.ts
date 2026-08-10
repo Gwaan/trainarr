@@ -26,20 +26,21 @@ describe('parseEnv — cas nominal', () => {
     // intervals.icu et son apparition dans Trainarr.
     expect(env.INTERVALS_POLL_INTERVAL_S).toBe(60);
     expect(env.INTERVALS_LOOKBACK_DAYS).toBe(30);
-    // Seule variable à défaut hors AI_PROVIDER : la boîte de dépôt FIT.
+    // Import FIT : boîte de dépôt et cadence de scan.
     expect(env.FIT_INBOX_DIR).toBe('/data/fit-inbox');
+    expect(env.FIT_WATCH_INTERVAL_S).toBe(30);
   });
 
-  it("valide le format de l'identifiant d'athlète intervals.icu", () => {
-    expect(
-      parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: 'i123456' })
-        .INTERVALS_ATHLETE_ID,
-    ).toBe('i123456');
-
-    // Le préfixe « i » fait partie de l'identifiant tel que l'API l'attend.
-    expect(() =>
-      parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: '123456' }),
-    ).toThrow(/INTERVALS_ATHLETE_ID/);
+  it("ne juge pas le format de l'identifiant d'athlète intervals.icu", () => {
+    // Volontaire : la valeur est passée telle quelle, `planPollerActivation` la
+    // normalise. Une variable mal recopiée doit désactiver le poller seul, pas
+    // empêcher l'application entière de démarrer.
+    for (const raw of ['i123456', '123456', 'pas-un-identifiant']) {
+      expect(
+        parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: raw })
+          .INTERVALS_ATHLETE_ID,
+      ).toBe(raw);
+    }
   });
 
   it('accepte une configuration complète', () => {
@@ -85,6 +86,7 @@ describe('parseEnv — cas nominal', () => {
       'AI_PROVIDER',
       'DATABASE_URL',
       'FIT_INBOX_DIR',
+      'FIT_WATCH_INTERVAL_S',
       'INTERVALS_LOOKBACK_DAYS',
       'INTERVALS_POLL_INTERVAL_S',
     ]);
