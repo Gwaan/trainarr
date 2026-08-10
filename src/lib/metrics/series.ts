@@ -105,11 +105,12 @@ export function cappedSampleDurationsS(time: readonly number[]): number[] {
  *
  * Repli sur la moyenne arithmétique quand le poids total est nul (horodatages
  * dupliqués) mais que des valeurs existent : mieux vaut une moyenne non pondérée
- * qu'un « non calculable » sur une donnée présente. Les valeurs non finies sont
- * ignorées.
+ * qu'un « non calculable » sur une donnée présente. Les valeurs non finies, et
+ * les `null` des canaux clairsemés (le capteur n'a rien dit à cet index), sont
+ * ignorées — la moyenne porte sur les seuls points mesurés.
  */
 export function weightedMean(
-  values: readonly number[],
+  values: readonly (number | null)[],
   durations: readonly number[],
   from: number,
   to: number,
@@ -121,7 +122,7 @@ export function weightedMean(
 
   for (let index = from; index < to; index += 1) {
     const value = values[index];
-    if (!Number.isFinite(value)) continue;
+    if (value === null || !Number.isFinite(value)) continue;
 
     plainSum += value;
     count += 1;

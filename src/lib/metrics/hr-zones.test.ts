@@ -119,6 +119,47 @@ describe('computeHrZones', () => {
     }
   });
 
+  it('compte le temps couvert par une FC clairsemée, pas le nombre de mesures', () => {
+    // 601 points à 1 Hz, FC écrite un record sur 4 (Apple Watch). Les durées se
+    // déduisent du sous-axe des mesures (pas de 4 s) : le panneau doit annoncer
+    // la séance entière, pas son quart.
+    const time: number[] = [];
+    const hr: (number | null)[] = [];
+    for (let second = 0; second <= 600; second += 1) {
+      time.push(second);
+      hr.push(second % 4 === 0 ? 150 : null);
+    }
+
+    const zones = computeHrZones(hr, time, MAX_HR);
+    const total = zones.reduce((sum, zone) => sum + zone.timeS, 0);
+
+    // 151 mesures espacées de 4 s : 149 × 4 s à l'intérieur + 2 s à chaque
+    // bord (demi-pas), soit exactement les 600 s de la séance.
+    expect(total).toBe(600);
+    expect(zones[2].share).toBe(1);
+  });
+
+  it('ne compte pas le temps où la ceinture a décroché', () => {
+    // 5 min de FC à 1 Hz, 10 min de silence complet, 5 min de FC : le trou
+    // dépasse le plafond du sous-axe et n'est attribué à personne.
+    const time: number[] = [];
+    const hr: (number | null)[] = [];
+    for (let second = 0; second < 1200; second += 1) {
+      time.push(second);
+      hr.push(second < 300 || second >= 900 ? 150 : null);
+    }
+
+    const zones = computeHrZones(hr, time, MAX_HR);
+    const total = zones.reduce((sum, zone) => sum + zone.timeS, 0);
+
+    expect(total).toBeGreaterThan(595);
+    expect(total).toBeLessThan(605);
+  });
+
+  it('ne calcule rien quand la FC ne parle jamais', () => {
+    expect(computeHrZones([null, null, null], [0, 1, 2], MAX_HR)).toEqual([]);
+  });
+
   it('ne calcule rien sans données exploitables', () => {
     const { time, hr } = series(100, () => 150);
 

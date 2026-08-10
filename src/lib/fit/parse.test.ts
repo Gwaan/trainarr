@@ -141,42 +141,67 @@ function buildFit({
   return Buffer.from(encoder.close());
 }
 
-/** Trois points complets, toutes mesures présentes. */
-const FULL_RECORDS: RecordInput[] = [
-  {
-    offsetS: 0,
-    positionLat: 582863000,
-    positionLong: 28000000,
-    distance: 0,
-    heartRate: 140,
-    cadence: 87,
-    fractionalCadence: 0.5,
-    altitude: 100,
-    speed: 3.2,
-  },
-  {
-    offsetS: 1,
-    positionLat: 582864000,
-    positionLong: 28001000,
-    distance: 3.2,
-    heartRate: 145,
-    cadence: 88,
-    fractionalCadence: 0,
-    altitude: 101,
-    speed: 3.3,
-  },
-  {
-    offsetS: 2,
-    positionLat: 582864000,
-    positionLong: 28001000,
-    distance: 6.5,
-    heartRate: 150,
-    cadence: 88,
-    fractionalCadence: 0.5,
-    altitude: 103,
-    speed: 3.4,
-  },
-];
+/**
+ * Points complets, toutes mesures présentes à chaque `record`.
+ *
+ * Douze points : au-delà du plancher de mesures d'un canal
+ * (`MIN_CHANNEL_MEASURES`), pour que la fixture nominale reste nominale.
+ */
+const FULL_POINT_COUNT = 12;
+
+const FULL_RECORDS: RecordInput[] = Array.from({ length: FULL_POINT_COUNT }, (_, index) => ({
+  offsetS: index,
+  positionLat: 582863000 + index * 1000,
+  positionLong: 28000000 + index * 1000,
+  distance: index * 4,
+  heartRate: 140 + index,
+  cadence: 87,
+  // Une seconde sur deux avec demi-tour de jambe : 175 puis 174 pas/min.
+  fractionalCadence: index % 2 === 0 ? 0.5 : 0,
+  altitude: 100 + index,
+  speed: [3.2, 3.3, 3.4][index % 3],
+}));
+
+/** Axe des temps de la fixture complète : 0, 1, … 11. */
+const FULL_TIME = Array.from({ length: FULL_POINT_COUNT }, (_, index) => index);
+
+/**
+ * Session courte servant les fixtures à échantillonnage clairsemé : 60 points à
+ * 1 Hz, 4 m/s, soit 236 m en 59 s.
+ */
+const SPARSE_SESSION: SessionInput = {
+  sport: 'running',
+  subSport: 'street',
+  startTime: START,
+  totalElapsedTime: 59,
+  totalTimerTime: 59,
+  totalDistance: 236,
+  avgHeartRate: 150,
+  maxHeartRate: 165,
+};
+
+const SPARSE_POINT_COUNT = 60;
+
+/**
+ * Fixture « Apple Watch ».
+ *
+ * Reproduit ce qu'on observe dans les fichiers de Gwen : chaque `record` porte
+ * son horodatage et sa distance, mais les autres capteurs écrivent à leur propre
+ * cadence — FC un point sur 4, GPS un sur 2, cadence un sur 5 — et le champ
+ * `speed` est purement absent. C'est le cas nominal du protocole FIT (chaque
+ * message ne porte que les champs déclarés par sa définition), pas un fichier
+ * abîmé.
+ */
+const APPLE_WATCH_RECORDS: RecordInput[] = Array.from(
+  { length: SPARSE_POINT_COUNT },
+  (_, index) => ({
+    offsetS: index,
+    distance: index * 4,
+    ...(index % 4 === 0 ? { heartRate: 140 + (index % 20) } : {}),
+    ...(index % 2 === 0 ? { positionLat: 582863000 + index * 1000, positionLong: 28000000 } : {}),
+    ...(index % 5 === 0 ? { cadence: 87, fractionalCadence: 0 } : {}),
+  }),
+);
 
 describe('parseFitActivity — fichier nominal', () => {
   const parsed = parseFitActivity(buildFit({ records: FULL_RECORDS }));
@@ -197,22 +222,24 @@ describe('parseFitActivity — fichier nominal', () => {
   });
 
   it('exprime le stream « time » en secondes depuis le départ', () => {
-    expect(parsed.streams.time).toEqual([0, 1, 2]);
+    expect(parsed.streams.time).toEqual(FULL_TIME);
   });
 
   it('convertit les semicercles en degrés arrondis au millionième', () => {
-    expect(parsed.streams.latlng).toEqual([
+    expect(parsed.streams.latlng).toHaveLength(FULL_POINT_COUNT);
+    expect(parsed.streams.latlng?.slice(0, 3)).toEqual([
       [48.855012, 2.346933],
       [48.855096, 2.347017],
-      [48.855096, 2.347017],
+      [48.85518, 2.347101],
     ]);
   });
 
   it('rend les autres streams alignés sur « time »', () => {
-    expect(parsed.streams.heartrate).toEqual([140, 145, 150]);
-    expect(parsed.streams.distance).toEqual([0, 3.2, 6.5]);
-    expect(parsed.streams.altitude).toEqual([100, 101, 103]);
-    expect(parsed.streams.velocity).toEqual([3.2, 3.3, 3.4]);
+    expect(parsed.streams.heartrate).toHaveLength(FULL_POINT_COUNT);
+    expect(parsed.streams.heartrate?.slice(0, 3)).toEqual([140, 141, 142]);
+    expect(parsed.streams.distance?.slice(0, 3)).toEqual([0, 4, 8]);
+    expect(parsed.streams.altitude?.slice(0, 3)).toEqual([100, 101, 102]);
+    expect(parsed.streams.velocity?.slice(0, 4)).toEqual([3.2, 3.3, 3.4, 3.2]);
   });
 });
 
@@ -229,7 +256,7 @@ describe('parseFitActivity — hash du fichier', () => {
   it('change dès qu’un octet du fichier change', () => {
     const one = parseFitActivity(buildFit({ records: FULL_RECORDS })).fileHash;
     const other = parseFitActivity(
-      buildFit({ records: [...FULL_RECORDS, { ...FULL_RECORDS[2], offsetS: 3 }] }),
+      buildFit({ records: [...FULL_RECORDS, { ...FULL_RECORDS[2], offsetS: 20 }] }),
     ).fileHash;
 
     expect(one).not.toBe(other);
@@ -242,7 +269,7 @@ describe('parseFitActivity — cadence', () => {
 
     // Session : 87 + 0.5 tours/min → 175 pas/min.
     expect(parsed.avgCadenceSpm).toBe(175);
-    expect(parsed.streams.cadence).toEqual([175, 176, 177]);
+    expect(parsed.streams.cadence?.slice(0, 4)).toEqual([175, 174, 175, 174]);
   });
 
   it('double aussi la cadence en marche et en randonnée', () => {
@@ -266,7 +293,7 @@ describe('parseFitActivity — cadence', () => {
 
     expect(parsed.sportType).toBe('Ride');
     expect(parsed.avgCadenceSpm).toBe(87);
-    expect(parsed.streams.cadence).toEqual([87.5, 88, 88.5]);
+    expect(parsed.streams.cadence?.slice(0, 4)).toEqual([87.5, 87, 87.5, 87]);
   });
 
   it('rend null quand la session ne porte aucune cadence', () => {
@@ -281,7 +308,7 @@ describe('parseFitActivity — cadence', () => {
 });
 
 describe('parseFitActivity — capteurs absents', () => {
-  it('omet le stream de FC et laisse les FC de session à null', () => {
+  it('omet le stream de FC, sans avertissement : un capteur qu’on n’a pas n’est pas une perte', () => {
     const parsed = parseFitActivity(
       buildFit({
         sessions: [{ ...DEFAULT_SESSION, avgHeartRate: undefined, maxHeartRate: undefined }],
@@ -292,8 +319,8 @@ describe('parseFitActivity — capteurs absents', () => {
     expect(parsed.avgHrBpm).toBeNull();
     expect(parsed.maxHrBpm).toBeNull();
     expect(parsed.streams.heartrate).toBeUndefined();
-    expect(parsed.streams.time).toEqual([0, 1, 2]);
-    expect(parsed.streams.latlng).toHaveLength(3);
+    expect(parsed.streams.time).toEqual(FULL_TIME);
+    expect(parsed.streams.latlng).toHaveLength(FULL_POINT_COUNT);
     expect(parsed.warnings).toEqual([]);
   });
 
@@ -305,7 +332,7 @@ describe('parseFitActivity — capteurs absents', () => {
     );
 
     expect(parsed.streams.latlng).toBeUndefined();
-    expect(parsed.streams.heartrate).toEqual([140, 145, 150]);
+    expect(parsed.streams.heartrate).toHaveLength(FULL_POINT_COUNT);
     expect(parsed.warnings).toEqual([]);
   });
 
@@ -319,65 +346,111 @@ describe('parseFitActivity — capteurs absents', () => {
 });
 
 describe('parseFitActivity — alignement des streams', () => {
-  it('rogne les points de tête auxquels le GPS manque encore', () => {
+  it('garde les points de tête auxquels le GPS manque encore, avec un trou explicite', () => {
     const parsed = parseFitActivity(
       buildFit({
         records: [
           omit(FULL_RECORDS[0], 'positionLat', 'positionLong'),
-          FULL_RECORDS[1],
-          FULL_RECORDS[2],
+          ...FULL_RECORDS.slice(1),
         ],
       }),
     );
 
-    expect(parsed.streams.time).toEqual([1, 2]);
-    expect(parsed.streams.heartrate).toEqual([145, 150]);
-    expect(parsed.streams.latlng).toHaveLength(2);
-    expect(parsed.warnings).toEqual([
-      "1 point(s) retiré(s) en début ou fin de séance : au moins un capteur n'y mesurait rien.",
-    ]);
+    // Le GPS sans fix au départ ne coûte plus les mesures des autres capteurs.
+    expect(parsed.streams.time).toEqual(FULL_TIME);
+    expect(parsed.streams.heartrate?.slice(0, 3)).toEqual([140, 141, 142]);
+    expect(parsed.streams.latlng?.slice(0, 2)).toEqual([null, [48.855096, 2.347017]]);
+    expect(parsed.warnings).toEqual([]);
   });
 
-  it('écarte un stream troué en milieu de séance plutôt que de le désaligner', () => {
+  it('conserve un stream troué en milieu de séance en l’alignant sur « time »', () => {
     const parsed = parseFitActivity(
       buildFit({
         records: [
           FULL_RECORDS[0],
           omit(FULL_RECORDS[1], 'heartRate'),
-          FULL_RECORDS[2],
+          ...FULL_RECORDS.slice(2),
         ],
       }),
     );
 
-    expect(parsed.streams.heartrate).toBeUndefined();
-    expect(parsed.streams.time).toEqual([0, 1, 2]);
-    expect(parsed.streams.distance).toEqual([0, 3.2, 6.5]);
-    expect(parsed.warnings).toEqual([
-      'Stream « heartrate » écarté : 1 mesure(s) manquante(s) sur 3, les index ne seraient plus alignés.',
-    ]);
+    expect(parsed.streams.heartrate?.slice(0, 3)).toEqual([140, null, 142]);
+    expect(parsed.streams.time).toEqual(FULL_TIME);
+    expect(parsed.streams.distance?.slice(0, 3)).toEqual([0, 4, 8]);
+    expect(parsed.warnings).toEqual([]);
   });
 
-  it('n’ampute pas les autres canaux à cause d’un canal qui finira écarté', () => {
-    // Ceinture cardio qui accroche en retard *et* décroche en cours de route :
-    // son stream est de toute façon inexploitable. Rogner d'abord la tête aurait
-    // coûté les premiers points de GPS et de distance pour rien.
+  it('ne comble jamais un trou par report de la dernière valeur', () => {
     const records = [
-      omit(FULL_RECORDS[0], 'heartRate'),
+      FULL_RECORDS[0],
       omit(FULL_RECORDS[1], 'heartRate'),
-      FULL_RECORDS[2],
-      omit({ ...FULL_RECORDS[0], offsetS: 3 }, 'heartRate'),
-      { ...FULL_RECORDS[1], offsetS: 4 },
+      omit(FULL_RECORDS[2], 'heartRate'),
+      ...FULL_RECORDS.slice(3),
     ];
 
     const parsed = parseFitActivity(buildFit({ records }));
 
+    expect(parsed.streams.heartrate?.slice(0, 4)).toEqual([140, null, null, 143]);
+  });
+
+  it('écarte le canal d’un capteur qui n’a parlé que neuf fois', () => {
+    // 60 points, la ceinture n'accroche que sur les neuf premiers : ce n'est
+    // plus un échantillonnage clairsemé, c'est un capteur mort.
+    const records: RecordInput[] = Array.from({ length: 60 }, (_, index) => ({
+      offsetS: index,
+      distance: index * 4,
+      ...(index < 9 ? { heartRate: 140 } : {}),
+    }));
+
+    const parsed = parseFitActivity(
+      buildFit({ sessions: [SPARSE_SESSION], records }),
+    );
+
     expect(parsed.streams.heartrate).toBeUndefined();
-    expect(parsed.streams.time).toEqual([0, 1, 2, 3, 4]);
-    expect(parsed.streams.latlng).toHaveLength(5);
-    expect(parsed.streams.distance).toHaveLength(5);
-    expect(parsed.warnings).toEqual([
-      'Stream « heartrate » écarté : 1 mesure(s) manquante(s) sur 3, les index ne seraient plus alignés.',
-    ]);
+    expect(parsed.streams.distance).toHaveLength(60);
+    expect(parsed.warnings).toContain(
+      'Stream « heartrate » écarté : 9 mesure(s) sur 60 points, ' +
+        "moins de 10 — capteur muet plutôt qu'échantillonnage clairsemé.",
+    );
+  });
+
+  it('conserve un canal dès la dixième mesure', () => {
+    const records: RecordInput[] = Array.from({ length: 60 }, (_, index) => ({
+      offsetS: index,
+      distance: index * 4,
+      ...(index < 10 ? { heartRate: 140 } : {}),
+    }));
+
+    const parsed = parseFitActivity(
+      buildFit({ sessions: [SPARSE_SESSION], records }),
+    );
+
+    expect(parsed.streams.heartrate).toHaveLength(60);
+    expect(parsed.streams.heartrate?.filter((beats) => beats !== null)).toHaveLength(10);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('conserve une ceinture lente mais vivante, que le seuil relatif jetait', () => {
+    // Mode économie : une mesure toutes les 30 s sur un flux à 1 Hz. Soit 3,3 %
+    // des points — mais dix mesures parfaitement exploitables.
+    const records: RecordInput[] = Array.from({ length: 300 }, (_, index) => ({
+      offsetS: index,
+      distance: index * 4,
+      ...(index % 30 === 0 ? { heartRate: 140 } : {}),
+    }));
+
+    const parsed = parseFitActivity(
+      buildFit({
+        sessions: [
+          { ...SPARSE_SESSION, totalElapsedTime: 299, totalTimerTime: 299, totalDistance: 1196 },
+        ],
+        records,
+      }),
+    );
+
+    expect(parsed.streams.heartrate).toHaveLength(300);
+    expect(parsed.streams.heartrate?.filter((beats) => beats !== null)).toHaveLength(10);
+    expect(parsed.warnings).toEqual([]);
   });
 
   it('ignore les points hors de la fenêtre temporelle de la session', () => {
@@ -385,14 +458,13 @@ describe('parseFitActivity — alignement des streams', () => {
       buildFit({
         records: [
           { ...FULL_RECORDS[0], offsetS: -30 },
-          FULL_RECORDS[0],
-          FULL_RECORDS[1],
+          ...FULL_RECORDS,
           { ...FULL_RECORDS[2], offsetS: 900 },
         ],
       }),
     );
 
-    expect(parsed.streams.time).toEqual([0, 1]);
+    expect(parsed.streams.time).toEqual(FULL_TIME);
     expect(parsed.warnings).toEqual([
       '2 point(s) ignoré(s) : sans horodatage ou hors de la fenêtre temporelle de la session.',
     ]);
@@ -405,11 +477,14 @@ describe('parseFitActivity — alignement des streams', () => {
     const parsed = parseFitActivity(
       buildFit({
         sessions: [{ ...DEFAULT_SESSION, timestamp: new Date(START.getTime() + 900_000) }],
-        records: [FULL_RECORDS[0], { ...FULL_RECORDS[1], offsetS: 700 }],
+        records: [
+          ...FULL_RECORDS.slice(0, FULL_POINT_COUNT - 1),
+          { ...FULL_RECORDS[FULL_POINT_COUNT - 1], offsetS: 700 },
+        ],
       }),
     );
 
-    expect(parsed.streams.time).toEqual([0, 700]);
+    expect(parsed.streams.time).toEqual([...FULL_TIME.slice(0, FULL_POINT_COUNT - 1), 700]);
     expect(parsed.warnings).toEqual([]);
   });
 
@@ -431,6 +506,55 @@ describe('parseFitActivity — alignement des streams', () => {
 
     expect(parsed.streams).toEqual({});
     expect(parsed.distanceM).toBe(1000);
+  });
+});
+
+describe('parseFitActivity — fixture « Apple Watch » (échantillonnage clairsemé)', () => {
+  const parsed = parseFitActivity(
+    buildFit({ sessions: [SPARSE_SESSION], records: APPLE_WATCH_RECORDS }),
+  );
+
+  it('conserve les quatre canaux présents, alignés sur l’axe des temps', () => {
+    expect(parsed.streams.time).toHaveLength(SPARSE_POINT_COUNT);
+    expect(parsed.streams.distance).toHaveLength(SPARSE_POINT_COUNT);
+    expect(parsed.streams.heartrate).toHaveLength(SPARSE_POINT_COUNT);
+    expect(parsed.streams.cadence).toHaveLength(SPARSE_POINT_COUNT);
+    expect(parsed.streams.latlng).toHaveLength(SPARSE_POINT_COUNT);
+  });
+
+  it('place les null exactement aux index où le capteur se tait', () => {
+    const measured = (values: readonly unknown[] | undefined): number[] =>
+      (values ?? []).flatMap((value, index) => (value === null ? [] : [index]));
+
+    // FC un point sur 4, GPS un sur 2, cadence un sur 5.
+    expect(measured(parsed.streams.heartrate)).toEqual([0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56]);
+    expect(measured(parsed.streams.latlng)).toEqual(
+      Array.from({ length: 30 }, (_, index) => index * 2),
+    );
+    expect(measured(parsed.streams.cadence)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index * 5),
+    );
+    // La distance, elle, est écrite à chaque record.
+    expect(measured(parsed.streams.distance)).toHaveLength(SPARSE_POINT_COUNT);
+  });
+
+  it('rend les valeurs mesurées, jamais une valeur reportée', () => {
+    expect(parsed.streams.heartrate?.slice(0, 5)).toEqual([140, null, null, null, 144]);
+    // Cadence FIT doublée : 87 tours de jambe → 174 pas/min.
+    expect(parsed.streams.cadence?.slice(0, 6)).toEqual([174, null, null, null, null, 174]);
+    expect(parsed.streams.latlng?.slice(0, 3)).toEqual([
+      [48.855012, 2.346933],
+      null,
+      [48.85518, 2.346933],
+    ]);
+  });
+
+  it('n’invente pas le canal de vitesse absent du fichier, et ne s’en plaint pas', () => {
+    // Aucune Apple Watch n'écrit `speed` : signaler ce canal à chaque import
+    // ferait passer un import nominal pour un import dégradé.
+    expect(parsed.streams.velocity).toBeUndefined();
+    expect(parsed.streams.altitude).toBeUndefined();
+    expect(parsed.warnings).toEqual([]);
   });
 });
 
@@ -520,7 +644,7 @@ describe('parseFitActivity — fichiers refusés', () => {
     );
 
     expect(parsed.startedAt).toEqual(new Date(START.getTime() + 5000));
-    expect(parsed.streams.time).toEqual([0, 1, 2]);
+    expect(parsed.streams.time).toEqual(FULL_TIME);
   });
 
   it('refuse un fichier sans aucune date exploitable', () => {

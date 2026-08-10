@@ -89,10 +89,25 @@ function crossingTimeS(
 /**
  * Splits au kilomètre.
  *
- * Les distances sont comptées **depuis le premier point de la série** : le
- * stream FIT est un cumul qui ne repart pas forcément de zéro (le parseur rogne
- * les points de tête sans mesure), et « km 1 » désigne le premier kilomètre de
- * la trace enregistrée.
+ * Les distances sont comptées **depuis la première distance mesurée** : le
+ * stream FIT est un cumul qui ne repart pas forcément de zéro, et « km 1 »
+ * désigne le premier kilomètre de la trace enregistrée.
+ *
+ * **Canaux clairsemés.** `distance`, `hr` et `altitude` portent `null` là où le
+ * capteur n'a rien dit — un `record` FIT n'écrit pas tous ses champs à chaque
+ * point. Le découpage kilométrique se fait sur la seule sous-série des distances
+ * mesurées (interpoler entre deux mesures réelles reste légitime, cf.
+ * {@link crossingTimeS}), tandis que les moyennes de FC et le D+ balaient l'axe
+ * complet en sautant leurs propres trous. Les bornes de split sont donc
+ * exprimées en index de l'axe complet : les canaux ne se décalent pas les uns
+ * par rapport aux autres.
+ *
+ * **La séance commence à la première distance mesurée et s'arrête à la
+ * dernière.** Ce qui précède le premier fix GPS (une minute d'attente au départ)
+ * et ce qui le suit (GPS perdu à l'arrivée) n'appartient à aucun kilomètre :
+ * `edges` ne les couvre pas, les tranches d'index non plus. Sans quoi le km 1
+ * affichait 147 bpm pour un kilomètre couru à 160, moyenné avec la FC de repos
+ * d'avant le départ.
  *
  * - `timeS` : **temps enregistré**, pas temps écoulé — le temps entre les deux
  *   bornes interpolées, diminué de la part des trous d'enregistrement qui
@@ -102,11 +117,17 @@ function crossingTimeS(
  *   elle, montre le temps en mouvement. Sur une série sans trou, `timeS` vaut
  *   exactement l'écart des bornes interpolées.
  * - `avgHrBpm` : moyenne des échantillons du split pondérée par leur durée
- *   (cf. `cappedSampleDurationsS`), arrondie au bpm. `null` sans stream de FC.
+ *   (cf. `cappedSampleDurationsS`), arrondie au bpm. Les durées sont dérivées de
+ *   l'axe des **seuls instants où la FC a parlé**, comme dans `computeHrZones`,
+ *   et non de l'axe complet : une FC écrite un point sur cinq représente cinq
+ *   secondes par mesure. Pondérer par les durées de l'axe complet ramenait la
+ *   moyenne à un comptage de points dès que la cadence de la ceinture changeait
+ *   en cours de split. `null` sans stream de FC, ou si aucun point du split n'en
+ *   porte une mesure.
  * - `elevationGainM` : gain positif filtré (cf. `ELEVATION_NOISE_THRESHOLD_M`).
- *   Le filtre court sur toute la séance et attribue chaque gain au split de
- *   l'échantillon courant : découper l'hystérésis par split perdrait les
- *   montées à cheval sur une borne. `null` sans stream d'altitude.
+ *   Le filtre court d'un bout à l'autre de la partie découpée et attribue chaque
+ *   gain au split de l'échantillon courant : découper l'hystérésis par split
+ *   perdrait les montées à cheval sur une borne. `null` sans stream d'altitude.
  * - Dernier split partiel émis si le reliquat atteint 100 m. **Sinon le reliquat
  *   n'appartient à aucun split** : le balayage s'arrête à la dernière borne
  *   kilométrique. Un sprint final de 88 m écarté de l'affichage ne doit pas
@@ -117,18 +138,36 @@ function crossingTimeS(
  * commun sont ignorés plutôt qu'alignés au hasard.
  */
 export function computeSplits(
-  distance: readonly number[],
+  distance: readonly (number | null)[],
   time: readonly number[],
-  hr?: readonly number[],
-  altitude?: readonly number[],
+  hr?: readonly (number | null)[],
+  altitude?: readonly (number | null)[],
 ): Split[] {
   const count = Math.min(distance.length, time.length);
   if (count < 2) return [];
 
-  const start = distance[0];
-  const total = distance[count - 1] - start;
-  if (!Number.isFinite(start) || !Number.isFinite(total) || total <= 0) return [];
-  if (!Number.isFinite(time[0]) || !Number.isFinite(time[count - 1])) return [];
+  /*
+   * Sous-série des points où la distance est mesurée. `at[k]` est l'index de ce
+   * point sur l'axe complet : c'est lui qui permet de rendre les bornes de split
+   * dans le repère commun à tous les canaux.
+   */
+  const at: number[] = [];
+  const marks: number[] = [];
+  const instants: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const value = distance[index];
+    if (value === null || !Number.isFinite(value) || !Number.isFinite(time[index])) continue;
+    at.push(index);
+    marks.push(value);
+    instants.push(time[index]);
+  }
+
+  const measured = at.length;
+  if (measured < 2) return [];
+
+  const start = marks[0];
+  const total = marks[measured - 1] - start;
+  if (total <= 0) return [];
 
   const fullKm = Math.floor(total / METERS_PER_KM);
   const remainder = total - fullKm * METERS_PER_KM;
@@ -136,38 +175,52 @@ export function computeSplits(
   if (splitCount === 0) return [];
 
   /* Bornes temporelles : `edges[k]` = instant du franchissement du k-ième km. */
-  const edges: number[] = [time[0]];
+  const edges: number[] = [instants[0]];
   let cursor = 1;
   for (let km = 1; km <= fullKm; km += 1) {
     const target = start + km * METERS_PER_KM;
-    while (cursor < count && distance[cursor] < target) cursor += 1;
-    if (cursor >= count) break;
+    while (cursor < measured && marks[cursor] < target) cursor += 1;
+    if (cursor >= measured) break;
 
     edges.push(
-      crossingTimeS(distance[cursor - 1], distance[cursor], time[cursor - 1], time[cursor], target),
+      crossingTimeS(
+        marks[cursor - 1],
+        marks[cursor],
+        instants[cursor - 1],
+        instants[cursor],
+        target,
+      ),
     );
   }
-  if (remainder >= MIN_PARTIAL_SPLIT_M) edges.push(time[count - 1]);
+  if (remainder >= MIN_PARTIAL_SPLIT_M) edges.push(instants[measured - 1]);
   if (edges.length < splitCount + 1) return [];
 
   /*
-   * Index de début de chaque split : premier échantillon dont la distance
-   * parcourue atteint la borne. Les splits sont des tranches d'index contiguës,
-   * la distance étant croissante.
+   * Index de début de chaque split, **sur l'axe complet** : premier échantillon
+   * de distance mesurée qui atteint la borne, ramené par `at` à sa position
+   * d'origine. Les splits sont des tranches d'index contiguës, la distance
+   * étant croissante.
+   *
+   * Les deux extrémités sont celles de la sous-série mesurée (`at[0]` et le
+   * point qui suit `at[measured - 1]`), jamais celles de l'axe : elles doivent
+   * cadrer exactement ce que couvre `edges`.
+   *
+   * Le pointeur n'est **pas** consommé d'une borne à l'autre, exactement comme
+   * le curseur d'`edges` : un même point peut porter plusieurs bornes quand plus
+   * d'un kilomètre sépare deux mesures de distance. Sinon le `timeS` d'un split
+   * venait d'un segment et sa FC d'un autre.
    */
-  const bounds: number[] = new Array<number>(splitCount + 1).fill(count);
-  bounds[0] = 0;
-  let split = 1;
-  for (let index = 1; index < count && split <= fullKm; index += 1) {
-    if (distance[index] - start >= split * METERS_PER_KM) {
-      bounds[split] = index;
-      split += 1;
-    }
+  const lastMeasuredAt = at[measured - 1];
+  const bounds: number[] = new Array<number>(splitCount + 1).fill(lastMeasuredAt + 1);
+  bounds[0] = at[0];
+  let pointer = 1;
+  for (let km = 1; km <= fullKm; km += 1) {
+    const target = start + km * METERS_PER_KM;
+    while (pointer < measured && marks[pointer] < target) pointer += 1;
+    if (pointer >= measured) break;
+
+    bounds[km] = at[pointer];
   }
-  // La tranche du dernier split s'arrête à sa borne de distance, comme les
-  // autres — sauf s'il est lui-même le reliquat partiel, qui court jusqu'au
-  // dernier point.
-  if (splitCount > fullKm) bounds[splitCount] = count;
   // Un split sans échantillon propre (deux bornes franchies entre deux points)
   // hérite d'une tranche vide : ses moyennes seront simplement `null`.
   for (let index = splitCount - 1; index >= 1; index -= 1) {
@@ -175,11 +228,13 @@ export function computeSplits(
   }
 
   const axis = count === time.length ? time : time.slice(0, count);
-  const durations = cappedSampleDurationsS(axis);
   const cap = sampleDurationCapS(axis);
-  const useHr = hr !== undefined && hr.length >= count;
+  // Sans stream de FC — ou avec un stream désaligné — la sous-série est vide et
+  // toutes les tranches le sont avec elle : `weightedMean` rend `null`.
+  const beats = measuredHr(hr, time, count);
+  const hrBounds = subSeriesBounds(beats.at, bounds);
   const gains = altitude !== undefined && altitude.length >= count
-    ? elevationGainPerSplit(altitude, bounds, splitCount, bounds[splitCount])
+    ? elevationGainPerSplit(altitude, bounds, splitCount, bounds[0], bounds[splitCount])
     : null;
 
   const splits: Split[] = [];
@@ -188,7 +243,12 @@ export function computeSplits(
     const distanceM = index < fullKm ? METERS_PER_KM : remainder;
     if (!Number.isFinite(timeS) || timeS <= 0) continue;
 
-    const avgHr = useHr ? weightedMean(hr, durations, bounds[index], bounds[index + 1]) : null;
+    const avgHr = weightedMean(
+      beats.bpm,
+      beats.durationsS,
+      hrBounds[index],
+      hrBounds[index + 1],
+    );
 
     splits.push({
       km: index + 1,
@@ -201,6 +261,67 @@ export function computeSplits(
   }
 
   return splits;
+}
+
+type MeasuredHr = {
+  /** Index, sur l'axe complet, de chaque battement mesuré. */
+  at: number[];
+  bpm: number[];
+  /** Durées plafonnées dérivées du **sous-axe** des instants mesurés. */
+  durationsS: number[];
+};
+
+/**
+ * Sous-série des points où la ceinture a réellement parlé.
+ *
+ * Les durées se déduisent de ce sous-axe et non de l'axe complet : une FC écrite
+ * un point sur cinq à 1 Hz représente 5 s par mesure. Pondérer par les durées de
+ * l'axe complet revenait à compter les points dès que la cadence change au sein
+ * d'un même split — une première moitié de kilomètre à 1 Hz écrasait alors une
+ * seconde moitié plus clairsemée. Même raisonnement, et même plafond de trou,
+ * que `computeHrZones`.
+ */
+function measuredHr(
+  hr: readonly (number | null)[] | undefined,
+  time: readonly number[],
+  count: number,
+): MeasuredHr {
+  const at: number[] = [];
+  const bpm: number[] = [];
+  const instants: number[] = [];
+
+  // Un stream plus court que l'axe commun est ignoré, jamais aligné au hasard.
+  if (hr !== undefined && hr.length >= count) {
+    for (let index = 0; index < count; index += 1) {
+      const value = hr[index];
+      if (value === null || !Number.isFinite(value) || value <= 0) continue;
+      if (!Number.isFinite(time[index])) continue;
+
+      at.push(index);
+      bpm.push(value);
+      instants.push(time[index]);
+    }
+  }
+
+  return { at, bpm, durationsS: cappedSampleDurationsS(instants) };
+}
+
+/**
+ * Bornes de split traduites dans le repère d'une sous-série : pour chaque borne,
+ * le premier point de la sous-série qui l'atteint.
+ *
+ * Les bornes étant croissantes et `at` aussi, un pointeur monotone suffit — la
+ * traduction coûte un seul balayage de la sous-série.
+ */
+function subSeriesBounds(at: readonly number[], bounds: readonly number[]): number[] {
+  const translated: number[] = new Array<number>(bounds.length).fill(at.length);
+
+  let pointer = 0;
+  for (let index = 0; index < bounds.length; index += 1) {
+    while (pointer < at.length && at[pointer] < bounds[index]) pointer += 1;
+    translated[index] = pointer;
+  }
+  return translated;
 }
 
 /**
@@ -242,9 +363,15 @@ function recordedTimeS(
 
 /** D+ filtré, attribué au split de l'échantillon où la montée est constatée. */
 function elevationGainPerSplit(
-  altitude: readonly number[],
+  altitude: readonly (number | null)[],
   bounds: readonly number[],
   splitCount: number,
+  /**
+   * Début du balayage : la première borne de split, jamais le début de la série.
+   * L'altitude d'avant le premier fix GPS n'appartient pas au km 1, et servirait
+   * de surcroît de référence d'hystérésis hors trace.
+   */
+  from: number,
   /** Fin du balayage : la dernière borne de split, jamais la fin de la série. */
   until: number,
 ): number[] {
@@ -253,11 +380,11 @@ function elevationGainPerSplit(
   let reference: number | null = null;
   let split = 0;
 
-  for (let index = 0; index < until; index += 1) {
+  for (let index = from; index < until; index += 1) {
     while (split < splitCount - 1 && index >= bounds[split + 1]) split += 1;
 
     const value = altitude[index];
-    if (!Number.isFinite(value)) continue;
+    if (value === null || !Number.isFinite(value)) continue;
 
     if (reference === null) {
       reference = value;

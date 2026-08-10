@@ -66,11 +66,18 @@ const METERS_PER_KM = 1000;
  * associé (tableaux de longueurs différentes — le parseur FIT ne produit jamais
  * ce cas) vaut `null` plutôt que d'aligner les séries au hasard.
  *
+ * **Canal clairsemé.** `velocity[i]` vaut `null` là où le capteur n'a rien dit
+ * (un `record` FIT ne porte pas tous les champs). Ces positions sont exclues de
+ * la moyenne de fenêtre — elles ne pèsent rien — et **ressortent à `null`** :
+ * lisser, c'est moyenner une mesure avec ses voisines, pas en fabriquer une là
+ * où il n'y en a jamais eu. La courbe est donc discontinue exactement là où le
+ * fichier l'est.
+ *
  * @param velocity vitesse instantanée en m/s, telle que stockée dans le stream
  * @param time secondes depuis le départ, croissant, aligné sur `velocity`
  */
 export function smoothPace(
-  velocity: readonly number[],
+  velocity: readonly (number | null)[],
   time: readonly number[],
 ): (number | null)[] {
   const paces: (number | null)[] = new Array<number | null>(velocity.length).fill(null);
@@ -83,6 +90,8 @@ export function smoothPace(
   for (let index = 0; index < count; index += 1) {
     const instant = time[index];
     if (!Number.isFinite(instant)) continue;
+    // Pas de mesure ici : rien à lisser, et la fenêtre voisine ne comblera pas.
+    if (velocity[index] === null) continue;
 
     // Bornes de la fenêtre par balayage depuis le point courant : O(points dans
     // la fenêtre), et robuste à un axe des temps localement irrégulier.
@@ -110,7 +119,7 @@ export function smoothPace(
  * ne contient aucune vitesse exploitable.
  */
 function windowSpeed(
-  velocity: readonly number[],
+  velocity: readonly (number | null)[],
   time: readonly number[],
   durations: readonly number[],
   first: number,
@@ -127,7 +136,7 @@ function windowSpeed(
 
   for (let index = first; index <= last; index += 1) {
     const speed = velocity[index];
-    if (!Number.isFinite(speed)) continue;
+    if (speed === null || !Number.isFinite(speed)) continue;
 
     plainSum += speed;
     count += 1;

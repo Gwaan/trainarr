@@ -21,20 +21,25 @@ import { mapFitSportType, usesFootCadence } from './sport';
 /**
  * Séries temporelles d'une activité, alignées sur `ACTIVITY_STREAM_TYPES` du
  * schéma : c'est la forme qu'attend la table `activity_streams`. Chaque clé est
- * optionnelle — le capteur peut manquer — et, quand elle est présente, son
- * tableau a la même longueur que les autres : les index sont alignés point à
- * point.
+ * optionnelle — le capteur peut manquer du fichier — et, quand elle est
+ * présente, son tableau a exactement la longueur de `time` : les index sont
+ * alignés point à point.
+ *
+ * **`null` = le capteur n'a rien mesuré à cet instant.** Voir
+ * {@link assembleStreams} : un canal clairsemé est le cas nominal d'un fichier
+ * FIT, pas une anomalie. Seul `time` est dense — il est la colonne vertébrale,
+ * reconstruite depuis l'horodatage de chaque `record`.
  */
 export type FitStreamSet = {
-  /** Secondes écoulées depuis `startedAt`. */
+  /** Secondes écoulées depuis `startedAt`. Jamais de trou : c'est l'axe. */
   time?: number[];
-  distance?: number[];
-  heartrate?: number[];
-  altitude?: number[];
-  cadence?: number[];
+  distance?: (number | null)[];
+  heartrate?: (number | null)[];
+  altitude?: (number | null)[];
+  cadence?: (number | null)[];
   /** Mètres par seconde. */
-  velocity?: number[];
-  latlng?: Array<[number, number]>;
+  velocity?: (number | null)[];
+  latlng?: Array<[number, number] | null>;
 };
 
 export type ParsedFitActivity = {
@@ -62,9 +67,10 @@ export type ParsedFitActivity = {
   streams: FitStreamSet;
   /**
    * Anomalies non bloquantes rencontrées à la lecture (points hors session,
-   * stream troué et donc écarté, sport inconnu du SDK…). Vide pour un fichier
-   * nominal. À journaliser ou à remonter à l'utilisateur par l'appelant : le
-   * parseur ne masque jamais une perte de données.
+   * canal écarté faute d'assez de mesures, sport inconnu du SDK…). Vide pour un
+   * fichier nominal — un capteur simplement absent du fichier n'en est pas une.
+   * À journaliser ou à remonter à l'utilisateur par l'appelant : le parseur ne
+   * masque jamais une perte de données.
    */
   warnings: string[];
 };
@@ -345,109 +351,81 @@ function roundDegrees(degrees: number): number {
   return Math.round(degrees * 1e6) / 1e6;
 }
 
-/** Étendue d'un canal : index de sa première et de sa dernière mesure. */
-type ChannelSpan = { channel: (typeof CHANNELS)[number]; first: number; last: number };
-
 /**
- * Étendue d'un canal, ou `null` s'il ne mesure jamais rien (capteur absent du
- * fichier : ce n'est pas une perte, il n'y a rien à signaler).
+ * Nombre minimal de mesures pour qu'un canal soit conservé : **10**.
+ *
+ * Le critère est **absolu, pas proportionnel** : ce qui rend un canal
+ * exploitable — tracer une courbe, calculer une moyenne, remplir des zones —
+ * c'est le nombre de mesures qu'il porte, pas la part des points qu'il couvre.
+ * Un seuil relatif jetait une ceinture FC en mode économie écrivant toutes les
+ * 30 s sur un flux à 1 Hz (3,3 % des points, mais 120 mesures par heure,
+ * parfaitement lisibles) tout en laissant passer trois fix GPS sur une séance de
+ * 50 points.
+ *
+ * Dix mesures dessinent déjà une tendance ; trois ne disent rien — c'est la
+ * signature d'un capteur qui s'apparie quelques secondes au départ puis
+ * décroche, ou d'un GPS qui accroche un fix isolé sous les arbres. Les garder
+ * n'apporterait qu'un canal annoncé mais vide à l'écran.
  */
-function channelSpan(
-  points: RecordPoint[],
-  channel: (typeof CHANNELS)[number],
-): ChannelSpan | null {
-  let first = -1;
-  let last = -1;
-  for (let index = 0; index < points.length; index += 1) {
-    if (points[index][channel] === null) continue;
-    if (first === -1) first = index;
-    last = index;
-  }
-
-  return first === -1 ? null : { channel, first, last };
-}
+const MIN_CHANNEL_MEASURES = 10;
 
 /**
  * Assemble les streams en garantissant l'alignement des index.
  *
- * Un stream est un tableau dense : il ne sait pas représenter un trou. Deux
- * traitements, dans cet ordre — et l'ordre compte — tous deux signalés dans
- * `warnings` :
+ * **Un canal clairsemé est le cas nominal.** Un fichier FIT n'écrit pas tous les
+ * champs dans chaque message `record` : la structure du protocole veut qu'un
+ * *definition message* déclare le sous-ensemble de champs que porteront les
+ * messages de données qui le suivent, et un appareil change de définition en
+ * cours de fichier. Chaque capteur écrit donc à sa propre cadence — le GPS à son
+ * taux de fix, la FC à celui de la ceinture. Un `record` sans champ `heart_rate`
+ * ne veut pas dire « la FC est en panne », il veut dire « pas de nouvelle mesure
+ * de FC à cet instant ».
  *
- * 1. un capteur troué **au milieu** de son étendue voit son stream écarté ;
- *    l'écarter est la seule option honnête, combler serait inventer des mesures ;
- * 2. les points de tête et de queue auxquels manque un capteur **conservé** sont
- *    retirés de tous les streams restants (cas courant : le GPS n'a pas encore de
- *    fix au départ).
+ * Deux règles, donc, et une seule forme de sortie :
  *
- * Faire le rognage en premier coûterait des points pour rien : une ceinture
- * cardio qui accroche en cours de route amputait le début du GPS avant que son
- * propre stream, troué, ne soit finalement jeté.
+ * 1. tous les canaux sont **alignés sur l'axe `time`**, avec `null` aux points
+ *    où le capteur n'a rien dit. Jamais de report de la dernière valeur : un
+ *    trou est un trou, le combler serait inventer une mesure ;
+ * 2. un canal n'est écarté que s'il porte moins de
+ *    {@link MIN_CHANNEL_MEASURES} mesures — capteur réellement mort.
+ *
+ * Un canal **totalement** absent du fichier ne produit aucun avertissement : une
+ * Apple Watch n'écrit jamais de champ `speed`, un tapis de course n'a pas de
+ * GPS. Un capteur qu'on n'a pas n'est pas une donnée perdue, et le signaler à
+ * chaque import noyait les vraies anomalies sous une ligne d'erreur de routine.
+ *
+ * Il n'y a plus de rognage tête/queue : un GPS sans fix au départ produit
+ * simplement quelques `null` en tête, ce qui ne coûte plus les premiers points
+ * des autres canaux. Le seul écartage de points reste celui de
+ * {@link collectPoints} — les `record` sans horodatage ou hors session, qui ne
+ * sont plaçables sur aucun axe.
  */
 function assembleStreams(points: RecordPoint[], warnings: string[]): FitStreamSet {
   if (points.length === 0) return {};
 
-  const spans = CHANNELS.map((channel) => channelSpan(points, channel)).filter(
-    (span): span is ChannelSpan => span !== null,
-  );
+  const streams: FitStreamSet = { time: points.map((point) => point.timeS) };
 
-  // 1. Canaux troués au milieu de leur étendue : écartés avant tout rognage.
-  const kept: ChannelSpan[] = [];
-  for (const span of spans) {
-    let gaps = 0;
-    for (let index = span.first; index <= span.last; index += 1) {
-      if (points[index][span.channel] === null) gaps += 1;
+  for (const channel of CHANNELS) {
+    let measured = 0;
+    for (const point of points) {
+      if (point[channel] !== null) measured += 1;
     }
 
-    if (gaps === 0) {
-      kept.push(span);
+    // Capteur absent du fichier : silence, pas avertissement.
+    if (measured === 0) continue;
+
+    if (measured < MIN_CHANNEL_MEASURES) {
+      warnings.push(
+        `Stream « ${channel} » écarté : ${measured} mesure(s) sur ${points.length} points, ` +
+          `moins de ${MIN_CHANNEL_MEASURES} — capteur muet plutôt qu'échantillonnage clairsemé.`,
+      );
       continue;
     }
 
-    warnings.push(
-      `Stream « ${span.channel} » écarté : ${gaps} mesure(s) manquante(s) sur ${span.last - span.first + 1}, les index ne seraient plus alignés.`,
-    );
-  }
-
-  if (kept.length === 0) {
-    return { time: points.map((point) => point.timeS) };
-  }
-
-  // 2. Rognage tête/queue, sur les seuls canaux conservés.
-  const start = Math.max(...kept.map((span) => span.first));
-  const end = Math.min(...kept.map((span) => span.last)) + 1;
-
-  const trimmedCount = points.length - Math.max(end - start, 0);
-  if (trimmedCount > 0) {
-    warnings.push(
-      `${trimmedCount} point(s) retiré(s) en début ou fin de séance : au moins un capteur n'y mesurait rien.`,
-    );
-  }
-
-  if (start >= end) {
-    warnings.push('Aucun point ne porte toutes les mesures : streams non conservés.');
-    return {};
-  }
-
-  const trimmed = points.slice(start, end);
-  const streams: FitStreamSet = { time: trimmed.map((point) => point.timeS) };
-
-  for (const { channel } of kept) {
-    // Les `null` viennent d'être exclus, mais seule une reconstruction point à
-    // point le prouve au compilateur — préférée à une assertion de type.
     if (channel === 'latlng') {
-      const values: Array<[number, number]> = [];
-      for (const point of trimmed) {
-        if (point.latlng !== null) values.push(point.latlng);
-      }
-      streams.latlng = values;
+      streams.latlng = points.map((point) => point.latlng);
     } else {
-      const values: number[] = [];
-      for (const point of trimmed) {
-        const value = point[channel];
-        if (value !== null) values.push(value);
-      }
-      streams[channel] = values;
+      streams[channel] = points.map((point) => point[channel]);
     }
   }
 

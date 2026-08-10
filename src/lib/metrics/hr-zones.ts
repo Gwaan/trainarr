@@ -65,12 +65,22 @@ function zoneOf(percentOfMax: number): HrZoneNumber {
  * zone, elle n'est comptée nulle part. Sans ce plafond, une séance de 20 min
  * mesurées coupée d'une pause de 20 min annonçait 40:00 en en-tête de panneau.
  *
+ * **Canal clairsemé.** Le stream de FC porte `null` là où la ceinture n'a rien
+ * dit : un fichier FIT n'écrit pas `heart_rate` dans chaque `record`. Ces points
+ * sont retirés **avant** le calcul des durées, et non simplement ignorés dans la
+ * boucle : les durées se déduisent de l'axe des temps, or l'axe pertinent ici
+ * est celui des instants où la FC a parlé. Une FC mesurée un point sur quatre
+ * sur un axe à 1 Hz représente 4 s par mesure, pas 1 s — les ignorer dans la
+ * boucle n'aurait compté que le quart de la séance. Le plafond de
+ * `cappedSampleDurationsS` s'applique alors à ce sous-axe : une ceinture qui
+ * décroche dix minutes laisse bien un trou non comptabilisé.
+ *
  * Retourne les 5 zones, y compris celles à zéro (le graphe doit montrer une
  * zone vide, pas l'omettre), ou `[]` si rien n'est calculable : FC max absurde,
  * séries vides, ou durée totale nulle (échantillon unique).
  */
 export function computeHrZones(
-  hr: readonly number[],
+  hr: readonly (number | null)[],
   time: readonly number[],
   maxHrBpm: number,
 ): ZoneTime[] {
@@ -79,19 +89,29 @@ export function computeHrZones(
   const count = Math.min(hr.length, time.length);
   if (count === 0) return [];
 
-  const durations = cappedSampleDurationsS(count === time.length ? time : time.slice(0, count));
+  // Sous-série des instants où la FC est réellement mesurée.
+  const beatsAt: number[] = [];
+  const instants: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const beats = hr[index];
+    if (beats === null || !Number.isFinite(beats) || beats <= 0) continue;
+    if (!Number.isFinite(time[index])) continue;
+
+    beatsAt.push(beats);
+    instants.push(time[index]);
+  }
+  if (beatsAt.length === 0) return [];
+
+  const durations = cappedSampleDurationsS(instants);
 
   const timeInZone = new Map<HrZoneNumber, number>(ZONES.map((zone) => [zone, 0]));
   let total = 0;
 
-  for (let index = 0; index < count; index += 1) {
-    const beats = hr[index];
-    if (!Number.isFinite(beats) || beats <= 0) continue;
-
+  for (let index = 0; index < beatsAt.length; index += 1) {
     const duration = durations[index];
     if (duration <= 0) continue;
 
-    const zone = zoneOf((beats / maxHrBpm) * 100);
+    const zone = zoneOf((beatsAt[index] / maxHrBpm) * 100);
     timeInZone.set(zone, (timeInZone.get(zone) ?? 0) + duration);
     total += duration;
   }

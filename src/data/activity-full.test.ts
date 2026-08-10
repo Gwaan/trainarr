@@ -100,6 +100,28 @@ function fullStreams(): ActivityStream[] {
   ];
 }
 
+/**
+ * Jeu de streams « Apple Watch » : chaque canal est aligné sur l'axe des temps
+ * et porte `null` là où le capteur se tait — FC un point sur 4, GPS un sur 2,
+ * cadence un sur 5 — et **aucun canal de vitesse**, que ces fichiers n'écrivent
+ * pas. C'est la forme que le parseur corrigé produit et que la base contient
+ * désormais.
+ */
+function appleWatchStreams(): ActivityStream[] {
+  const time = indexes();
+  const thin = <T>(values: readonly T[], every: number): (T | null)[] =>
+    values.map((value, index) => (index % every === 0 ? value : null));
+
+  return [
+    stream('time', time),
+    stream('distance', time.map((second) => 420 + second * SPEED_M_PER_S)),
+    stream('heartrate', thin(time.map((second) => (second < 300 ? 140 : 160)), 4)),
+    stream('altitude', thin(time.map((second) => (second < 250 ? 100 : 105)), 4)),
+    stream('cadence', thin(time.map(() => 172), 5)),
+    stream('latlng', thin(time.map((second): [number, number] => [48.85 + second / 1e5, 2.35]), 2)),
+  ];
+}
+
 beforeEach(() => {
   queryState.rows = {};
 });
@@ -204,6 +226,50 @@ describe('getActivityFull', () => {
     expect(full?.charts?.points[0].hrBpm).toBe(150);
     expect(full?.charts?.latlng).toHaveLength(POINT_COUNT);
     expect(full?.hrZones).not.toBeNull();
+  });
+
+  it('exploite une séance Apple Watch aux canaux clairsemés', async () => {
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: appleWatchStreams(),
+      athlete: [ATHLETE],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+    const charts = full?.charts ?? null;
+    expect(charts).not.toBeNull();
+    if (charts === null) return;
+
+    // Allure dérivée de distance + temps, le fichier ne portant pas `velocity` :
+    // 4 m/s constants → 250 s/km. C'est un calcul, pas une estimation.
+    const paced = charts.points.filter((point) => point.paceSecPerKm !== null);
+    expect(paced.length).toBeGreaterThan(1);
+    for (const point of paced) {
+      expect(point.paceSecPerKm).toBeCloseTo(250, 6);
+    }
+
+    // Chaque canal garde ses trous : aucune valeur n'est reportée.
+    expect(charts.points.some((point) => point.hrBpm === null)).toBe(true);
+    expect(charts.points.some((point) => point.hrBpm === 140)).toBe(true);
+    expect(charts.points.some((point) => point.cadenceSpm === null)).toBe(true);
+    expect(charts.points.some((point) => point.cadenceSpm === 172)).toBe(true);
+
+    // La carte ne reçoit que les fix réels — un point sur deux.
+    expect(charts.latlng).toHaveLength(Math.ceil(POINT_COUNT / 2));
+
+    // Splits et zones tombent au même endroit qu'avec des canaux denses : le
+    // 2ᵉ km est à cheval sur le changement de FC (140 → 160 à 300 s), sa
+    // moyenne pondérée vaut 156 dans les deux cas.
+    expect(full?.splits.map((split) => split.km)).toEqual([1, 2, 3]);
+    expect(full?.splits.map((split) => split.avgHrBpm)).toEqual([140, 156, 160]);
+    expect(full?.splits.map((split) => split.elevationGainM)).toEqual([0, 5, 0]);
+
+    // Le total des zones est le temps **couvert** par la FC, pas le nombre de
+    // mesures : 163 mesures espacées de 4 s couvrent 648 des 650 s de la
+    // séance (la dernière tombe à 648 s). Compter les mesures aurait annoncé
+    // 163 s, soit le quart de la séance.
+    const zonesTotal = (full?.hrZones ?? []).reduce((sum, zone) => sum + zone.timeS, 0);
+    expect(zonesTotal).toBe(648);
   });
 
   it('n’estime pas de VO₂max hors course à pied', async () => {

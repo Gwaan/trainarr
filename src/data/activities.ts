@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
 
 import { APP_TIME_ZONE } from '@/config/time';
 import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
@@ -9,6 +9,7 @@ import {
   computeHrZones,
   computeSplits,
   computeTrimp,
+  deriveVelocity,
   estimateEffectiveVo2max,
   paceSecPerKm,
   resamplePoints,
@@ -229,7 +230,15 @@ export type ActivityChartsDto = {
     altitudeM: number | null;
     cadenceSpm: number | null;
   }>;
-  /** Trace GPS complète (pas rééchantillonnée), `null` si absente. */
+  /**
+   * Trace GPS complète (pas rééchantillonnée), `null` si absente.
+   *
+   * **Compactée** : les points où le GPS n'a rien mesuré sont retirés, alors que
+   * le stream stocké les porte en `null` pour rester aligné sur l'axe des temps.
+   * Une polyligne n'a pas de notion de « pas de position ici » — elle relie deux
+   * fix consécutifs, ce qui est exactement le tracé attendu — et aucun affichage
+   * ne corrèle aujourd'hui la carte à l'index temporel.
+   */
   latlng: Array<[number, number]> | null;
 };
 
@@ -264,8 +273,13 @@ export type ActivityFullDto = {
   effectiveVo2max: number | null;
 };
 
-/** Streams scalaires d'une activité, indexés par type. */
-type NumericStreams = Partial<Record<Exclude<ActivityStreamType, 'latlng'>, number[]>>;
+/**
+ * Streams scalaires d'une activité, indexés par type.
+ *
+ * `null` par point = le capteur n'a rien mesuré à cet instant (échantillonnage
+ * clairsemé, cf. `ActivityStreamData`). Les index restent alignés entre séries.
+ */
+type NumericStreams = Partial<Record<Exclude<ActivityStreamType, 'latlng'>, (number | null)[]>>;
 
 /*
  * Le contenu des colonnes JSONB est typé côté schéma (`$type<ActivityStreamData>`)
@@ -274,27 +288,28 @@ type NumericStreams = Partial<Record<Exclude<ActivityStreamType, 'latlng'>, numb
  * lieu de l'affirmer par une assertion de type.
  */
 
-function isNumberSeries(data: readonly unknown[]): data is number[] {
-  return data.every((value) => typeof value === 'number');
+function isNumberSeries(data: readonly unknown[]): data is (number | null)[] {
+  return data.every((value) => value === null || typeof value === 'number');
 }
 
-function isLatLngSeries(data: readonly unknown[]): data is Array<[number, number]> {
+function isLatLngSeries(data: readonly unknown[]): data is Array<[number, number] | null> {
   return data.every(
     (value) =>
-      Array.isArray(value) &&
-      value.length === 2 &&
-      typeof value[0] === 'number' &&
-      typeof value[1] === 'number',
+      value === null ||
+      (Array.isArray(value) &&
+        value.length === 2 &&
+        typeof value[0] === 'number' &&
+        typeof value[1] === 'number'),
   );
 }
 
 /** Range les lignes de `activity_streams` par type. Les séries vides sont ignorées. */
 function collectStreams(rows: readonly ActivityStream[]): {
   numeric: NumericStreams;
-  latlng: Array<[number, number]> | null;
+  latlng: Array<[number, number] | null> | null;
 } {
   const numeric: NumericStreams = {};
-  let latlng: Array<[number, number]> | null = null;
+  let latlng: Array<[number, number] | null> | null = null;
 
   for (const row of rows) {
     const { data } = row;
@@ -311,12 +326,32 @@ function collectStreams(rows: readonly ActivityStream[]): {
 }
 
 /**
+ * Axe des temps, ou `null` s'il est inexploitable.
+ *
+ * C'est le seul canal qui ne tolère **aucun** trou : tous les autres se lisent
+ * par rapport à lui, et une durée d'échantillon ne se calcule pas autour d'un
+ * instant inconnu. Le parseur FIT le garantit dense (il ne retient que les
+ * `record` horodatés) ; on le vérifie quand même, la base pouvant contenir ce
+ * qu'y a écrit une version antérieure du code.
+ */
+function denseTimeAxis(time: (number | null)[] | undefined): number[] | null {
+  if (time === undefined) return null;
+
+  const axis: number[] = [];
+  for (const instant of time) {
+    if (instant === null || !Number.isFinite(instant)) return null;
+    axis.push(instant);
+  }
+  return axis.length > 0 ? axis : null;
+}
+
+/**
  * Nombre de points exploitables en commun.
  *
- * Le parseur FIT écrit des streams de longueur identique (il rogne et écarte
- * avant d'écrire) ; on retient malgré tout la plus courte, parce qu'un
- * désalignement d'index attribuerait la FC d'un instant à un autre — une donnée
- * fausse est pire qu'une donnée tronquée.
+ * Le parseur FIT écrit des streams de longueur identique (tous alignés sur
+ * l'axe `time`, `null` compris) ; on retient malgré tout la plus courte, parce
+ * qu'un désalignement d'index attribuerait la FC d'un instant à un autre — une
+ * donnée fausse est pire qu'une donnée tronquée.
  */
 function alignedLength(numeric: NumericStreams): number {
   let shortest = Number.POSITIVE_INFINITY;
@@ -328,6 +363,14 @@ function alignedLength(numeric: NumericStreams): number {
   return Number.isFinite(shortest) ? shortest : 0;
 }
 
+/** Première valeur mesurée d'un canal clairsemé, `null` s'il n'en a aucune. */
+function firstMeasured(values: readonly (number | null)[]): number | null {
+  for (const value of values) {
+    if (value !== null && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
 /**
  * Séries prêtes pour les graphes.
  *
@@ -335,28 +378,44 @@ function alignedLength(numeric: NumericStreams): number {
  * n'est plaçable. La trace GPS, elle, est renvoyée entière — une carte a besoin
  * de tous ses points pour ne pas couper les virages, et une paire de flottants
  * pèse bien moins qu'un point de graphe.
+ *
+ * **Allure dérivée** : quand le fichier ne porte pas de canal `velocity` (cas
+ * des Apple Watch, qui n'écrivent pas `speed` dans leurs `record`) mais qu'il
+ * porte `distance`, la vitesse est calculée par `deriveVelocity` avant lissage.
+ * C'est une division entre deux mesures réelles, pas une estimation — et elle
+ * vaut pour tout l'historique déjà en base, puisqu'elle se fait à la lecture.
+ * Le stream stocké, lui, reste ce que le fichier contenait.
  */
 function buildCharts(
   numeric: NumericStreams,
-  latlng: Array<[number, number]> | null,
+  time: number[] | null,
+  sparseLatlng: Array<[number, number] | null> | null,
 ): ActivityChartsDto | null {
-  const { time, distance, heartrate, altitude, cadence, velocity } = numeric;
-  const count = time === undefined ? 0 : alignedLength(numeric);
+  const { distance, heartrate, altitude, cadence, velocity } = numeric;
+  const count = time === null ? 0 : alignedLength(numeric);
 
-  if (time === undefined || count === 0) {
+  const path = sparseLatlng?.filter((fix): fix is [number, number] => fix !== null) ?? null;
+  const latlng = path === null || path.length === 0 ? null : path;
+
+  if (time === null || count === 0) {
     return latlng === null ? null : { points: [], latlng };
   }
 
-  const paces = velocity === undefined ? null : smoothPace(velocity, time);
-  // Le cumul de distance du FIT ne repart pas de zéro (points de tête rognés) :
-  // la page affiche des mètres depuis le départ de la trace.
-  const startDistance = distance === undefined ? 0 : distance[0];
+  // `velocity` d'abord : la mesure du fichier prime toujours sur la dérivation.
+  const derived = distance === undefined ? undefined : deriveVelocity(distance, time);
+  const speeds = velocity ?? derived;
+  const paces = speeds === undefined ? null : smoothPace(speeds, time);
+
+  // Le cumul de distance du FIT ne repart pas de zéro : la page affiche des
+  // mètres depuis le départ de la trace, donc depuis sa première mesure.
+  const startDistance = distance === undefined ? 0 : (firstMeasured(distance) ?? 0);
 
   const samples: SeriesSample[] = new Array<SeriesSample>(count);
   for (let index = 0; index < count; index += 1) {
+    const mark = distance === undefined ? null : distance[index];
     samples[index] = {
       timeS: time[index],
-      distanceM: distance === undefined ? null : distance[index] - startDistance,
+      distanceM: mark === null ? null : mark - startDistance,
       paceSecPerKm: paces === null ? null : paces[index],
       hrBpm: heartrate === undefined ? null : heartrate[index],
       altitudeM: altitude === undefined ? null : altitude[index],
@@ -395,16 +454,17 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   if (!row) return null;
 
   const { numeric, latlng } = collectStreams(streamRows);
-  const { time, distance, heartrate, altitude } = numeric;
+  const { distance, heartrate, altitude } = numeric;
+  const time = denseTimeAxis(numeric.time);
   const maxHrBpm = profile?.maxHrBpm ?? null;
 
   const splits =
-    time !== undefined && distance !== undefined
+    time !== null && distance !== undefined
       ? computeSplits(distance, time, heartrate, altitude)
       : [];
 
   const hrZones =
-    time !== undefined && heartrate !== undefined && maxHrBpm !== null
+    time !== null && heartrate !== undefined && maxHrBpm !== null
       ? computeHrZones(heartrate, time, maxHrBpm)
       : [];
 
@@ -430,7 +490,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
 
   return {
     detail: toActivityDetailDto(row),
-    charts: buildCharts(numeric, latlng),
+    charts: buildCharts(numeric, time, latlng),
     splits,
     hrZones: hrZones.length > 0 ? hrZones : null,
     trimp,
@@ -445,28 +505,6 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
 /** Colonnes entières du schéma : le FIT renvoie des moyennes flottantes. */
 function toIntegerBpm(value: number | null): number | null {
   return value === null ? null : Math.round(value);
-}
-
-/**
- * Parmi `activityIds`, ceux qui n'ont **aucune** série temporelle en base.
- *
- * C'est ce critère — et non « la ligne d'activité était absente » — qui décide
- * de l'écriture des séries : une activité insérée par un import dont l'écriture
- * des streams a échoué n'a pas les siennes, et doit les récupérer au redépôt du
- * fichier.
- */
-export async function findActivityIdsWithoutStreams(
-  activityIds: readonly number[],
-): Promise<ReadonlySet<number>> {
-  if (activityIds.length === 0) return new Set();
-
-  const rows = await db
-    .selectDistinct({ activityId: activityStreams.activityId })
-    .from(activityStreams)
-    .where(inArray(activityStreams.activityId, [...activityIds]));
-
-  const withStreams = new Set(rows.map((row) => row.activityId));
-  return new Set(activityIds.filter((id) => !withStreams.has(id)));
 }
 
 /**
@@ -486,6 +524,13 @@ export async function findActivityIdsWithoutStreams(
  *
  * Le tout dans une transaction : une réimportation ne doit pas laisser un état
  * partiel derrière elle.
+ *
+ * **Remplacement, pas complétion.** Contrairement aux colonnes de `activities`
+ * (qui ne se complètent que sur leurs trous, cf. {@link completableFields}), les
+ * séries sont intégralement réécrites à chaque appel : elles ne sont pas
+ * éditables à la main, leur seule source est le fichier, et c'est ce qui permet
+ * à une correction du parseur de réparer un import passé au simple redépôt du
+ * fichier.
  *
  * Les streams vides sont ignorés : une ligne sans point n'apporte rien.
  */

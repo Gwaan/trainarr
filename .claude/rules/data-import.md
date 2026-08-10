@@ -165,13 +165,54 @@ absorbée sans log. Trois règles en découlent, à ne pas défaire :
 - Clé unique : `activities.fit_file_hash` (SHA-256 du fichier). Redéposer le même
   fichier retombe sur la même ligne, jamais un doublon — c'est la contrainte
   unique, pas une lecture préalable, qui le garantit.
-- Un réimport ne **complète que les trous** (colonnes `null`) : une valeur déjà
-  en base, ou un nom corrigé à la main, n'est jamais écrasé.
+- Un réimport ne **complète que les trous** des colonnes de `activities`
+  (`null`) : une valeur déjà en base, ou un nom corrigé à la main, n'est jamais
+  écrasé.
+- **Les séries temporelles, elles, sont intégralement remplacées** à chaque
+  ingestion (`saveActivityStreams`, upsert sur `(activity_id, type)` + purge des
+  types disparus). La règle est la même vue de plus haut : ne jamais perdre ce
+  que seul l'humain produit, toujours rafraîchir ce que seul le fichier produit.
+  Un stream n'est pas éditable dans l'appli ; ne réécrire que les activités
+  dépourvues de séries rendait toute correction du parseur inopérante sur
+  l'historique.
 - Le parseur (`src/lib/fit/parse.ts`) est pur : octets → structure. Aucun accès
   base, fichier ou réseau. Ce qu'il a dû écarter part dans `warnings`, jamais
   masqué.
 - Stocker les séries temporelles (FC, allure, altitude par point) dans la table
   dédiée `activity_streams` (JSONB) — pas dans la table `activities` principale.
+
+## Échantillonnage clairsemé (ne pas le relire comme une panne)
+
+Un fichier FIT n'écrit **pas** tous les champs dans chaque message `record` :
+un *definition message* déclare le sous-ensemble de champs que porteront les
+messages de données suivants, et l'appareil change de définition en cours de
+fichier. Chaque capteur écrit donc à sa propre cadence. Un `record` sans champ
+`heart_rate` signifie « pas de nouvelle mesure à cet instant », jamais « la FC
+est en panne ».
+
+- Les streams sont **alignés sur l'axe `time`**, `null` aux points muets. Jamais
+  de report de la dernière valeur, jamais de canal écarté pour cause de trous —
+  c'est la règle qui, enfreinte, avait fait perdre la FC de 21 des 27 premières
+  activités importées.
+- Seul un canal réellement mort est écarté : moins de **10 mesures** dans tout le
+  fichier (`MIN_CHANNEL_MEASURES` dans `parse.ts`). Le plancher est absolu, pas
+  proportionnel — c'est le nombre de mesures qui rend un canal exploitable, pas
+  sa couverture : une ceinture FC en mode économie (une mesure toutes les 30 s
+  sur un flux à 1 Hz, soit 3,3 % des points) reste parfaitement lisible. Un canal
+  **totalement** absent du fichier, lui, ne produit aucun avertissement : une
+  Apple Watch n'écrit jamais `speed`, un tapis n'a pas de GPS — un capteur qu'on
+  n'a pas n'est pas une donnée perdue.
+- Tout consommateur d'un stream saute ses propres `null` **sans décaler les
+  autres canaux** (`computeHrZones`, `computeSplits`, `smoothPace`,
+  `resamplePoints`, `getActivityFull`). Seul `time` est dense : c'est l'axe.
+- Un canal absent du fichier n'est pas fabriqué à l'écriture. En revanche le DAL
+  peut le **dériver à la lecture** quand c'est un calcul et non une estimation :
+  `deriveVelocity` (Δdistance/Δtemps) donne son allure à une séance Apple Watch,
+  dont les fichiers ne portent aucun champ `speed`. Un intervalle plus long que
+  le plafond de trou (`sampleDurationCapS`, calculé sur les seuls instants où la
+  distance est mesurée) rend `null` : une auto-pause de 5 min n'est pas une
+  vitesse de 0,017 m/s étalée sur la pause, c'est du temps que personne n'a
+  couru.
 
 ## Calculs physio (`lib/metrics/`)
 

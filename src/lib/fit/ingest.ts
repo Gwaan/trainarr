@@ -1,10 +1,6 @@
 import 'server-only';
 
-import {
-  findActivityIdsWithoutStreams,
-  saveActivityStreams,
-  upsertActivityFromFit,
-} from '@/data/activities';
+import { saveActivityStreams, upsertActivityFromFit } from '@/data/activities';
 import { getAthleteId } from '@/data/athlete';
 
 import { parseFitActivity } from './parse';
@@ -28,9 +24,16 @@ export type IngestReport = {
 /**
  * Importe le contenu d'un fichier FIT.
  *
- * Les séries ne sont écrites que si l'activité n'en a **aucune** : celles déjà
- * en base font foi, un redépôt du fichier ne les réécrit pas ; une activité dont
- * l'écriture des séries avait échoué les récupère au passage suivant.
+ * **Les séries sont systématiquement réécrites**, y compris quand le fichier
+ * avait déjà été importé (`status: 'updated'`). C'est l'inverse de la politique
+ * des colonnes de `activities`, qui ne comble que ses trous — et la raison est
+ * la même dans les deux cas : ne jamais perdre une donnée que seul l'humain
+ * pouvait produire, toujours rafraîchir celle que seul le fichier produit. Une
+ * série temporelle n'est pas éditable dans l'appli ; sa seule source est le
+ * fichier, relu ici par la version courante du parseur. Ne réécrire que les
+ * activités dépourvues de séries — le comportement précédent — rendait toute
+ * correction du parseur inopérante sur l'historique : redéposer le fichier ne
+ * réparait rien.
  *
  * @throws {FitParseError} si le fichier est illisible — l'erreur remonte telle
  * quelle à l'appelant (le watcher), qui décide du sort du fichier.
@@ -54,10 +57,7 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
 
   const { activityId, created } = await upsertActivityFromFit(parsed, athleteId);
 
-  const withoutStreams = await findActivityIdsWithoutStreams([activityId]);
-  if (withoutStreams.has(activityId)) {
-    await saveActivityStreams(activityId, parsed.streams);
-  }
+  await saveActivityStreams(activityId, parsed.streams);
 
   return { status: created ? 'created' : 'updated', activityId };
 }

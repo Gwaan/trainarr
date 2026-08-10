@@ -9,7 +9,6 @@ const { mocks } = vi.hoisted(() => ({
     parseFitActivity: vi.fn(),
     getAthleteId: vi.fn(),
     upsertActivityFromFit: vi.fn(),
-    findActivityIdsWithoutStreams: vi.fn(),
     saveActivityStreams: vi.fn(),
   },
 }));
@@ -24,7 +23,6 @@ vi.mock('@/data/athlete', () => ({
 
 vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
-  findActivityIdsWithoutStreams: mocks.findActivityIdsWithoutStreams,
   saveActivityStreams: mocks.saveActivityStreams,
 }));
 
@@ -46,6 +44,20 @@ const PARSED: ParsedFitActivity = {
   warnings: [],
 };
 
+/**
+ * Le même fichier relu par un parseur corrigé : les canaux clairsemés que
+ * l'ancienne version écartait sont là, avec leurs trous explicites.
+ */
+const REPARSED: ParsedFitActivity = {
+  ...PARSED,
+  streams: {
+    time: [0, 1],
+    heartrate: [130, null],
+    cadence: [null, 174],
+    latlng: [[48.85, 2.35], null],
+  },
+};
+
 const BUFFER = Buffer.from('fit');
 
 beforeEach(() => {
@@ -53,7 +65,6 @@ beforeEach(() => {
   mocks.parseFitActivity.mockReturnValue(PARSED);
   mocks.getAthleteId.mockResolvedValue(1);
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: true });
-  mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set([42]));
   mocks.saveActivityStreams.mockResolvedValue(undefined);
 });
 
@@ -72,13 +83,16 @@ describe('ingestFitBuffer', () => {
     await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
   });
 
-  it('n’écrit pas les séries si l’activité en a déjà (celles en base font foi)', async () => {
-    mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set());
+  it('remplace les séries au réimport du même fichier (parseur corrigé)', async () => {
+    // Le fichier avait déjà été ingéré : même empreinte, donc `updated`. Les
+    // séries doivent malgré tout être réécrites — sinon une correction du
+    // parseur resterait sans effet sur l'historique, ce qui était le bug.
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: false });
+    mocks.parseFitActivity.mockReturnValue(REPARSED);
 
-    await ingestFitBuffer(BUFFER);
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
 
-    expect(mocks.findActivityIdsWithoutStreams).toHaveBeenCalledWith([42]);
-    expect(mocks.saveActivityStreams).not.toHaveBeenCalled();
+    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, REPARSED.streams);
   });
 
   it('échoue explicitement si aucun athlète n’est enregistré', async () => {

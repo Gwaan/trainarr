@@ -13,6 +13,45 @@ function series(count: number, speedAt: (second: number) => number) {
   return { time, velocity };
 }
 
+describe('smoothPace — canal clairsemé', () => {
+  it('lisse aux points mesurés et laisse les trous à null', () => {
+    const { time, velocity } = series(120, () => 3);
+    // Vitesse écrite un point sur 4 : la courbe est discontinue là où le
+    // fichier l'est, jamais comblée par report.
+    const sparse = velocity.map((speed, index) => (index % 4 === 0 ? speed : null));
+
+    const paces = smoothPace(sparse, time);
+
+    expect(paces).toHaveLength(120);
+    for (const [index, pace] of paces.entries()) {
+      if (index % 4 === 0) expect(pace).toBeCloseTo(1000 / 3, 6);
+      else expect(pace).toBeNull();
+    }
+  });
+
+  it('moyenne la fenêtre sur les seules mesures présentes', () => {
+    // 2 m/s partout sauf une mesure isolée à 6 m/s : la fenêtre de 15 s autour
+    // d'elle ne compte que les points mesurés, pas les trous.
+    const { time, velocity } = series(60, () => 2);
+    const sparse: (number | null)[] = velocity.map((speed, index) =>
+      index % 2 === 0 ? speed : null,
+    );
+    sparse[30] = 6;
+
+    const paces = smoothPace(sparse, time);
+
+    expect(paces[30]).not.toBeNull();
+    expect(paces[31]).toBeNull();
+    // La pointe est moyennée avec ses voisines mesurées, pas prise brute.
+    expect(paces[30]).toBeGreaterThan(1000 / 6);
+    expect(paces[30]).toBeLessThan(1000 / 2);
+  });
+
+  it('rend tout à null quand la vitesse ne parle jamais', () => {
+    expect(smoothPace([null, null, null], [0, 1, 2])).toEqual([null, null, null]);
+  });
+});
+
 describe('smoothPace', () => {
   it('rend une allure constante sur une vitesse constante', () => {
     const { time, velocity } = series(120, () => 3);

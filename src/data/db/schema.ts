@@ -117,8 +117,22 @@ export const ACTIVITY_STREAM_TYPES = [
 
 export type ActivityStreamType = (typeof ACTIVITY_STREAM_TYPES)[number];
 
-/** Un stream est une série de scalaires, sauf `latlng` qui est une série de couples. */
-export type ActivityStreamData = number[] | Array<[number, number]>;
+/**
+ * Un stream est une série de scalaires, sauf `latlng` qui est une série de
+ * couples.
+ *
+ * **`null` = le capteur n'a rien mesuré à cet index.** Un fichier FIT n'écrit
+ * pas tous les champs dans chaque message `record` : chaque message ne porte que
+ * les champs déclarés par sa *definition message*, et chaque capteur écrit à sa
+ * propre cadence (le GPS à son taux de fix, la FC à celui de la ceinture). Un
+ * canal clairsemé est donc la norme, pas une panne — le représenter avec des
+ * trous explicites est la seule façon de garder les index alignés entre séries
+ * sans inventer de mesure.
+ *
+ * Le stockage est en JSONB : `null` y est une valeur native, aucune migration
+ * n'est nécessaire pour l'accueillir.
+ */
+export type ActivityStreamData = (number | null)[] | Array<[number, number] | null>;
 
 /** Séries temporelles d'une activité, hors table principale (JSONB). */
 export const activityStreams = pgTable(
