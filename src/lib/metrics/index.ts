@@ -9,4 +9,5 @@
 export { computeTrimp, type Sex, type TrimpInput } from './trimp';
 export { computeLoadSeries, type DailyTrimp, type LoadPoint } from './load';
 export { estimateVdot, type EffortInput } from './vdot';
+export { estimateEffectiveVo2max, type EffectiveVo2maxInput } from './vo2max';
 export { paceSecPerKm } from './pace';

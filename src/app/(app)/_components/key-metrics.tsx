@@ -1,9 +1,18 @@
 import { Gauge, HeartPulse } from "lucide-react";
 
 import { StatCard, type StatDelta, type StatTone } from "@/components/stat-card";
-import type { FitnessDto, Vo2maxDto } from "@/data/dashboard";
+import type {
+  FitnessDto,
+  FitnessUnavailableDto,
+  Vo2maxDto,
+  Vo2maxUnavailableDto,
+} from "@/data/dashboard";
 
 import { formatLoad, formatNumber, formatVo2max } from "../_lib/format";
+import {
+  describeFitnessUnavailable,
+  describeVo2maxUnavailable,
+} from "../_lib/metric-unavailable";
 import { MetricPlaceholder } from "./metric-placeholder";
 
 /**
@@ -41,12 +50,22 @@ function readTsb(tsb: number): { tone: StatTone; note: string } {
 
 export type KeyMetricsProps = {
   fitness: FitnessDto | null;
+  /** Cause réelle de l'absence de charge — non-`null` quand `fitness` l'est. */
+  fitnessUnavailable: FitnessUnavailableDto | null;
   vo2max: Vo2maxDto | null;
+  /** Cause réelle de l'absence de VO₂max — non-`null` quand `vo2max` l'est. */
+  vo2maxUnavailable: Vo2maxUnavailableDto | null;
   /** `false` quand aucun athlète n'existe encore : l'onboarding n'a pas eu lieu. */
   hasProfile: boolean;
 };
 
-export function KeyMetrics({ fitness, vo2max, hasProfile }: KeyMetricsProps) {
+export function KeyMetrics({
+  fitness,
+  fitnessUnavailable,
+  vo2max,
+  vo2maxUnavailable,
+  hasProfile,
+}: KeyMetricsProps) {
   const tsb = fitness ? readTsb(fitness.tsb) : null;
 
   /*
@@ -76,9 +95,8 @@ export function KeyMetrics({ fitness, vo2max, hasProfile }: KeyMetricsProps) {
         <MetricPlaceholder
           icon={Gauge}
           label="VO₂max estimée"
-          title="Pas encore d'effort de référence"
-          description="Une sortie soutenue d'au moins 1,5 km dans les trente derniers jours suffit à estimer ta VO₂max."
           className={vo2maxSpan}
+          {...describeVo2maxUnavailable(vo2maxUnavailable)}
         />
       )}
 
@@ -98,18 +116,11 @@ export function KeyMetrics({ fitness, vo2max, hasProfile }: KeyMetricsProps) {
           />
         </>
       ) : showLoadPlaceholder ? (
-        /*
-         * Le composant ne reçoit qu'un `fitness` absent : il ne sait pas si le
-         * profil est incomplet, si aucune séance n'est importée, ou si aucune
-         * ne porte de fréquence cardiaque. Le message énonce donc les deux
-         * conditions sans accuser l'athlète d'en avoir manqué une.
-         */
         <MetricPlaceholder
           icon={HeartPulse}
           label="Charge & forme"
-          title="Charge indisponible"
-          description="La charge (CTL, ATL, TSB) se calcule dès que ton profil est complet — FC max, FC repos, sexe — et que des séances avec fréquence cardiaque sont importées."
           className="col-span-2"
+          {...describeFitnessUnavailable(fitnessUnavailable)}
         />
       ) : null}
     </section>

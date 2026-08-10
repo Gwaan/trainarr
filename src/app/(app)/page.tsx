@@ -38,7 +38,9 @@ async function DashboardContent() {
 
       <KeyMetrics
         fitness={summary.fitness}
+        fitnessUnavailable={summary.fitnessUnavailable}
         vo2max={summary.vo2max}
+        vo2maxUnavailable={summary.vo2maxUnavailable}
         hasProfile={hasProfile}
       />
 

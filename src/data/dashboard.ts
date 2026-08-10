@@ -7,7 +7,7 @@ import { APP_TIME_ZONE } from '@/config/time';
 import {
   computeLoadSeries,
   computeTrimp,
-  estimateVdot,
+  estimateEffectiveVo2max,
   type DailyTrimp,
   type LoadPoint,
 } from '@/lib/metrics';
@@ -39,10 +39,37 @@ export type FitnessDto = {
   ctlDelta7d: number | null;
 };
 
+/**
+ * Pourquoi la charge n'est pas calculable. Renseigné **exactement quand**
+ * `fitness` est `null` alors qu'un athlète existe : un placeholder qui récite
+ * toutes les conditions possibles ne vaut rien, l'athlète doit lire la sienne.
+ */
+export type FitnessUnavailableDto = {
+  /** Champs de profil manquants, dans l'ordre où le TRIMP de Banister les exige. */
+  missingProfileFields: Array<'sex' | 'maxHrBpm' | 'restingHrBpm'>;
+  /** Aucune séance importée ne porte de FC moyenne. */
+  noHeartRateData: boolean;
+};
+
 export type Vo2maxDto = {
   value: number;
   /** Variation sur 30 jours, `null` si aucun point de comparaison. */
   delta30d: number | null;
+};
+
+/**
+ * Pourquoi la VO₂max n'est pas estimable. Même contrat que
+ * `FitnessUnavailableDto` : non-`null` exactement quand `vo2max` est `null` et
+ * qu'un athlète existe.
+ */
+export type Vo2maxUnavailableDto = {
+  /**
+   * FC max du profil absente. Bloquant : l'estimation corrige l'allure par le
+   * rapport FC moyenne / FC max, elle ne peut pas s'en passer.
+   */
+  missingMaxHrBpm: boolean;
+  /** Aucune course des 30 derniers jours ne porte de FC moyenne. */
+  noRecentRunWithHeartRate: boolean;
 };
 
 export type LoadWeekDto = {
@@ -69,7 +96,9 @@ export type PlannedSessionDto = {
 export type DashboardSummary = {
   athleteName: string | null;
   fitness: FitnessDto | null;
+  fitnessUnavailable: FitnessUnavailableDto | null;
   vo2max: Vo2maxDto | null;
+  vo2maxUnavailable: Vo2maxUnavailableDto | null;
   loadWeeks: LoadWeekDto[];
   todaySession: PlannedSessionDto | null;
   recentActivities: ActivitySummaryDto[];
@@ -80,7 +109,10 @@ const TIME_ZONE = APP_TIME_ZONE;
 
 const RECENT_ACTIVITIES_COUNT = 3;
 const LOAD_WEEKS_COUNT = 6;
-/** Fenêtre de comparaison du VDOT : 30 jours glissants vs les 30 précédents. */
+/**
+ * Fenêtre de la VO₂max : 30 jours glissants vs les 30 précédents. C'est la
+ * valeur par défaut de Runalyze (`VO2MAX_DAYS = 30`, cf. `buildVo2max`).
+ */
 const VO2MAX_WINDOW_DAYS = 30;
 const CTL_DELTA_DAYS = 7;
 const DAY_MS = 86_400_000;
@@ -88,7 +120,10 @@ const DAY_MS = 86_400_000;
 const EMPTY_SUMMARY: DashboardSummary = {
   athleteName: null,
   fitness: null,
+  // Sans athlète, il n'y a pas de cause à expliquer : c'est l'onboarding qui parle.
+  fitnessUnavailable: null,
   vo2max: null,
+  vo2maxUnavailable: null,
   loadWeeks: [],
   todaySession: null,
   recentActivities: [],
@@ -140,7 +175,7 @@ function isoWeekNumber(date: string): number {
   return 1 + Math.round((thursday.getTime() - firstThursday.getTime()) / (7 * DAY_MS));
 }
 
-/** Le VDOT n'a de sens qu'en course à pied (`Run`, `TrailRun`, `VirtualRun`…). */
+/** La VO₂max n'a de sens qu'en course à pied (`Run`, `TrailRun`, `VirtualRun`…). */
 function isRunning(sportType: string): boolean {
   return sportType.toLowerCase().includes('run');
 }
@@ -200,31 +235,109 @@ function buildFitness(series: readonly LoadPoint[]): FitnessDto | null {
   };
 }
 
-/** Meilleur VDOT des efforts de course situés dans `]after, until]`. */
-function bestVdot(rows: readonly Activity[], after: string, until: string): number | null {
-  let best: number | null = null;
+/**
+ * VO₂max des courses de `]after, until]`, moyennée en pondérant chaque séance
+ * par son temps de déplacement. `null` si aucune n'est exploitable.
+ *
+ * C'est l'agrégation de Runalyze, relevée dans
+ * `TrainingRepository::calculateVO2maxShape` (branche `support/4.3.x`) :
+ * `SUM(s · vo2max) / SUM(s)` sur les 30 derniers jours du sport « course ».
+ * https://github.com/Runalyze/Runalyze/blob/support/4.3.x/src/CoreBundle/Entity/TrainingRepository.php
+ *
+ * Pourquoi pas le maximum brut, qui était le calcul précédent : sur une série de
+ * footings, le max retient la séance la plus favorable et suit le bruit d'un
+ * seul point. Pourquoi pas la médiane non plus, malgré sa robustesse : la
+ * pondération par la durée fait déjà ce travail — une sortie de 12 min pèse
+ * cinq fois moins qu'une sortie d'une heure, et ce sont les séances courtes qui
+ * portent l'essentiel des aberrations (FC pas encore stabilisée, GPS en ville).
+ * S'y ajoutent les garde-fous de `estimateEffectiveVo2max`, qui écarte en amont
+ * les efforts trop courts et les valeurs hors de [20, 90].
+ */
+function averageVo2max(
+  rows: readonly Activity[],
+  profile: Athlete,
+  after: string,
+  until: string,
+): number | null {
+  let weightedSum = 0;
+  let totalWeight = 0;
+
   for (const row of rows) {
     if (!isRunning(row.sportType)) continue;
 
     const day = toCivilDate(row.startedAt);
     if (day <= after || day > until) continue;
 
-    const vdot = estimateVdot({ distanceM: row.distanceM, movingTimeS: row.movingTimeS });
-    if (vdot === null) continue;
-    if (best === null || vdot > best) best = vdot;
+    const value = estimateEffectiveVo2max({
+      distanceM: row.distanceM,
+      movingTimeS: row.movingTimeS,
+      avgHrBpm: row.avgHrBpm,
+      maxHrBpm: profile.maxHrBpm,
+    });
+    if (value === null) continue;
+
+    // `movingTimeS` est nécessairement > 0 ici : l'estimation aurait renvoyé
+    // `null` sinon. Le poids total ne peut donc pas être nul après un ajout.
+    weightedSum += value * row.movingTimeS;
+    totalWeight += row.movingTimeS;
   }
-  return best;
+
+  return totalWeight > 0 ? weightedSum / totalWeight : null;
 }
 
-function buildVo2max(rows: readonly Activity[], today: string): Vo2maxDto | null {
+function buildVo2max(
+  rows: readonly Activity[],
+  profile: Athlete,
+  today: string,
+): Vo2maxDto | null {
   const previousWindowStart = shiftCivilDate(today, -2 * VO2MAX_WINDOW_DAYS);
   const currentWindowStart = shiftCivilDate(today, -VO2MAX_WINDOW_DAYS);
 
-  const current = bestVdot(rows, currentWindowStart, today);
+  const current = averageVo2max(rows, profile, currentWindowStart, today);
   if (current === null) return null;
 
-  const previous = bestVdot(rows, previousWindowStart, currentWindowStart);
+  const previous = averageVo2max(rows, profile, previousWindowStart, currentWindowStart);
   return { value: current, delta30d: previous === null ? null : current - previous };
+}
+
+/**
+ * Ce qui manque pour calculer la charge. Le TRIMP de Banister exige le sexe, la
+ * FC max et la FC de repos côté profil, plus une FC moyenne par séance : dire
+ * laquelle de ces conditions n'est pas remplie évite la session de debug que le
+ * message générique précédent a coûtée.
+ */
+function buildFitnessUnavailable(
+  rows: readonly Activity[],
+  profile: Athlete,
+  today: string,
+): FitnessUnavailableDto {
+  const missingProfileFields: FitnessUnavailableDto['missingProfileFields'] = [];
+  if (profile.sex === null) missingProfileFields.push('sex');
+  if (profile.maxHrBpm === null) missingProfileFields.push('maxHrBpm');
+  if (profile.restingHrBpm === null) missingProfileFields.push('restingHrBpm');
+
+  const noHeartRateData = !rows.some(
+    (row) => row.avgHrBpm !== null && toCivilDate(row.startedAt) <= today,
+  );
+
+  return { missingProfileFields, noHeartRateData };
+}
+
+/** Ce qui manque pour estimer la VO₂max — cf. `buildFitnessUnavailable`. */
+function buildVo2maxUnavailable(
+  rows: readonly Activity[],
+  profile: Athlete,
+  today: string,
+): Vo2maxUnavailableDto {
+  const windowStart = shiftCivilDate(today, -VO2MAX_WINDOW_DAYS);
+
+  const noRecentRunWithHeartRate = !rows.some((row) => {
+    if (!isRunning(row.sportType) || row.avgHrBpm === null) return false;
+    const day = toCivilDate(row.startedAt);
+    return day > windowStart && day <= today;
+  });
+
+  return { missingMaxHrBpm: profile.maxHrBpm === null, noRecentRunWithHeartRate };
 }
 
 /**
@@ -298,10 +411,17 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
   const todaySession = sessionRows[0];
 
+  const fitness = buildFitness(loadSeries);
+  const vo2max = buildVo2max(activityRows, profile, today);
+
   return {
     athleteName: profile.displayName,
-    fitness: buildFitness(loadSeries),
-    vo2max: buildVo2max(activityRows, today),
+    fitness,
+    fitnessUnavailable: fitness
+      ? null
+      : buildFitnessUnavailable(activityRows, profile, today),
+    vo2max,
+    vo2maxUnavailable: vo2max ? null : buildVo2maxUnavailable(activityRows, profile, today),
     loadWeeks: buildLoadWeeks(loadSeries, today),
     todaySession: todaySession ? toPlannedSessionDto(todaySession) : null,
     recentActivities: activityRows.slice(0, RECENT_ACTIVITIES_COUNT).map(toActivitySummaryDto),

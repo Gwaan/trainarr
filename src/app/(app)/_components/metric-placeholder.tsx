@@ -1,4 +1,5 @@
-import type { LucideIcon } from "lucide-react";
+import Link from "next/link";
+import { ChevronRight, type LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -9,6 +10,11 @@ export type MetricPlaceholderProps = {
   title: string;
   /** Ce qui manque, et comment l'obtenir. */
   description: string;
+  /**
+   * Où lever l'obstacle, quand il y a un endroit où le faire. Lien discret et
+   * non un bouton accent : le tableau de bord n'en porte qu'un.
+   */
+  action?: { href: string; label: string };
   className?: string;
 };
 
@@ -21,6 +27,7 @@ export function MetricPlaceholder({
   label,
   title,
   description,
+  action,
   className,
 }: MetricPlaceholderProps) {
   return (
@@ -36,6 +43,15 @@ export function MetricPlaceholder({
         {title}
       </p>
       <p className="mt-2 text-[0.78rem] leading-snug text-fg-faint">{description}</p>
+      {action ? (
+        <Link
+          href={action.href}
+          className="mt-3 inline-flex items-center gap-0.5 self-start rounded-button text-[0.78rem] font-medium text-fg-muted transition-colors duration-150 ease-out hover:text-accent"
+        >
+          {action.label}
+          <ChevronRight aria-hidden="true" className="size-3.5" />
+        </Link>
+      ) : null}
     </article>
   );
 }

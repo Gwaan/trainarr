@@ -1,7 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { computeLoadSeries, computeTrimp, estimateVdot } from '@/lib/metrics';
-import type { DailyTrimp, EffortInput, LoadPoint, TrimpInput } from '@/lib/metrics';
+import { computeLoadSeries, computeTrimp, estimateEffectiveVo2max } from '@/lib/metrics';
+import type {
+  DailyTrimp,
+  EffectiveVo2maxInput,
+  LoadPoint,
+  TrimpInput,
+} from '@/lib/metrics';
 
 import { getDashboardSummary } from './dashboard';
 import type { Activity, Athlete, PlannedSession } from './db/schema';
@@ -54,7 +59,8 @@ vi.mock('./db/client', async () => {
  * — elles ont leurs propres tests.
  *
  * Conventions du double : 1 point de TRIMP par minute, CTL = index du jour dans
- * la série, VDOT = vitesse en m/s × 10.
+ * la série, VO₂max effective = vitesse en m/s × 10 (et `null` sans FC, ou sous
+ * 3 km — de quoi vérifier la propagation des cas non calculables).
  */
 vi.mock('@/lib/metrics', () => ({
   computeTrimp: vi.fn((input: TrimpInput): number | null => {
@@ -71,9 +77,11 @@ vi.mock('@/lib/metrics', () => ({
       tsb: index - day.trimp,
     })),
   ),
-  estimateVdot: vi.fn((effort: EffortInput): number | null =>
-    effort.distanceM < 3_000 ? null : (effort.distanceM / effort.movingTimeS) * 10,
-  ),
+  estimateEffectiveVo2max: vi.fn((input: EffectiveVo2maxInput): number | null => {
+    if (input.avgHrBpm === null || input.maxHrBpm === null) return null;
+    if (input.distanceM < 3_000) return null;
+    return (input.distanceM / input.movingTimeS) * 10;
+  }),
   paceSecPerKm: vi.fn(() => null),
 }));
 
@@ -174,7 +182,9 @@ describe('getDashboardSummary — base vide', () => {
     expect(summary).toEqual({
       athleteName: null,
       fitness: null,
+      fitnessUnavailable: null,
       vo2max: null,
+      vo2maxUnavailable: null,
       loadWeeks: [],
       todaySession: null,
       recentActivities: [],
@@ -329,20 +339,49 @@ describe('getDashboardSummary — charge hebdomadaire', () => {
 });
 
 describe('getDashboardSummary — VO₂max', () => {
-  it('retient le meilleur VDOT des 30 derniers jours et le compare aux 30 précédents', async () => {
+  it('moyenne les 30 derniers jours en pondérant par la durée, et compare aux 30 précédents', async () => {
     queryState.rows.athlete = [ATHLETE];
     queryState.rows.activities = [
       makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), movingTimeS: 2_000 }),
-      makeActivity({ startedAt: new Date('2026-07-20T09:00:00.000Z'), movingTimeS: 2_500 }),
+      makeActivity({
+        startedAt: new Date('2026-07-20T09:00:00.000Z'),
+        distanceM: 12_000,
+        movingTimeS: 3_000,
+      }),
       makeActivity({ startedAt: new Date('2026-07-05T09:00:00.000Z'), movingTimeS: 2_500 }),
-      // Plus de 60 jours : hors des deux fenêtres, malgré un VDOT bien meilleur.
+      // Plus de 60 jours : hors des deux fenêtres, malgré une valeur bien meilleure.
       makeActivity({ startedAt: new Date('2026-06-05T09:00:00.000Z'), movingTimeS: 1_000 }),
     ];
 
     const summary = await getDashboardSummary();
 
-    // 10 km en 2 000 s → 50 ; meilleur des 30 jours précédents : 10 km en 2 500 s → 40.
-    expect(summary.vo2max).toEqual({ value: 50, delta30d: 10 });
+    /*
+     * Fenêtre courante : 50 sur 2 000 s et 40 sur 3 000 s
+     * → (50 × 2 000 + 40 × 3 000) / 5 000 = 44 (le maximum brut aurait dit 50,
+     * la moyenne simple 45 — la pondération est bien celle qui s'applique).
+     * Fenêtre précédente : 10 km en 2 500 s → 40.
+     */
+    expect(summary.vo2max).toEqual({ value: 44, delta30d: 4 });
+    expect(summary.vo2maxUnavailable).toBeNull();
+  });
+
+  it('empêche une séance courte et aberrante de dominer la moyenne', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      // Sortie longue, représentative.
+      makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), movingTimeS: 4_000 }),
+      // Sprint de 5 min à allure GPS douteuse : quatorze fois moins lourd.
+      makeActivity({
+        startedAt: new Date('2026-08-02T09:00:00.000Z'),
+        distanceM: 4_500,
+        movingTimeS: 300,
+      }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    // (25 × 4 000 + 150 × 300) / 4 300 = 33.72… — loin des 150 du maximum brut.
+    expect(summary.vo2max?.value).toBeCloseTo(33.721, 3);
   });
 
   it('ignore les sports qui ne sont pas de la course à pied', async () => {
@@ -359,8 +398,41 @@ describe('getDashboardSummary — VO₂max', () => {
 
     const summary = await getDashboardSummary();
 
-    expect(estimateVdot).toHaveBeenCalledTimes(1);
+    expect(estimateEffectiveVo2max).toHaveBeenCalledTimes(1);
     expect(summary.vo2max).toEqual({ value: 40, delta30d: null });
+  });
+
+  it('transmet la FC de la séance et la FC max du profil à l’estimation', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), avgHrBpm: 151 }),
+    ];
+
+    await getDashboardSummary();
+
+    expect(estimateEffectiveVo2max).toHaveBeenCalledWith({
+      distanceM: 10_000,
+      movingTimeS: 3_600,
+      avgHrBpm: 151,
+      maxHrBpm: 188,
+    });
+  });
+
+  it('écarte de la moyenne les courses sans fréquence cardiaque', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), movingTimeS: 2_000 }),
+      makeActivity({
+        startedAt: new Date('2026-08-02T09:00:00.000Z'),
+        movingTimeS: 5_000,
+        avgHrBpm: null,
+      }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    // Seule la première compte : sans elle, la seconde tirerait la moyenne à 20.
+    expect(summary.vo2max).toEqual({ value: 50, delta30d: null });
   });
 
   it('retourne null quand aucun effort récent n’est exploitable', async () => {
@@ -373,6 +445,122 @@ describe('getDashboardSummary — VO₂max', () => {
     const summary = await getDashboardSummary();
 
     expect(summary.vo2max).toBeNull();
+  });
+});
+
+describe('getDashboardSummary — causes d’indisponibilité', () => {
+  it('ne renseigne aucune cause quand les deux indicateurs sont calculés', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = dailyActivities('2026-07-01', '2026-08-09');
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.fitness).not.toBeNull();
+    expect(summary.fitnessUnavailable).toBeNull();
+    expect(summary.vo2max).not.toBeNull();
+    expect(summary.vo2maxUnavailable).toBeNull();
+  });
+
+  it.each([
+    ['sexe', { sex: null }, ['sex']],
+    ['FC max', { maxHrBpm: null }, ['maxHrBpm']],
+    ['FC de repos', { restingHrBpm: null }, ['restingHrBpm']],
+    [
+      'tout le profil physiologique',
+      { sex: null, maxHrBpm: null, restingHrBpm: null },
+      ['sex', 'maxHrBpm', 'restingHrBpm'],
+    ],
+  ])(
+    'désigne le champ de profil manquant pour la charge (%s)',
+    async (_label, missing, expected) => {
+      queryState.rows.athlete = [{ ...ATHLETE, ...missing }];
+      queryState.rows.activities = dailyActivities('2026-07-01', '2026-08-09');
+
+      const summary = await getDashboardSummary();
+
+      expect(summary.fitness).toBeNull();
+      expect(summary.fitnessUnavailable).toEqual({
+        missingProfileFields: expected,
+        noHeartRateData: false,
+      });
+    },
+  );
+
+  it('signale l’absence totale de fréquence cardiaque plutôt qu’un profil incomplet', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-08T07:00:00.000Z'), avgHrBpm: null }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.fitnessUnavailable).toEqual({
+      missingProfileFields: [],
+      noHeartRateData: true,
+    });
+  });
+
+  it('signale les deux causes à la fois quand elles coexistent', async () => {
+    queryState.rows.athlete = [{ ...ATHLETE, sex: null }];
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-08T07:00:00.000Z'), avgHrBpm: null }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.fitnessUnavailable).toEqual({
+      missingProfileFields: ['sex'],
+      noHeartRateData: true,
+    });
+  });
+
+  it('distingue la FC max manquante de l’absence de course avec FC', async () => {
+    queryState.rows.athlete = [{ ...ATHLETE, maxHrBpm: null }];
+    queryState.rows.activities = dailyActivities('2026-07-20', '2026-08-09');
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.vo2max).toBeNull();
+    expect(summary.vo2maxUnavailable).toEqual({
+      missingMaxHrBpm: true,
+      // Les courses avec FC existent bel et bien : c'est le profil qui bloque.
+      noRecentRunWithHeartRate: false,
+    });
+  });
+
+  it('signale l’absence de course avec FC sur les 30 derniers jours', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      // Course avec FC, mais vieille de plus de 30 jours.
+      makeActivity({ startedAt: new Date('2026-06-20T09:00:00.000Z') }),
+      // Récente, mais sans FC.
+      makeActivity({ startedAt: new Date('2026-08-05T09:00:00.000Z'), avgHrBpm: null }),
+      // Récente et avec FC, mais ce n'est pas de la course à pied.
+      makeActivity({ startedAt: new Date('2026-08-06T09:00:00.000Z'), sportType: 'Ride' }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.vo2maxUnavailable).toEqual({
+      missingMaxHrBpm: false,
+      noRecentRunWithHeartRate: true,
+    });
+  });
+
+  it('ne pointe aucune cause franche quand les courses récentes sont simplement inexploitables', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    // Avec FC et récentes, mais trop courtes pour l'estimation (< 3 km ici).
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-05T09:00:00.000Z'), distanceM: 1_200 }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.vo2max).toBeNull();
+    expect(summary.vo2maxUnavailable).toEqual({
+      missingMaxHrBpm: false,
+      noRecentRunWithHeartRate: false,
+    });
   });
 });
 
