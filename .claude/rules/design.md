@@ -87,7 +87,9 @@ Mode clair : non prioritaire (l'appli est dark-first par identité). S'il est aj
 Couleurs de séries des panneaux du détail d'activité (un panneau = une série,
 jamais deux axes) : allure = `accent`, FC = `negative` (#F87171), altitude =
 remplissage `fg-faint` ~15 %, cadence = `--color-chart-cadence` (#38BDF8, token
-dédié). Le texte reste en tokens texte, jamais en couleur de série.
+dédié), foulée = `--color-chart-stride` (#2DD4BF, token dédié, teal — famille
+froide distincte de la cadence bleue), contraste 10,4:1 vs `bg`. Le texte reste
+en tokens texte, jamais en couleur de série.
 
 - Fond transparent, grille quasi invisible (`border` à 40%), courbe 2px, remplissage `accent` à 12–14%, point terminal accentué.
 - Zones cardio avec la rampe dédiée ci-dessus. Tooltips en mono. Suivre le skill dataviz pour tout nouveau graphe.

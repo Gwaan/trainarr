@@ -122,6 +122,24 @@ function appleWatchStreams(): ActivityStream[] {
   ];
 }
 
+/**
+ * Séance d'une heure à 4 m/s, FC à 140 puis 154 à mi-parcours : assez longue
+ * pour que la dérive cardiaque soit calculable (plancher de 20 min), et assez
+ * régulière pour que sa valeur soit prévisible à la main.
+ */
+const LONG_POINT_COUNT = 3_001;
+
+function longStreams(): ActivityStream[] {
+  const time = Array.from({ length: LONG_POINT_COUNT }, (_, index) => index);
+  return [
+    stream('time', time),
+    stream('distance', time.map((second) => second * SPEED_M_PER_S)),
+    stream('heartrate', time.map((second) => (second < 1_500 ? 140 : 154))),
+    stream('velocity', time.map(() => SPEED_M_PER_S)),
+    stream('cadence', time.map(() => 170)),
+  ];
+}
+
 beforeEach(() => {
   queryState.rows = {};
 });
@@ -157,10 +175,11 @@ describe('getActivityFull', () => {
     // Distance rebasée sur le départ de la trace, pas le cumul brut du FIT.
     expect(charts.points[0].distanceM).toBe(0);
     expect(charts.points[charts.points.length - 1].distanceM).toBeCloseTo(2_600, 6);
-    // 4 m/s constants → 250 s/km partout.
+    // 4 m/s constants → 250 s/km partout, et 60 × 4 / 172 ≈ 1,395 m de foulée.
     for (const point of charts.points) {
       expect(point.paceSecPerKm).toBeCloseTo(250, 6);
       expect(point.cadenceSpm).toBe(172);
+      expect(point.strideM).toBeCloseTo((60 * SPEED_M_PER_S) / 172, 9);
     }
     // La trace GPS n'est pas décimée.
     expect(charts.latlng).toHaveLength(POINT_COUNT);
@@ -178,6 +197,99 @@ describe('getActivityFull', () => {
 
     expect(full.trimp).toBeGreaterThan(0);
     expect(full.effectiveVo2max).toBeGreaterThan(20);
+    expect(full.profileMaxHrBpm).toBe(190);
+
+    // Distribution d'allure : 250 s/km constants tombent tous dans la tranche
+    // [240, 255) de la grille de 15 s ancrée à 3:00/km.
+    expect(full.paceDistribution).toEqual([{ from: 240, to: 255, seconds: 650 }]);
+
+    // Distribution de FC : 140 puis 160 bpm, tranches de 5 bpm. Les trois
+    // tranches intermédiaires sont émises à zéro — un creux est une information.
+    const hrBins = full.hrDistribution ?? [];
+    expect(hrBins.map((bin) => bin.from)).toEqual([140, 145, 150, 155, 160]);
+    // Le point de bascule 140 → 160 partage sa seconde entre les deux tranches
+    // (règle du demi-pas de `cappedSampleDurationsS`) : 299,5 + 350,5 = 650 s.
+    expect(hrBins.map((bin) => bin.seconds)).toEqual([299.5, 0, 0, 0, 350.5]);
+
+    // Séance de 650 s : sous le plancher de 20 min de la dérive cardiaque.
+    expect(full.decoupling).toBeNull();
+
+    // 2 600 m parcourus : le 5 km n'existe pas dans cette séance.
+    expect(full.bestSegments.map((segment) => segment.targetM)).toEqual([
+      400, 1000, 1609.34,
+    ]);
+    expect(full.bestSegments[1].timeS).toBeCloseTo(250, 6);
+    expect(full.bestSegments[1].paceSecPerKm).toBeCloseTo(250, 6);
+  });
+
+  it('calcule la dérive cardiaque d’une séance assez longue', async () => {
+    queryState.rows = {
+      activities: [{ ...ACTIVITY, movingTimeS: 3_000, distanceM: 12_000 }],
+      activity_streams: longStreams(),
+      athlete: [ATHLETE],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+    const decoupling = full?.decoupling ?? null;
+    expect(decoupling).not.toBeNull();
+    if (decoupling === null) return;
+
+    // Allure constante, FC qui passe de 140 à 154 : l'efficience perd
+    // 1 − 140/154 ≈ 9,1 % entre les deux moitiés.
+    // La coupure tombe sur un échantillon, pas à la milliseconde : les moyennes
+    // approchent 140 et 154 sans les valoir exactement.
+    expect(decoupling.firstHalf.avgHrBpm).toBeCloseTo(140, 1);
+    expect(decoupling.secondHalf.avgHrBpm).toBeCloseTo(154, 1);
+    expect(decoupling.firstHalf.avgSpeedMps).toBeCloseTo(SPEED_M_PER_S, 9);
+    expect(decoupling.decouplingPct).toBeCloseTo(9.09, 1);
+
+    // 12 km couverts : toutes les cibles jusqu'au 10 km, pas le semi.
+    expect(full?.bestSegments.map((segment) => segment.targetM)).toEqual([
+      400, 1000, 1609.34, 5000, 10000,
+    ]);
+  });
+
+  it('ne prête aucune lecture de coureur à une sortie vélo', async () => {
+    queryState.rows = {
+      activities: [{ ...ACTIVITY, sportType: 'Ride' }],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    // À vélo, `cadence` compte des tours de pédalier : le quotient
+    // vitesse ÷ cadence est un développement, pas une foulée.
+    expect(full?.charts?.points.every((point) => point.strideM === null)).toBe(true);
+    // Les bornes 3:00–12:00/km sont celles d'un coureur.
+    expect(full?.paceDistribution).toBeNull();
+    // Pa:Hr compare des allures ; le panneau en afficherait une, absurde ici.
+    expect(full?.decoupling).toBeNull();
+    expect(full?.bestSegments).toEqual([]);
+
+    // La FC ne présume d'aucun sport : c'est la même mesure partout.
+    expect(full?.hrDistribution).not.toBeNull();
+    // Le reste de la séance est intact : graphes, splits et zones restent.
+    expect(full?.charts?.points.length).toBeGreaterThan(1);
+    expect(full?.splits).toHaveLength(3);
+    expect(full?.hrZones).not.toBeNull();
+  });
+
+  it('calcule la foulée en marche comme en course', async () => {
+    // `usesFootCadenceSportType` couvre Run, TrailRun, VirtualRun, Walk et Hike :
+    // c'est la cadence en pas qui décide, pas le fait de courir.
+    queryState.rows = {
+      activities: [{ ...ACTIVITY, sportType: 'Hike' }],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    expect(full?.charts?.points.every((point) => point.strideM !== null)).toBe(true);
+    // Une randonnée n'est pas une course : pas de meilleurs segments pour autant.
+    expect(full?.bestSegments).toEqual([]);
+    expect(full?.paceDistribution).toBeNull();
   });
 
   it('dégrade proprement une activité sans aucune série temporelle', async () => {
@@ -188,6 +300,10 @@ describe('getActivityFull', () => {
     expect(full?.charts).toBeNull();
     expect(full?.splits).toEqual([]);
     expect(full?.hrZones).toBeNull();
+    expect(full?.paceDistribution).toBeNull();
+    expect(full?.hrDistribution).toBeNull();
+    expect(full?.decoupling).toBeNull();
+    expect(full?.bestSegments).toEqual([]);
     // Le TRIMP et la VO₂max viennent des colonnes de l'activité : ils restent.
     expect(full?.trimp).toBeGreaterThan(0);
     expect(full?.effectiveVo2max).toBeGreaterThan(20);
@@ -202,8 +318,12 @@ describe('getActivityFull', () => {
     expect(full?.splits).toHaveLength(3);
     // Sans FC max ni sexe au profil, rien n'est estimé.
     expect(full?.hrZones).toBeNull();
+    expect(full?.profileMaxHrBpm).toBeNull();
     expect(full?.trimp).toBeNull();
     expect(full?.effectiveVo2max).toBeNull();
+    // Les distributions ne dépendent d'aucun profil : une répartition brute.
+    expect(full?.paceDistribution).not.toBeNull();
+    expect(full?.hrDistribution).not.toBeNull();
   });
 
   it('garde la trace GPS et les zones sans stream de distance', async () => {

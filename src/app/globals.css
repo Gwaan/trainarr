@@ -36,9 +36,12 @@
   --color-zone-4: #e25613;
   --color-zone-5: #ff4d00;
 
-  /* Séries de graphe hors accent — la cadence, qu'aucun token existant ne peut
-     porter (l'accent est pris par l'allure, `negative` par la FC). */
+  /* Séries de graphe hors accent — la cadence et la foulée, qu'aucun token
+     existant ne peut porter (l'accent est pris par l'allure, `negative` par la
+     FC). Deux teintes froides distinctes : le bleu de la cadence, le teal de la
+     foulée (contraste 10,4:1 contre `bg`, validé par le validateur dataviz). */
   --color-chart-cadence: #38bdf8;
+  --color-chart-stride: #2dd4bf;
 
   /* Typographie — auto-hébergée via next/font, aucune fonte système */
   --font-sans: var(--font-archivo);

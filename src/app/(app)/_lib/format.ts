@@ -9,9 +9,9 @@
  */
 
 import { APP_TIME_ZONE } from "@/config/time";
+import { civilDaysBetween, toCivilDate } from "@/lib/dates/civil";
 
 const MINUS = "−";
-const DAY_MS = 86_400_000;
 
 // `timeZone` explicite partout : le container tourne en UTC, alors que le DAL
 // agrège les jours en heure locale de l'athlète. Sans ça, entre minuit et
@@ -39,14 +39,6 @@ const fullDateFormatter = new Intl.DateTimeFormat("fr-FR", {
   day: "numeric",
   month: "long",
   timeZone: APP_TIME_ZONE,
-});
-
-/** Date civile `YYYY-MM-DD` d'un instant, dans le fuseau de l'athlète. */
-const civilDateFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: APP_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
 });
 
 /** Première lettre en capitale — les libellés `Intl` français sont en minuscules. */
@@ -127,11 +119,6 @@ export function parseCivilDate(value: string): Date | null {
   return isReal ? date : null;
 }
 
-/** Jour civil d'un instant, dans le fuseau de l'athlète — jamais celui du process. */
-function civilDayMs(date: Date): number {
-  return Date.parse(`${civilDateFormatter.format(date)}T00:00:00Z`);
-}
-
 /**
  * Jour relatif en minuscules : `aujourd'hui`, `hier`, `demain`, le nom du jour
  * dans la semaine écoulée/à venir (`dimanche`), sinon la date courte
@@ -140,16 +127,14 @@ function civilDayMs(date: Date): number {
 export function formatRelativeDay(date: Date, now: Date = new Date()): string {
   // Comparaison de jours civils dans le fuseau de l'athlète : les deux repères
   // sont à minuit UTC, donc l'écart est un nombre entier de jours exact.
-  const days = Math.round((civilDayMs(date) - civilDayMs(now)) / DAY_MS);
+  const days = civilDaysBetween(toCivilDate(now), toCivilDate(date));
 
   if (days === 0) return "aujourd'hui";
   if (days === -1) return "hier";
   if (days === 1) return "demain";
   if (days >= -6 && days <= 6) return weekdayFormatter.format(date);
 
-  const sameYear =
-    civilDateFormatter.format(date).slice(0, 4) ===
-    civilDateFormatter.format(now).slice(0, 4);
+  const sameYear = toCivilDate(date).slice(0, 4) === toCivilDate(now).slice(0, 4);
   return sameYear
     ? shortDateFormatter.format(date)
     : shortDateWithYearFormatter.format(date);

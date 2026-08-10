@@ -8,9 +8,13 @@ import { ActivityDetailSkeleton } from "./_components/activity-detail-skeleton";
 import { ActivityMapPanel } from "./_components/activity-map-panel";
 import { ActivitySplits } from "./_components/activity-splits";
 import { ActivityHeader, ActivityStatsPanel } from "./_components/activity-summary";
+import { BestSegmentsPanel } from "./_components/best-segments-panel";
+import { DecouplingPanel } from "./_components/decoupling-panel";
+import { DistributionPanel } from "./_components/distribution-panel";
 import { HrZonesPanel } from "./_components/hr-zones-panel";
 import { NoDetailedData } from "./_components/no-detailed-data";
 import { parseActivityId } from "./_lib/activity-id";
+import { hrDistributionModel, paceDistributionModel } from "./_lib/distribution-model";
 import { loadActivity } from "./_lib/load-activity";
 
 type PageProps = { params: Promise<{ id: string }> };
@@ -55,12 +59,24 @@ async function ActivityDetail({ params }: PageProps) {
   const full = await loadActivity(id);
   if (full === null) notFound();
 
-  const { detail, charts, splits, hrZones } = full;
+  const { detail, charts, splits, hrZones, decoupling, bestSegments } = full;
   const summary = { ...detail, trimp: full.trimp, effectiveVo2max: full.effectiveVo2max };
 
   const path = charts?.latlng ?? null;
   const hasMap = path !== null && path.length >= 2;
   const hasBreakdown = splits.length > 0 || hrZones !== null;
+
+  // Les modèles d'histogramme se calculent ici, côté serveur : le composant de
+  // rendu n'est client que pour son état de survol.
+  const paceBars =
+    full.paceDistribution === null ? null : paceDistributionModel(full.paceDistribution);
+  const hrBars =
+    full.hrDistribution === null
+      ? null
+      : hrDistributionModel(full.hrDistribution, full.profileMaxHrBpm);
+  const both = paceBars !== null && hrBars !== null;
+
+  const hasEfforts = decoupling !== null || bestSegments.length > 0;
 
   return (
     <>
@@ -91,6 +107,53 @@ async function ActivityDetail({ params }: PageProps) {
               className={splits.length > 0 ? "self-start lg:col-span-2" : "lg:col-span-5"}
             />
           )}
+        </div>
+      ) : null}
+
+      {/* Deux histogrammes de même nature : côte à côte, ils se comparent. */}
+      {paceBars === null && hrBars === null ? null : (
+        <div className={both ? "grid gap-4 md:grid-cols-2" : "grid gap-4"}>
+          {paceBars === null ? null : (
+            <DistributionPanel
+              title="Distribution de l'allure"
+              model={paceBars}
+              hint="Temps passé dans chaque tranche d'allure."
+            />
+          )}
+          {hrBars === null ? null : (
+            <DistributionPanel
+              title="Distribution cardiaque"
+              model={hrBars}
+              // La couleur ne se devine pas : quand les tranches sont zonées,
+              // la légende le dit — sinon elle ne promet rien.
+              hint={
+                full.profileMaxHrBpm === null
+                  ? "Temps passé dans chaque tranche de fréquence cardiaque."
+                  : "Temps passé dans chaque tranche de fréquence cardiaque, colorée par zone."
+              }
+            />
+          )}
+        </div>
+      )}
+
+      {hasEfforts ? (
+        <div className="grid gap-4 lg:grid-cols-5">
+          {decoupling === null ? null : (
+            <DecouplingPanel
+              decoupling={decoupling}
+              className={
+                bestSegments.length > 0 ? "self-start lg:col-span-2" : "lg:col-span-5"
+              }
+            />
+          )}
+          {bestSegments.length > 0 ? (
+            <BestSegmentsPanel
+              segments={bestSegments}
+              className={
+                decoupling === null ? "lg:col-span-5" : "self-start lg:col-span-3"
+              }
+            />
+          ) : null}
         </div>
       ) : null}
     </>

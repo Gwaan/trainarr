@@ -2,7 +2,7 @@ import 'server-only';
 
 import { asc, eq } from 'drizzle-orm';
 
-import { APP_TIME_ZONE } from '@/config/time';
+import { toCivilDate } from '@/lib/dates/civil';
 
 import { db } from './db/client';
 import { ATHLETE_SEXES, athlete, type Athlete, type AthleteSex } from './db/schema';
@@ -110,20 +110,13 @@ export function toAthleteProfileDto(row: Athlete): AthleteProfileDto {
  * valeur aberrante, quel que soit son appelant.
  */
 
-const civilDateFormatter = new Intl.DateTimeFormat('en-CA', {
-  timeZone: APP_TIME_ZONE,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
-
 /**
  * Aujourd'hui dans le fuseau de l'athlète — une date de naissance est civile,
  * pas un instant. Exportée pour que la validation Zod de la Server Action borne
  * la date exactement comme le DAL.
  */
 export function todayCivilDate(): string {
-  return civilDateFormatter.format(new Date());
+  return toCivilDate(new Date());
 }
 
 const CIVIL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;

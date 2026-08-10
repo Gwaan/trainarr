@@ -23,7 +23,8 @@ function PanelFrame({
  * Squelette du détail d'une activité.
  *
  * Même géométrie que la page réelle (en-tête, chiffres + carte, graphes
- * empilés, kilomètres) pour qu'aucun bloc ne saute à l'arrivée des données.
+ * empilés, kilomètres et zones, distributions, dérive et meilleurs segments)
+ * pour qu'aucun bloc ne saute à l'arrivée des données.
  * Toute modification de la mise en page doit être répercutée ici.
  */
 export function ActivityDetailSkeleton() {
@@ -61,17 +62,21 @@ export function ActivityDetailSkeleton() {
 
       <PanelFrame>
         <div className="flex flex-col gap-4 p-4 sm:p-5">
-          {["h-36 sm:h-44", "h-36 sm:h-44", "h-24 sm:h-28", "h-24 sm:h-28"].map(
-            (height, index) => (
-              <div key={index} className="flex flex-col gap-1.5">
-                <Skeleton className="h-3 w-40" />
-                <div className="flex gap-2">
-                  <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
-                  <Skeleton className={`min-w-0 flex-1 ${height}`} />
-                </div>
+          {[
+            "h-36 sm:h-44",
+            "h-36 sm:h-44",
+            "h-24 sm:h-28",
+            "h-24 sm:h-28",
+            "h-24 sm:h-28",
+          ].map((height, index) => (
+            <div key={index} className="flex flex-col gap-1.5">
+              <Skeleton className="h-3 w-40" />
+              <div className="flex gap-2">
+                <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
+                <Skeleton className={`min-w-0 flex-1 ${height}`} />
               </div>
-            ),
-          )}
+            </div>
+          ))}
         </div>
       </PanelFrame>
 
@@ -87,6 +92,38 @@ export function ActivityDetailSkeleton() {
           <div className="flex flex-col gap-0.5 p-4 sm:p-5">
             {[0, 1, 2, 3, 4].map((zone) => (
               <Skeleton key={zone} className="h-4 w-full" />
+            ))}
+          </div>
+        </PanelFrame>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {[0, 1].map((histogram) => (
+          <PanelFrame key={histogram}>
+            <div className="flex flex-col gap-3 p-4 sm:p-5">
+              <Skeleton className="h-3 w-48 max-w-full" />
+              <div className="flex gap-2">
+                <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
+                <Skeleton className="h-32 min-w-0 flex-1 sm:h-36" />
+              </div>
+            </div>
+          </PanelFrame>
+        ))}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-5">
+        <PanelFrame className="self-start lg:col-span-2">
+          <div className="flex flex-col gap-3 p-4 sm:p-5">
+            <Skeleton className="h-7 w-28" />
+            {[0, 1, 2].map((row) => (
+              <Skeleton key={row} className="h-4 w-full" />
+            ))}
+          </div>
+        </PanelFrame>
+        <PanelFrame className="self-start lg:col-span-3">
+          <div className="flex flex-col gap-3 p-4 sm:p-5">
+            {[0, 1, 2, 3].map((row) => (
+              <Skeleton key={row} className="h-4 w-full" />
             ))}
           </div>
         </PanelFrame>

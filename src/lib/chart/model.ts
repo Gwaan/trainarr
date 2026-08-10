@@ -1,5 +1,5 @@
 /**
- * Géométrie des graphes de séance — fonctions pures, testées.
+ * Géométrie des graphes maison — fonctions pures, testées.
  *
  * Aucun JSX ici : les composants SVG restent déclaratifs et se contentent de
  * consommer les échelles, chemins et graduations calculés dans ce module.
@@ -15,20 +15,6 @@
 export const VIEW_W = 1000;
 /** Hauteur du repère interne — la hauteur réelle est fixée en CSS. */
 export const VIEW_H = 100;
-
-/** Un point de la série temporelle d'une activité, tel que le livre le DAL. */
-export type ChartPoint = {
-  timeS: number;
-  /** `null` quand la séance n'a pas de stream de distance (tapis sans capteur). */
-  distanceM: number | null;
-  paceSecPerKm: number | null;
-  hrBpm: number | null;
-  altitudeM: number | null;
-  cadenceSpm: number | null;
-};
-
-/** Abscisse commune à tous les panneaux. */
-export type XAxisKind = "distance" | "time";
 
 export type Domain = { min: number; max: number };
 
@@ -224,6 +210,92 @@ export function areaPath(points: readonly (Pt | null)[]): string {
   flush();
 
   return d;
+}
+
+/** Aire d'un tronçon continu, refermée sur une ordonnée de référence. */
+function areaAgainst(run: readonly Pt[], baselineY: number): string {
+  if (run.length < 2) return "";
+
+  const first = run[0];
+  const last = run[run.length - 1];
+  let d = `M ${round(first.x)} ${round(baselineY)}`;
+  for (const point of run) d += ` L ${round(point.x)} ${round(point.y)}`;
+  return `${d} L ${round(last.x)} ${round(baselineY)} Z`;
+}
+
+/** Point où le segment `from`→`to` croise l'ordonnée `y`. */
+function crossing(from: Pt, to: Pt, y: number): Pt {
+  const span = to.y - from.y;
+  // Les deux points sont de part et d'autre de `y` : `span` ne peut pas être nul.
+  return { x: from.x + ((y - from.y) / span) * (to.x - from.x), y };
+}
+
+/**
+ * Aires d'une série **divergente** : ce qui est au-dessus de la ligne de zéro
+ * d'un côté, ce qui est en dessous de l'autre, chaque tronçon coupé net à la
+ * traversée.
+ *
+ * Sans cette découpe, une seule aire remplirait tout l'écart à zéro et les deux
+ * signes porteraient la même couleur — or c'est précisément le signe que le TSB
+ * raconte (frais au-dessus, en dette en dessous). Le point de croisement est
+ * interpolé linéairement, comme le segment qui le porte : la courbe ne dit rien
+ * de plus que ce qu'elle traçait déjà.
+ *
+ * `zeroY` est en unités de vue (l'axe Y du SVG descend) : « au-dessus » signifie
+ * donc une ordonnée **plus petite**. Les trous coupent les aires comme les
+ * courbes — jamais d'interpolation par-dessus une mesure absente.
+ */
+export function divergingAreaPaths(
+  points: readonly (Pt | null)[],
+  zeroY: number,
+): { above: string; below: string } {
+  let above = "";
+  let below = "";
+
+  let run: Pt[] = [];
+  // -1 au-dessus de zéro, 1 en dessous, 0 tant que la série colle à la ligne.
+  let side: -1 | 0 | 1 = 0;
+
+  const sideOf = (y: number): -1 | 0 | 1 => (y < zeroY ? -1 : y > zeroY ? 1 : 0);
+
+  const flush = () => {
+    if (side === -1) above += areaAgainst(run, zeroY);
+    else if (side === 1) below += areaAgainst(run, zeroY);
+    run = [];
+    side = 0;
+  };
+
+  for (const point of points) {
+    if (point === null) {
+      flush();
+      continue;
+    }
+
+    const pointSide = sideOf(point.y);
+    if (run.length === 0) {
+      run.push(point);
+      side = pointSide;
+      continue;
+    }
+
+    if (side === 0 || pointSide === 0 || pointSide === side) {
+      run.push(point);
+      // Une série partie de la ligne de zéro prend le signe de son premier écart.
+      if (side === 0) side = pointSide;
+      continue;
+    }
+
+    // Changement de signe : le point de croisement ferme l'aire courante et
+    // ouvre la suivante, pour que les deux se rejoignent exactement sur la ligne.
+    const cross = crossing(run[run.length - 1], point, zeroY);
+    run.push(cross);
+    flush();
+    run = [cross, point];
+    side = pointSide;
+  }
+  flush();
+
+  return { above, below };
 }
 
 /*

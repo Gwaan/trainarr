@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatAltitude,
+  formatBinTime,
   formatCadence,
   formatClock,
   formatDistanceTick,
   formatElevationGain,
   formatFullDateTime,
   formatPaceValue,
+  formatSignedPercent,
+  formatStride,
+  formatStrideTick,
   formatTrimp,
 } from "./format-detail";
 import { parseActivityId } from "./activity-id";
@@ -40,6 +44,33 @@ describe("formats d'unités", () => {
     expect(formatAltitude(412.6)).toBe("413 m");
     expect(formatCadence(174.2)).toBe("174 spm");
     expect(formatTrimp(118.7)).toBe("119");
+  });
+
+  it("rend la foulée au centimètre, virgule française", () => {
+    expect(formatStride(1.1789)).toBe("1,18 m");
+    expect(formatStride(1.2)).toBe("1,20 m");
+    expect(formatStrideTick(1.2)).toBe("1,20");
+  });
+});
+
+describe("formatBinTime", () => {
+  it("rend le temps d'une tranche sans arrondir à la minute", () => {
+    expect(formatBinTime(45)).toBe("45 s");
+    expect(formatBinTime(60)).toBe("1 min");
+    expect(formatBinTime(750)).toBe("12 min 30");
+    expect(formatBinTime(2880)).toBe("48 min");
+    expect(formatBinTime(3872)).toBe("1 h 04");
+    expect(formatBinTime(-5)).toBe("0 s");
+  });
+});
+
+describe("formatSignedPercent", () => {
+  it("porte toujours le sens de la dérive", () => {
+    expect(formatSignedPercent(4.23)).toBe("+4,2 %");
+    expect(formatSignedPercent(-1.84)).toBe("−1,8 %");
+    // Arrondi nul : ni « + » ni « − », il n'y a pas de sens à annoncer.
+    expect(formatSignedPercent(0.02)).toBe("0,0 %");
+    expect(formatSignedPercent(0)).toBe("0,0 %");
   });
 });
 

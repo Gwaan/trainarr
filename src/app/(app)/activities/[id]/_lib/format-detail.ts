@@ -64,6 +64,52 @@ export function formatCadence(spm: number): string {
   return `${formatNumber(spm, 0)} spm`;
 }
 
+/**
+ * Longueur de foulée, ex. `1,18 m`.
+ *
+ * Deux décimales : l'écart utile entre deux séances se joue au centimètre
+ * (1,18 m contre 1,24 m), qu'un arrondi au décimètre effacerait.
+ */
+export function formatStride(meters: number): string {
+  return `${formatNumber(meters, 2)} m`;
+}
+
+/** Foulée nue `1,20` — sans unité, pour les graduations d'axe. */
+export function formatStrideTick(meters: number): string {
+  return formatNumber(meters, 2);
+}
+
+/**
+ * Temps passé dans une tranche d'histogramme : `45 s`, `12 min 30`, `48 min`,
+ * `1 h 04`.
+ *
+ * Exact à la seconde, contrairement à `formatDuration` qui arrondit à la minute :
+ * une tranche de 90 s ne doit pas s'afficher « 2 min » à côté d'une part de 3 %
+ * qui, elle, est calculée sur la valeur réelle.
+ */
+export function formatBinTime(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) return `${total} s`;
+
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+
+  if (hours > 0) return `${hours} h ${String(minutes).padStart(2, "0")}`;
+  return rest === 0 ? `${minutes} min` : `${minutes} min ${String(rest).padStart(2, "0")}`;
+}
+
+/**
+ * Pourcentage signé, ex. `+4,2 %`, `−1,8 %`. Le signe porte le sens de la
+ * dérive : sans lui, « 4,2 % » ne dirait pas dans quel sens le cœur a dérivé.
+ * Une valeur qui s'arrondit à zéro ne reçoit aucun signe.
+ */
+export function formatSignedPercent(value: number, fractionDigits = 1): string {
+  const rounded = Number(value.toFixed(fractionDigits));
+  const text = formatNumber(value, fractionDigits);
+  return rounded > 0 ? `+${text} %` : `${text} %`;
+}
+
 /** TRIMP à l'entier — l'unité n'a pas de symbole. */
 export function formatTrimp(value: number): string {
   return formatNumber(value, 0);

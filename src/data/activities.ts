@@ -2,18 +2,26 @@ import 'server-only';
 
 import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
 
-import { APP_TIME_ZONE } from '@/config/time';
+import { isoWeekNumber, isoWeekStart, toCivilDate } from '@/lib/dates/civil';
 import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
-import { defaultActivityName } from '@/lib/fit/sport';
+import { defaultActivityName, usesFootCadenceSportType } from '@/lib/fit/sport';
 import {
+  computeBestSegments,
+  computeDecoupling,
   computeHrZones,
   computeSplits,
   computeTrimp,
   deriveVelocity,
   estimateEffectiveVo2max,
+  hrDistribution,
+  paceDistribution,
   paceSecPerKm,
   resamplePoints,
   smoothPace,
+  strideSeries,
+  type BestSegment,
+  type Decoupling,
+  type DistributionBin,
   type SeriesSample,
 } from '@/lib/metrics';
 
@@ -28,6 +36,7 @@ import {
   type ActivityStreamType,
   type NewActivityStream,
 } from './db/schema';
+import { isRunning } from './training-metrics';
 
 /**
  * DTOs des activités exposés à l'UI.
@@ -94,53 +103,6 @@ export async function listRecentActivities(limit = 20): Promise<ActivitySummaryD
     .orderBy(desc(activities.startedAt))
     .limit(limit);
   return rows.map(toActivitySummaryDto);
-}
-
-/*
- * Découpage en semaines ISO.
- *
- * Ces trois helpers dupliquent la logique privée de `dashboard.ts`
- * (`isoDayIndex`, `isoWeekNumber` et le repère « minuit UTC du jour civil ») :
- * elle n'y est pas exportée, et l'y exposer ferait dépendre le module des
- * activités d'un module d'agrégation qui, lui, importe déjà celui-ci. Les
- * commentaires détaillés (choix du jeudi, semaine 1 ISO) vivent là-bas.
- */
-
-const DAY_MS = 86_400_000;
-
-const civilDateFormatter = new Intl.DateTimeFormat('en-CA', {
-  timeZone: APP_TIME_ZONE,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
-
-/** Date civile `YYYY-MM-DD` d'un instant, dans le fuseau de l'athlète. */
-function toCivilDate(instant: Date): string {
-  return civilDateFormatter.format(instant);
-}
-
-/** Minuit UTC de la date civile — repère de calcul, jamais affiché. */
-function civilDateToMs(date: string): number {
-  return Date.parse(`${date}T00:00:00Z`);
-}
-
-/** Index du jour dans la semaine ISO : lundi = 0 … dimanche = 6. */
-function isoDayIndex(date: string): number {
-  return (new Date(civilDateToMs(date)).getUTCDay() + 6) % 7;
-}
-
-/** Lundi de la semaine ISO contenant `date` — clé de regroupement. */
-function isoWeekStart(date: string): string {
-  return new Date(civilDateToMs(date) - isoDayIndex(date) * DAY_MS).toISOString().slice(0, 10);
-}
-
-/** Numéro de semaine ISO 8601 (la semaine 1 contient le premier jeudi). */
-function isoWeekNumber(date: string): number {
-  const thursday = new Date(civilDateToMs(date) + (3 - isoDayIndex(date)) * DAY_MS);
-  const january4 = `${thursday.getUTCFullYear()}-01-04`;
-  const firstThursday = new Date(civilDateToMs(january4) + (3 - isoDayIndex(january4)) * DAY_MS);
-  return 1 + Math.round((thursday.getTime() - firstThursday.getTime()) / (7 * DAY_MS));
 }
 
 /**
@@ -229,6 +191,8 @@ export type ActivityChartsDto = {
     hrBpm: number | null;
     altitudeM: number | null;
     cadenceSpm: number | null;
+    /** Longueur de foulée en mètres, null si vitesse ou cadence manque ici. */
+    strideM: number | null;
   }>;
   /**
    * Trace GPS complète (pas rééchantillonnée), `null` si absente.
@@ -268,6 +232,21 @@ export type ActivityFullDto = {
   splits: ActivitySplitDto[];
   /** `null` sans stream de FC ou sans FC max au profil. */
   hrZones: HrZoneDto[] | null;
+  /**
+   * FC max **du profil athlète**, distincte de `detail.maxHrBpm` (le maximum
+   * atteint pendant cette séance). C'est elle qui découpe les zones : l'affichage
+   * en a besoin pour colorer une tranche d'histogramme dans la rampe des zones,
+   * et il n'a pas d'autre chemin vers le profil.
+   */
+  profileMaxHrBpm: number | null;
+  /** Temps par tranche d'allure. `null` sans vitesse mesurée ni dérivable. */
+  paceDistribution: DistributionBin[] | null;
+  /** Temps par tranche de FC. `null` sans stream de FC. */
+  hrDistribution: DistributionBin[] | null;
+  /** Dérive cardiaque. `null` sous 20 min ou si un capteur couvre mal une moitié. */
+  decoupling: Decoupling | null;
+  /** Meilleurs efforts sur les distances de référence — course à pied uniquement. */
+  bestSegments: BestSegment[];
   trimp: number | null;
   /** Course à pied uniquement. */
   effectiveVo2max: number | null;
@@ -372,6 +351,32 @@ function firstMeasured(values: readonly (number | null)[]): number | null {
 }
 
 /**
+ * Vitesse instantanée de la séance, en m/s, alignée sur l'axe des temps.
+ *
+ * Le canal `velocity` du fichier prime toujours : c'est une mesure. Quand il est
+ * absent (cas des Apple Watch, qui n'écrivent pas `speed` dans leurs `record`)
+ * mais que `distance` est là, la vitesse est calculée par `deriveVelocity`.
+ * C'est une division entre deux mesures réelles, pas une estimation — et elle
+ * vaut pour tout l'historique déjà en base, puisqu'elle se fait à la lecture.
+ * Le stream stocké, lui, reste ce que le fichier contenait.
+ *
+ * `undefined` quand la séance ne porte ni vitesse ni distance : rien à dériver.
+ *
+ * Calculée **une fois** par lecture et partagée : l'allure des graphes, la
+ * foulée, la distribution d'allure et la dérive cardiaque lisent toutes cette
+ * série-là.
+ */
+function activitySpeeds(
+  numeric: NumericStreams,
+  time: number[] | null,
+): (number | null)[] | undefined {
+  const { velocity, distance } = numeric;
+  if (velocity !== undefined) return velocity;
+  if (distance === undefined || time === null) return undefined;
+  return deriveVelocity(distance, time);
+}
+
+/**
  * Séries prêtes pour les graphes.
  *
  * L'axe des temps (`time`) est la colonne vertébrale : sans lui, aucun point
@@ -379,19 +384,18 @@ function firstMeasured(values: readonly (number | null)[]): number | null {
  * de tous ses points pour ne pas couper les virages, et une paire de flottants
  * pèse bien moins qu'un point de graphe.
  *
- * **Allure dérivée** : quand le fichier ne porte pas de canal `velocity` (cas
- * des Apple Watch, qui n'écrivent pas `speed` dans leurs `record`) mais qu'il
- * porte `distance`, la vitesse est calculée par `deriveVelocity` avant lissage.
- * C'est une division entre deux mesures réelles, pas une estimation — et elle
- * vaut pour tout l'historique déjà en base, puisqu'elle se fait à la lecture.
- * Le stream stocké, lui, reste ce que le fichier contenait.
+ * La vitesse arrive de {@link activitySpeeds} : allure, foulée et distributions
+ * doivent lire exactement la même série, sans quoi deux blocs de la page
+ * décriraient la même séance différemment.
  */
 function buildCharts(
   numeric: NumericStreams,
   time: number[] | null,
   sparseLatlng: Array<[number, number] | null> | null,
+  speeds: (number | null)[] | undefined,
+  footCadence: boolean,
 ): ActivityChartsDto | null {
-  const { distance, heartrate, altitude, cadence, velocity } = numeric;
+  const { distance, heartrate, altitude, cadence } = numeric;
   const count = time === null ? 0 : alignedLength(numeric);
 
   const path = sparseLatlng?.filter((fix): fix is [number, number] => fix !== null) ?? null;
@@ -401,10 +405,19 @@ function buildCharts(
     return latlng === null ? null : { points: [], latlng };
   }
 
-  // `velocity` d'abord : la mesure du fichier prime toujours sur la dérivation.
-  const derived = distance === undefined ? undefined : deriveVelocity(distance, time);
-  const speeds = velocity ?? derived;
   const paces = speeds === undefined ? null : smoothPace(speeds, time);
+
+  // Foulée : vitesse ÷ cadence, sur la **même** vitesse que l'allure. Ni l'une
+  // ni l'autre n'est reportée sur un point où son capteur s'est tu.
+  //
+  // Sports à pied uniquement : ailleurs, `cadence` compte des tours de pédalier
+  // (le parseur ne double que la cadence des sports à pied, cf. `usesFootCadence`)
+  // et le quotient donnerait un développement — 5,65 m à vélo — affiché comme
+  // une foulée. Une grandeur juste sous un mauvais nom reste une donnée fausse.
+  const strides =
+    !footCadence || speeds === undefined || cadence === undefined
+      ? null
+      : strideSeries(speeds, cadence);
 
   // Le cumul de distance du FIT ne repart pas de zéro : la page affiche des
   // mètres depuis le départ de la trace, donc depuis sa première mesure.
@@ -420,20 +433,11 @@ function buildCharts(
       hrBpm: heartrate === undefined ? null : heartrate[index],
       altitudeM: altitude === undefined ? null : altitude[index],
       cadenceSpm: cadence === undefined ? null : cadence[index],
+      strideM: strides === null ? null : strides[index],
     };
   }
 
   return { points: resamplePoints(samples), latlng };
-}
-
-/**
- * La VO₂max effective n'a de sens qu'en course à pied (`Run`, `TrailRun`…).
- *
- * Duplique le prédicat privé de `dashboard.ts` : ce module ne peut pas l'importer
- * de là-bas, `dashboard.ts` dépendant déjà de celui-ci.
- */
-function isRunning(sportType: string): boolean {
-  return sportType.toLowerCase().includes('run');
 }
 
 /**
@@ -442,6 +446,11 @@ function isRunning(sportType: string): boolean {
  * `null` si l'activité n'existe pas. Sinon, chaque bloc se dégrade seul : pas de
  * streams → `charts` à `null` mais le détail et le TRIMP restent ; pas de FC max
  * au profil → pas de zones, mais les splits sont là.
+ *
+ * Distributions, dérive cardiaque et meilleurs segments se calculent **ici**, sur
+ * les streams entiers : les points des graphes sont décimés (600 au plus), et un
+ * histogramme de temps bâti dessus compterait le temps de la décimation, pas
+ * celui de la séance.
  */
 export async function getActivityFull(id: number): Promise<ActivityFullDto | null> {
   const [activityRows, streamRows, profile] = await Promise.all([
@@ -457,6 +466,13 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   const { distance, heartrate, altitude } = numeric;
   const time = denseTimeAxis(numeric.time);
   const maxHrBpm = profile?.maxHrBpm ?? null;
+  const speeds = activitySpeeds(numeric, time);
+
+  // Deux questions distinctes, et deux prédicats distincts : « est-ce de la
+  // course ? » (les lectures d'allure) et « la cadence compte-t-elle des pas ? »
+  // (la foulée, vraie aussi en marche et en randonnée).
+  const running = isRunning(row.sportType);
+  const footCadence = usesFootCadenceSportType(row.sportType);
 
   const splits =
     time !== null && distance !== undefined
@@ -479,7 +495,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
         })
       : null;
 
-  const effectiveVo2max = isRunning(row.sportType)
+  const effectiveVo2max = running
     ? estimateEffectiveVo2max({
         distanceM: row.distanceM,
         movingTimeS: row.movingTimeS,
@@ -488,11 +504,42 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
       })
     : null;
 
+  // Course à pied seulement : l'axe d'allure de `paceDistribution` est borné à
+  // 3:00–12:00/km, des bornes de coureur. Une sortie vélo à 8 m/s tomberait tout
+  // entière dans le bin de bord « < 3:00 » — un histogramme d'une seule barre,
+  // qui n'apprendrait rien et prétendrait pourtant décrire la séance.
+  const paceBins =
+    running && time !== null && speeds !== undefined
+      ? paceDistribution(speeds, time)
+      : null;
+
+  // La FC, elle, ne présume d'aucun sport : c'est la même mesure partout.
+  const hrBins = time !== null && heartrate !== undefined ? hrDistribution(heartrate, time) : null;
+
+  // Course à pied seulement : la méthode Pa:Hr de Friel compare des allures, et
+  // le panneau affiche une ligne « Allure » — à vélo elle annoncerait 2:05/km.
+  const decoupling =
+    running && time !== null && speeds !== undefined && heartrate !== undefined
+      ? computeDecoupling(speeds, heartrate, time)
+      : null;
+
+  // Un « record » à l'allure n'a pas de sens à vélo : les meilleurs efforts sont
+  // une lecture de course à pied, comme la VO₂max effective au-dessus.
+  const bestSegments =
+    running && time !== null && distance !== undefined
+      ? computeBestSegments(distance, time)
+      : [];
+
   return {
     detail: toActivityDetailDto(row),
-    charts: buildCharts(numeric, time, latlng),
+    charts: buildCharts(numeric, time, latlng, speeds, footCadence),
     splits,
     hrZones: hrZones.length > 0 ? hrZones : null,
+    profileMaxHrBpm: maxHrBpm,
+    paceDistribution: paceBins,
+    hrDistribution: hrBins,
+    decoupling,
+    bestSegments,
     trimp,
     effectiveVo2max,
   };

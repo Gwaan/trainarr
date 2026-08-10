@@ -6,6 +6,7 @@ import {
   areaPath,
   chipSide,
   clampRatio,
+  divergingAreaPaths,
   edgeAnchor,
   extentOf,
   linePath,
@@ -17,7 +18,7 @@ import {
   projectY,
   ticksIn,
   timeStep,
-} from "./chart-model";
+} from "./model";
 
 describe("niceStep", () => {
   it("choisit un pas rond couvrant l'étendue", () => {
@@ -151,6 +152,74 @@ describe("areaPath", () => {
 
   it("ignore un tronçon d'un seul point : il n'a pas de surface", () => {
     expect(areaPath([{ x: 0, y: 10 }, null])).toBe("");
+  });
+});
+
+describe("divergingAreaPaths", () => {
+  // L'axe Y du SVG descend : une ordonnée plus petite que `zeroY` est « au-dessus ».
+  const ZERO = 50;
+
+  it("range une série entièrement positive du seul côté haut", () => {
+    const { above, below } = divergingAreaPaths(
+      [
+        { x: 0, y: 20 },
+        { x: 100, y: 30 },
+      ],
+      ZERO,
+    );
+
+    expect(above).toBe("M 0.00 50.00 L 0.00 20.00 L 100.00 30.00 L 100.00 50.00 Z");
+    expect(below).toBe("");
+  });
+
+  it("coupe l'aire sur la ligne de zéro au changement de signe", () => {
+    const { above, below } = divergingAreaPaths(
+      [
+        { x: 0, y: 30 },
+        { x: 100, y: 70 },
+      ],
+      ZERO,
+    );
+
+    // Croisement à mi-chemin : les deux aires se rejoignent exactement en x = 50.
+    expect(above).toBe("M 0.00 50.00 L 0.00 30.00 L 50.00 50.00 L 50.00 50.00 Z");
+    expect(below).toBe("M 50.00 50.00 L 50.00 50.00 L 100.00 70.00 L 100.00 50.00 Z");
+  });
+
+  it("traite les trous comme des ruptures, sans interpoler par-dessus", () => {
+    const { above, below } = divergingAreaPaths(
+      [{ x: 0, y: 20 }, { x: 50, y: 30 }, null, { x: 100, y: 80 }],
+      ZERO,
+    );
+
+    expect(above).toBe("M 0.00 50.00 L 0.00 20.00 L 50.00 30.00 L 50.00 50.00 Z");
+    // Le seul point restant après le trou n'a pas de surface.
+    expect(below).toBe("");
+  });
+
+  it("ne rend rien d'une série collée à la ligne de zéro", () => {
+    expect(
+      divergingAreaPaths(
+        [
+          { x: 0, y: ZERO },
+          { x: 100, y: ZERO },
+        ],
+        ZERO,
+      ),
+    ).toEqual({ above: "", below: "" });
+  });
+
+  it("attribue le tronçon parti de zéro au signe de son premier écart", () => {
+    const { above, below } = divergingAreaPaths(
+      [
+        { x: 0, y: ZERO },
+        { x: 100, y: 80 },
+      ],
+      ZERO,
+    );
+
+    expect(above).toBe("");
+    expect(below).toBe("M 0.00 50.00 L 0.00 50.00 L 100.00 80.00 L 100.00 50.00 Z");
   });
 });
 
