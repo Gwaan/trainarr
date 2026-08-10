@@ -14,9 +14,11 @@
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:run": "tsx src/data/db/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
-    "strava:subscribe": "tsx scripts/strava-subscribe.ts"
+    "strava:subscribe": "tsx scripts/strava-subscribe.ts",
+    "fit:watch": "tsx --conditions=react-server scripts/fit-watcher.ts"
   },
   "dependencies": {
+    "@garmin/fitsdk": "^21.212.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",

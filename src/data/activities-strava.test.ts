@@ -8,25 +8,29 @@ import {
   saveActivityStreams,
   upsertActivityFromStrava,
 } from './activities';
-import { activities, activityStreams } from './db/schema';
+import { activities, activityStreams, type Activity } from './db/schema';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
 
 /**
  * Aucune base de données : les écritures sont enregistrées, les lectures servent
- * les lignes déclarées par le test.
+ * les lignes déclarées par le test — `selectQueue` quand le code enchaîne
+ * plusieurs lectures distinctes (recherche par `strava_id`, puis candidats au
+ * rapprochement croisé), `selectRows` sinon.
  *
  * Ce fichier couvre les écritures de la sync Strava ; les lectures et les DTOs
  * sont testés dans `activities.test.ts`.
  */
 const { dbState } = vi.hoisted(() => ({
   dbState: {
+    selectQueue: [] as unknown[][],
     selectRows: [] as unknown[],
     returning: [] as unknown[],
     inserts: [] as Array<{ table: unknown; values: unknown }>,
     conflicts: [] as unknown[],
     deletes: [] as unknown[],
+    updates: [] as Array<{ table: unknown; values: unknown }>,
     selectWheres: [] as unknown[],
   },
 }));
@@ -59,7 +63,10 @@ vi.mock('./db/client', () => {
     },
   });
 
-  type SelectChain = PromiseLike<unknown[]> & { where: (clause: unknown) => SelectChain };
+  type SelectChain = PromiseLike<unknown[]> & {
+    where: (clause: unknown) => SelectChain;
+    limit: (count: number) => SelectChain;
+  };
 
   const selectChain = (): SelectChain => {
     const chain: SelectChain = {
@@ -67,8 +74,12 @@ vi.mock('./db/client', () => {
         dbState.selectWheres.push(clause);
         return chain;
       },
+      limit: () => chain,
       then: (onFulfilled, onRejected) =>
-        Promise.resolve(dbState.selectRows).then(onFulfilled, onRejected),
+        Promise.resolve(dbState.selectQueue.shift() ?? dbState.selectRows).then(
+          onFulfilled,
+          onRejected,
+        ),
     };
     return chain;
   };
@@ -78,6 +89,12 @@ vi.mock('./db/client', () => {
     selectDistinct: () => ({ from: selectChain }),
     insert: insertInto,
     delete: deleteFrom,
+    update: (table: unknown) => ({
+      set: (values: unknown) => {
+        dbState.updates.push({ table, values });
+        return { where: () => Promise.resolve() };
+      },
+    }),
     transaction: (callback: (tx: unknown) => Promise<unknown>) =>
       callback({ insert: insertInto, delete: deleteFrom }),
   };
@@ -101,18 +118,47 @@ const STRAVA_ACTIVITY: StravaActivity = {
   avgCadenceSpm: 87.5,
 };
 
+/** Ligne déjà en base, importée d'un fichier FIT, décrivant la même sortie. */
+function fitRow(overrides: Partial<Activity> = {}): Activity {
+  return {
+    id: 7,
+    athleteId: 1,
+    stravaId: null,
+    fitFileHash: 'a'.repeat(64),
+    name: 'Course à pied',
+    sportType: 'Run',
+    startedAt: new Date('2026-08-02T06:30:00.000Z'),
+    distanceM: 21_097.5,
+    movingTimeS: 6_120,
+    elapsedTimeS: 6_300,
+    elevationGainM: null,
+    avgHrBpm: null,
+    maxHrBpm: null,
+    avgPaceSecPerKm: null,
+    avgCadenceSpm: null,
+    createdAt: new Date('2026-08-02T08:05:00.000Z'),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
+  dbState.selectQueue = [];
   dbState.selectRows = [];
   dbState.returning = [{ id: 42 }];
   dbState.inserts = [];
   dbState.conflicts = [];
   dbState.deletes = [];
+  dbState.updates = [];
   dbState.selectWheres = [];
 });
 
 describe('upsertActivityFromStrava', () => {
   it('retourne l’id local de la ligne écrite', async () => {
-    await expect(upsertActivityFromStrava(STRAVA_ACTIVITY, 1)).resolves.toBe(42);
+    await expect(upsertActivityFromStrava(STRAVA_ACTIVITY, 1)).resolves.toEqual({
+      activityId: 42,
+      created: true,
+      merged: false,
+    });
   });
 
   it('mappe les champs Strava sur les colonnes du schéma', async () => {
@@ -183,6 +229,91 @@ describe('upsertActivityFromStrava', () => {
     dbState.returning = [];
 
     await expect(upsertActivityFromStrava(STRAVA_ACTIVITY, 1)).rejects.toThrowError(/15123456789/);
+  });
+
+  it('signale une mise à jour quand l’activité Strava est déjà connue', async () => {
+    // Première lecture : `strava_id` déjà en base.
+    dbState.selectQueue = [[{ id: 42 }]];
+
+    await expect(upsertActivityFromStrava(STRAVA_ACTIVITY, 1)).resolves.toEqual({
+      activityId: 42,
+      created: false,
+      merged: false,
+    });
+
+    // Aucun rapprochement croisé n'est tenté : la file de lectures est intacte.
+    expect(dbState.selectQueue).toEqual([]);
+    expect(dbState.updates).toEqual([]);
+  });
+});
+
+describe('upsertActivityFromStrava — rapprochement avec un FIT déjà importé', () => {
+  it('rejoint la sortie déposée par la montre plutôt que de la dupliquer', async () => {
+    // Ordre le plus fréquent : HealthFit dépose son fichier dans la minute,
+    // le webhook Strava n'arrive que quelques minutes plus tard.
+    dbState.selectQueue = [[], [fitRow()]];
+
+    await expect(upsertActivityFromStrava(STRAVA_ACTIVITY, 1)).resolves.toEqual({
+      activityId: 7,
+      created: false,
+      merged: true,
+    });
+
+    // Aucune insertion : pas de doublon.
+    expect(dbState.inserts).toEqual([]);
+    const update = dbState.updates[0];
+    expect(update?.table).toBe(activities);
+    expect(update?.values).toEqual({
+      stravaId: 15_123_456_789,
+      elevationGainM: 187.4,
+      avgHrBpm: 152,
+      maxHrBpm: 177,
+      avgPaceSecPerKm: 6_120 / 21.0975,
+      avgCadenceSpm: 87.5,
+    });
+  });
+
+  it('rapproche aux bornes : +60 s de décalage et +2 % de distance', async () => {
+    dbState.selectQueue = [
+      [],
+      [fitRow({ startedAt: new Date('2026-08-02T06:31:00.000Z'), distanceM: 10_200 })],
+    ];
+
+    await expect(
+      upsertActivityFromStrava({ ...STRAVA_ACTIVITY, distanceM: 10_000 }, 1),
+    ).resolves.toMatchObject({ merged: true });
+  });
+
+  it('ne rapproche pas au-delà des bornes : la sortie est créée à part', async () => {
+    dbState.selectQueue = [
+      [],
+      // Dans la fenêtre SQL (±60 s) mais 3 % plus longue : autre sortie.
+      [fitRow({ distanceM: 10_300 })],
+    ];
+
+    await expect(
+      upsertActivityFromStrava({ ...STRAVA_ACTIVITY, distanceM: 10_000 }, 1),
+    ).resolves.toEqual({
+      activityId: 42,
+      created: true,
+      merged: false,
+    });
+    expect(dbState.updates).toEqual([]);
+    expect(dbState.inserts).toHaveLength(1);
+  });
+
+  it('n’écrase pas les champs déjà renseignés de l’activité rapprochée', async () => {
+    // Le FIT est la mesure brute de la montre : sa FC et sa cadence font foi.
+    dbState.selectQueue = [[], [fitRow({ avgHrBpm: 149, avgCadenceSpm: 176.4 })]];
+
+    await upsertActivityFromStrava(STRAVA_ACTIVITY, 1);
+
+    expect(dbState.updates[0]?.values).toEqual({
+      stravaId: 15_123_456_789,
+      elevationGainM: 187.4,
+      maxHrBpm: 177,
+      avgPaceSecPerKm: 6_120 / 21.0975,
+    });
   });
 });
 

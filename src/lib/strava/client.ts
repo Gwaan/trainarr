@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { usesFootCadenceSportType } from '@/lib/fit/sport';
+
 import { StravaApiError, StravaAuthError, StravaRateLimitError } from './errors';
 
 /**
@@ -59,12 +61,18 @@ const activitySchema = z
     avgHrBpm: raw.average_heartrate ?? null,
     maxHrBpm: raw.max_heartrate ?? null,
     /**
-     * Strava renvoie la cadence de course en cycles par minute (une jambe) :
-     * ~87 pour ~174 pas/min. La colonne stocke des pas par minute (`Spm`) —
-     * l'unité que connaissent les coureurs — d'où la conversion ×2 ici, à
-     * l'ingestion, une seule fois et documentée.
+     * Strava renvoie la cadence des sports à pied en cycles par minute (une
+     * jambe) : ~87 pour ~174 pas/min. La colonne stocke des pas par minute
+     * (`Spm`) — d'où la conversion ×2 à l'ingestion, pour les sports à pied
+     * uniquement : à vélo, la valeur est déjà le régime pédalier (rpm), la
+     * doubler donnerait un chiffre absurde. Même règle que le parseur FIT.
      */
-    avgCadenceSpm: raw.average_cadence == null ? null : raw.average_cadence * 2,
+    avgCadenceSpm:
+      raw.average_cadence == null
+        ? null
+        : usesFootCadenceSportType(raw.sport_type)
+          ? raw.average_cadence * 2
+          : raw.average_cadence,
   }));
 
 export type StravaActivity = z.infer<typeof activitySchema>;
@@ -106,6 +114,13 @@ export type StravaStreamSet = {
   distance?: number[];
   heartrate?: number[];
   altitude?: number[];
+  /**
+   * Cadence **brute de l'API** : les cycles d'une seule jambe (~87) pour les
+   * sports à pied, les tours de pédalier pour le vélo. La colonne
+   * `activity_streams` stocke, elle, des pas par minute pour les sports à pied —
+   * la conversion ×2 se fait à l'ingestion (`src/lib/strava/sync.ts`), une seule
+   * fois, comme pour le scalaire `avgCadenceSpm`.
+   */
   cadence?: number[];
   /** `velocity_smooth` côté Strava, en m/s. */
   velocity?: number[];

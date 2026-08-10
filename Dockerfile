@@ -37,6 +37,23 @@ COPY src/data/db/migrate.ts ./src/data/db/migrate.ts
 # télécharger pnpm au démarrage du container, ce qui suppose un accès réseau.
 CMD ["node_modules/.bin/tsx", "src/data/db/migrate.ts"]
 
+# --- worker : services longue durée exécutés hors du serveur Next -------------
+# Même approche que `migrator` (réutilise la couche `deps`, exécute du TypeScript
+# via tsx) mais ce container-ci ne sort pas : il surveille le dossier d'import FIT.
+#
+# `--conditions=react-server` : le watcher importe le DAL, dont les modules
+# commencent par `import 'server-only'`. Hors de cette condition d'export, ce
+# paquet lève volontairement à l'import. C'est exactement le drapeau que Next
+# positionne pour ses modules serveur.
+FROM base AS worker
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+# tsconfig.json est nécessaire : tsx y lit l'alias `@/*`.
+COPY package.json tsconfig.json ./
+COPY src ./src
+COPY scripts ./scripts
+CMD ["node_modules/.bin/tsx", "--conditions=react-server", "scripts/fit-watcher.ts"]
+
 # --- runner : image finale minimale, sans pnpm ni sources ---------------------
 FROM node:22-alpine AS runner
 WORKDIR /app

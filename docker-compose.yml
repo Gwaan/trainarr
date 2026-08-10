@@ -49,6 +49,60 @@ services:
     networks:
       - app-staging
 
+  # Surveille le dossier d'import FIT et ingère les fichiers déposés par WebDAV.
+  # Process séparé du serveur Next : c'est une boucle longue durée, elle n'a rien
+  # à faire dans le cycle de vie des requêtes HTTP.
+  fit-watcher:
+    container_name: trainarr-fit-watcher
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      # Fixé ici et non dans .env : le chemin doit coïncider avec le point de
+      # montage ci-dessous, et compose est le seul à connaître les deux.
+      FIT_INBOX_DIR: /data/fit-inbox
+    volumes:
+      - trainarr-fit-inbox:/data/fit-inbox
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - app-staging
+
+  # Point de dépôt des fichiers FIT (montre → WebDAV → volume partagé → watcher).
+  # Aucun port publié : l'accès depuis l'extérieur passe par le reverse proxy du
+  # homelab, qui apporte TLS — l'authentification WebDAV est en clair sans lui.
+  webdav:
+    container_name: trainarr-webdav
+    # Version épinglée (tag + digest) : c'est le seul container exposé en
+    # écriture sur Internet, une image tierce ne doit pas changer sous nos pieds
+    # au prochain `docker compose pull`.
+    image: hacdias/webdav:v5.14.2@sha256:ee6471cec865a9ea819dfd8912570fa80885749c525a85cd96fa22840b192bee
+    restart: unless-stopped
+    # Pas d'`env_file` ici, contrairement aux autres services : il injecterait
+    # DATABASE_URL et les secrets Strava/IA dans le container le plus exposé de
+    # la stack. Seules ses deux variables lui sont passées, substituées dans
+    # webdav.yml au démarrage ; `:?` fait échouer le déploiement si elles
+    # manquent, plutôt que de démarrer un WebDAV sans identifiants valides.
+    environment:
+      WEBDAV_USERNAME: ${WEBDAV_USERNAME:?WEBDAV_USERNAME requis}
+      WEBDAV_PASSWORD: ${WEBDAV_PASSWORD:?WEBDAV_PASSWORD requis}
+      TZ: ${TZ:-Europe/Paris}
+    command: ["-c", "/config.yml"]
+    volumes:
+      - ./webdav.yml:/config.yml:ro
+      # Même volume que le watcher, monté à la racine servie : ce que WebDAV
+      # écrit dans /data, le watcher le voit dans /data/fit-inbox.
+      - trainarr-fit-inbox:/data
+    networks:
+      - app-staging
+
   db:
     container_name: trainarr-db
     image: pgvector/pgvector:pg17
@@ -78,6 +132,9 @@ services:
 
 volumes:
   trainarr-db-data:
+  # Boîte de dépôt des fichiers FIT, partagée entre webdav (écriture) et
+  # fit-watcher (lecture puis rangement dans processed/ ou failed/).
+  trainarr-fit-inbox:
 
 networks:
   # Réseau partagé du homelab, géré hors de ce stack (Komodo).

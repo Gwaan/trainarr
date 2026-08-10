@@ -150,6 +150,17 @@ describe('listActivities', () => {
     expect(activity).toMatchObject({ avgHrBpm: null, maxHrBpm: null, avgCadenceSpm: null });
   });
 
+  it('ne double pas la cadence des sports qui ne sont pas à pied', async () => {
+    // À vélo, average_cadence est déjà le régime pédalier (rpm) : le doubler
+    // donnerait ~180 rpm, une valeur absurde.
+    const ride = { ...RAW_ACTIVITY, sport_type: 'Ride', average_cadence: 92 };
+    fetchMock.mockResolvedValue(jsonResponse([ride]));
+
+    const [activity] = await listActivities('access-xyz', { page: 1, perPage: 100 });
+
+    expect(activity?.avgCadenceSpm).toBe(92);
+  });
+
   it('rejette une réponse dont un champ requis manque', async () => {
     fetchMock.mockResolvedValue(jsonResponse([{ id: 1, name: 'Incomplète' }]));
 

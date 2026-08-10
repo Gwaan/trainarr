@@ -108,6 +108,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     id,
     athleteId: 1,
     stravaId: 9_000_000_000 + id,
+    fitFileHash: null,
     name: 'Footing',
     sportType: 'Run',
     distanceM: 10_000,

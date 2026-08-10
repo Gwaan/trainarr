@@ -42,6 +42,7 @@ const rawActivity: Activity = {
   id: 42,
   athleteId: 1,
   stravaId: 15_123_456_789,
+  fitFileHash: null,
   name: 'Sortie longue',
   sportType: 'Run',
   startedAt: new Date('2026-08-02T06:30:00.000Z'),

@@ -47,7 +47,7 @@ const STREAMS: StravaStreamSet = { time: [0, 1], heartrate: [120, 130] };
 /** Identifiant Strava de Gwen, tel que `saveStravaTokens` l'a enregistré. */
 const OWNER_ID = 987_654;
 
-/** Activité Strava minimale : seuls l'id et le propriétaire comptent ici. */
+/** Activité Strava minimale : seuls l'id, le sport et le propriétaire comptent ici. */
 function activity(id: number, athleteStravaId: number | null = OWNER_ID): StravaActivity {
   return {
     id,
@@ -77,7 +77,7 @@ beforeEach(() => {
   dal.getStravaAthleteId.mockResolvedValue(OWNER_ID);
   // Id local dérivé de l'id Strava : suffit à vérifier le chaînage des appels.
   dal.upsertActivityFromStrava.mockImplementation((item: StravaActivity) =>
-    Promise.resolve(item.id + 1_000),
+    Promise.resolve({ activityId: item.id + 1_000, created: true, merged: false }),
   );
   dal.findKnownStravaIds.mockResolvedValue(new Set<number>());
   // Par défaut : aucune activité n'a de streams en base, toutes sont à compléter.
@@ -223,6 +223,70 @@ describe('syncRecentActivities — idempotence et streams', () => {
 
     expect(api.getActivityStreams).not.toHaveBeenCalled();
     expect(report).toEqual({ fetched: 2, created: 0, updated: 2, rateLimited: false });
+  });
+});
+
+describe('syncRecentActivities — unité de la cadence', () => {
+  /** Cadence brute de l'API : les cycles d'une seule jambe. */
+  const RAW_CADENCE: StravaStreamSet = { time: [0, 1], cadence: [87, 88] };
+
+  it('double la cadence des sports à pied (la colonne est en pas/min)', async () => {
+    // Le FIT écrit déjà des pas par minute : sans conversion, la même colonne
+    // mélangeait deux unités et les graphes étaient faux d'un facteur 2.
+    api.listActivities.mockResolvedValueOnce([activity(1)]);
+    api.getActivityStreams.mockResolvedValue(RAW_CADENCE);
+
+    await syncRecentActivities();
+
+    expect(dal.saveActivityStreams).toHaveBeenCalledWith(1_001, {
+      time: [0, 1],
+      cadence: [174, 176],
+    });
+  });
+
+  it('laisse la cadence du vélo en tours de pédalier par minute', async () => {
+    api.listActivities.mockResolvedValueOnce([{ ...activity(1), sportType: 'Ride' }]);
+    api.getActivityStreams.mockResolvedValue(RAW_CADENCE);
+
+    await syncRecentActivities();
+
+    expect(dal.saveActivityStreams).toHaveBeenCalledWith(1_001, RAW_CADENCE);
+  });
+
+  it('ne touche pas aux autres séries', async () => {
+    api.listActivities.mockResolvedValueOnce([activity(1)]);
+
+    await syncRecentActivities();
+
+    expect(dal.saveActivityStreams).toHaveBeenCalledWith(1_001, STREAMS);
+  });
+
+  it('convertit aussi sur le chemin du webhook', async () => {
+    api.getActivity.mockResolvedValue(activity(7));
+    api.getActivityStreams.mockResolvedValue(RAW_CADENCE);
+
+    await syncSingleActivity(7, OWNER_ID);
+
+    expect(dal.saveActivityStreams).toHaveBeenCalledWith(1_007, {
+      time: [0, 1],
+      cadence: [174, 176],
+    });
+  });
+});
+
+describe('syncRecentActivities — rapprochement avec un FIT déjà importé', () => {
+  it('compte une fusion comme une mise à jour, pas comme une création', async () => {
+    // Le fichier de la montre était déjà en base : aucune ligne n'a été ajoutée.
+    api.listActivities.mockResolvedValueOnce(page(1));
+    dal.upsertActivityFromStrava.mockResolvedValue({
+      activityId: 7,
+      created: false,
+      merged: true,
+    });
+
+    const report = await syncRecentActivities();
+
+    expect(report).toEqual({ fetched: 1, created: 0, updated: 1, rateLimited: false });
   });
 });
 

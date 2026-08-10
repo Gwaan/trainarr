@@ -1,0 +1,25 @@
+# Configuration du service WebDAV (hacdias/webdav) — point de dépôt des fichiers FIT.
+#
+# ⚠️ Ce fichier est VERSIONNÉ : il ne doit contenir aucun identifiant en dur.
+# La syntaxe « {env}NOM » est résolue au démarrage par hacdias/webdav ; les
+# valeurs viennent donc de .env (gitignoré), comme tous les autres secrets.
+#
+# Monté en lecture seule sur /config.yml dans le container (cf. docker-compose.yml).
+
+address: 0.0.0.0
+port: 6065
+
+# Le service n'est pas publié sur l'hôte : il n'est joignable que par le reverse
+# proxy du homelab, qui apporte TLS (l'authentification WebDAV est en Basic Auth,
+# donc en clair sans lui) et dont on veut voir l'IP réelle dans les logs.
+behindProxy: true
+
+# Racine servie : le volume trainarr-fit-inbox, que le watcher lit par ailleurs.
+directory: /data
+
+users:
+  - username: "{env}WEBDAV_USERNAME"
+    password: "{env}WEBDAV_PASSWORD"
+    # Create + Read + Update + Delete : le client de la montre écrit le fichier,
+    # peut le relire pour vérifier l'envoi, et le reprendre s'il l'interrompt.
+    permissions: CRUD

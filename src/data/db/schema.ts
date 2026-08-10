@@ -79,7 +79,16 @@ export const stravaTokens = pgTable('strava_tokens', {
   updatedAt: updatedAt(),
 });
 
-/** Une séance. `stravaId` est unique : l'idempotence de la sync (upsert) en dépend. */
+/**
+ * Une séance.
+ *
+ * Deux canaux d'import, deux clés d'idempotence, toutes deux uniques et
+ * **nullables** : une sortie peut arriver par Strava (`strava_id`), par un
+ * fichier FIT déposé dans le dossier surveillé (`fit_file_hash`), ou par les
+ * deux — auquel cas les deux colonnes sont renseignées sur la même ligne.
+ * Postgres autorise plusieurs `NULL` dans une contrainte `UNIQUE` : les
+ * activités d'un seul canal ne se collisionnent donc pas entre elles.
+ */
 export const activities = pgTable(
   'activities',
   {
@@ -91,8 +100,18 @@ export const activities = pgTable(
      * Identifiant Strava de l'activité. `mode: 'number'` : les ids Strava (~1e10)
      * restent très en dessous de `Number.MAX_SAFE_INTEGER`, et un `bigint` JS
      * ne serait pas sérialisable vers le client.
+     *
+     * Nullable depuis l'import FIT : une activité importée depuis la montre sans
+     * passer par Strava n'a aucun identifiant Strava à stocker.
      */
-    stravaId: bigint('strava_id', { mode: 'number' }).notNull().unique(),
+    stravaId: bigint('strava_id', { mode: 'number' }).unique(),
+    /**
+     * Empreinte du fichier FIT à l'origine de l'activité — clé d'idempotence des
+     * imports FIT, pendant de `strava_id`. Réimporter le même fichier met à jour
+     * la ligne au lieu de la dupliquer. `null` pour une activité venue de Strava
+     * seule (et renseignée après coup si son FIT arrive ensuite).
+     */
+    fitFileHash: text('fit_file_hash').unique(),
     name: text('name').notNull(),
     sportType: text('sport_type').notNull(),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),

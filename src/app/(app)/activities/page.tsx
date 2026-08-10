@@ -4,11 +4,11 @@ import { connection } from "next/server";
 import { Activity, Zap } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
-import { PageHeader } from "@/components/page-header";
 import { StravaConnectButton } from "@/components/strava-connect-button";
 import { listActivitiesByWeek } from "@/data/activities";
 import { isStravaConnected } from "@/data/strava-tokens";
 
+import { ActivitiesHeader } from "./_components/activities-header";
 import { ActivitiesSkeleton } from "./_components/activities-skeleton";
 import { ActivityWeek } from "./_components/activity-week";
 import { StravaStatusBanner } from "./_components/strava-status-banner";
@@ -49,8 +49,8 @@ async function ActivitiesContent() {
 
   const isEmpty = weeks.length === 0;
   // Un seul CTA accent par écran : quand l'état d'accueil le porte, l'en-tête
-  // n'affiche aucune action.
-  const headerAction = connected ? (
+  // n'affiche pas l'action Strava (l'import FIT, lui, reste secondaire).
+  const stravaAction = connected ? (
     <StravaConnectedBadge />
   ) : isEmpty ? undefined : (
     <StravaConnectButton />
@@ -58,7 +58,11 @@ async function ActivitiesContent() {
 
   return (
     <>
-      <PageHeader title="Activités" subtitle={PAGE_SUBTITLE} action={headerAction} />
+      <ActivitiesHeader
+        title="Activités"
+        subtitle={PAGE_SUBTITLE}
+        stravaAction={stravaAction}
+      />
 
       {isEmpty ? (
         <div className="rounded-card border border-border bg-surface">

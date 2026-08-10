@@ -8,8 +8,15 @@ import {
   upsertActivityFromStrava,
 } from '@/data/activities';
 import { getFreshAccessToken } from '@/data/strava-tokens';
+import { usesFootCadenceSportType } from '@/lib/fit/sport';
 
-import { getActivity, getActivityStreams, listActivities, type StravaActivity } from './client';
+import {
+  getActivity,
+  getActivityStreams,
+  listActivities,
+  type StravaActivity,
+  type StravaStreamSet,
+} from './client';
 import { StravaAuthError, StravaRateLimitError } from './errors';
 
 /**
@@ -71,15 +78,32 @@ function isForeignActivity(activity: StravaActivity, stravaAthleteId: number | n
   return activity.athleteStravaId !== stravaAthleteId;
 }
 
+/**
+ * Aligne les séries sur les unités de la table `activity_streams`.
+ *
+ * Strava renvoie la cadence en cycles d'une seule jambe (~87 pour ~174 pas/min).
+ * La colonne stocke des **pas par minute** pour les sports à pied — l'unité que
+ * connaissent les coureurs, et celle que produit déjà l'import FIT
+ * (`src/lib/fit/parse.ts`) comme le scalaire `avgCadenceSpm`. Sans cette
+ * conversion, la même colonne mélangeait deux unités selon le canal d'import et
+ * les graphes de cadence étaient faux d'un facteur 2. Le vélo garde ses tours de
+ * pédalier par minute.
+ */
+function toStoredUnits(streams: StravaStreamSet, sportType: string): StravaStreamSet {
+  if (!streams.cadence || !usesFootCadenceSportType(sportType)) return streams;
+
+  return { ...streams, cadence: streams.cadence.map((value) => value * 2) };
+}
+
 /** Importe les streams d'une activité. Sans objet si Strava n'en a pas (404). */
 async function importStreams(
   accessToken: string,
   activityId: number,
-  stravaActivityId: number,
+  activity: StravaActivity,
 ): Promise<void> {
-  const streams = await getActivityStreams(accessToken, stravaActivityId);
+  const streams = await getActivityStreams(accessToken, activity.id);
   if (!streams) return;
-  await saveActivityStreams(activityId, streams);
+  await saveActivityStreams(activityId, toStoredUnits(streams, activity.sportType));
 }
 
 /**
@@ -116,24 +140,26 @@ export async function syncRecentActivities(options?: { after?: Date }): Promise<
       }
 
       const known = await findKnownStravaIds(owned.map((activity) => activity.id));
-      const upserted: Array<{ activityId: number; stravaActivityId: number }> = [];
+      const upserted: Array<{ activityId: number; activity: StravaActivity }> = [];
 
       for (const activity of owned) {
-        const activityId = await upsertActivityFromStrava(activity, athleteId);
-        if (known.has(activity.id)) {
+        const { activityId, merged } = await upsertActivityFromStrava(activity, athleteId);
+        // Une activité rapprochée d'un FIT déjà en base n'est pas une création :
+        // aucune ligne n'a été ajoutée, celle du fichier a été complétée.
+        if (known.has(activity.id) || merged) {
           report.updated += 1;
         } else {
           report.created += 1;
         }
-        upserted.push({ activityId, stravaActivityId: activity.id });
+        upserted.push({ activityId, activity });
       }
 
       const missingStreams = await findActivityIdsWithoutStreams(
         upserted.map((item) => item.activityId),
       );
-      for (const { activityId, stravaActivityId } of upserted) {
+      for (const { activityId, activity } of upserted) {
         if (!missingStreams.has(activityId)) continue;
-        await importStreams(accessToken, activityId, stravaActivityId);
+        await importStreams(accessToken, activityId, activity);
       }
 
       // Page incomplète : c'est la dernière, inutile d'en demander une de plus.
@@ -184,6 +210,6 @@ export async function syncSingleActivity(
     return;
   }
 
-  const activityId = await upsertActivityFromStrava(activity, athleteId);
-  await importStreams(accessToken, activityId, stravaActivityId);
+  const { activityId } = await upsertActivityFromStrava(activity, athleteId);
+  await importStreams(accessToken, activityId, activity);
 }
