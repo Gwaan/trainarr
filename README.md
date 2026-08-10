@@ -25,20 +25,23 @@ L'application est disponible sur http://localhost:3000.
 
 ## Import des séances
 
-Les données d'entraînement arrivent par un seul canal : le **fichier FIT** de la
-montre. Pas d'API tierce, donc rien à connecter, aucun quota.
+Les données d'entraînement arrivent sous un seul format : le **fichier FIT** de
+la montre. Deux routes y mènent, et toutes deux aboutissent à la même boîte de
+dépôt.
 
 ```
 Montre → HealthFit (iPhone)
-           │  export automatique après chaque séance
-           ▼
-   https://<domaine>/dav        ← point WebDAV servi par l'appli
-           │  (Basic auth : WEBDAV_USERNAME / WEBDAV_PASSWORD)
-           ▼
-   FIT_INBOX_DIR                ← volume partagé trainarr-fit-inbox
-           │  scan périodique
-           ▼
-   fit-watcher                  → ingestion, puis processed/ ou failed/
+           │                              │
+           │  export WebDAV               │  synchronisation intervals.icu
+           ▼                              ▼
+   https://<domaine>/dav            intervals.icu
+   ← point servi par l'appli              │  API : le poller récupère
+     (Basic auth WEBDAV_*)                │  le fichier original
+           │                              ▼
+           └──────────────►  FIT_INBOX_DIR  ← volume trainarr-fit-inbox
+                                   │  scan périodique
+                                   ▼
+                            fit-watcher   → ingestion, puis processed/ ou failed/
 ```
 
 - **HealthFit** est configuré une fois pour envoyer chaque séance en WebDAV vers
@@ -51,6 +54,40 @@ Montre → HealthFit (iPhone)
   glisser-déposer de `.fit`).
 - L'idempotence repose sur l'empreinte SHA-256 du fichier : redéposer le même
   fichier ne crée jamais de doublon.
+
+### Rapatriement depuis intervals.icu (optionnel)
+
+Si HealthFit synchronise déjà les séances vers [intervals.icu](https://intervals.icu),
+le service `fit-watcher` peut y récupérer les fichiers d'activité **originaux**
+et les déposer lui-même dans la boîte d'import. C'est un filet : une séance que
+l'envoi WebDAV a manquée arrive quand même.
+
+Configuration, une fois :
+
+1. Créer un compte sur intervals.icu et y connecter HealthFit (réglage
+   « intervals.icu » dans l'app iPhone, qui envoie chaque séance après l'export).
+2. Dans intervals.icu, **Settings → Developer Settings**, générer une clé API.
+   C'est un secret : elle ne va que dans `.env.local` (dev) ou `.env` (Docker),
+   jamais dans le repo.
+3. Relever l'identifiant d'athlète dans l'URL intervals.icu — la forme `i123456`,
+   préfixe `i` compris.
+4. Renseigner les variables suivantes, puis redémarrer `fit-watcher` :
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `INTERVALS_ATHLETE_ID` | Identifiant d'athlète (`i` + chiffres) | — |
+| `INTERVALS_API_KEY` | Clé API personnelle | — |
+| `INTERVALS_POLL_INTERVAL_S` | Intervalle entre deux cycles, en secondes | `300` |
+| `INTERVALS_LOOKBACK_DAYS` | Profondeur de la fenêtre interrogée, en jours | `30` |
+
+Tant que `INTERVALS_ATHLETE_ID` **et** `INTERVALS_API_KEY` ne sont pas tous deux
+renseignés, le rapatriement reste inactif — le watcher le signale au démarrage et
+fonctionne comme avant.
+
+Une activité déjà rapatriée n'est jamais retéléchargée : le fichier déposé
+s'appelle `intervals-<id>.fit`, et sa présence dans la boîte, dans `processed/`
+ou dans `failed/` suffit à le savoir. Une séance saisie à la main sur
+intervals.icu n'a pas de fichier : le watcher le note une fois et passe.
 
 ## Commandes
 

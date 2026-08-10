@@ -29,6 +29,21 @@ const envSchema = z.object({
   // montage du volume trainarr-fit-inbox.
   FIT_INBOX_DIR: z.string().min(1).default('/data/fit-inbox'),
 
+  // Rapatriement automatique depuis intervals.icu (cf. src/lib/intervals/).
+  // Lues par le service `fit-watcher`, qui a sa propre copie du schéma comme
+  // pour FIT_INBOX_DIR — elles sont déclarées ici pour que la configuration de
+  // l'application reste décrite d'un seul endroit.
+  // Le poller ne démarre que si l'identifiant d'athlète ET la clé sont donnés.
+  INTERVALS_ATHLETE_ID: z
+    .string()
+    .regex(/^i\d+$/, {
+      error: "identifiant d'athlète intervals.icu attendu, de la forme i123456",
+    })
+    .optional(),
+  INTERVALS_API_KEY: z.string().min(1).optional(),
+  INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(300),
+  INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
+
   // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).
   // Optionnels, mais tant que les deux ne sont pas renseignés le dépôt répond
   // 503 : il n'existe pas d'état « ouvert sans authentification ».

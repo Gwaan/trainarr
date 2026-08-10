@@ -19,8 +19,25 @@ describe('parseEnv — cas nominal', () => {
     expect(env.AI_API_KEY).toBeUndefined();
     expect(env.WEBDAV_USERNAME).toBeUndefined();
     expect(env.WEBDAV_PASSWORD).toBeUndefined();
+    // Sans identifiant d'athlète ni clé, le poller intervals.icu reste inactif.
+    expect(env.INTERVALS_ATHLETE_ID).toBeUndefined();
+    expect(env.INTERVALS_API_KEY).toBeUndefined();
+    expect(env.INTERVALS_POLL_INTERVAL_S).toBe(300);
+    expect(env.INTERVALS_LOOKBACK_DAYS).toBe(30);
     // Seule variable à défaut hors AI_PROVIDER : la boîte de dépôt FIT.
     expect(env.FIT_INBOX_DIR).toBe('/data/fit-inbox');
+  });
+
+  it("valide le format de l'identifiant d'athlète intervals.icu", () => {
+    expect(
+      parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: 'i123456' })
+        .INTERVALS_ATHLETE_ID,
+    ).toBe('i123456');
+
+    // Le préfixe « i » fait partie de l'identifiant tel que l'API l'attend.
+    expect(() =>
+      parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: '123456' }),
+    ).toThrow(/INTERVALS_ATHLETE_ID/);
   });
 
   it('accepte une configuration complète', () => {
@@ -62,7 +79,13 @@ describe('parseEnv — cas nominal', () => {
 
     expect(Object.keys(env)).not.toContain('GITHUB_PAT');
     // La variable fournie mise à part, il ne reste que les clés à valeur par défaut.
-    expect(Object.keys(env).sort()).toEqual(['AI_PROVIDER', 'DATABASE_URL', 'FIT_INBOX_DIR']);
+    expect(Object.keys(env).sort()).toEqual([
+      'AI_PROVIDER',
+      'DATABASE_URL',
+      'FIT_INBOX_DIR',
+      'INTERVALS_LOOKBACK_DAYS',
+      'INTERVALS_POLL_INTERVAL_S',
+    ]);
   });
 
   it('retourne un objet figé', () => {

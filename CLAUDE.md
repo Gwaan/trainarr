@@ -9,7 +9,7 @@ Appli de running self-hosted qui remplace Runna (plans d'entraînement) et Runal
 - **Next.js 16 (App Router, Turbopack)** + TypeScript strict + React 19 — full-stack, pas de backend séparé. Node.js ≥ 20.9.
 - **PostgreSQL + pgvector** (Drizzle ORM) — activités, plans, séries temporelles, embeddings RAG
 - **Coach IA multi-provider** : abstraction unique compatible OpenAI — llama.cpp local (`llama-server`), Claude API, ou toute API compatible. Jamais de couplage direct à un provider dans le code métier.
-- **Import FIT** comme canal de données unique : HealthFit (iPhone) exporte chaque séance vers le dépôt WebDAV `/dav`, un watcher ramasse les fichiers et les ingère. Import manuel possible depuis la page « Activités ».
+- **Import FIT** comme format de données unique. Canal automatique : HealthFit (iPhone) synchronise vers intervals.icu, dont un poller rapatrie les FIT originaux dans l'inbox du watcher. En secours : dépôt WebDAV `/dav` (servi par l'appli) et import manuel depuis la page « Activités ».
 - Déploiement : Docker Compose (container `trainarr` sur le port 3000 + Postgres/pgvector), livraison auto via webhook Komodo sur push.
 
 ## Commandes (pnpm)
