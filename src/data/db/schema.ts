@@ -1,6 +1,5 @@
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import {
-  bigint,
   date,
   index,
   integer,
@@ -40,16 +39,6 @@ export type AthleteSex = (typeof ATHLETE_SEXES)[number];
 export const athlete = pgTable('athlete', {
   id: serial('id').primaryKey(),
   displayName: text('display_name').notNull(),
-  /**
-   * Identifiant Strava de l'athlète, renseigné à la connexion OAuth. C'est la
-   * référence qui permet de rejeter un événement webhook dont l'`owner_id` est
-   * celui de quelqu'un d'autre (le payload webhook n'est pas signé).
-   *
-   * `mode: 'number'` comme `activities.stravaId` : les ids Strava restent très
-   * en dessous de `Number.MAX_SAFE_INTEGER`. Nullable tant que Strava n'a jamais
-   * été connecté, unique pour interdire deux athlètes sur le même compte Strava.
-   */
-  stravaAthleteId: bigint('strava_athlete_id', { mode: 'number' }).unique(),
   sex: text('sex', { enum: ATHLETE_SEXES }),
   maxHrBpm: integer('max_hr_bpm'),
   restingHrBpm: integer('resting_hr_bpm'),
@@ -61,33 +50,13 @@ export const athlete = pgTable('athlete', {
 });
 
 /**
- * Jetons OAuth Strava.
- *
- * ⚠️ SECRET : `access_token`, `refresh_token` et `scope` ne sortent JAMAIS du DAL.
- * Aucun DTO exposé à l'UI, à une Server Action ou à un composant client ne doit
- * contenir ces colonnes, et elles ne doivent jamais être loggées.
- */
-export const stravaTokens = pgTable('strava_tokens', {
-  id: serial('id').primaryKey(),
-  athleteId: integer('athlete_id')
-    .notNull()
-    .references(() => athlete.id),
-  accessToken: text('access_token').notNull(),
-  refreshToken: text('refresh_token').notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  scope: text('scope'),
-  updatedAt: updatedAt(),
-});
-
-/**
  * Une séance.
  *
- * Deux canaux d'import, deux clés d'idempotence, toutes deux uniques et
- * **nullables** : une sortie peut arriver par Strava (`strava_id`), par un
- * fichier FIT déposé dans le dossier surveillé (`fit_file_hash`), ou par les
- * deux — auquel cas les deux colonnes sont renseignées sur la même ligne.
- * Postgres autorise plusieurs `NULL` dans une contrainte `UNIQUE` : les
- * activités d'un seul canal ne se collisionnent donc pas entre elles.
+ * Un seul canal d'import — le fichier FIT déposé dans le dossier surveillé —
+ * donc une seule clé d'idempotence : `fit_file_hash`, unique et **nullable**
+ * (une ligne peut naître autrement qu'en lisant un fichier). Postgres autorise
+ * plusieurs `NULL` dans une contrainte `UNIQUE` : ces lignes-là ne se
+ * collisionnent pas entre elles.
  */
 export const activities = pgTable(
   'activities',
@@ -97,19 +66,9 @@ export const activities = pgTable(
       .notNull()
       .references(() => athlete.id),
     /**
-     * Identifiant Strava de l'activité. `mode: 'number'` : les ids Strava (~1e10)
-     * restent très en dessous de `Number.MAX_SAFE_INTEGER`, et un `bigint` JS
-     * ne serait pas sérialisable vers le client.
-     *
-     * Nullable depuis l'import FIT : une activité importée depuis la montre sans
-     * passer par Strava n'a aucun identifiant Strava à stocker.
-     */
-    stravaId: bigint('strava_id', { mode: 'number' }).unique(),
-    /**
-     * Empreinte du fichier FIT à l'origine de l'activité — clé d'idempotence des
-     * imports FIT, pendant de `strava_id`. Réimporter le même fichier met à jour
-     * la ligne au lieu de la dupliquer. `null` pour une activité venue de Strava
-     * seule (et renseignée après coup si son FIT arrive ensuite).
+     * Empreinte SHA-256 du fichier FIT à l'origine de l'activité — clé
+     * d'idempotence de l'import. Redéposer le même fichier retombe sur la même
+     * ligne au lieu de la dupliquer.
      */
     fitFileHash: text('fit_file_hash').unique(),
     name: text('name').notNull(),
@@ -130,7 +89,7 @@ export const activities = pgTable(
   ],
 );
 
-/** Types de streams Strava conservés (point par point). */
+/** Types de séries temporelles conservées (point par point). */
 export const ACTIVITY_STREAM_TYPES = [
   'time',
   'distance',
@@ -210,9 +169,6 @@ export const plannedSessions = pgTable(
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
-
-export type StravaToken = InferSelectModel<typeof stravaTokens>;
-export type NewStravaToken = InferInsertModel<typeof stravaTokens>;
 
 export type Activity = InferSelectModel<typeof activities>;
 export type NewActivity = InferInsertModel<typeof activities>;

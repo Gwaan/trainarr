@@ -9,7 +9,7 @@ Appli de running self-hosted qui remplace Runna (plans d'entraînement) et Runal
 - **Next.js 16 (App Router, Turbopack)** + TypeScript strict + React 19 — full-stack, pas de backend séparé. Node.js ≥ 20.9.
 - **PostgreSQL + pgvector** (Drizzle ORM) — activités, plans, séries temporelles, embeddings RAG
 - **Coach IA multi-provider** : abstraction unique compatible OpenAI — llama.cpp local (`llama-server`), Claude API, ou toute API compatible. Jamais de couplage direct à un provider dans le code métier.
-- **Sync Strava** (OAuth + webhooks) comme source de données principale ; import FIT prévu ensuite
+- **Import FIT** comme canal de données unique : HealthFit (iPhone) exporte chaque séance vers le dépôt WebDAV `/dav`, un watcher ramasse les fichiers et les ingère. Import manuel possible depuis la page « Activités ».
 - Déploiement : Docker Compose (container `trainarr` sur le port 3000 + Postgres/pgvector), livraison auto via webhook Komodo sur push.
 
 ## Commandes (pnpm)
@@ -38,7 +38,7 @@ src/
 ├── data/                 # Data Access Layer (server-only) — SEUL accès DB + auth
 ├── lib/
 │   ├── ai/               # abstraction provider LLM + outils du coach
-│   ├── strava/           # OAuth, sync, webhooks
+│   ├── fit/              # lecture des fichiers FIT, dépôt WebDAV, ingestion
 │   └── metrics/          # calculs physio purs (VO2max, TRIMP, ATL/CTL/TSB)
 ├── config/               # env validé par Zod (fail fast au build)
 └── proxy.ts              # interception réseau (ex-middleware.ts, déprécié en v16)
@@ -54,7 +54,7 @@ Flux d'une mutation : Server Action mince → valide (Zod) → délègue au DAL 
 
 ## Règles critiques
 
-- **JAMAIS de secret dans le repo** : ni PAT GitHub, ni tokens Strava, ni clés API. Tout passe par `.env.local` (gitignoré) et n'est lu que dans `src/config/` + le DAL. Vérifier avant chaque commit.
+- **JAMAIS de secret dans le repo** : ni PAT GitHub, ni identifiants WebDAV, ni clés API. Tout passe par `.env.local` (gitignoré) et n'est lu que dans `src/config/` + le DAL. Vérifier avant chaque commit.
 - Les données d'entraînement sont la source de vérité : ne jamais inventer ou approximer des métriques physio — si un calcul manque de données, le dire.
 - Design : direction **Night Track** verrouillée, tokens dans `.claude/rules/design.md` — aucune couleur ni typo hors système.
-- Règles détaillées par domaine dans `.claude/rules/` (nextjs, security, typescript, design, ai-coach, data-strava).
+- Règles détaillées par domaine dans `.claude/rules/` (nextjs, security, typescript, design, ai-coach, data-import).

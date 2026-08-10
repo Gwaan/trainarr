@@ -14,17 +14,17 @@ import {
 } from '../_lib/upload-contract';
 
 /**
- * Import manuel de fichiers FIT (montre, export Garmin…), en complément de la
- * synchronisation Strava.
+ * Import manuel de fichiers FIT (montre, export HealthFit…), en complément du
+ * dépôt automatique sur `/dav` que ramasse le watcher.
  *
  * Route handler et non Server Action : l'entrée est un `multipart/form-data`
  * de plusieurs fichiers volumineux, et la réponse est un rapport par fichier.
  * L'enveloppe reste mince — le décodage et l'écriture vivent dans
  * `src/lib/fit/`, la validation d'un fichier dans `../_lib/upload-contract.ts`.
  *
- * Pas de `connection()` ici, contrairement aux routes Strava : un handler POST
- * n'est jamais prérendu, et la lecture du corps est déjà un signal dynamique —
- * vérifié au build, la route ressort en `ƒ`.
+ * Pas de `connection()` ici : un handler POST n'est jamais prérendu, et la
+ * lecture du corps est déjà un signal dynamique — vérifié au build, la route
+ * ressort en `ƒ`.
  */
 
 export async function POST(request: NextRequest): Promise<NextResponse> {

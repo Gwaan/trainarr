@@ -90,7 +90,6 @@ afterAll(() => {
 const ATHLETE: Athlete = {
   id: 1,
   displayName: 'Gwen',
-  stravaAthleteId: 987_654,
   sex: 'female',
   maxHrBpm: 188,
   restingHrBpm: 48,
@@ -107,8 +106,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
   return {
     id,
     athleteId: 1,
-    stravaId: 9_000_000_000 + id,
-    fitFileHash: null,
+    fitFileHash: `hash-${id}`,
     name: 'Footing',
     sportType: 'Run',
     distanceM: 10_000,
@@ -433,7 +431,7 @@ describe('getDashboardSummary — dernières activités', () => {
       new Date('2026-08-08T09:00:00.000Z'),
       new Date('2026-08-07T09:00:00.000Z'),
     ]);
-    expect(summary.recentActivities[0]).not.toHaveProperty('stravaId');
+    expect(summary.recentActivities[0]).not.toHaveProperty('fitFileHash');
     expect(summary.recentActivities[0]).not.toHaveProperty('athleteId');
   });
 });

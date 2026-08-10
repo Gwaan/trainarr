@@ -12,7 +12,7 @@ Tout accès aux données passe par un DAL dédié, conformément à la reco offi
 
 - Chaque module du DAL commence par `import 'server-only'` → erreur de build si importé côté client.
 - **Seul le DAL (et `src/config/`) lit `process.env`** et importe le client DB. Drizzle n'est jamais importé dans un composant ou une action directement.
-- Le DAL retourne des **DTOs minimaux** : uniquement les champs dont l'UI a besoin, jamais un enregistrement brut (les tokens Strava, par exemple, ne sortent jamais du DAL).
+- Le DAL retourne des **DTOs minimaux** : uniquement les champs dont l'UI a besoin, jamais un enregistrement brut (les identifiants internes, par exemple, ne franchissent pas la frontière).
 - Helpers d'auth mémoïsés avec `cache()` de React (`getCurrentUser`) plutôt que passés de composant en composant.
 
 ## Server Actions — chaque action est un endpoint public
@@ -39,7 +39,7 @@ Jamais de mutation en side-effect de rendu (pas de `cookies().delete()` dans un 
 Ce sont les surfaces les plus sensibles (pouvoir maximal) :
 
 - `proxy.ts` peut faire du routage/redirect optimiste mais **n'est pas la couche d'auth** — la vérification de session se fait dans le DAL, au plus près des données.
-- Webhook Strava : vérifier le token de souscription à chaque requête ; callback OAuth : valider `state` (anti-CSRF).
+- Dépôt WebDAV `/dav` et `POST /api/fit/upload` : entrées externes exposées en écriture. Authentifier (Basic auth pour `/dav`), borner la taille avant de bufferiser, et ne jamais renvoyer de trace d'exécution au client.
 - Rate-limiter les endpoints coûteux (chat IA notamment).
 
 ## Secrets

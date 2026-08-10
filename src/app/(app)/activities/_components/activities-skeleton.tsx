@@ -21,11 +21,8 @@ export function ActivitiesSkeleton() {
           <Skeleton className="h-8 w-44 max-w-full sm:h-9" />
           <Skeleton className="mt-2.5 h-3.5 w-80 max-w-full" />
         </div>
-        {/* Statut Strava + bouton d'import FIT */}
-        <div className="flex items-center gap-2">
-          <Skeleton className="h-9 w-[8.5rem]" />
-          <Skeleton className="h-11 w-[8.5rem] sm:w-[13.5rem]" />
-        </div>
+        {/* Bouton d'import FIT */}
+        <Skeleton className="h-11 w-[8.5rem] sm:w-[13.5rem]" />
       </div>
 
       {/* Deux semaines : le reste arrive en même temps, inutile de les figurer */}

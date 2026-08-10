@@ -1,17 +1,15 @@
 /**
- * Correspondance des sports FIT vers le vocabulaire déjà stocké en base
- * (`activities.sport_type`), qui est celui de Strava — les deux canaux d'import
- * doivent produire les mêmes libellés, sinon les agrégats du dashboard se
- * scindent en deux familles d'activités.
+ * Correspondance des sports FIT vers le vocabulaire de `activities.sport_type`
+ * (`Run`, `TrailRun`, `Ride`…) : c'est lui que lisent les agrégats du dashboard,
+ * un même sport doit toujours produire le même libellé.
  *
  * Référence des valeurs FIT : profil 21.212 du SDK Garmin, types `sport` et
  * `sub_sport` (`node_modules/@garmin/fitsdk/src/profile.js`).
  */
 
 /**
- * Sports (vocabulaire Strava, celui de la colonne `sport_type`) dont la cadence
- * brute compte les cycles d'une seule jambe. Les deux canaux d'import s'y
- * réfèrent : le FIT traduit d'abord son sport, Strava fournit déjà ce libellé.
+ * Sports (vocabulaire de la colonne `sport_type`) dont la cadence brute compte
+ * les cycles d'une seule jambe, et doit donc être doublée avant stockage.
  */
 const FOOT_CADENCE_SPORT_TYPES = new Set(['Run', 'TrailRun', 'VirtualRun', 'Walk', 'Hike']);
 
@@ -45,7 +43,7 @@ const BY_SPORT_AND_SUB_SPORT: Record<string, string> = {
   'training/yoga': 'Yoga',
 };
 
-/** Sports FIT ayant un équivalent Strava dont le nom ne se déduit pas du libellé FIT. */
+/** Sports FIT dont le libellé stocké ne se déduit pas du nom FIT. */
 const BY_SPORT: Record<string, string> = {
   running: 'Run',
   cycling: 'Ride',
@@ -63,7 +61,7 @@ const BY_SPORT: Record<string, string> = {
   rockClimbing: 'RockClimbing',
   hiit: 'HighIntensityIntervalTraining',
   standUpPaddleboarding: 'StandUpPaddling',
-  /** Fourre-tout Strava, pour les sports FIT qui ne décrivent aucune discipline. */
+  /** Fourre-tout, pour les sports FIT qui ne décrivent aucune discipline. */
   generic: 'Workout',
   training: 'Workout',
   fitnessEquipment: 'Workout',
@@ -107,8 +105,8 @@ export function mapFitSportType(
 }
 
 /**
- * `true` si la cadence brute du sport (vocabulaire Strava) compte les cycles
- * d'une seule jambe et doit donc être doublée pour obtenir des pas par minute.
+ * `true` si la cadence brute du sport (vocabulaire `sport_type`) compte les
+ * cycles d'une seule jambe et doit donc être doublée pour obtenir des pas par minute.
  * Faux pour le vélo, dont la cadence est déjà un nombre de tours de pédalier.
  */
 export function usesFootCadenceSportType(sportType: string): boolean {

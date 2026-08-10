@@ -52,7 +52,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.parseFitActivity.mockReturnValue(PARSED);
   mocks.getAthleteProfile.mockResolvedValue({ id: 1, displayName: 'Gwen' });
-  mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: true, merged: false });
+  mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: true });
   mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set([42]));
   mocks.saveActivityStreams.mockResolvedValue(undefined);
 });
@@ -67,23 +67,12 @@ describe('ingestFitBuffer', () => {
   });
 
   it('rapporte `updated` quand le fichier avait déjà été importé', async () => {
-    mocks.upsertActivityFromFit.mockResolvedValue({
-      activityId: 42,
-      created: false,
-      merged: false,
-    });
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: false });
 
     await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
   });
 
-  it('rapporte `merged` quand le FIT rejoint une activité Strava existante', async () => {
-    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 7, created: false, merged: true });
-    mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set([7]));
-
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 7 });
-  });
-
-  it('n’écrit pas les séries si l’activité en a déjà (celles de Strava font foi)', async () => {
+  it('n’écrit pas les séries si l’activité en a déjà (celles en base font foi)', async () => {
     mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set());
 
     await ingestFitBuffer(BUFFER);

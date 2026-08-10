@@ -13,8 +13,9 @@ const envSchema = z.object({
   // Base de données
   DATABASE_URL: z.url({ error: 'URL Postgres requise (ex: postgres://user:pass@host:5432/trainarr)' }),
 
-  // URL publique de l'application (ex: https://watchenv.gwenzr.dev) — nécessaire
-  // au redirect OAuth Strava et à l'URL de callback du webhook.
+  // URL publique de l'application (ex: https://watchenv.gwenzr.dev) — celle par
+  // laquelle la montre atteint le dépôt WebDAV, et qu'affichent les liens
+  // absolus construits côté serveur.
   APP_BASE_URL: z.url().optional(),
 
   // Coach IA — abstraction compatible OpenAI, jamais de couplage direct à un provider
@@ -22,11 +23,6 @@ const envSchema = z.object({
   AI_BASE_URL: z.url().optional(),
   AI_MODEL: z.string().min(1).optional(),
   AI_API_KEY: z.string().min(1).optional(),
-
-  // Strava — optionnels tant que la sync n'est pas branchée
-  STRAVA_CLIENT_ID: z.string().min(1).optional(),
-  STRAVA_CLIENT_SECRET: z.string().min(1).optional(),
-  STRAVA_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
 
   // Import FIT — boîte de dépôt partagée avec le service `fit-watcher`.
   // Même défaut que `scripts/fit-watcher.ts` : en Docker, c'est le point de

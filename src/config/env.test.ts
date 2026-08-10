@@ -17,9 +17,10 @@ describe('parseEnv — cas nominal', () => {
     expect(env.AI_BASE_URL).toBeUndefined();
     expect(env.AI_MODEL).toBeUndefined();
     expect(env.AI_API_KEY).toBeUndefined();
-    expect(env.STRAVA_CLIENT_ID).toBeUndefined();
-    expect(env.STRAVA_CLIENT_SECRET).toBeUndefined();
-    expect(env.STRAVA_WEBHOOK_VERIFY_TOKEN).toBeUndefined();
+    expect(env.WEBDAV_USERNAME).toBeUndefined();
+    expect(env.WEBDAV_PASSWORD).toBeUndefined();
+    // Seule variable à défaut hors AI_PROVIDER : la boîte de dépôt FIT.
+    expect(env.FIT_INBOX_DIR).toBe('/data/fit-inbox');
   });
 
   it('accepte une configuration complète', () => {
@@ -29,14 +30,17 @@ describe('parseEnv — cas nominal', () => {
       AI_BASE_URL: 'https://api.anthropic.com',
       AI_MODEL: 'claude-opus-5',
       AI_API_KEY: 'cle-de-test',
-      STRAVA_CLIENT_ID: '12345',
-      STRAVA_CLIENT_SECRET: 'secret-de-test',
-      STRAVA_WEBHOOK_VERIFY_TOKEN: 'token-de-test',
+      APP_BASE_URL: 'https://exemple.test',
+      FIT_INBOX_DIR: '/tmp/fit',
+      WEBDAV_USERNAME: 'gwen',
+      WEBDAV_PASSWORD: 'mot-de-passe-de-test',
     });
 
     expect(env.AI_PROVIDER).toBe('anthropic');
     expect(env.AI_BASE_URL).toBe('https://api.anthropic.com');
-    expect(env.STRAVA_CLIENT_ID).toBe('12345');
+    expect(env.APP_BASE_URL).toBe('https://exemple.test');
+    expect(env.FIT_INBOX_DIR).toBe('/tmp/fit');
+    expect(env.WEBDAV_USERNAME).toBe('gwen');
   });
 
   it('traite une variable définie mais vide comme absente', () => {

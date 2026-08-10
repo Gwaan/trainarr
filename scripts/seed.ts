@@ -9,7 +9,7 @@
  *
  * Usage : `pnpm db:seed` (les migrations doivent avoir été appliquées avant).
  *
- * Idempotent : les activités sont upsertées sur un `strava_id` synthétique
+ * Idempotent : les activités sont upsertées sur un `fit_file_hash` synthétique
  * réservé, les séances planifiées sont réécrites, l'athlète est mis à jour.
  * Relancer le script ne duplique donc rien — il repositionne simplement les
  * 8 semaines d'historique par rapport à la date du jour.
@@ -28,10 +28,11 @@ import {
 } from '../src/data/db/schema';
 
 /**
- * Plage d'identifiants Strava réservée aux données fictives. Les ids Strava
- * réels valent ~1,5 × 10^10 : aucun risque de collision avec une vraie sync.
+ * Préfixe des empreintes `fit_file_hash` réservées aux données fictives. Les
+ * empreintes réelles sont des SHA-256 hexadécimaux de 64 caractères : aucune ne
+ * peut commencer par « seed- », donc aucune collision avec un vrai import.
  */
-const SEED_STRAVA_ID_BASE = 9_000_000_000_000;
+const SEED_FIT_HASH_PREFIX = 'seed-';
 
 /** Nombre de semaines complètes générées, auxquelles s'ajoute la semaine en cours. */
 const WEEKS = 8;
@@ -184,10 +185,10 @@ function buildActivities(athleteId: number, today: Date): NewActivity[] {
 
       rows.push({
         athleteId,
-        // Identifiant dérivé de la DATE et non du créneau (semaine × jour) :
+        // Empreinte dérivée de la DATE CIVILE et non du créneau (semaine × jour) :
         // sinon le même créneau désigne une date différente selon le jour où
         // l'on relance le seed, et l'ancienne ligne survit en double.
-        stravaId: SEED_STRAVA_ID_BASE + Math.floor(dayMs / DAY_MS),
+        fitFileHash: `${SEED_FIT_HASH_PREFIX}${civilDate(startedAt)}`,
         name: week % 2 === 1 && template.alternateName ? template.alternateName : template.name,
         sportType: template.sportType,
         startedAt,
@@ -320,7 +321,7 @@ async function main(): Promise<void> {
       await db
         .insert(activities)
         .values(row)
-        .onConflictDoUpdate({ target: activities.stravaId, set: row });
+        .onConflictDoUpdate({ target: activities.fitFileHash, set: row });
     }
 
     // Pas de clé naturelle sur les séances planifiées : on réécrit celles de

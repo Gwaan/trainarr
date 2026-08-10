@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Upload } from "lucide-react";
 
@@ -10,6 +10,7 @@ import {
   fitUploadResponseSchema,
 } from "@/app/api/fit/_lib/upload-contract";
 import { Banner } from "@/components/banner";
+import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 
@@ -19,13 +20,13 @@ import {
 } from "../_lib/fit-upload-summary";
 
 /**
- * En-tête de la page « Activités », porteur de l'import manuel de fichiers FIT.
+ * En-tête de la page « Activités », porteur de l'import de fichiers FIT — le
+ * seul canal d'entrée des données.
  *
  * L'en-tête est un composant client parce que le bouton d'import, la zone de
- * dépôt et le récapitulatif partagent le même état : ils sont rendus à trois
- * endroits différents du flux (dans l'action de l'en-tête, puis en pleine
- * largeur sous celui-ci). Tout ce qui vient du serveur — le badge ou le CTA
- * Strava — reste rendu côté serveur et transite par `stravaAction`.
+ * dépôt, le récapitulatif et l'état d'accueil partagent le même état et le même
+ * `<input type="file">` : ils sont rendus à plusieurs endroits du flux, mais
+ * déclenchent tous le même envoi.
  */
 
 const UPLOAD_ENDPOINT = "/api/fit/upload";
@@ -39,14 +40,18 @@ const GENERIC_FAILURE: FitUploadSummary = {
 export type ActivitiesHeaderProps = {
   title: string;
   subtitle: string;
-  /** Badge « Strava connecté » ou bouton de connexion, rendus côté serveur. */
-  stravaAction?: ReactNode;
+  /**
+   * `true` quand aucune activité n'est encore enregistrée : l'en-tête rend
+   * alors l'état d'accueil, qui porte le CTA accent d'import à la place du
+   * bouton secondaire.
+   */
+  isEmpty: boolean;
 };
 
 export function ActivitiesHeader({
   title,
   subtitle,
-  stravaAction,
+  isEmpty,
 }: ActivitiesHeaderProps) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -151,13 +156,14 @@ export function ActivitiesHeader({
         title={title}
         subtitle={subtitle}
         action={
-          <div className="flex items-center gap-2">
-            {stravaAction}
+          // Un seul CTA accent par écran : quand l'état d'accueil le porte,
+          // l'en-tête n'affiche pas de second bouton d'import.
+          isEmpty ? undefined : (
             <Button
               type="button"
               variant="secondary"
               // Le libellé complet reste le nom accessible : sur mobile, seule
-              // la forme courte est affichée, faute de place à côté du badge.
+              // la forme courte est affichée, faute de place.
               aria-label="Importer des fichiers FIT"
               aria-busy={isPending}
               disabled={isPending}
@@ -177,24 +183,26 @@ export function ActivitiesHeader({
                 </>
               )}
             </Button>
-            {/* Chemin réel depuis un iPhone : le bouton ouvre le sélecteur natif. */}
-            <input
-              ref={inputRef}
-              type="file"
-              accept=".fit"
-              multiple
-              className="sr-only"
-              tabIndex={-1}
-              aria-hidden="true"
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                // Réinitialisé pour que le même fichier puisse être resoumis.
-                event.target.value = "";
-                void upload(files);
-              }}
-            />
-          </div>
+          )
         }
+      />
+
+      {/* Rendu hors de l'action de l'en-tête : le sélecteur natif doit rester
+          joignable depuis l'état d'accueil, qui remplace ce bouton. */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".fit"
+        multiple
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          // Réinitialisé pour que le même fichier puisse être resoumis.
+          event.target.value = "";
+          void upload(files);
+        }}
       />
 
       {isDragging ? (
@@ -231,6 +239,38 @@ export function ActivitiesHeader({
           </Banner>
         ) : null}
       </div>
+
+      {isEmpty ? (
+        <div className="rounded-card border border-border bg-surface">
+          <EmptyState
+            icon={Upload}
+            title="Aucune activité pour l'instant"
+            description="Dépose tes fichiers .fit ici ou choisis-les depuis ton téléphone : distances, allures et fréquences cardiaques alimenteront tes analyses et ton coach."
+            action={
+              <div className="flex flex-col items-center gap-3">
+                <Button
+                  type="button"
+                  variant="accent"
+                  aria-busy={isPending}
+                  disabled={isPending}
+                  onClick={() => inputRef.current?.click()}
+                >
+                  {isPending ? (
+                    <Loader2 aria-hidden="true" className="animate-spin" />
+                  ) : (
+                    <Upload aria-hidden="true" strokeWidth={1.8} />
+                  )}
+                  {isPending ? "Import…" : "Importer mes fichiers FIT"}
+                </Button>
+                <p className="max-w-sm text-[0.78rem] leading-relaxed text-balance text-fg-faint">
+                  Ensuite, plus rien à faire : HealthFit exporte automatiquement
+                  chaque séance vers Trainarr, qui l&apos;importe seul.
+                </p>
+              </div>
+            }
+          />
+        </div>
+      ) : null}
     </>
   );
 }

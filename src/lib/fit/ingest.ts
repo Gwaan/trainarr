@@ -12,28 +12,25 @@ import { parseFitActivity } from './parse';
 /**
  * Ingestion d'un fichier FIT : parsing → écriture en base → séries temporelles.
  *
- * Seul module de `lib/fit` à toucher la base, et uniquement via le DAL — même
- * découpage que `lib/strava/sync.ts` (le parseur reste une fonction pure).
+ * Seul module de `lib/fit` à toucher la base, et uniquement via le DAL (le
+ * parseur, lui, reste une fonction pure).
  */
 
 export type IngestReport = {
   /**
    * - `created` : nouvelle activité ;
-   * - `updated` : ce fichier avait déjà été importé (même empreinte) ;
-   * - `merged`  : le fichier a été rattaché à une activité déjà importée depuis
-   *   Strava, dont il a complété les champs manquants.
+   * - `updated` : ce fichier avait déjà été importé (même empreinte).
    */
-  status: 'created' | 'updated' | 'merged';
+  status: 'created' | 'updated';
   activityId: number;
 };
 
 /**
  * Importe le contenu d'un fichier FIT.
  *
- * Les streams ne sont écrits que si l'activité n'en a **aucun** — même critère
- * que la sync Strava (`findActivityIdsWithoutStreams`) : sur un rapprochement,
- * les séries déjà importées depuis Strava font foi et ne sont pas réécrites ;
- * sur une activité arrivée sans ses séries, le FIT les fournit.
+ * Les séries ne sont écrites que si l'activité n'en a **aucune** : celles déjà
+ * en base font foi, un redépôt du fichier ne les réécrit pas ; une activité dont
+ * l'écriture des séries avait échoué les récupère au passage suivant.
  *
  * @throws {FitParseError} si le fichier est illisible — l'erreur remonte telle
  * quelle à l'appelant (le watcher), qui décide du sort du fichier.
@@ -55,13 +52,12 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
     );
   }
 
-  const { activityId, created, merged } = await upsertActivityFromFit(parsed, profile.id);
+  const { activityId, created } = await upsertActivityFromFit(parsed, profile.id);
 
   const withoutStreams = await findActivityIdsWithoutStreams([activityId]);
   if (withoutStreams.has(activityId)) {
     await saveActivityStreams(activityId, parsed.streams);
   }
 
-  const status = merged ? 'merged' : created ? 'created' : 'updated';
-  return { status, activityId };
+  return { status: created ? 'created' : 'updated', activityId };
 }

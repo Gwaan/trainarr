@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getAthleteProfile, getStravaAthleteId, toAthleteProfileDto } from './athlete';
+import { getAthleteProfile, toAthleteProfileDto } from './athlete';
 import type { Athlete } from './db/schema';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
@@ -30,7 +30,6 @@ vi.mock('./db/client', () => {
 const rawAthlete: Athlete = {
   id: 1,
   displayName: 'Gwen',
-  stravaAthleteId: 987_654,
   sex: 'female',
   maxHrBpm: 191,
   restingHrBpm: 48,
@@ -88,17 +87,16 @@ describe('toAthleteProfileDto', () => {
     expect(dto.birthDate).toBeNull();
   });
 
-  it('ne laisse fuir aucun jeton Strava joint à la ligne', () => {
-    const polluted: Athlete & { accessToken: string; refreshToken: string } = {
+  it('ne laisse fuir aucune colonne jointe à la ligne', () => {
+    const polluted: Athlete & { internalNote: string } = {
       ...rawAthlete,
-      accessToken: 'strava-access-token',
-      refreshToken: 'strava-refresh-token',
+      internalNote: 'ne-doit-pas-fuiter',
     };
 
     const dto = toAthleteProfileDto(polluted);
 
     expect(Object.keys(dto).sort()).toEqual(PROFILE_KEYS);
-    expect(JSON.stringify(dto)).not.toContain('strava-');
+    expect(JSON.stringify(dto)).not.toContain('ne-doit-pas-fuiter');
   });
 });
 
@@ -116,27 +114,9 @@ describe('getAthleteProfile', () => {
     await expect(getAthleteProfile()).resolves.toBeNull();
   });
 
-  it("n'expose pas l'identifiant Strava dans le DTO d'affichage", async () => {
+  it("n'expose pas le sexe biologique dans le DTO d'affichage", async () => {
     queryState.rows = [rawAthlete];
 
-    expect(await getAthleteProfile()).not.toHaveProperty('stravaAthleteId');
-  });
-});
-
-describe('getStravaAthleteId', () => {
-  it("retourne l'identifiant Strava de l'athlète connecté", async () => {
-    queryState.rows = [{ stravaAthleteId: 987_654 }];
-
-    await expect(getStravaAthleteId()).resolves.toBe(987_654);
-  });
-
-  it('retourne null quand Strava n’a jamais été connecté', async () => {
-    queryState.rows = [{ stravaAthleteId: null }];
-
-    await expect(getStravaAthleteId()).resolves.toBeNull();
-  });
-
-  it('retourne null sans athlète en base', async () => {
-    await expect(getStravaAthleteId()).resolves.toBeNull();
+    expect(await getAthleteProfile()).not.toHaveProperty('sex');
   });
 });

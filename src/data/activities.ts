@@ -1,23 +1,11 @@
 import 'server-only';
 
-import {
-  and,
-  desc,
-  eq,
-  gte,
-  inArray,
-  isNull,
-  lte,
-  notInArray,
-  sql,
-  type Column,
-} from 'drizzle-orm';
+import { and, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
 import { APP_TIME_ZONE } from '@/config/time';
-import type { ParsedFitActivity } from '@/lib/fit/parse';
+import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
 import { defaultActivityName } from '@/lib/fit/sport';
 import { paceSecPerKm } from '@/lib/metrics';
-import type { StravaActivity, StravaStreamSet } from '@/lib/strava/client';
 
 import { db } from './db/client';
 import {
@@ -31,7 +19,7 @@ import {
 /**
  * DTOs des activités exposés à l'UI.
  *
- * Déclarés explicitement (pas de `typeof row`) : `stravaId`, `athleteId` et
+ * Déclarés explicitement (pas de `typeof row`) : `fitFileHash`, `athleteId` et
  * `createdAt` sont des champs internes et ne franchissent pas la frontière.
  */
 export type ActivitySummaryDto = {
@@ -209,112 +197,21 @@ export async function getActivityById(id: number): Promise<ActivityDetailDto | n
 }
 
 /*
- * Écritures de la synchronisation Strava (`src/lib/strava/sync.ts`).
+ * Écritures de l'import FIT (`src/lib/fit/ingest.ts`).
  */
 
-/** Colonnes entières du schéma : Strava renvoie des moyennes flottantes. */
+/** Colonnes entières du schéma : le FIT renvoie des moyennes flottantes. */
 function toIntegerBpm(value: number | null): number | null {
   return value === null ? null : Math.round(value);
-}
-
-/** Colonnes du schéma dérivées d'une activité Strava. */
-function stravaColumns(activity: StravaActivity) {
-  return {
-    name: activity.name,
-    sportType: activity.sportType,
-    startedAt: activity.startedAt,
-    distanceM: activity.distanceM,
-    movingTimeS: activity.movingTimeS,
-    elapsedTimeS: activity.elapsedTimeS,
-    elevationGainM: activity.elevationGainM,
-    avgHrBpm: toIntegerBpm(activity.avgHrBpm),
-    maxHrBpm: toIntegerBpm(activity.maxHrBpm),
-    avgPaceSecPerKm: paceSecPerKm(activity.distanceM, activity.movingTimeS),
-    avgCadenceSpm: activity.avgCadenceSpm,
-  };
-}
-
-/**
- * Insère, met à jour ou rapproche une activité issue de Strava. Miroir exact de
- * {@link upsertActivityFromFit} — les deux canaux se rapprochent l'un de l'autre,
- * sans quoi l'ordre d'arrivée déciderait de l'existence d'un doublon :
- *
- * 1. **Déjà importée depuis Strava** (`strava_id` connu) → mise à jour. C'est la
- *    contrainte unique, et non la lecture préalable, qui porte l'idempotence.
- * 2. **Même sortie déjà importée par un FIT** (cf. {@link isSameOuting}) → on
- *    rattache l'`strava_id` à cette ligne et on complète ses champs manquants.
- *    C'est le cas le plus fréquent : la montre dépose son FIT dans la minute,
- *    Strava n'émet son webhook que quelques minutes plus tard.
- * 3. Sinon → insertion.
- *
- * L'allure moyenne est dérivée ici (et non côté Strava) : elle reste `null` si
- * la distance ou la durée ne permettent pas de la calculer.
- */
-export async function upsertActivityFromStrava(
-  activity: StravaActivity,
-  athleteId: number,
-): Promise<CrossChannelUpsertResult> {
-  const values = stravaColumns(activity);
-
-  const sameActivity = await db
-    .select({ id: activities.id })
-    .from(activities)
-    .where(eq(activities.stravaId, activity.id))
-    .limit(1);
-
-  if (sameActivity.length === 0) {
-    const twin = await findTwinOuting(athleteId, activity, activities.stravaId);
-    if (twin) {
-      await db
-        .update(activities)
-        .set({ stravaId: activity.id, ...completableFields(twin, values) })
-        .where(eq(activities.id, twin.id));
-
-      return { activityId: twin.id, created: false, merged: true };
-    }
-  }
-
-  const rows = await db
-    .insert(activities)
-    .values({ athleteId, stravaId: activity.id, ...values })
-    // Strava fait foi quand il a une valeur (activity.update, backfill), mais
-    // ne doit jamais effacer une mesure venue du FIT avec un `null` : les
-    // colonnes nullables passent par coalesce(excluded, existant).
-    .onConflictDoUpdate({ target: activities.stravaId, set: stravaIdConflictSet(values) })
-    .returning({ id: activities.id });
-
-  const row = rows[0];
-  if (!row) {
-    throw new Error(`Upsert de l'activité Strava ${activity.id} sans ligne retournée.`);
-  }
-  return { activityId: row.id, created: sameActivity.length === 0, merged: false };
-}
-
-/**
- * Parmi `stravaIds`, ceux déjà présents en base. Permet à la sync de distinguer
- * les activités nouvelles (dont il faut importer les streams) des mises à jour.
- */
-export async function findKnownStravaIds(
-  stravaIds: readonly number[],
-): Promise<ReadonlySet<number>> {
-  if (stravaIds.length === 0) return new Set();
-
-  const rows = await db
-    .select({ stravaId: activities.stravaId })
-    .from(activities)
-    .where(inArray(activities.stravaId, [...stravaIds]));
-
-  // La colonne est nullable (activités importées d'un FIT seul), mais le filtre
-  // `IN` ne peut jamais ramener de `NULL` : le garde n'est là que pour le typage.
-  return new Set(rows.flatMap((row) => (row.stravaId === null ? [] : [row.stravaId])));
 }
 
 /**
  * Parmi `activityIds`, ceux qui n'ont **aucune** série temporelle en base.
  *
  * C'est ce critère — et non « la ligne d'activité était absente » — qui décide
- * de l'import des streams : une activité écrite lors d'un backfill interrompu par
- * le quota Strava n'a pas ses streams, et doit les récupérer au passage suivant.
+ * de l'écriture des séries : une activité insérée par un import dont l'écriture
+ * des streams a échoué n'a pas les siennes, et doit les récupérer au redépôt du
+ * fichier.
  */
 export async function findActivityIdsWithoutStreams(
   activityIds: readonly number[],
@@ -336,8 +233,8 @@ export async function findActivityIdsWithoutStreams(
  * **Unités** : les séries sont stockées telles quelles, dans les unités du
  * schéma. En particulier la cadence est en **pas par minute** pour les sports à
  * pied (comme la colonne `avg_cadence_spm`), en tours de pédalier par minute
- * pour le vélo : c'est à l'appelant de convertir avant d'écrire — Strava et le
- * FIT livrent tous deux les cycles d'une seule jambe.
+ * pour le vélo : c'est à l'appelant de convertir avant d'écrire — le FIT livre
+ * les cycles d'une seule jambe.
  *
  * Upsert sur `(activity_id, type)` — l'index unique du schéma garantit une seule
  * ligne par type, même si deux imports de la même activité se croisent (le
@@ -352,7 +249,7 @@ export async function findActivityIdsWithoutStreams(
  */
 export async function saveActivityStreams(
   activityId: number,
-  streams: StravaStreamSet,
+  streams: FitStreamSet,
 ): Promise<void> {
   const rows: NewActivityStream[] = [];
   for (const type of ACTIVITY_STREAM_TYPES) {
@@ -386,104 +283,26 @@ export async function saveActivityStreams(
   });
 }
 
-/*
- * Rapprochement croisé des deux canaux d'import (Strava et fichiers FIT).
- */
-
-/**
- * Tolérance de rapprochement entre les deux descriptions d'une même sortie.
- *
- * La même sortie arrive par deux canaux : Strava (montre → Garmin Connect →
- * Strava) et le fichier FIT déposé dans le dossier surveillé. Les deux décrivent
- * la même course mais aucun identifiant ne les relie, et leurs valeurs ne
- * coïncident pas au bit près — Strava recalcule distance et heure de départ à
- * partir des points GPS. On considère donc qu'il s'agit d'une seule sortie quand
- * le départ tient dans ±60 s et la distance dans ±2 % (soit ±200 m sur 10 km,
- * bien au-delà de l'écart observé entre les deux sources, et bien en deçà de ce
- * qui séparerait deux vraies sorties du même jour).
- */
-const MATCH_START_TOLERANCE_S = 60;
-const MATCH_DISTANCE_RATIO = 0.02;
-
-/** Colonnes qu'un canal peut compléter sur une ligne écrite par l'autre. */
+/** Colonnes nullables qu'un redépôt du même fichier peut venir combler. */
 type CompletableColumns = Pick<
   Activity,
   'elevationGainM' | 'avgHrBpm' | 'maxHrBpm' | 'avgPaceSecPerKm' | 'avgCadenceSpm'
 >;
 
 /** Résultat d'un import, du point de vue de la ligne d'activité. */
-export type CrossChannelUpsertResult = {
+export type FitUpsertResult = {
   activityId: number;
   /** `true` si la ligne n'existait pas et vient d'être insérée. */
   created: boolean;
-  /**
-   * `true` si l'import a été rattaché à une activité déjà écrite par l'autre
-   * canal plutôt que d'en créer une nouvelle. Exclusif de `created`.
-   */
-  merged: boolean;
 };
-
-/**
- * `true` si les deux descriptions désignent la même sortie, aux tolérances
- * ci-dessus. Symétrique en temps, relative à la distance du FIT (la mesure de la
- * montre, pas celle recalculée par Strava). Bornes **incluses**.
- *
- * Fonction pure, exportée pour les tests.
- */
-export function isSameOuting(
-  existing: { startedAt: Date; distanceM: number },
-  incoming: { startedAt: Date; distanceM: number },
-): boolean {
-  const gapS = Math.abs(existing.startedAt.getTime() - incoming.startedAt.getTime()) / 1000;
-  if (gapS > MATCH_START_TOLERANCE_S) return false;
-
-  const tolerance = Math.abs(incoming.distanceM) * MATCH_DISTANCE_RATIO;
-  return Math.abs(existing.distanceM - incoming.distanceM) <= tolerance;
-}
-
-/**
- * La jumelle d'une sortie en base : même athlète, même sortie au sens de
- * {@link isSameOuting}, et **pas encore rattachée au canal appelant**
- * (`unlinkedColumn IS NULL` : `strava_id` quand c'est Strava qui cherche,
- * `fit_file_hash` quand c'est un FIT). Une ligne déjà rattachée à ce canal vient
- * d'un autre import et reste distincte.
- *
- * Le rapprochement se fait en deux temps : la fenêtre temporelle est filtrée en
- * SQL (l'index `(athlete_id, started_at)` la sert directement), le critère de
- * distance en mémoire — il est relatif, donc mal indexable, et la fenêtre ne
- * ramène qu'une poignée de lignes.
- */
-async function findTwinOuting(
-  athleteId: number,
-  incoming: { startedAt: Date; distanceM: number },
-  unlinkedColumn: Column,
-): Promise<Activity | undefined> {
-  const windowMs = MATCH_START_TOLERANCE_S * 1000;
-
-  const candidates = await db
-    .select()
-    .from(activities)
-    .where(
-      and(
-        eq(activities.athleteId, athleteId),
-        isNull(unlinkedColumn),
-        gte(activities.startedAt, new Date(incoming.startedAt.getTime() - windowMs)),
-        lte(activities.startedAt, new Date(incoming.startedAt.getTime() + windowMs)),
-      ),
-    );
-
-  return candidates.find((row) => isSameOuting(row, incoming));
-}
 
 /**
  * Les champs que l'import apporte et qui manquent (`null`) à la ligne existante.
  *
- * Chaque canal porte des colonnes que l'autre n'a pas toujours : le FIT est la
- * mesure brute de la montre (cadence, dénivelé barométrique, FC si la ceinture
- * n'a pas été synchronisée avec Strava), Strava recalcule certaines valeurs à
- * partir des points GPS. On ne **complète** donc que les trous : une valeur déjà
- * en base n'est jamais écrasée, pour ne pas faire dépendre l'historique de
- * l'ordre d'arrivée des deux canaux.
+ * On ne **complète** que les trous : une valeur déjà en base n'est jamais
+ * écrasée. C'est ce qui rend un redépôt inoffensif — une mesure affinée depuis
+ * (ou un nom corrigé à la main) survit — tout en laissant un fichier relu par
+ * une version plus complète du parseur remplir ce qui manquait.
  *
  * Fonction pure, exportée pour les tests.
  */
@@ -513,8 +332,8 @@ export function completableFields(
 /**
  * Colonnes du schéma dérivées d'un FIT parsé.
  *
- * - `avgPaceSecPerKm` est calculée ici, comme pour Strava : elle reste `null` si
- *   distance ou durée ne la permettent pas ;
+ * - `avgPaceSecPerKm` est dérivée ici : elle reste `null` si distance ou durée
+ *   ne la permettent pas ;
  * - `name` : le format FIT n'a pas de champ « titre » (le parseur ne le renseigne
  *   que si la séance suivait un entraînement structuré). La colonne étant
  *   obligatoire, on retombe sur le libellé français de la discipline — factuel,
@@ -542,27 +361,8 @@ function fitColumns(parsed: ParsedFitActivity) {
  *
  * Les colonnes obligatoires (nom, sport, distance, durées) en sont absentes :
  * elles ne sont jamais `null`, donc jamais à compléter — les réécrire ferait
- * perdre le nom venu de Strava au moindre redépôt du même fichier.
+ * perdre un nom corrigé à la main au moindre redépôt du même fichier.
  */
-/**
- * `SET` du conflit `strava_id` : Strava est prioritaire sur les champs qu'il
- * renseigne (un `activity.update` doit se refléter), mais un `null` Strava ne
- * doit jamais effacer une mesure venue du FIT (FC, cadence) — d'où
- * `coalesce(excluded, existant)`, l'ordre inverse de {@link FIT_HASH_CONFLICT_SET}.
- * Les colonnes obligatoires (nom, sport, distance, durées) sont réécrites telles
- * quelles : Strava fait foi pour elles.
- */
-function stravaIdConflictSet(values: ReturnType<typeof stravaColumns>) {
-  return {
-    ...values,
-    elevationGainM: sql`coalesce(excluded.elevation_gain_m, ${activities.elevationGainM})`,
-    avgHrBpm: sql`coalesce(excluded.avg_hr_bpm, ${activities.avgHrBpm})`,
-    maxHrBpm: sql`coalesce(excluded.max_hr_bpm, ${activities.maxHrBpm})`,
-    avgPaceSecPerKm: sql`coalesce(excluded.avg_pace_sec_per_km, ${activities.avgPaceSecPerKm})`,
-    avgCadenceSpm: sql`coalesce(excluded.avg_cadence_spm, ${activities.avgCadenceSpm})`,
-  };
-}
-
 const FIT_HASH_CONFLICT_SET = {
   elevationGainM: sql`coalesce(${activities.elevationGainM}, excluded.elevation_gain_m)`,
   avgHrBpm: sql`coalesce(${activities.avgHrBpm}, excluded.avg_hr_bpm)`,
@@ -572,26 +372,22 @@ const FIT_HASH_CONFLICT_SET = {
 };
 
 /**
- * Insère, met à jour ou rapproche une activité issue d'un fichier FIT. Miroir de
- * {@link upsertActivityFromStrava}.
+ * Insère ou met à jour l'activité décrite par un fichier FIT.
  *
- * Trois chemins, dans cet ordre :
+ * Deux chemins, dans cet ordre :
  *
  * 1. **Déjà importée depuis ce même fichier** (`fit_file_hash` connu) → seuls les
- *    trous de la ligne sont comblés. Redéposer un fichier déjà fusionné ne doit
- *    rien écraser : ni le nom venu de Strava, ni une valeur affinée depuis.
- * 2. **Même sortie déjà importée par Strava** (cf. {@link isSameOuting}) → on
- *    rattache le FIT à cette ligne (`fit_file_hash` posé) et on complète ses
- *    champs manquants au lieu de créer un doublon.
- * 3. Sinon → insertion. Le `ON CONFLICT (fit_file_hash)` couvre la course entre
- *    deux imports simultanés du même fichier, avec la même politique qu'en 1.
- *
- * L'état final ne dépend donc pas de l'ordre d'arrivée des deux canaux.
+ *    trous de la ligne sont comblés (cf. {@link completableFields}) ; rien de ce
+ *    qui est déjà renseigné n'est écrasé.
+ * 2. Sinon → insertion. Le `ON CONFLICT (fit_file_hash)` couvre la course entre
+ *    deux imports simultanés du même fichier, avec la même politique qu'en 1 :
+ *    c'est la contrainte unique, et non la lecture préalable, qui porte
+ *    l'idempotence.
  */
 export async function upsertActivityFromFit(
   parsed: ParsedFitActivity,
   athleteId: number,
-): Promise<CrossChannelUpsertResult> {
+): Promise<FitUpsertResult> {
   const values = fitColumns(parsed);
 
   const sameFile = await db
@@ -607,17 +403,7 @@ export async function upsertActivityFromFit(
       await db.update(activities).set(completion).where(eq(activities.id, existing.id));
     }
 
-    return { activityId: existing.id, created: false, merged: false };
-  }
-
-  const twin = await findTwinOuting(athleteId, parsed, activities.fitFileHash);
-  if (twin) {
-    await db
-      .update(activities)
-      .set({ fitFileHash: parsed.fileHash, ...completableFields(twin, values) })
-      .where(eq(activities.id, twin.id));
-
-    return { activityId: twin.id, created: false, merged: true };
+    return { activityId: existing.id, created: false };
   }
 
   const rows = await db
@@ -630,5 +416,5 @@ export async function upsertActivityFromFit(
   if (!row) {
     throw new Error(`Upsert de l'activité FIT ${parsed.fileHash} sans ligne retournée.`);
   }
-  return { activityId: row.id, created: true, merged: false };
+  return { activityId: row.id, created: true };
 }

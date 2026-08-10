@@ -3,7 +3,7 @@
  *
  * Module **pur** : il reçoit les octets du fichier et rend une structure ; ni
  * base de données, ni système de fichiers, ni réseau. L'idempotence de l'import
- * repose sur `fileHash`, pendant du `strava_id` côté Strava.
+ * repose sur `fileHash`.
  *
  * Règle du projet : ne jamais approximer. Un champ absent du fichier vaut
  * `null` (ou est absent des streams) — jamais zéro, jamais une valeur déduite.
@@ -19,12 +19,11 @@ import type { FitMessages, RecordMesg, SessionMesg } from '@garmin/fitsdk';
 import { mapFitSportType, usesFootCadence } from './sport';
 
 /**
- * Séries temporelles d'une activité. Structurellement identique à
- * `StravaStreamSet` (`src/lib/strava/client.ts`) et aligné sur
- * `ACTIVITY_STREAM_TYPES` du schéma : les deux canaux d'import alimentent la
- * même table `activity_streams`. Chaque clé est optionnelle — le capteur peut
- * manquer — et, quand elle est présente, son tableau a la même longueur que les
- * autres : les index sont alignés point à point.
+ * Séries temporelles d'une activité, alignées sur `ACTIVITY_STREAM_TYPES` du
+ * schéma : c'est la forme qu'attend la table `activity_streams`. Chaque clé est
+ * optionnelle — le capteur peut manquer — et, quand elle est présente, son
+ * tableau a la même longueur que les autres : les index sont alignés point à
+ * point.
  */
 export type FitStreamSet = {
   /** Secondes écoulées depuis `startedAt`. */
@@ -47,7 +46,7 @@ export type ParsedFitActivity = {
    * Jamais de titre inventé — c'est à l'appelant de choisir un libellé.
    */
   name: string | null;
-  /** Vocabulaire Strava (`Run`, `TrailRun`, `Ride`…), voir `./sport`. */
+  /** Vocabulaire de `activities.sport_type` (`Run`, `TrailRun`, `Ride`…), voir `./sport`. */
   sportType: string;
   startedAt: Date;
   distanceM: number;
@@ -242,8 +241,8 @@ function requireSeconds(value: unknown, fieldName: string): number {
 
 /**
  * Cadence en pas par minute. FIT compte les cycles d'une jambe pour les sports
- * à pied (~87 pour ~174 pas/min) : ×2 à l'ingestion, exactement comme la sync
- * Strava (`src/lib/strava/client.ts`). Le vélo garde ses tours de pédalier.
+ * à pied (~87 pour ~174 pas/min) : ×2 à la lecture, pour que la colonne
+ * `avg_cadence_spm` porte bien des pas. Le vélo garde ses tours de pédalier.
  */
 function readCadence(
   cadence: unknown,

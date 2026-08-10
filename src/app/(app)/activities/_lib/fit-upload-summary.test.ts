@@ -4,7 +4,6 @@ import { summarizeFitUpload } from './fit-upload-summary';
 
 const created = (name: string) => ({ name, ok: true, status: 'created' }) as const;
 const updated = (name: string) => ({ name, ok: true, status: 'updated' }) as const;
-const merged = (name: string) => ({ name, ok: true, status: 'merged' }) as const;
 const failed = (name: string, error: string) => ({ name, ok: false, error }) as const;
 
 describe('summarizeFitUpload', () => {
@@ -28,29 +27,20 @@ describe('summarizeFitUpload', () => {
 
   it('enchaîne les statuts sans répéter le nom, dans un ordre stable', () => {
     const summary = summarizeFitUpload([
-      merged('c.fit'),
+      updated('c.fit'),
       created('a.fit'),
       created('b.fit'),
       created('d.fit'),
     ]);
 
     expect(summary?.tone).toBe('positive');
-    expect(summary?.title).toBe(
-      '3 activités importées, 1 fusionnée avec une activité existante',
-    );
+    expect(summary?.title).toBe('3 activités importées, 1 mise à jour');
   });
 
-  it('distingue mise à jour et fusion', () => {
-    const summary = summarizeFitUpload([
-      updated('a.fit'),
-      updated('b.fit'),
-      merged('c.fit'),
-      merged('d.fit'),
-    ]);
+  it('accorde le pluriel des mises à jour', () => {
+    const summary = summarizeFitUpload([updated('a.fit'), updated('b.fit')]);
 
-    expect(summary?.title).toBe(
-      '2 activités mises à jour, 2 fusionnées avec des activités existantes',
-    );
+    expect(summary?.title).toBe('2 activités mises à jour');
   });
 
   it('reste neutre et compte les échecs quand le lot est partiel', () => {

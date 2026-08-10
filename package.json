@@ -14,7 +14,6 @@
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:run": "tsx src/data/db/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
-    "strava:subscribe": "tsx scripts/strava-subscribe.ts",
     "fit:watch": "tsx --conditions=react-server scripts/fit-watcher.ts"
   },
   "dependencies": {

@@ -41,8 +41,7 @@ vi.mock('./db/client', () => {
 const rawActivity: Activity = {
   id: 42,
   athleteId: 1,
-  stravaId: 15_123_456_789,
-  fitFileHash: null,
+  fitFileHash: 'a'.repeat(64),
   name: 'Sortie longue',
   sportType: 'Run',
   startedAt: new Date('2026-08-02T06:30:00.000Z'),
@@ -85,7 +84,7 @@ describe('toActivitySummaryDto', () => {
   it('ne laisse fuir aucun identifiant interne', () => {
     const dto = toActivitySummaryDto(rawActivity);
 
-    expect(dto).not.toHaveProperty('stravaId');
+    expect(dto).not.toHaveProperty('fitFileHash');
     expect(dto).not.toHaveProperty('athleteId');
     expect(dto).not.toHaveProperty('createdAt');
   });
@@ -120,15 +119,15 @@ describe('toActivitySummaryDto', () => {
   });
 
   it('ignore les champs surnuméraires présents sur la ligne', () => {
-    const polluted: Activity & { accessToken: string } = {
+    const polluted: Activity & { internalNote: string } = {
       ...rawActivity,
-      accessToken: 'strava-access-token',
+      internalNote: 'ne-doit-pas-fuiter',
     };
 
     const dto = toActivitySummaryDto(polluted);
 
     expect(Object.keys(dto).sort()).toEqual(SUMMARY_KEYS);
-    expect(JSON.stringify(dto)).not.toContain('strava-access-token');
+    expect(JSON.stringify(dto)).not.toContain('ne-doit-pas-fuiter');
   });
 });
 
@@ -137,7 +136,7 @@ describe('toActivityDetailDto', () => {
     const dto = toActivityDetailDto(rawActivity);
 
     expect(Object.keys(dto).sort()).toEqual(DETAIL_KEYS);
-    expect(dto).not.toHaveProperty('stravaId');
+    expect(dto).not.toHaveProperty('fitFileHash');
     expect(dto).not.toHaveProperty('athleteId');
   });
 });

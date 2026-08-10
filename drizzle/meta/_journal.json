@@ -22,6 +22,13 @@
       "when": 1786353182297,
       "tag": "0002_fit_file_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786359829831,
+      "tag": "0003_drop_strava",
+      "breakpoints": true
     }
   ]
 }

@@ -67,7 +67,7 @@ Le `Suspense` seul **ne suffit pas** (testé) : c'est `connection()` qui bascule
 
 - `src/app/` contient **uniquement** du routing : `page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `default.tsx`, `route.ts`.
 - Code propre à une route : colocalisé dans `_components/` et `_lib/` (underscore = hors routing). Route groups `(nom)` pour les frontières de layout sans impacter l'URL.
-- Route handlers (`route.ts`) réservés aux entrées externes : webhook Strava, callback OAuth, streaming SSE du chat coach. Le reste passe par Server Actions.
+- Route handlers (`route.ts`) réservés aux entrées externes : dépôt WebDAV des fichiers FIT, upload multipart, streaming SSE du chat coach. Le reste passe par Server Actions.
 
 ## Formulaires & navigation
 

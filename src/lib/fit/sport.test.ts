@@ -33,7 +33,7 @@ describe('mapFitSportType', () => {
     expect(mapFitSportType(sport, subSport)).toEqual({ sportType: expected, warning: null });
   });
 
-  it('capitalise les sports FIT sans équivalent Strava nommé', () => {
+  it('capitalise les sports FIT sans libellé dédié', () => {
     expect(mapFitSportType('windsurfing', 'generic')).toEqual({
       sportType: 'Windsurfing',
       warning: null,
@@ -71,9 +71,9 @@ describe('usesFootCadence', () => {
 });
 
 describe('usesFootCadenceSportType', () => {
-  it('vaut vrai pour les sports à pied du vocabulaire Strava', () => {
-    // Même liste que côté FIT : les deux canaux écrivent dans la même colonne,
-    // elle ne doit pas mélanger les pas par minute et les cycles d'une jambe.
+  it('vaut vrai pour les sports à pied du vocabulaire `sport_type`', () => {
+    // La colonne `avg_cadence_spm` ne doit jamais mélanger les pas par minute
+    // et les cycles d'une seule jambe.
     for (const sportType of ['Run', 'TrailRun', 'VirtualRun', 'Walk', 'Hike']) {
       expect(usesFootCadenceSportType(sportType)).toBe(true);
     }

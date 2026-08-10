@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Toutes les variables (DATABASE_URL, clés Strava/IA, identifiants WebDAV)
+    # Toutes les variables (DATABASE_URL, clés IA, identifiants WebDAV)
     # viennent de .env — jamais du repo.
     env_file: .env
     environment:

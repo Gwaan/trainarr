@@ -1,17 +1,12 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { connection } from "next/server";
-import { Activity, Zap } from "lucide-react";
 
-import { EmptyState } from "@/components/empty-state";
-import { StravaConnectButton } from "@/components/strava-connect-button";
 import { listActivitiesByWeek } from "@/data/activities";
-import { isStravaConnected } from "@/data/strava-tokens";
 
 import { ActivitiesHeader } from "./_components/activities-header";
 import { ActivitiesSkeleton } from "./_components/activities-skeleton";
 import { ActivityWeek } from "./_components/activity-week";
-import { StravaStatusBanner } from "./_components/strava-status-banner";
 
 export const metadata: Metadata = {
   title: "Activités",
@@ -23,16 +18,6 @@ const PAGE_SUBTITLE =
 /** Pas de pagination pour l'instant : la page s'arrête à huit semaines. */
 const WEEKS_LIMIT = 8;
 
-/** Badge discret — l'accent reste réservé aux actions. */
-function StravaConnectedBadge() {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-button border border-border bg-surface-2 px-3 py-2 text-[0.78rem] text-fg-muted">
-      <span aria-hidden="true" className="size-1.5 rounded-full bg-positive" />
-      Strava connecté
-    </span>
-  );
-}
-
 /**
  * Contenu de la page.
  *
@@ -42,46 +27,19 @@ function StravaConnectedBadge() {
  */
 async function ActivitiesContent() {
   await connection();
-  const [connected, weeks] = await Promise.all([
-    isStravaConnected(),
-    listActivitiesByWeek(WEEKS_LIMIT),
-  ]);
-
-  const isEmpty = weeks.length === 0;
-  // Un seul CTA accent par écran : quand l'état d'accueil le porte, l'en-tête
-  // n'affiche pas l'action Strava (l'import FIT, lui, reste secondaire).
-  const stravaAction = connected ? (
-    <StravaConnectedBadge />
-  ) : isEmpty ? undefined : (
-    <StravaConnectButton />
-  );
+  const weeks = await listActivitiesByWeek(WEEKS_LIMIT);
 
   return (
     <>
+      {/* L'en-tête porte l'import FIT — et, tant qu'aucune sortie n'est
+          enregistrée, l'état d'accueil qui l'invite. */}
       <ActivitiesHeader
         title="Activités"
         subtitle={PAGE_SUBTITLE}
-        stravaAction={stravaAction}
+        isEmpty={weeks.length === 0}
       />
 
-      {isEmpty ? (
-        <div className="rounded-card border border-border bg-surface">
-          {connected ? (
-            <EmptyState
-              icon={Activity}
-              title="Aucune activité pour l'instant"
-              description="Ton compte Strava est connecté : tes prochaines sorties seront importées automatiquement et s'afficheront ici."
-            />
-          ) : (
-            <EmptyState
-              icon={Zap}
-              title="Connecte ton compte Strava"
-              description="Tes sorties seront importées automatiquement — distances, allures, fréquences cardiaques — pour alimenter tes analyses et ton coach."
-              action={<StravaConnectButton />}
-            />
-          )}
-        </div>
-      ) : (
+      {weeks.length > 0 ? (
         <div className="flex flex-col gap-4">
           {weeks.map((week) => (
             <ActivityWeek key={week.weekLabel} week={week} />
@@ -93,24 +51,14 @@ async function ActivitiesContent() {
             </p>
           ) : null}
         </div>
-      )}
+      ) : null}
     </>
   );
 }
 
-export default function ActivitiesPage({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
+export default function ActivitiesPage() {
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
-      {/* Bandeau et contenu sont suspendus séparément : le retour OAuth ne doit
-          pas attendre la lecture des activités. */}
-      <Suspense fallback={null}>
-        <StravaStatusBanner searchParams={searchParams} />
-      </Suspense>
-
       <Suspense fallback={<ActivitiesSkeleton />}>
         <ActivitiesContent />
       </Suspense>

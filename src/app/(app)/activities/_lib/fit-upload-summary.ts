@@ -14,20 +14,16 @@ import type { BannerTone } from "@/components/banner";
 /**
  * Formulations validées pour chaque issue.
  *
- * `merged` : la même sortie était déjà arrivée par Strava, le fichier FIT l'a
- * complétée plutôt que de créer un doublon.
+ * `updated` : ce fichier avait déjà été importé (même empreinte) — l'activité
+ * existante a été retrouvée, pas dupliquée.
  */
 const STATUS_LABELS: Record<FitUploadStatus, { one: string; many: string }> = {
   created: { one: "importée", many: "importées" },
   updated: { one: "mise à jour", many: "mises à jour" },
-  merged: {
-    one: "fusionnée avec une activité existante",
-    many: "fusionnées avec des activités existantes",
-  },
 };
 
 /** Ordre de lecture du récapitulatif, du cas le plus courant au plus rare. */
-const STATUS_ORDER: readonly FitUploadStatus[] = ["created", "updated", "merged"];
+const STATUS_ORDER: readonly FitUploadStatus[] = ["created", "updated"];
 
 export type FitUploadFailure = { name: string; error: string };
 
