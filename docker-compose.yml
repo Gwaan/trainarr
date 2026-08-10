@@ -14,7 +14,9 @@ services:
       # aligne aussi les logs et tout code tiers sur la même heure locale.
       TZ: ${TZ:-Europe/Paris}
     ports:
-      - "3000:3000"
+      # Port hôte paramétrable : sur le réseau app-staging, les autres services
+      # (reverse proxy, Komodo) joignent le container sur 3000 quoi qu'il arrive.
+      - "${APP_PORT:-3000}:3000"
     depends_on:
       db:
         condition: service_healthy
