@@ -1,0 +1,90 @@
+import { Gauge, HeartPulse } from "lucide-react";
+
+import { StatCard } from "@/components/stat-card";
+import type {
+  FitnessDto,
+  FitnessUnavailableDto,
+  Vo2maxDto,
+  Vo2maxUnavailableDto,
+} from "@/data/progression";
+
+import { MetricPlaceholder } from "../../_components/metric-placeholder";
+import { formatLoad, formatVo2max } from "../../_lib/format";
+import { readTsb, toDelta } from "../../_lib/metric-tone";
+import {
+  describeFitnessUnavailable,
+  describeVo2maxUnavailable,
+} from "../../_lib/metric-unavailable";
+
+export type ProgressionStatsProps = {
+  fitness: FitnessDto | null;
+  vo2max: Vo2maxDto | null;
+  fitnessUnavailable: FitnessUnavailableDto | null;
+  vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /** `false` quand aucun athlète n'existe encore : l'onboarding n'a pas eu lieu. */
+  hasProfile: boolean;
+};
+
+/**
+ * Où l'athlète en est **aujourd'hui**, en tête des courbes qui racontent
+ * comment elle y est arrivée. Volontairement identique au tableau de bord :
+ * mêmes valeurs, mêmes seuils, mêmes couleurs (cf. `_lib/metric-tone`).
+ *
+ * Ces trois chiffres ne dépendent pas de la période choisie — l'écart de CTL est
+ * toujours à sept jours, celui de VO₂max à trente : ce sont les fenêtres qui
+ * font sens physiologiquement, pas celle qu'on regarde.
+ */
+export function ProgressionStats({
+  fitness,
+  vo2max,
+  fitnessUnavailable,
+  vo2maxUnavailable,
+  hasProfile,
+}: ProgressionStatsProps) {
+  const tsb = fitness ? readTsb(fitness.tsb) : null;
+
+  return (
+    <section aria-label="Indicateurs du jour" className="grid grid-cols-2 gap-3 md:grid-cols-3">
+      {fitness && tsb ? (
+        <>
+          <StatCard
+            label="Forme CTL"
+            value={formatLoad(fitness.ctl)}
+            delta={toDelta(fitness.ctlDelta7d, 0, "warning")}
+            note="Charge chronique, lissée sur 42 jours."
+          />
+          <StatCard
+            label="Fraîcheur TSB"
+            value={formatLoad(fitness.tsb)}
+            tone={tsb.tone}
+            note={tsb.note}
+          />
+        </>
+      ) : hasProfile ? (
+        <MetricPlaceholder
+          icon={HeartPulse}
+          label="Charge & forme"
+          className="col-span-2"
+          {...describeFitnessUnavailable(fitnessUnavailable)}
+        />
+      ) : null}
+
+      {vo2max ? (
+        <StatCard
+          label="VO₂max estimée"
+          value={formatVo2max(vo2max.value)}
+          delta={toDelta(vo2max.delta30d, 1, "negative")}
+          note="Moyenne des 30 derniers jours."
+          className="col-span-2 md:col-span-1"
+        />
+      ) : (
+        <MetricPlaceholder
+          icon={Gauge}
+          label="VO₂max estimée"
+          className="col-span-2 md:col-span-1"
+          {...describeVo2maxUnavailable(vo2maxUnavailable)}
+        />
+      )}
+    </section>
+  );
+}

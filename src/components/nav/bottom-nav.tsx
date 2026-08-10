@@ -18,7 +18,9 @@ export function BottomNav() {
       aria-label="Navigation principale"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-md lg:hidden"
     >
-      <ul className="grid grid-cols-4">
+      {/* `grid-cols-*` calé sur le nombre d'onglets : cinq colonnes égales
+          plutôt qu'un défilement horizontal, que personne ne devine. */}
+      <ul className="grid grid-cols-5">
         {NAV_LINKS.map(({ href, label, icon: Icon }) => {
           const active = isActivePath(pathname, href);
 
@@ -28,7 +30,7 @@ export function BottomNav() {
                 href={href}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "relative flex h-14 min-h-11 flex-col items-center justify-center gap-1",
+                  "relative flex h-14 min-h-11 flex-col items-center justify-center gap-1 px-0.5",
                   "transition-colors duration-150 ease-out",
                   "before:absolute before:inset-x-0 before:top-0 before:h-[3px] before:bg-accent before:transition-opacity before:duration-150 before:ease-out",
                   active
@@ -43,7 +45,9 @@ export function BottomNav() {
                 />
                 <span
                   className={cn(
-                    "text-[0.66rem] leading-none font-medium tracking-[0.01em]",
+                    // `truncate` en garde-fou : « Progression » tient de justesse
+                    // sur un écran de 320 px, il ne doit jamais déborder.
+                    "w-full truncate text-center text-[0.66rem] leading-none font-medium tracking-[0.01em]",
                     active && "text-fg",
                   )}
                 >

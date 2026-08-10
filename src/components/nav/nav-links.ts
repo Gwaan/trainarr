@@ -3,6 +3,7 @@ import {
   CalendarRange,
   LayoutDashboard,
   Sparkles,
+  TrendingUp,
   type LucideIcon,
 } from "lucide-react";
 
@@ -15,6 +16,7 @@ export type NavLink = {
 export const NAV_LINKS: readonly NavLink[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/activities", label: "Activités", icon: Activity },
+  { href: "/progression", label: "Progression", icon: TrendingUp },
   { href: "/plan", label: "Plan", icon: CalendarRange },
   { href: "/coach", label: "Coach", icon: Sparkles },
 ];
