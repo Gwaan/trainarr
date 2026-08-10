@@ -25,12 +25,20 @@
   --color-warning: #fbbf24;
   --color-negative: #f87171;
 
-  /* Zones cardio — graphes uniquement */
-  --color-zone-1: #64748b;
-  --color-zone-2: #38bdf8;
-  --color-zone-3: #a3e635;
-  --color-zone-4: #fbbf24;
+  /* Zones cardio — graphes uniquement. Rampe SÉQUENTIELLE dans la famille de
+     l'accent : les zones sont une magnitude ordonnée, donc une seule teinte à
+     luminosité croissante (cf. .claude/rules/design.md).
+     Les cinq remplissages tiennent ≥ 3:1 (WCAG non-textuel) contre le rail des
+     barres, qui est `bg` — c'est ce rail-là qu'il faut mesurer, pas `surface`. */
+  --color-zone-1: #726152;
+  --color-zone-2: #946443;
+  --color-zone-3: #b95f27;
+  --color-zone-4: #e25613;
   --color-zone-5: #ff4d00;
+
+  /* Séries de graphe hors accent — la cadence, qu'aucun token existant ne peut
+     porter (l'accent est pris par l'allure, `negative` par la FC). */
+  --color-chart-cadence: #38bdf8;
 
   /* Typographie — auto-hébergée via next/font, aucune fonte système */
   --font-sans: var(--font-archivo);

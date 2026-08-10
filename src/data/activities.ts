@@ -5,14 +5,26 @@ import { and, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { APP_TIME_ZONE } from '@/config/time';
 import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
 import { defaultActivityName } from '@/lib/fit/sport';
-import { paceSecPerKm } from '@/lib/metrics';
+import {
+  computeHrZones,
+  computeSplits,
+  computeTrimp,
+  estimateEffectiveVo2max,
+  paceSecPerKm,
+  resamplePoints,
+  smoothPace,
+  type SeriesSample,
+} from '@/lib/metrics';
 
+import { getAthleteProfile } from './athlete';
 import { db } from './db/client';
 import {
   ACTIVITY_STREAM_TYPES,
   activities,
   activityStreams,
   type Activity,
+  type ActivityStream,
+  type ActivityStreamType,
   type NewActivityStream,
 } from './db/schema';
 
@@ -194,6 +206,236 @@ export async function getActivityById(id: number): Promise<ActivityDetailDto | n
   const rows = await db.select().from(activities).where(eq(activities.id, id)).limit(1);
   const row = rows[0];
   return row ? toActivityDetailDto(row) : null;
+}
+
+/*
+ * Détail complet d'une activité : ce que la page de séance affiche.
+ *
+ * Chaque bloc est indépendamment nullable — même principe que le dashboard. Une
+ * séance sans GPS garde ses splits et ses zones, une séance sans ceinture garde
+ * sa trace et son profil altimétrique : rien n'est estimé pour combler un trou.
+ */
+
+export type ActivityChartsDto = {
+  /** Points rééchantillonnés (~600 max) pour les graphes, alignés entre séries. */
+  points: Array<{
+    /** Secondes depuis le départ. */
+    timeS: number;
+    /** Mètres depuis le départ, null si pas de stream distance. */
+    distanceM: number | null;
+    /** Allure lissée en s/km, null si vitesse inexploitable à ce point. */
+    paceSecPerKm: number | null;
+    hrBpm: number | null;
+    altitudeM: number | null;
+    cadenceSpm: number | null;
+  }>;
+  /** Trace GPS complète (pas rééchantillonnée), `null` si absente. */
+  latlng: Array<[number, number]> | null;
+};
+
+export type ActivitySplitDto = {
+  /** Numéro du km, 1-indexé ; le dernier peut être partiel. */
+  km: number;
+  /** 1000, sauf pour le dernier split s'il est partiel. */
+  distanceM: number;
+  timeS: number;
+  paceSecPerKm: number;
+  avgHrBpm: number | null;
+  elevationGainM: number | null;
+};
+
+export type HrZoneDto = {
+  zone: 1 | 2 | 3 | 4 | 5;
+  timeS: number;
+  /** Part de la durée totale, dans [0, 1]. */
+  share: number;
+};
+
+export type ActivityFullDto = {
+  detail: ActivityDetailDto;
+  /** `null` si l'activité n'a aucune série temporelle exploitable. */
+  charts: ActivityChartsDto | null;
+  /** Vide si l'activité n'a pas de stream de distance. */
+  splits: ActivitySplitDto[];
+  /** `null` sans stream de FC ou sans FC max au profil. */
+  hrZones: HrZoneDto[] | null;
+  trimp: number | null;
+  /** Course à pied uniquement. */
+  effectiveVo2max: number | null;
+};
+
+/** Streams scalaires d'une activité, indexés par type. */
+type NumericStreams = Partial<Record<Exclude<ActivityStreamType, 'latlng'>, number[]>>;
+
+/*
+ * Le contenu des colonnes JSONB est typé côté schéma (`$type<ActivityStreamData>`)
+ * mais rien ne le garantit à la lecture : Postgres rend ce qui y a été écrit,
+ * éventuellement par une version antérieure du code. On vérifie donc la forme au
+ * lieu de l'affirmer par une assertion de type.
+ */
+
+function isNumberSeries(data: readonly unknown[]): data is number[] {
+  return data.every((value) => typeof value === 'number');
+}
+
+function isLatLngSeries(data: readonly unknown[]): data is Array<[number, number]> {
+  return data.every(
+    (value) =>
+      Array.isArray(value) &&
+      value.length === 2 &&
+      typeof value[0] === 'number' &&
+      typeof value[1] === 'number',
+  );
+}
+
+/** Range les lignes de `activity_streams` par type. Les séries vides sont ignorées. */
+function collectStreams(rows: readonly ActivityStream[]): {
+  numeric: NumericStreams;
+  latlng: Array<[number, number]> | null;
+} {
+  const numeric: NumericStreams = {};
+  let latlng: Array<[number, number]> | null = null;
+
+  for (const row of rows) {
+    const { data } = row;
+    if (data.length === 0) continue;
+
+    if (row.type === 'latlng') {
+      if (isLatLngSeries(data)) latlng = data;
+      continue;
+    }
+    if (isNumberSeries(data)) numeric[row.type] = data;
+  }
+
+  return { numeric, latlng };
+}
+
+/**
+ * Nombre de points exploitables en commun.
+ *
+ * Le parseur FIT écrit des streams de longueur identique (il rogne et écarte
+ * avant d'écrire) ; on retient malgré tout la plus courte, parce qu'un
+ * désalignement d'index attribuerait la FC d'un instant à un autre — une donnée
+ * fausse est pire qu'une donnée tronquée.
+ */
+function alignedLength(numeric: NumericStreams): number {
+  let shortest = Number.POSITIVE_INFINITY;
+  for (const type of ACTIVITY_STREAM_TYPES) {
+    if (type === 'latlng') continue;
+    const stream = numeric[type];
+    if (stream !== undefined) shortest = Math.min(shortest, stream.length);
+  }
+  return Number.isFinite(shortest) ? shortest : 0;
+}
+
+/**
+ * Séries prêtes pour les graphes.
+ *
+ * L'axe des temps (`time`) est la colonne vertébrale : sans lui, aucun point
+ * n'est plaçable. La trace GPS, elle, est renvoyée entière — une carte a besoin
+ * de tous ses points pour ne pas couper les virages, et une paire de flottants
+ * pèse bien moins qu'un point de graphe.
+ */
+function buildCharts(
+  numeric: NumericStreams,
+  latlng: Array<[number, number]> | null,
+): ActivityChartsDto | null {
+  const { time, distance, heartrate, altitude, cadence, velocity } = numeric;
+  const count = time === undefined ? 0 : alignedLength(numeric);
+
+  if (time === undefined || count === 0) {
+    return latlng === null ? null : { points: [], latlng };
+  }
+
+  const paces = velocity === undefined ? null : smoothPace(velocity, time);
+  // Le cumul de distance du FIT ne repart pas de zéro (points de tête rognés) :
+  // la page affiche des mètres depuis le départ de la trace.
+  const startDistance = distance === undefined ? 0 : distance[0];
+
+  const samples: SeriesSample[] = new Array<SeriesSample>(count);
+  for (let index = 0; index < count; index += 1) {
+    samples[index] = {
+      timeS: time[index],
+      distanceM: distance === undefined ? null : distance[index] - startDistance,
+      paceSecPerKm: paces === null ? null : paces[index],
+      hrBpm: heartrate === undefined ? null : heartrate[index],
+      altitudeM: altitude === undefined ? null : altitude[index],
+      cadenceSpm: cadence === undefined ? null : cadence[index],
+    };
+  }
+
+  return { points: resamplePoints(samples), latlng };
+}
+
+/**
+ * La VO₂max effective n'a de sens qu'en course à pied (`Run`, `TrailRun`…).
+ *
+ * Duplique le prédicat privé de `dashboard.ts` : ce module ne peut pas l'importer
+ * de là-bas, `dashboard.ts` dépendant déjà de celui-ci.
+ */
+function isRunning(sportType: string): boolean {
+  return sportType.toLowerCase().includes('run');
+}
+
+/**
+ * Tout ce que la page de détail d'une activité affiche, en une lecture.
+ *
+ * `null` si l'activité n'existe pas. Sinon, chaque bloc se dégrade seul : pas de
+ * streams → `charts` à `null` mais le détail et le TRIMP restent ; pas de FC max
+ * au profil → pas de zones, mais les splits sont là.
+ */
+export async function getActivityFull(id: number): Promise<ActivityFullDto | null> {
+  const [activityRows, streamRows, profile] = await Promise.all([
+    db.select().from(activities).where(eq(activities.id, id)).limit(1),
+    db.select().from(activityStreams).where(eq(activityStreams.activityId, id)),
+    getAthleteProfile(),
+  ]);
+
+  const row = activityRows[0];
+  if (!row) return null;
+
+  const { numeric, latlng } = collectStreams(streamRows);
+  const { time, distance, heartrate, altitude } = numeric;
+  const maxHrBpm = profile?.maxHrBpm ?? null;
+
+  const splits =
+    time !== undefined && distance !== undefined
+      ? computeSplits(distance, time, heartrate, altitude)
+      : [];
+
+  const hrZones =
+    time !== undefined && heartrate !== undefined && maxHrBpm !== null
+      ? computeHrZones(heartrate, time, maxHrBpm)
+      : [];
+
+  const trimp =
+    profile !== null && profile.sex !== null
+      ? computeTrimp({
+          movingTimeS: row.movingTimeS,
+          avgHrBpm: row.avgHrBpm,
+          restingHrBpm: profile.restingHrBpm,
+          maxHrBpm,
+          sex: profile.sex,
+        })
+      : null;
+
+  const effectiveVo2max = isRunning(row.sportType)
+    ? estimateEffectiveVo2max({
+        distanceM: row.distanceM,
+        movingTimeS: row.movingTimeS,
+        avgHrBpm: row.avgHrBpm,
+        maxHrBpm,
+      })
+    : null;
+
+  return {
+    detail: toActivityDetailDto(row),
+    charts: buildCharts(numeric, latlng),
+    splits,
+    hrZones: hrZones.length > 0 ? hrZones : null,
+    trimp,
+    effectiveVo2max,
+  };
 }
 
 /*

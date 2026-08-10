@@ -1,0 +1,131 @@
+import { describe, expect, it } from 'vitest';
+
+import { computeHrZones } from './hr-zones';
+
+const MAX_HR = 200;
+
+/** Série 1 Hz de `count` secondes, FC donnée par une fonction du temps. */
+function series(count: number, hrAt: (second: number) => number) {
+  const time: number[] = [];
+  const hr: number[] = [];
+  for (let second = 0; second < count; second += 1) {
+    time.push(second);
+    hr.push(hrAt(second));
+  }
+  return { time, hr };
+}
+
+describe('computeHrZones', () => {
+  it('rend les cinq zones, y compris celles à zéro', () => {
+    const { time, hr } = series(100, () => 150);
+    const zones = computeHrZones(hr, time, MAX_HR);
+
+    expect(zones.map((zone) => zone.zone)).toEqual([1, 2, 3, 4, 5]);
+    expect(zones.filter((zone) => zone.timeS > 0)).toHaveLength(1);
+  });
+
+  it('classe chaque frontière dans la zone supérieure', () => {
+    // 120 = 60 %, 140 = 70 %, 160 = 80 %, 180 = 90 % de 200.
+    const boundaries: Array<[number, number]> = [
+      [119, 1],
+      [120, 2],
+      [139, 2],
+      [140, 3],
+      [159, 3],
+      [160, 4],
+      [179, 4],
+      [180, 5],
+      [200, 5],
+    ];
+
+    for (const [beats, expected] of boundaries) {
+      const { time, hr } = series(10, () => beats);
+      const zones = computeHrZones(hr, time, MAX_HR);
+      const occupied = zones.filter((zone) => zone.timeS > 0);
+
+      expect(occupied).toHaveLength(1);
+      expect(occupied[0].zone).toBe(expected);
+    }
+  });
+
+  it('compte les échantillons sous 50 % de FC max en zone 1', () => {
+    const { time, hr } = series(60, () => 80); // 40 % de FC max
+    const zones = computeHrZones(hr, time, MAX_HR);
+
+    expect(zones[0].timeS).toBe(59);
+    expect(zones[0].share).toBe(1);
+  });
+
+  it('pondère par le pas temporel réel, pas par le nombre de points', () => {
+    // Enregistrement « intelligent » : 10 s de zone 5 échantillonnées à 1 Hz
+    // (11 points), puis 60 s de zone 2 échantillonnées toutes les 3 s
+    // (20 points). Compter les points donnerait 35 % de zone 5 ; le temps dit
+    // 16 %. Aucun pas ne dépasse le plafond : rien n'est écarté.
+    const time: number[] = [];
+    const hr: number[] = [];
+    for (let second = 0; second <= 10; second += 1) {
+      time.push(second);
+      hr.push(190);
+    }
+    for (let second = 13; second <= 70; second += 3) {
+      time.push(second);
+      hr.push(130);
+    }
+
+    const zones = computeHrZones(hr, time, MAX_HR);
+    const zone2 = zones[1];
+    const zone5 = zones[4];
+
+    expect(zone5.timeS).toBe(11.5);
+    expect(zone2.timeS).toBe(58.5);
+    expect(zone5.timeS + zone2.timeS).toBe(70);
+    expect(zone2.share + zone5.share).toBeCloseTo(1, 12);
+  });
+
+  it('ne compte pas une pause d’enregistrement comme du temps en zone', () => {
+    // 10 min à 150 bpm (zone 3), 20 min d'auto-pause sans le moindre point,
+    // 10 min à 110 bpm (zone 1). Le total mesuré est de 20 min ; la règle du
+    // point milieu seule attribuait la moitié du trou à chaque bord et le
+    // panneau annonçait 40:00 (2 399 s).
+    const time: number[] = [];
+    const hr: number[] = [];
+    for (let second = 0; second < 600; second += 1) {
+      time.push(second);
+      hr.push(150);
+    }
+    for (let second = 1800; second < 2400; second += 1) {
+      time.push(second);
+      hr.push(110);
+    }
+
+    const zones = computeHrZones(hr, time, MAX_HR);
+    const total = zones.reduce((sum, zone) => sum + zone.timeS, 0);
+
+    expect(total).toBe(1203);
+    expect(zones[0].timeS).toBe(601.5);
+    expect(zones[2].timeS).toBe(601.5);
+  });
+
+  it('rend des parts qui somment à 1', () => {
+    const { time, hr } = series(600, (second) => 100 + (second % 100));
+    const zones = computeHrZones(hr, time, MAX_HR);
+
+    const total = zones.reduce((sum, zone) => sum + zone.share, 0);
+    expect(total).toBeCloseTo(1, 12);
+
+    for (const zone of zones) {
+      expect(zone.share).toBeGreaterThanOrEqual(0);
+      expect(zone.share).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('ne calcule rien sans données exploitables', () => {
+    const { time, hr } = series(100, () => 150);
+
+    expect(computeHrZones(hr, time, 0)).toEqual([]);
+    expect(computeHrZones(hr, time, Number.NaN)).toEqual([]);
+    expect(computeHrZones([], [], MAX_HR)).toEqual([]);
+    // Un instant unique n'a pas de durée.
+    expect(computeHrZones([150], [0], MAX_HR)).toEqual([]);
+  });
+});
