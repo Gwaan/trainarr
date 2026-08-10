@@ -29,6 +29,13 @@
       "when": 1786359829831,
       "tag": "0003_drop_strava",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786370994439,
+      "tag": "0004_athlete_singleton",
+      "breakpoints": true
     }
   ]
 }

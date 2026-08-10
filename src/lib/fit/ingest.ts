@@ -5,7 +5,7 @@ import {
   saveActivityStreams,
   upsertActivityFromFit,
 } from '@/data/activities';
-import { getAthleteProfile } from '@/data/athlete';
+import { getAthleteId } from '@/data/athlete';
 
 import { parseFitActivity } from './parse';
 
@@ -45,14 +45,14 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
     console.error(`[fit] ${parsed.fileHash.slice(0, 12)} : ${warning}`);
   }
 
-  const profile = await getAthleteProfile();
-  if (!profile) {
+  const athleteId = await getAthleteId();
+  if (athleteId === null) {
     throw new Error(
       "Aucun athlète enregistré : impossible d'importer un fichier FIT (onboarding requis).",
     );
   }
 
-  const { activityId, created } = await upsertActivityFromFit(parsed, profile.id);
+  const { activityId, created } = await upsertActivityFromFit(parsed, athleteId);
 
   const withoutStreams = await findActivityIdsWithoutStreams([activityId]);
   if (withoutStreams.has(activityId)) {

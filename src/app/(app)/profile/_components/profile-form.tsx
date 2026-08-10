@@ -1,0 +1,431 @@
+"use client";
+
+import {
+  useActionState,
+  useId,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
+import { Loader2 } from "lucide-react";
+
+import { Banner } from "@/components/banner";
+import { Panel } from "@/components/panel";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+
+import { saveProfileAction, type ProfileFormState } from "../_lib/actions";
+import { SEX_CHOICES, type ProfileFormValues } from "../_lib/form-values";
+
+/**
+ * Formulaire de profil — le même à l'onboarding et à l'édition : les champs sont
+ * identiques, seuls l'intention et le libellé de l'action changent.
+ *
+ * Chaque champ physiologique dit à quoi il sert : le renseigner est un choix
+ * éclairé, pas une case à cocher. Les champs sont contrôlés parce que React
+ * réinitialise un formulaire non contrôlé une fois l'action terminée — la
+ * saisie serait perdue au moindre message de validation.
+ */
+
+const HINTS = {
+  displayName: "Il sert à t'accueillir sur le tableau de bord.",
+  sex: "Les coefficients du modèle de charge (Banister) diffèrent — sans cette info, la charge n'est pas calculée.",
+  heartRate:
+    "La FC max et la FC de repos permettent de calculer ta charge d'entraînement (TRIMP).",
+  weightKg:
+    "Enregistré pour en suivre l'évolution ; aucun calcul actuel ne s'en sert.",
+  birthDate:
+    "Repère d'âge pour la lecture de tes séances ; aucun calcul actuel ne s'en sert.",
+} as const;
+
+/** Rien à afficher tant que le formulaire n'a pas été soumis. */
+const INITIAL_STATE: ProfileFormState = { status: "idle" };
+
+/** Repli si l'action échoue sans message — elle en fournit un dans tous ses cas connus. */
+const GENERIC_FAILURE = "Le profil n'a pas été enregistré.";
+
+/** Concatène les `id` de description d'un champ, en écartant ceux qui n'existent pas. */
+function describedBy(...ids: (string | false)[]): string | undefined {
+  const kept = ids.filter((id) => id !== false);
+  return kept.length > 0 ? kept.join(" ") : undefined;
+}
+
+function FieldError({ id, message }: { id: string; message: string }) {
+  return (
+    <p id={id} className="mt-1.5 text-[0.76rem] leading-snug text-negative">
+      {message}
+    </p>
+  );
+}
+
+function OptionalTag() {
+  return (
+    <span className="text-[0.72rem] font-normal text-fg-faint">facultatif</span>
+  );
+}
+
+/** Trame commune d'un champ : libellé, ligne d'aide, saisie, erreur. */
+function Field({
+  id,
+  label,
+  hint,
+  error,
+  optional,
+  children,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  error?: string;
+  optional?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="min-w-0">
+      <label
+        htmlFor={id}
+        className="flex flex-wrap items-baseline gap-x-2 text-[0.85rem] font-medium text-fg"
+      >
+        {label}
+        {optional ? <OptionalTag /> : null}
+      </label>
+      <p id={`${id}-hint`} className="mt-1 text-[0.76rem] leading-snug text-fg-faint">
+        {hint}
+      </p>
+      <div className="mt-2">{children}</div>
+      {error ? <FieldError id={`${id}-error`} message={error} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Saisie chiffrée : mono, largeur ajustée au nombre de chiffres, unité suffixée.
+ * L'unité affichée est décorative ; sa version lisible porte l'`id` `<id>-unit`,
+ * que l'appelant ajoute à `aria-describedby`.
+ */
+function NumberInput({
+  id,
+  unit,
+  unitLabel,
+  className,
+  ...props
+}: Omit<ComponentProps<typeof Input>, "id"> & {
+  id: string;
+  unit: string;
+  unitLabel: string;
+}) {
+  return (
+    <div className={cn("relative", className)}>
+      <Input id={id} inputMode="numeric" autoComplete="off" {...props} className="num pr-12" />
+      <span
+        aria-hidden="true"
+        className="num pointer-events-none absolute inset-y-0 right-3 flex items-center text-[0.78rem] text-fg-faint"
+      >
+        {unit}
+      </span>
+      <span id={`${id}-unit`} className="sr-only">
+        {unitLabel}
+      </span>
+    </div>
+  );
+}
+
+export type ProfileFormProps = {
+  /** `onboarding` : aucun profil en base — c'est une création. */
+  mode: "onboarding" | "edit";
+  values: ProfileFormValues;
+};
+
+export function ProfileForm({ mode, values }: ProfileFormProps) {
+  const [state, formAction, isPending] = useActionState(
+    saveProfileAction,
+    INITIAL_STATE,
+  );
+  const [fields, setFields] = useState(values);
+  const uid = useId();
+
+  const fieldId = (name: keyof ProfileFormValues) => `${uid}-${name}`;
+  const setField = (name: keyof ProfileFormValues, value: string) =>
+    setFields((current) => ({ ...current, [name]: value }));
+
+  const errors = state.fieldErrors;
+  const hasFeedback = state.status !== "idle";
+
+  const sexHintId = `${uid}-sex-hint`;
+  const heartRateHintId = `${uid}-heart-rate-hint`;
+
+  return (
+    <form
+      action={formAction}
+      // La validation est celle de l'action : mêmes messages, même endroit et
+      // même ton pour tous les champs, plutôt que des bulles natives.
+      noValidate
+      className="flex flex-col gap-4 sm:gap-5"
+    >
+      {/*
+        Région live permanente : elle doit exister avant la mise à jour pour que
+        le retour d'action soit annoncé. Sans message, `sr-only` la sort du flux
+        (position absolue), donc de l'espacement de la colonne.
+      */}
+      <div aria-live="polite" className={hasFeedback ? undefined : "sr-only"}>
+        {state.status === "success" ? (
+          // Le message peut annoncer la reprise des imports en attente : il est
+          // affiché tel quel, c'est l'action qui sait ce qu'elle a déclenché.
+          <Banner tone="positive" title={state.message ?? "Profil enregistré."} />
+        ) : null}
+        {state.status === "error" ? (
+          <Banner tone="negative" title={state.message ?? GENERIC_FAILURE} />
+        ) : null}
+      </div>
+
+      <Panel title="Identité">
+        <div className="flex flex-col gap-5">
+          <Field
+            id={fieldId("displayName")}
+            label="Prénom"
+            hint={HINTS.displayName}
+            error={errors?.displayName}
+          >
+            <Input
+              id={fieldId("displayName")}
+              name="displayName"
+              type="text"
+              autoComplete="given-name"
+              aria-required="true"
+              aria-invalid={errors?.displayName ? true : undefined}
+              aria-describedby={describedBy(
+                `${fieldId("displayName")}-hint`,
+                Boolean(errors?.displayName) && `${fieldId("displayName")}-error`,
+              )}
+              value={fields.displayName}
+              onChange={(event) => setField("displayName", event.target.value)}
+              className="sm:max-w-xs"
+            />
+          </Field>
+
+          <fieldset
+            className="min-w-0"
+            aria-describedby={describedBy(
+              sexHintId,
+              Boolean(errors?.sex) && `${fieldId("sex")}-error`,
+            )}
+          >
+            <legend className="text-[0.85rem] font-medium text-fg">Sexe</legend>
+            <p
+              id={sexHintId}
+              className="mt-1 text-[0.76rem] leading-snug text-fg-faint"
+            >
+              {HINTS.sex}
+            </p>
+
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              {SEX_CHOICES.map((choice) => {
+                const checked = fields.sex === choice.value;
+
+                return (
+                  <label
+                    key={choice.label}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2.5 rounded-button border px-3 py-2.5 text-[0.85rem]",
+                      "transition-colors duration-150 ease-out",
+                      // Le radio natif est masqué : le focus clavier est reporté
+                      // sur l'étiquette entière, sans quoi il disparaîtrait.
+                      "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent",
+                      checked
+                        ? "border-accent bg-accent-soft font-medium text-fg"
+                        : "border-border bg-surface-2 text-fg-muted hover:border-fg-faint/35",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="sex"
+                      value={choice.value}
+                      checked={checked}
+                      onChange={() => setField("sex", choice.value)}
+                      className="sr-only"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "flex size-[1.05rem] shrink-0 items-center justify-center rounded-full border",
+                        checked ? "border-accent" : "border-fg-faint",
+                      )}
+                    >
+                      {checked ? (
+                        <span className="size-2 rounded-full bg-accent" />
+                      ) : null}
+                    </span>
+                    {choice.label}
+                  </label>
+                );
+              })}
+            </div>
+
+            {errors?.sex ? (
+              <FieldError id={`${fieldId("sex")}-error`} message={errors.sex} />
+            ) : null}
+          </fieldset>
+
+          <Field
+            id={fieldId("birthDate")}
+            label="Date de naissance"
+            hint={HINTS.birthDate}
+            error={errors?.birthDate}
+            optional
+          >
+            <Input
+              id={fieldId("birthDate")}
+              name="birthDate"
+              type="date"
+              autoComplete="bday"
+              aria-invalid={errors?.birthDate ? true : undefined}
+              aria-describedby={describedBy(
+                `${fieldId("birthDate")}-hint`,
+                Boolean(errors?.birthDate) && `${fieldId("birthDate")}-error`,
+              )}
+              value={fields.birthDate}
+              onChange={(event) => setField("birthDate", event.target.value)}
+              className="num w-full sm:w-48"
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel title="Données physiologiques">
+        <div className="flex flex-col gap-5">
+          {/* FC max et FC de repos vont par paire : une seule ligne d'aide. */}
+          <fieldset className="min-w-0">
+            <legend className="flex flex-wrap items-baseline gap-x-2 text-[0.85rem] font-medium text-fg">
+              Fréquence cardiaque
+              <OptionalTag />
+            </legend>
+            <p
+              id={heartRateHintId}
+              className="mt-1 text-[0.76rem] leading-snug text-fg-faint"
+            >
+              {HINTS.heartRate}
+            </p>
+
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-3">
+              <div>
+                <label
+                  htmlFor={fieldId("maxHrBpm")}
+                  className="block text-[0.8rem] text-fg-muted"
+                >
+                  FC max
+                </label>
+                <NumberInput
+                  id={fieldId("maxHrBpm")}
+                  name="maxHrBpm"
+                  type="text"
+                  unit="bpm"
+                  unitLabel="en battements par minute"
+                  aria-invalid={errors?.maxHrBpm ? true : undefined}
+                  aria-describedby={describedBy(
+                    `${fieldId("maxHrBpm")}-unit`,
+                    heartRateHintId,
+                    Boolean(errors?.maxHrBpm) && `${fieldId("maxHrBpm")}-error`,
+                  )}
+                  value={fields.maxHrBpm}
+                  onChange={(event) => setField("maxHrBpm", event.target.value)}
+                  className="mt-1.5 w-32"
+                />
+                {errors?.maxHrBpm ? (
+                  <FieldError
+                    id={`${fieldId("maxHrBpm")}-error`}
+                    message={errors.maxHrBpm}
+                  />
+                ) : null}
+              </div>
+
+              <div>
+                <label
+                  htmlFor={fieldId("restingHrBpm")}
+                  className="block text-[0.8rem] text-fg-muted"
+                >
+                  FC de repos
+                </label>
+                <NumberInput
+                  id={fieldId("restingHrBpm")}
+                  name="restingHrBpm"
+                  type="text"
+                  unit="bpm"
+                  unitLabel="en battements par minute"
+                  aria-invalid={errors?.restingHrBpm ? true : undefined}
+                  aria-describedby={describedBy(
+                    `${fieldId("restingHrBpm")}-unit`,
+                    heartRateHintId,
+                    Boolean(errors?.restingHrBpm) &&
+                      `${fieldId("restingHrBpm")}-error`,
+                  )}
+                  value={fields.restingHrBpm}
+                  onChange={(event) =>
+                    setField("restingHrBpm", event.target.value)
+                  }
+                  className="mt-1.5 w-32"
+                />
+                {errors?.restingHrBpm ? (
+                  <FieldError
+                    id={`${fieldId("restingHrBpm")}-error`}
+                    message={errors.restingHrBpm}
+                  />
+                ) : null}
+              </div>
+            </div>
+          </fieldset>
+
+          <Field
+            id={fieldId("weightKg")}
+            label="Poids"
+            hint={HINTS.weightKg}
+            error={errors?.weightKg}
+            optional
+          >
+            <NumberInput
+              id={fieldId("weightKg")}
+              name="weightKg"
+              type="text"
+              inputMode="decimal"
+              unit="kg"
+              unitLabel="en kilogrammes"
+              aria-invalid={errors?.weightKg ? true : undefined}
+              aria-describedby={describedBy(
+                `${fieldId("weightKg")}-unit`,
+                `${fieldId("weightKg")}-hint`,
+                Boolean(errors?.weightKg) && `${fieldId("weightKg")}-error`,
+              )}
+              value={fields.weightKg}
+              onChange={(event) => setField("weightKg", event.target.value)}
+              className="w-32"
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <Button
+          type="submit"
+          size="lg"
+          disabled={isPending}
+          aria-busy={isPending}
+          className="w-full sm:w-auto"
+        >
+          {isPending ? (
+            <Loader2 aria-hidden="true" className="animate-spin" />
+          ) : null}
+          {isPending
+            ? "Enregistrement…"
+            : mode === "onboarding"
+              ? "Créer mon profil"
+              : "Enregistrer"}
+        </Button>
+        <p className="text-[0.78rem] leading-relaxed text-fg-faint">
+          {mode === "onboarding"
+            ? "Tout reste modifiable ensuite, depuis cette même page."
+            : "Les calculs repartent de ces valeurs dès l'enregistrement."}
+        </p>
+      </div>
+    </form>
+  );
+}

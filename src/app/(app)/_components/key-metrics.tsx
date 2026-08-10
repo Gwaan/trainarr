@@ -42,10 +42,23 @@ function readTsb(tsb: number): { tone: StatTone; note: string } {
 export type KeyMetricsProps = {
   fitness: FitnessDto | null;
   vo2max: Vo2maxDto | null;
+  /** `false` quand aucun athlète n'existe encore : l'onboarding n'a pas eu lieu. */
+  hasProfile: boolean;
 };
 
-export function KeyMetrics({ fitness, vo2max }: KeyMetricsProps) {
+export function KeyMetrics({ fitness, vo2max, hasProfile }: KeyMetricsProps) {
   const tsb = fitness ? readTsb(fitness.tsb) : null;
+
+  /*
+   * Sans profil du tout, la carte d'accueil en tête du tableau de bord porte
+   * déjà l'invitation : répéter « Profil incomplet » ici ferait doublon. La
+   * VO₂max, seule rescapée, prend alors toute la largeur.
+   */
+  const showLoadPlaceholder = hasProfile;
+  const vo2maxSpan =
+    fitness || showLoadPlaceholder
+      ? "col-span-2 md:col-span-1"
+      : "col-span-2 md:col-span-3";
 
   return (
     <section
@@ -57,7 +70,7 @@ export function KeyMetrics({ fitness, vo2max }: KeyMetricsProps) {
           label="VO₂max estimée"
           value={formatVo2max(vo2max.value)}
           delta={toDelta(vo2max.delta30d, 1, "negative")}
-          className={fitness ? undefined : "col-span-2 md:col-span-1"}
+          className={fitness ? undefined : vo2maxSpan}
         />
       ) : (
         <MetricPlaceholder
@@ -65,7 +78,7 @@ export function KeyMetrics({ fitness, vo2max }: KeyMetricsProps) {
           label="VO₂max estimée"
           title="Pas encore d'effort de référence"
           description="Une sortie soutenue d'au moins 1,5 km dans les trente derniers jours suffit à estimer ta VO₂max."
-          className="col-span-2 md:col-span-1"
+          className={vo2maxSpan}
         />
       )}
 
@@ -84,15 +97,21 @@ export function KeyMetrics({ fitness, vo2max }: KeyMetricsProps) {
             className={vo2max ? "col-span-2 md:col-span-1" : undefined}
           />
         </>
-      ) : (
+      ) : showLoadPlaceholder ? (
+        /*
+         * Le composant ne reçoit qu'un `fitness` absent : il ne sait pas si le
+         * profil est incomplet, si aucune séance n'est importée, ou si aucune
+         * ne porte de fréquence cardiaque. Le message énonce donc les deux
+         * conditions sans accuser l'athlète d'en avoir manqué une.
+         */
         <MetricPlaceholder
           icon={HeartPulse}
           label="Charge & forme"
-          title="Profil incomplet"
-          description="La charge (CTL, ATL, TSB) se calcule à partir de ta FC max, de ta FC de repos et de ton sexe — les coefficients du modèle en dépendent."
+          title="Charge indisponible"
+          description="La charge (CTL, ATL, TSB) se calcule dès que ton profil est complet — FC max, FC repos, sexe — et que des séances avec fréquence cardiaque sont importées."
           className="col-span-2"
         />
-      )}
+      ) : null}
     </section>
   );
 }

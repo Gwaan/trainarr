@@ -7,7 +7,7 @@ vi.mock('server-only', () => ({}));
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     parseFitActivity: vi.fn(),
-    getAthleteProfile: vi.fn(),
+    getAthleteId: vi.fn(),
     upsertActivityFromFit: vi.fn(),
     findActivityIdsWithoutStreams: vi.fn(),
     saveActivityStreams: vi.fn(),
@@ -19,7 +19,7 @@ vi.mock('./parse', () => ({
 }));
 
 vi.mock('@/data/athlete', () => ({
-  getAthleteProfile: mocks.getAthleteProfile,
+  getAthleteId: mocks.getAthleteId,
 }));
 
 vi.mock('@/data/activities', () => ({
@@ -51,7 +51,7 @@ const BUFFER = Buffer.from('fit');
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.parseFitActivity.mockReturnValue(PARSED);
-  mocks.getAthleteProfile.mockResolvedValue({ id: 1, displayName: 'Gwen' });
+  mocks.getAthleteId.mockResolvedValue(1);
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, created: true });
   mocks.findActivityIdsWithoutStreams.mockResolvedValue(new Set([42]));
   mocks.saveActivityStreams.mockResolvedValue(undefined);
@@ -82,7 +82,7 @@ describe('ingestFitBuffer', () => {
   });
 
   it('échoue explicitement si aucun athlète n’est enregistré', async () => {
-    mocks.getAthleteProfile.mockResolvedValue(null);
+    mocks.getAthleteId.mockResolvedValue(null);
 
     await expect(ingestFitBuffer(BUFFER)).rejects.toThrowError(/athlète/);
     expect(mocks.upsertActivityFromFit).not.toHaveBeenCalled();
@@ -95,7 +95,7 @@ describe('ingestFitBuffer', () => {
     });
 
     await expect(ingestFitBuffer(BUFFER)).rejects.toBe(failure);
-    expect(mocks.getAthleteProfile).not.toHaveBeenCalled();
+    expect(mocks.getAthleteId).not.toHaveBeenCalled();
     expect(mocks.upsertActivityFromFit).not.toHaveBeenCalled();
   });
 });

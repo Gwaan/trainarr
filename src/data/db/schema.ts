@@ -1,4 +1,4 @@
-import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import { sql, type InferInsertModel, type InferSelectModel } from 'drizzle-orm';
 import {
   date,
   index,
@@ -35,19 +35,34 @@ export const ATHLETE_SEXES = ['male', 'female'] as const;
 
 export type AthleteSex = (typeof ATHLETE_SEXES)[number];
 
-/** Profil de l'athlète. Application mono-utilisateur : une seule ligne en pratique. */
-export const athlete = pgTable('athlete', {
-  id: serial('id').primaryKey(),
-  displayName: text('display_name').notNull(),
-  sex: text('sex', { enum: ATHLETE_SEXES }),
-  maxHrBpm: integer('max_hr_bpm'),
-  restingHrBpm: integer('resting_hr_bpm'),
-  weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
-  /** Date civile (mode `string`, `YYYY-MM-DD`) : pas d'heure, donc pas de fuseau. */
-  birthDate: date('birth_date'),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+/** Profil de l'athlète. Application mono-utilisateur : une seule ligne, garantie par la base. */
+export const athlete = pgTable(
+  'athlete',
+  {
+    id: serial('id').primaryKey(),
+    displayName: text('display_name').notNull(),
+    sex: text('sex', { enum: ATHLETE_SEXES }),
+    maxHrBpm: integer('max_hr_bpm'),
+    restingHrBpm: integer('resting_hr_bpm'),
+    weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
+    /** Date civile (mode `string`, `YYYY-MM-DD`) : pas d'heure, donc pas de fuseau. */
+    birthDate: date('birth_date'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  () => [
+    /**
+     * Contrainte de singleton : un index unique sur l'expression constante
+     * `true` produit la même clé pour toute ligne, donc la seconde insertion
+     * échoue (`23505`). C'est ce qui ferme la course entre deux soumissions
+     * simultanées de l'onboarding — un `SELECT` suivi d'un `INSERT` en
+     * `READ COMMITTED` ne la voit pas venir, les deux transactions lisant une
+     * table encore vide. Côté DAL, `createAthlete` traduit la violation en
+     * `AthleteAlreadyExistsError`.
+     */
+    uniqueIndex('athlete_singleton').on(sql`(true)`),
+  ],
+);
 
 /**
  * Une séance.

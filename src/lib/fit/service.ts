@@ -73,7 +73,8 @@ import {
 } from '@/lib/intervals/poll-plan';
 
 const PROCESSED_DIR = 'processed';
-const FAILED_DIR = 'failed';
+/** Archive des fichiers dont l'import a échoué — cf. `recoverPendingImports`. */
+export const FAILED_DIR = 'failed';
 
 /**
  * Délai avant de relancer une boucle tombée sur une erreur qu'aucun de ses
@@ -443,7 +444,7 @@ type PollMemory = {
  * vit dans le système de fichiers, comme la déduplication — il survit aux
  * redémarrages. Sans extension `.fit` ni suffixe `.part`, le watcher l'ignore.
  */
-const BACKFILL_MARKER = '.backfill-pending';
+export const BACKFILL_MARKER = '.backfill-pending';
 
 async function backfillMarkerExists(inboxDir: string): Promise<boolean> {
   try {
@@ -455,20 +456,30 @@ async function backfillMarkerExists(inboxDir: string): Promise<boolean> {
 }
 
 /**
- * Pose ou retire le marqueur. Ne propage rien : ce marqueur est un confort de
- * reprise, pas une condition du rapatriement. Le faire échouer un cycle entier
- * (droits du volume, disque plein) reviendrait à ne plus rien importer du tout
- * pour une raison secondaire.
+ * Pose ou retire le marqueur, et dit si l'opération a abouti. Ne propage rien :
+ * ce marqueur est un confort de reprise, pas une condition du rapatriement. Le
+ * faire échouer un cycle entier (droits du volume, disque plein) reviendrait à
+ * ne plus rien importer du tout pour une raison secondaire.
+ *
+ * Exportée pour la reprise après onboarding (`recoverPendingImports`), qui
+ * rouvre une fenêtre historique : le marqueur y est le seul moyen de redemander
+ * tout l'historique alors que des fichiers ont déjà été rapatriés.
  */
-async function setBackfillMarker(inboxDir: string, present: boolean, now: number): Promise<void> {
+export async function setBackfillMarker(
+  inboxDir: string,
+  present: boolean,
+  now: number,
+): Promise<boolean> {
   try {
     if (present) {
       await writeFile(join(inboxDir, BACKFILL_MARKER), `${new Date(now).toISOString()}\n`);
     } else {
       await rm(join(inboxDir, BACKFILL_MARKER), { force: true });
     }
+    return true;
   } catch (error) {
     pollLogError(`marqueur de backfill non ${present ? 'posé' : 'retiré'} : ${errorMessage(error)}`);
+    return false;
   }
 }
 

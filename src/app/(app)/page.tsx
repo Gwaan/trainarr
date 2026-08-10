@@ -6,6 +6,7 @@ import { getDashboardSummary } from "@/data/dashboard";
 
 import { DashboardSkeleton } from "./_components/dashboard-skeleton";
 import { KeyMetrics } from "./_components/key-metrics";
+import { OnboardingCard } from "./_components/onboarding-card";
 import { RecentActivitiesPanel } from "./_components/recent-activities-panel";
 import { TodaySessionPanel } from "./_components/today-session-panel";
 import { TrainingLoadPanel } from "./_components/training-load-panel";
@@ -23,6 +24,9 @@ async function DashboardContent() {
   await connection();
   const summary = await getDashboardSummary();
 
+  // Aucun nom d'athlète = aucun profil en base : l'installation est neuve.
+  const hasProfile = summary.athleteName !== null;
+
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
       <PageHeader
@@ -30,7 +34,13 @@ async function DashboardContent() {
         title={summary.athleteName ? `Bonjour, ${summary.athleteName}` : "Bonjour"}
       />
 
-      <KeyMetrics fitness={summary.fitness} vo2max={summary.vo2max} />
+      {hasProfile ? null : <OnboardingCard />}
+
+      <KeyMetrics
+        fitness={summary.fitness}
+        vo2max={summary.vo2max}
+        hasProfile={hasProfile}
+      />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
         <TodaySessionPanel session={summary.todaySession} />

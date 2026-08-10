@@ -1,4 +1,5 @@
-import { AthleteAvatar, type AthleteProfile } from "./athlete";
+import type { AthleteProfile } from "./athlete";
+import { AthleteLink } from "./athlete-link";
 import { Logo } from "./logo";
 import { SidebarNav } from "./sidebar-nav";
 
@@ -12,20 +13,10 @@ export function Sidebar({ athlete }: { athlete: AthleteProfile }) {
 
       <SidebarNav />
 
-      <div className="mt-auto border-t border-border p-3">
-        <div className="flex items-center gap-3 px-2 py-1.5">
-          <AthleteAvatar initials={athlete.initials} />
-          <span className="min-w-0">
-            <span className="block truncate text-[0.82rem] leading-tight font-medium text-fg">
-              {athlete.name}
-            </span>
-            {athlete.subtitle ? (
-              <span className="eyebrow mt-1 block truncate">
-                {athlete.subtitle}
-              </span>
-            ) : null}
-          </span>
-        </div>
+      {/* Pas de padding latéral : le filet accent de l'item actif doit affleurer
+          le bord de la sidebar, comme sur les liens de navigation. */}
+      <div className="mt-auto border-t border-border py-2">
+        <AthleteLink athlete={athlete} />
       </div>
     </aside>
   );
