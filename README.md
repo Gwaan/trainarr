@@ -77,8 +77,8 @@ Configuration, une fois :
 |---|---|---|
 | `INTERVALS_ATHLETE_ID` | Identifiant d'athlète (`i` + chiffres) | — |
 | `INTERVALS_API_KEY` | Clé API personnelle | — |
-| `INTERVALS_POLL_INTERVAL_S` | Intervalle entre deux cycles, en secondes | `300` |
-| `INTERVALS_LOOKBACK_DAYS` | Profondeur de la fenêtre interrogée, en jours | `30` |
+| `INTERVALS_POLL_INTERVAL_S` | Intervalle entre deux cycles, en secondes | `60` |
+| `INTERVALS_LOOKBACK_DAYS` | Profondeur de la fenêtre glissante, en jours | `30` |
 
 Tant que `INTERVALS_ATHLETE_ID` **et** `INTERVALS_API_KEY` ne sont pas tous deux
 renseignés, le rapatriement reste inactif — le watcher le signale au démarrage et
@@ -88,6 +88,15 @@ Une activité déjà rapatriée n'est jamais retéléchargée : le fichier dépo
 s'appelle `intervals-<id>.fit`, et sa présence dans la boîte, dans `processed/`
 ou dans `failed/` suffit à le savoir. Une séance saisie à la main sur
 intervals.icu n'a pas de fichier : le watcher le note une fois et passe.
+
+**Le premier démarrage rapatrie tout l'historique.** Tant qu'aucune séance n'a
+été récupérée, le poller demande l'intégralité des activités du compte plutôt que
+les 30 derniers jours, et les télécharge par tranches de 50 par cycle — plusieurs
+centaines de séances s'étalent donc sur quelques minutes, tranche par tranche,
+sans marteler l'API (les journaux annoncent `backfill : 50 rapatriés, reste ~N`).
+Une fois l'historique en place, chaque cycle se limite à la fenêtre glissante de
+`INTERVALS_LOOKBACK_DAYS` jours : **une nouvelle séance apparaît dans Trainarr
+environ une minute après sa synchronisation sur intervals.icu.**
 
 ## Commandes
 

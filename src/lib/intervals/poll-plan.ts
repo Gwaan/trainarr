@@ -2,10 +2,11 @@
  * Logique de décision du rapatriement intervals.icu — fonctions pures, sans I/O.
  *
  * Le poller (`scripts/fit-watcher.ts`) se contente de lister les activités
- * distantes et les fichiers déjà présents, d'appeler {@link planPoll}, puis de
- * télécharger ce qu'on lui désigne. Tout ce qui se raisonne (nom déterministe,
- * activité déjà rapatriée, activité sans fichier, cadence des cycles) vit ici
- * pour rester testable sans réseau ni système de fichiers.
+ * distantes et les fichiers déjà présents, d'appeler {@link planPollWindow} puis
+ * {@link planPoll}, et de télécharger ce qu'on lui désigne. Tout ce qui se
+ * raisonne (fenêtre interrogée, nom déterministe, activité déjà rapatriée,
+ * activité sans fichier, plafond et cadence des cycles) vit ici pour rester
+ * testable sans réseau ni système de fichiers.
  *
  * **L'état de la déduplication, c'est le système de fichiers.** Une activité est
  * « déjà rapatriée » si son fichier existe dans la boîte de dépôt ou dans ses
@@ -81,8 +82,16 @@ export type PlannedDownload = {
 };
 
 export type PollPlan = {
-  /** Activités à télécharger, dans l'ordre de la liste fournie. */
+  /**
+   * Activités à télécharger pendant ce cycle, dans l'ordre de la liste fournie,
+   * au plus {@link MAX_DOWNLOADS_PER_CYCLE}.
+   */
   toDownload: PlannedDownload[];
+  /**
+   * Activités éligibles laissées de côté par le plafond du cycle. Strictement
+   * positif = il reste du travail, le cycle suivant le reprendra.
+   */
+  remaining: number;
   /**
    * Identifiants écartés parce qu'ils ne composent pas un nom de fichier sûr.
    * Remontés plutôt que tus : c'est le signe d'une API qui a changé.
@@ -90,18 +99,27 @@ export type PollPlan = {
   invalidIds: string[];
 };
 
+/**
+ * Nombre maximal de fichiers rapatriés en un cycle.
+ *
+ * Un backfill d'historique désigne d'un coup plusieurs centaines d'activités,
+ * donc autant de `GET /file`. Les enchaîner sans fin martèlerait l'API et
+ * retarderait d'autant l'arrêt du service. Le reste est repris au cycle suivant :
+ * la déduplication se faisant sur les fichiers déjà déposés, la reprise est
+ * automatique et n'a rien à mémoriser.
+ */
+export const MAX_DOWNLOADS_PER_CYCLE = 50;
+
 /** Quelles activités rapatrier, compte tenu de ce qui est déjà sur le disque. */
-export function planPoll(
-  activities: readonly PollCandidate[],
-  context: PollContext,
-): PollPlan {
-  const plan: PollPlan = { toDownload: [], invalidIds: [] };
+export function planPoll(activities: readonly PollCandidate[], context: PollContext): PollPlan {
+  const eligible: PlannedDownload[] = [];
+  const invalidIds: string[] = [];
   /** Une même activité listée deux fois ne doit pas être téléchargée deux fois. */
   const planned = new Set<string>();
 
   for (const activity of activities) {
     if (!isSafeActivityId(activity.id)) {
-      plan.invalidIds.push(activity.id);
+      invalidIds.push(activity.id);
       continue;
     }
     if (activity.source === UNSUPPORTED_SOURCE) continue;
@@ -112,10 +130,101 @@ export function planPoll(
     if (planned.has(fileName)) continue;
 
     planned.add(fileName);
-    plan.toDownload.push({ activityId: activity.id, fileName });
+    eligible.push({ activityId: activity.id, fileName });
   }
 
-  return plan;
+  // L'API liste les activités de la plus récente à la plus ancienne : couper la
+  // fin du tableau, c'est reporter les plus vieilles. Une séance qui vient
+  // d'arriver n'attend donc jamais la fin d'un backfill pour être ingérée.
+  return {
+    toDownload: eligible.slice(0, MAX_DOWNLOADS_PER_CYCLE),
+    remaining: Math.max(0, eligible.length - MAX_DOWNLOADS_PER_CYCLE),
+    invalidIds,
+  };
+}
+
+/*
+ * Fenêtre interrogée : backfill intégral ou fenêtre glissante.
+ */
+
+/**
+ * Borne basse du backfill : antérieure à tout historique intervals.icu (le site
+ * a ouvert en 2019), donc « toute l'histoire ». Midi UTC plutôt que minuit pour
+ * que la conversion en date locale de l'athlète tombe sur le même jour civil
+ * quel que soit son fuseau.
+ */
+export const BACKFILL_OLDEST_MS = Date.UTC(2000, 0, 1, 12);
+
+/**
+ * `true` si au moins une activité a déjà été rapatriée — les `.part` d'un
+ * téléchargement interrompu ne comptent pas, ils ne prouvent aucun dépôt abouti.
+ */
+function hasRepatriatedFile(existingNames: ReadonlySet<string>): boolean {
+  for (const name of existingNames) {
+    if (name.startsWith(FILE_PREFIX) && name.endsWith(FILE_EXTENSION)) return true;
+  }
+  return false;
+}
+
+export type PollWindowContext = {
+  /** Mêmes noms que {@link PollContext.existingNames} : inbox + `processed/` + `failed/`. */
+  existingNames: ReadonlySet<string>;
+  /**
+   * Un cycle précédent a laissé des activités de côté (plafond atteint, quota,
+   * panne). Tant que c'est vrai, la fenêtre historique est maintenue : sans
+   * cela, les 50 premiers fichiers déposés feraient basculer le cycle suivant
+   * sur la fenêtre glissante et le reste de l'historique ne serait jamais
+   * demandé.
+   */
+  unfinished: boolean;
+  /** Profondeur de la fenêtre glissante, en jours. */
+  lookbackDays: number;
+  /** Instant de référence, en millisecondes. */
+  now: number;
+};
+
+export type PollWindow = {
+  /** Borne basse à passer à l'API. */
+  oldest: Date;
+  /** `true` si cette fenêtre couvre tout l'historique. */
+  backfill: boolean;
+};
+
+/**
+ * Quelle fenêtre interroger à ce cycle.
+ *
+ * Au tout premier passage — aucun `intervals-*.fit` dans la boîte ni dans ses
+ * archives — on demande **tout l'historique** : le rapatriement est un import
+ * initial autant qu'un filet, et une installation neuve doit récupérer les
+ * séances antérieures. Ensuite, la fenêtre glissante habituelle suffit.
+ *
+ * Un backfill relancé par accident (quelqu'un vide `processed/` à la main) est
+ * inoffensif : les fichiers sont retéléchargés, mais l'empreinte SHA-256 en base
+ * les ramène sur les mêmes activités — aucun doublon, seulement du trafic.
+ */
+export function planPollWindow(context: PollWindowContext): PollWindow {
+  if (context.unfinished || !hasRepatriatedFile(context.existingNames)) {
+    return { oldest: new Date(BACKFILL_OLDEST_MS), backfill: true };
+  }
+  return {
+    oldest: new Date(context.now - context.lookbackDays * 24 * 60 * 60 * 1000),
+    backfill: false,
+  };
+}
+
+/** Espacement entre deux téléchargements consécutifs d'un même cycle. */
+export const DOWNLOAD_SPACING_MS = 500;
+
+/**
+ * Pause observée **avant** un téléchargement, en millisecondes : nulle pour le
+ * premier du cycle, {@link DOWNLOAD_SPACING_MS} pour les suivants.
+ *
+ * Une nouvelle séance ne doit pas attendre une demi-seconde pour rien, mais un
+ * backfill ne doit pas non plus tirer cinquante fichiers d'affilée à pleine
+ * vitesse : intervals.icu est un service gratuit tenu par une personne.
+ */
+export function downloadSpacingMs(index: number): number {
+  return index === 0 ? 0 : DOWNLOAD_SPACING_MS;
 }
 
 /*

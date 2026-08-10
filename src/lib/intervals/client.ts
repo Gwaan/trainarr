@@ -23,6 +23,18 @@
  *   `newest` optionnel (défaut : maintenant) ; format documenté « Local ISO-8601
  *   date or date and time e.g. 2019-07-22T16:18:49 or 2019-07-22 » — donc une
  *   date **locale** de l'athlète, d'où {@link formatIntervalsDate}.
+ * - **Pas de pagination sur cet endpoint** (spec relue le 2026-08-10) : ni
+ *   `page`, ni `offset`, ni curseur. Les seuls paramètres restants sont
+ *   `route_id`, `fields` (« comma separated list of field names to include…,
+ *   also excludes null values ») et `limit` (« Return at most this many
+ *   activities »), sans défaut documenté. `limit` est **volontairement omis** :
+ *   la liste est triée du plus récent au plus ancien, le borner tronquerait
+ *   précisément l'historique ancien que le backfill vient chercher. Une réponse
+ *   d'historique complet reste une seule requête, et le plafonnement du travail
+ *   se fait à l'étape suivante, sur les téléchargements (cf.
+ *   `MAX_DOWNLOADS_PER_CYCLE`). Si le volume de cette réponse devenait un
+ *   problème, `fields=id,start_date_local,type,source` est le levier prévu par
+ *   l'API — non utilisé ici, faute de pouvoir le vérifier contre le service.
  * - **Fichier original** — `GET /api/v1/activity/{id}/file`, « Download original
  *   activity file, Strava activities not supported ». À ne pas confondre avec
  *   `/api/v1/activity/{id}/fit-file`, qui **régénère** un FIT à partir des

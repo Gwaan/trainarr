@@ -34,6 +34,9 @@ const envSchema = z.object({
   // pour FIT_INBOX_DIR — elles sont déclarées ici pour que la configuration de
   // l'application reste décrite d'un seul endroit.
   // Le poller ne démarre que si l'identifiant d'athlète ET la clé sont donnés.
+  // Tant qu'aucune séance n'a été rapatriée, il demande tout l'historique (par
+  // tranches, sur plusieurs cycles) ; ensuite seulement la fenêtre glissante de
+  // INTERVALS_LOOKBACK_DAYS jours.
   INTERVALS_ATHLETE_ID: z
     .string()
     .regex(/^i\d+$/, {
@@ -41,7 +44,7 @@ const envSchema = z.object({
     })
     .optional(),
   INTERVALS_API_KEY: z.string().min(1).optional(),
-  INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(300),
+  INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(60),
   INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
 
   // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).

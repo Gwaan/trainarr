@@ -10,7 +10,9 @@
  * par HealthFit et les dépose dans la même boîte d'import. La séparation est
  * stricte — le poller parle au réseau et écrit des fichiers, il ne parse ni
  * n'ingère rien ; le watcher parle à la base. Les deux ne se croisent que par le
- * répertoire.
+ * répertoire. Tant qu'aucune séance n'a été rapatriée, cette boucle demande tout
+ * l'historique plutôt que la fenêtre glissante — par tranches, sur plusieurs
+ * cycles (cf. `planPollWindow` et `MAX_DOWNLOADS_PER_CYCLE`).
  *
  * Scan par intervalle plutôt qu'inotify, volontairement : le dépôt se fait par
  * WebDAV sur un volume Docker (et, à terme, possiblement un partage réseau) où
@@ -26,7 +28,7 @@
  * Usage : `pnpm fit:watch`.
  */
 
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import { z } from 'zod';
@@ -42,14 +44,18 @@ import {
 } from '@/lib/intervals/client';
 import { depositInInbox } from '@/lib/intervals/inbox';
 import {
+  downloadSpacingMs,
+  MAX_DOWNLOADS_PER_CYCLE,
   MAX_SLEEP_MS,
   missingIntervalsSettings,
   nextPollDelayMs,
   planPoll,
+  planPollWindow,
   purgeExpiredWithoutFile,
   shouldLogOnce,
   WITHOUT_FILE_TTL_MS,
   type PollPlan,
+  type PollWindow,
 } from '@/lib/intervals/poll-plan';
 
 const PROCESSED_DIR = 'processed';
@@ -74,7 +80,7 @@ const configSchema = z.object({
     .regex(/^i\d+$/, "identifiant d'athlète intervals.icu attendu, de la forme i123456")
     .optional(),
   INTERVALS_API_KEY: z.string().min(1).optional(),
-  INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(300),
+  INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(60),
   INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
 });
 
@@ -425,12 +431,41 @@ type PollMemory = {
   loggedInvalidIds: Set<string>;
   /** Activités « sans fichier » déjà signalées : une ligne, pas une par tentative. */
   loggedWithoutFile: Set<string>;
+  /**
+   * Le cycle précédent n'a pas rapatrié tout ce qu'il avait identifié (plafond
+   * du cycle, quota, panne). Maintient la fenêtre historique jusqu'à ce qu'un
+   * cycle se termine à vide — cf. {@link planPollWindow}.
+   *
+   * Doublé par le marqueur {@link BACKFILL_MARKER} sur disque : un redémarrage
+   * en plein backfill (un simple déploiement suffit) perdrait sinon le reliquat
+   * d'historique — des fichiers existent déjà, la fenêtre glissante prendrait
+   * le dessus, et les séances les plus anciennes ne seraient plus jamais
+   * demandées.
+   */
+  unfinished: boolean;
 };
 
 /**
- * Un cycle : lister les activités de la fenêtre, télécharger celles qui manquent,
- * les déposer dans la boîte d'import. Retourne le délai imposé par un quota, en
- * secondes, ou `null`.
+ * Marqueur « backfill en cours », posé dans l'inbox : créé quand une fenêtre
+ * historique s'ouvre, supprimé quand un cycle se termine sans reliquat. L'état
+ * vit dans le système de fichiers, comme la déduplication — il survit aux
+ * redémarrages. Sans extension `.fit` ni suffixe `.part`, le watcher l'ignore.
+ */
+const BACKFILL_MARKER = '.backfill-pending';
+
+async function backfillMarkerExists(inboxDir: string): Promise<boolean> {
+  try {
+    await access(join(inboxDir, BACKFILL_MARKER));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Un cycle : choisir la fenêtre, lister les activités, télécharger celles qui
+ * manquent, les déposer dans la boîte d'import. Retourne le délai imposé par un
+ * quota, en secondes, ou `null`.
  */
 async function pollOnce(
   inboxDir: string,
@@ -438,21 +473,35 @@ async function pollOnce(
   memory: PollMemory,
 ): Promise<number | null> {
   const now = Date.now();
-  const oldest = new Date(now - settings.lookbackDays * 24 * 60 * 60 * 1000);
   purgeExpiredWithoutFile(memory.withoutFile, now);
 
   let plan: PollPlan;
+  let pollWindow: PollWindow;
   try {
+    // Les fichiers déjà là servent deux fois : ils décident de la fenêtre (aucun
+    // rapatriement encore fait = on demande tout l'historique) puis de ce qu'il
+    // reste à télécharger.
+    const existingNames = await listExistingNames(inboxDir);
+    pollWindow = planPollWindow({
+      existingNames,
+      // Le marqueur sur disque prolonge la mémoire du process : un backfill
+      // interrompu par un redémarrage reprend au lieu d'abandonner son reliquat.
+      unfinished: memory.unfinished || (await backfillMarkerExists(inboxDir)),
+      lookbackDays: settings.lookbackDays,
+      now,
+    });
+    if (pollWindow.backfill) {
+      // Posé avant les téléchargements : un crash en plein cycle le laisse en
+      // place, c'est exactement son rôle. Contenu = date, purement informatif.
+      await writeFile(join(inboxDir, BACKFILL_MARKER), `${new Date(now).toISOString()}\n`);
+    }
     const activities = await listRecentActivities({
       athleteId: settings.athleteId,
       apiKey: settings.apiKey,
-      oldest,
+      oldest: pollWindow.oldest,
       signal: inFlight.signal,
     });
-    plan = planPoll(activities, {
-      existingNames: await listExistingNames(inboxDir),
-      knownWithoutFile: memory.withoutFile,
-    });
+    plan = planPoll(activities, { existingNames, knownWithoutFile: memory.withoutFile });
   } catch (error) {
     return reportPollError(error, 'cycle abandonné');
   }
@@ -464,7 +513,30 @@ async function pollOnce(
     pollLogError(`activité ignorée : identifiant inattendu ${JSON.stringify(id)}.`);
   }
 
-  for (const { activityId, fileName } of plan.toDownload) {
+  /**
+   * Activités réglées : fichier déposé, ou constat qu'il n'y en a pas. Une
+   * activité que le réseau a fait échouer n'en fait pas partie — c'est du
+   * travail en attente, pas du travail fait.
+   */
+  let settled = 0;
+  let deposited = 0;
+
+  /**
+   * Ce que le cycle suivant doit savoir : reste-t-il des activités identifiées
+   * mais non rapatriées ? Tant que oui, la fenêtre historique est maintenue —
+   * sinon une séance ancienne qu'une panne a fait manquer sortirait de la
+   * fenêtre glissante avant d'avoir jamais été retentée.
+   */
+  const rememberProgress = (): void => {
+    memory.unfinished = plan.remaining > 0 || settled < plan.toDownload.length;
+  };
+
+  for (const [index, { activityId, fileName }] of plan.toDownload.entries()) {
+    if (stopping) break;
+    // Jamais de rafale de téléchargements, même sur un backfill de plusieurs
+    // centaines de séances. L'attente est interruptible : un SIGTERM ne l'attend pas.
+    const spacingMs = downloadSpacingMs(index);
+    if (spacingMs > 0) await sleep(spacingMs);
     if (stopping) break;
 
     let data: Buffer | null;
@@ -478,7 +550,10 @@ async function pollOnce(
       const retryAfterS = reportPollError(error, `activité ${activityId}`);
       // Un quota atteint interrompt le cycle sur-le-champ : enchaîner les
       // téléchargements ne ferait qu'aggraver le dépassement.
-      if (error instanceof IntervalsRateLimitError) return retryAfterS;
+      if (error instanceof IntervalsRateLimitError) {
+        rememberProgress();
+        return retryAfterS;
+      }
       continue;
     }
 
@@ -487,6 +562,7 @@ async function pollOnce(
       // pas à chaque cycle. Passé le TTL une tentative est refaite — un fichier
       // peut avoir été ajouté depuis, et l'oubli définitif perdrait la séance.
       memory.withoutFile.set(activityId, Date.now());
+      settled += 1;
       if (shouldLogOnce(memory.loggedWithoutFile, activityId)) {
         pollLog(
           `activité ${activityId} : aucun fichier original, nouvelle tentative dans ${WITHOUT_FILE_TTL_MS / 3_600_000} h.`,
@@ -497,10 +573,30 @@ async function pollOnce(
 
     try {
       await depositInInbox({ inboxDir, fileName, data });
+      deposited += 1;
+      settled += 1;
       pollLog(`activité ${activityId} → ${fileName} déposé (${data.byteLength} octets).`);
     } catch (error) {
       pollLogError(`activité ${activityId} → dépôt impossible : ${errorMessage(error)}`);
     }
+  }
+
+  rememberProgress();
+
+  // Fin de backfill : cycle historique terminé sans reliquat (et sans arrêt en
+  // cours, qui laisserait du travail identifié non fait) → le marqueur tombe.
+  if (pollWindow.backfill && !memory.unfinished && !stopping) {
+    await rm(join(inboxDir, BACKFILL_MARKER), { force: true });
+  }
+
+  // Un backfill s'étale sur plusieurs cycles : le dire, sinon le service a l'air
+  // de tourner sans fin sur le même travail.
+  if (pollWindow.backfill && (plan.toDownload.length > 0 || plan.remaining > 0)) {
+    pollLog(
+      plan.remaining > 0
+        ? `backfill : ${deposited} rapatriés, reste ~${plan.remaining} — suite au prochain cycle.`
+        : `backfill : ${deposited} rapatriés, historique complet.`,
+    );
   }
 
   return null;
@@ -512,10 +608,11 @@ async function pollLoop(inboxDir: string, settings: IntervalsSettings): Promise<
     withoutFile: new Map(),
     loggedInvalidIds: new Set(),
     loggedWithoutFile: new Set(),
+    unfinished: false,
   };
 
   pollLog(
-    `rapatriement actif pour l'athlète ${settings.athleteId} : un cycle toutes les ${settings.pollIntervalS} s sur ${settings.lookbackDays} jours glissants.`,
+    `rapatriement actif pour l'athlète ${settings.athleteId} : un cycle toutes les ${settings.pollIntervalS} s sur ${settings.lookbackDays} jours glissants, par tranches de ${MAX_DOWNLOADS_PER_CYCLE} fichiers. Tant qu'aucune séance n'a été rapatriée, c'est tout l'historique qui est demandé.`,
   );
 
   while (!stopping) {

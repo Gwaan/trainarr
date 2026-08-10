@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BACKFILL_OLDEST_MS,
+  DOWNLOAD_SPACING_MS,
+  downloadSpacingMs,
   inboxFileName,
   isSafeActivityId,
+  MAX_DOWNLOADS_PER_CYCLE,
   MAX_SLEEP_MS,
   missingIntervalsSettings,
   nextPollDelayMs,
   planPoll,
+  planPollWindow,
   purgeExpiredWithoutFile,
   shouldLogOnce,
   WITHOUT_FILE_TTL_MS,
@@ -97,6 +102,127 @@ describe('planPoll', () => {
     const plan = planPoll([activity('i905'), activity('i906'), activity('i907')], context());
 
     expect(plan.toDownload.map((item) => item.activityId)).toEqual(['i905', 'i906', 'i907']);
+    expect(plan.remaining).toBe(0);
+  });
+
+  it('plafonne un cycle et annonce ce qui reste', () => {
+    // Un backfill d'historique désigne des centaines d'activités d'un coup : le
+    // cycle en prend une tranche, les suivants reprennent la suite.
+    const activities = Array.from({ length: MAX_DOWNLOADS_PER_CYCLE + 12 }, (_, index) =>
+      activity(`i${index}`),
+    );
+
+    const plan = planPoll(activities, context());
+
+    expect(plan.toDownload).toHaveLength(MAX_DOWNLOADS_PER_CYCLE);
+    expect(plan.remaining).toBe(12);
+  });
+
+  it('reporte les plus anciennes, jamais les plus récentes', () => {
+    // L'API liste du plus récent au plus ancien : la séance du jour ne doit pas
+    // attendre la fin du backfill pour être ingérée.
+    const activities = Array.from({ length: MAX_DOWNLOADS_PER_CYCLE + 1 }, (_, index) =>
+      activity(`i${index}`),
+    );
+
+    const plan = planPoll(activities, context());
+
+    expect(plan.toDownload[0]?.activityId).toBe('i0');
+    expect(plan.toDownload.map((item) => item.activityId)).not.toContain(
+      `i${MAX_DOWNLOADS_PER_CYCLE}`,
+    );
+  });
+
+  it('ne compte dans le reste que les activités réellement éligibles', () => {
+    // Déjà rapatriées ou sans fichier : elles ne sont pas « du travail en
+    // attente », sinon la fenêtre historique ne se refermerait jamais.
+    const activities = Array.from({ length: MAX_DOWNLOADS_PER_CYCLE + 5 }, (_, index) =>
+      activity(`i${index}`),
+    );
+    const existing = activities
+      .slice(MAX_DOWNLOADS_PER_CYCLE)
+      .map((item) => inboxFileName(item.id));
+
+    const plan = planPoll(activities, context(existing));
+
+    expect(plan.toDownload).toHaveLength(MAX_DOWNLOADS_PER_CYCLE);
+    expect(plan.remaining).toBe(0);
+  });
+});
+
+describe('planPollWindow', () => {
+  const NOW = Date.parse('2026-08-10T12:00:00Z');
+
+  function window(existing: string[], unfinished = false) {
+    return planPollWindow({
+      existingNames: new Set(existing),
+      unfinished,
+      lookbackDays: 30,
+      now: NOW,
+    });
+  }
+
+  it("remonte à tout l'historique quand aucune séance n'a été rapatriée", () => {
+    const decision = window([]);
+
+    expect(decision.backfill).toBe(true);
+    expect(decision.oldest.getTime()).toBe(BACKFILL_OLDEST_MS);
+    expect(decision.oldest.getUTCFullYear()).toBe(2000);
+  });
+
+  it('ignore les fichiers déposés par une autre voie que le poller', () => {
+    // Un dépôt WebDAV de la montre ne prouve pas qu'intervals.icu a été
+    // interrogé : l'historique reste à rapatrier.
+    const decision = window(['2026-08-09-run.fit', 'processed', 'intervals-i900.fit.part']);
+
+    expect(decision.backfill).toBe(true);
+  });
+
+  it('retombe sur la fenêtre glissante dès la première séance rapatriée', () => {
+    // Le nom suffit, où qu'il soit : `existingNames` fusionne l'inbox et ses
+    // archives.
+    const decision = window(['intervals-i900.fit']);
+
+    expect(decision.backfill).toBe(false);
+    expect(decision.oldest.getTime()).toBe(NOW - 30 * 24 * 60 * 60 * 1000);
+  });
+
+  it("maintient la fenêtre historique tant qu'un cycle a laissé du travail", () => {
+    // Sans cela, les 50 premiers fichiers déposés feraient basculer le cycle
+    // suivant sur 30 jours et le reste de l'historique ne serait jamais demandé.
+    const decision = window(['intervals-i900.fit'], true);
+
+    expect(decision.backfill).toBe(true);
+    expect(decision.oldest.getTime()).toBe(BACKFILL_OLDEST_MS);
+  });
+
+  it('ne partage pas la même instance de Date entre deux cycles', () => {
+    expect(window([]).oldest).not.toBe(window([]).oldest);
+  });
+});
+
+describe('downloadSpacingMs', () => {
+  it('ne fait pas attendre le premier téléchargement du cycle', () => {
+    // Une séance qui vient d'arriver ne doit pas payer la politesse due à un
+    // backfill.
+    expect(downloadSpacingMs(0)).toBe(0);
+  });
+
+  it('espace les suivants', () => {
+    expect(downloadSpacingMs(1)).toBe(DOWNLOAD_SPACING_MS);
+    expect(downloadSpacingMs(MAX_DOWNLOADS_PER_CYCLE - 1)).toBe(DOWNLOAD_SPACING_MS);
+  });
+
+  it("garde un cycle plein sous l'ordre de grandeur de la minute", () => {
+    // Le plafond du cycle et l'espacement se répondent : 50 fichiers espacés de
+    // 500 ms tiennent en une trentaine de secondes de pauses cumulées, pas en
+    // plusieurs minutes.
+    const total = Array.from({ length: MAX_DOWNLOADS_PER_CYCLE }, (_, index) =>
+      downloadSpacingMs(index),
+    ).reduce((sum, value) => sum + value, 0);
+
+    expect(total).toBe((MAX_DOWNLOADS_PER_CYCLE - 1) * DOWNLOAD_SPACING_MS);
+    expect(total).toBeLessThan(60_000);
   });
 });
 

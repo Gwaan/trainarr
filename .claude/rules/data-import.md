@@ -60,8 +60,26 @@ le watcher ne voit jamais un `.fit` à moitié écrit.
   et `GET /api/v1/activity/{id}/file` (le fichier **original**, pas
   `/fit-file` qui le régénère depuis les données retouchées). L'en-tête du
   module cite la spec OpenAPI utilisée — la mettre à jour si l'API bouge.
-- `poll-plan.ts` : la décision (quoi télécharger) est pure et testée. Aucune
-  logique décisionnelle dans le script.
+- `poll-plan.ts` : les décisions (quelle fenêtre interroger, quoi télécharger)
+  sont pures et testées. Aucune logique décisionnelle dans le script.
+- **Backfill intégral au premier passage** : tant qu'aucun `intervals-*.fit`
+  n'existe (inbox, `processed/`, `failed/`), le cycle interroge tout
+  l'historique (`oldest` = 2000-01-01) au lieu de la fenêtre glissante ; ensuite
+  seulement `INTERVALS_LOOKBACK_DAYS` s'applique. Un cycle rapatrie au plus
+  `MAX_DOWNLOADS_PER_CYCLE` = 50 fichiers, espacés de `DOWNLOAD_SPACING_MS` =
+  500 ms, et les suivants reprennent la suite — la fenêtre historique est
+  maintenue tant qu'un cycle laisse du travail derrière lui, sans quoi les 50
+  premiers fichiers déposés la refermeraient. Les activités sont listées de la
+  plus récente à la plus ancienne : une séance du jour n'attend jamais la fin
+  d'un backfill. Relancer un backfill par accident (`processed/` vidé à la main)
+  est inoffensif — l'empreinte SHA-256 en base absorbe les re-téléchargements.
+- **Pas de pagination côté API** : `GET /athlete/{id}/activities` n'offre ni
+  page, ni curseur ; `limit` existe mais reste volontairement non transmis (la
+  liste étant en ordre décroissant, il tronquerait l'historique ancien). Le
+  volume se maîtrise sur les téléchargements, pas sur la liste.
+- **Cadence** : `INTERVALS_POLL_INTERVAL_S` vaut 60 s par défaut — une nouvelle
+  séance arrive donc dans Trainarr environ une minute après sa synchronisation
+  sur intervals.icu.
 - **Déduplication sans état persistant** : le nom déposé est déterministe
   (`intervals-<activityId>.fit`) ; une activité est « déjà rapatriée » si ce nom
   existe dans l'inbox, dans `processed/` ou dans `failed/`. L'état, c'est le

@@ -22,7 +22,9 @@ describe('parseEnv — cas nominal', () => {
     // Sans identifiant d'athlète ni clé, le poller intervals.icu reste inactif.
     expect(env.INTERVALS_ATHLETE_ID).toBeUndefined();
     expect(env.INTERVALS_API_KEY).toBeUndefined();
-    expect(env.INTERVALS_POLL_INTERVAL_S).toBe(300);
+    // Une minute : c'est la latence typique entre une séance synchronisée sur
+    // intervals.icu et son apparition dans Trainarr.
+    expect(env.INTERVALS_POLL_INTERVAL_S).toBe(60);
     expect(env.INTERVALS_LOOKBACK_DAYS).toBe(30);
     // Seule variable à défaut hors AI_PROVIDER : la boîte de dépôt FIT.
     expect(env.FIT_INBOX_DIR).toBe('/data/fit-inbox');
