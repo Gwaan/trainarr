@@ -12,6 +12,7 @@ describe('parseEnv — cas nominal', () => {
     const env = parseEnv({ DATABASE_URL: VALID_DATABASE_URL });
 
     expect(env.DATABASE_URL).toBe(VALID_DATABASE_URL);
+    expect(env.APP_BASE_URL).toBeUndefined();
     expect(env.AI_PROVIDER).toBe('llamacpp');
     expect(env.AI_BASE_URL).toBeUndefined();
     expect(env.AI_MODEL).toBeUndefined();

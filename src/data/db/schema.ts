@@ -11,6 +11,7 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -39,6 +40,16 @@ export type AthleteSex = (typeof ATHLETE_SEXES)[number];
 export const athlete = pgTable('athlete', {
   id: serial('id').primaryKey(),
   displayName: text('display_name').notNull(),
+  /**
+   * Identifiant Strava de l'athlète, renseigné à la connexion OAuth. C'est la
+   * référence qui permet de rejeter un événement webhook dont l'`owner_id` est
+   * celui de quelqu'un d'autre (le payload webhook n'est pas signé).
+   *
+   * `mode: 'number'` comme `activities.stravaId` : les ids Strava restent très
+   * en dessous de `Number.MAX_SAFE_INTEGER`. Nullable tant que Strava n'a jamais
+   * été connecté, unique pour interdire deux athlètes sur le même compte Strava.
+   */
+  stravaAthleteId: bigint('strava_athlete_id', { mode: 'number' }).unique(),
   sex: text('sex', { enum: ATHLETE_SEXES }),
   maxHrBpm: integer('max_hr_bpm'),
   restingHrBpm: integer('resting_hr_bpm'),
@@ -127,7 +138,15 @@ export const activityStreams = pgTable(
     type: text('type', { enum: ACTIVITY_STREAM_TYPES }).notNull(),
     data: jsonb('data').$type<ActivityStreamData>().notNull(),
   },
-  (table) => [index('activity_streams_activity_id_idx').on(table.activityId)],
+  (table) => [
+    index('activity_streams_activity_id_idx').on(table.activityId),
+    /**
+     * Une seule ligne par (activité, type) : c'est cette contrainte qui rend
+     * `saveActivityStreams` idempotent (`ON CONFLICT`) et interdit les doublons
+     * si deux imports de la même activité se croisent.
+     */
+    uniqueIndex('activity_streams_activity_id_type_idx').on(table.activityId, table.type),
+  ],
 );
 
 /**

@@ -90,6 +90,7 @@ afterAll(() => {
 const ATHLETE: Athlete = {
   id: 1,
   displayName: 'Gwen',
+  stravaAthleteId: 987_654,
   sex: 'female',
   maxHrBpm: 188,
   restingHrBpm: 48,

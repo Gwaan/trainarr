@@ -13,6 +13,10 @@ const envSchema = z.object({
   // Base de données
   DATABASE_URL: z.url({ error: 'URL Postgres requise (ex: postgres://user:pass@host:5432/trainarr)' }),
 
+  // URL publique de l'application (ex: https://watchenv.gwenzr.dev) — nécessaire
+  // au redirect OAuth Strava et à l'URL de callback du webhook.
+  APP_BASE_URL: z.url().optional(),
+
   // Coach IA — abstraction compatible OpenAI, jamais de couplage direct à un provider
   AI_PROVIDER: z.enum(['llamacpp', 'anthropic', 'openai']).default('llamacpp'),
   AI_BASE_URL: z.url().optional(),

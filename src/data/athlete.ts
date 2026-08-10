@@ -41,3 +41,21 @@ export async function getAthleteProfile(): Promise<AthleteProfileDto | null> {
   const row = rows[0];
   return row ? toAthleteProfileDto(row) : null;
 }
+
+/**
+ * Identifiant Strava de l'athlète connecté, `null` tant que Strava ne l'a jamais
+ * été. Renseigné par `saveStravaTokens`.
+ *
+ * Volontairement hors de `AthleteProfileDto` : ce n'est pas une donnée
+ * d'affichage mais la référence qui autorise (ou non) un événement webhook —
+ * dont le payload n'est pas signé par Strava.
+ */
+export async function getStravaAthleteId(): Promise<number | null> {
+  const rows = await db
+    .select({ stravaAthleteId: athlete.stravaAthleteId })
+    .from(athlete)
+    .orderBy(asc(athlete.id))
+    .limit(1);
+
+  return rows[0]?.stravaAthleteId ?? null;
+}

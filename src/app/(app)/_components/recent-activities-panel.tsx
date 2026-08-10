@@ -3,7 +3,7 @@ import { Activity, ChevronRight } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { Panel } from "@/components/panel";
-import { Button } from "@/components/ui/button";
+import { StravaConnectButton } from "@/components/strava-connect-button";
 import type { ActivitySummaryDto } from "@/data/activities";
 
 import {
@@ -30,12 +30,7 @@ export function RecentActivitiesPanel({
           icon={Activity}
           title="Aucune activité synchronisée"
           description="Connecte ton compte Strava pour importer automatiquement tes sorties : distances, allures et fréquences cardiaques arriveront ici."
-          action={
-            // La connexion Strava n'est pas encore branchée : aucune route à cibler.
-            <Button variant="secondary" disabled>
-              Connecter Strava
-            </Button>
-          }
+          action={<StravaConnectButton variant="secondary" />}
         />
       </Panel>
     );

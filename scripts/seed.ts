@@ -82,7 +82,7 @@ const WEEK_TEMPLATE: Partial<Record<number, SessionTemplate>> = {
     avgHrBpm: 166,
     hrPeakOffset: 15,
     elevationGainM: 45,
-    avgCadenceSpm: 90,
+    avgCadenceSpm: 180,
     startHourUtc: 16,
   },
   2: {
@@ -94,7 +94,7 @@ const WEEK_TEMPLATE: Partial<Record<number, SessionTemplate>> = {
     avgHrBpm: 138,
     hrPeakOffset: 12,
     elevationGainM: 60,
-    avgCadenceSpm: 86,
+    avgCadenceSpm: 172,
     startHourUtc: 5,
   },
   3: {
@@ -106,7 +106,7 @@ const WEEK_TEMPLATE: Partial<Record<number, SessionTemplate>> = {
     avgHrBpm: 136,
     hrPeakOffset: 10,
     elevationGainM: 40,
-    avgCadenceSpm: 86,
+    avgCadenceSpm: 172,
     startHourUtc: 5,
   },
   4: {
@@ -118,7 +118,7 @@ const WEEK_TEMPLATE: Partial<Record<number, SessionTemplate>> = {
     avgHrBpm: 130,
     hrPeakOffset: 8,
     elevationGainM: 30,
-    avgCadenceSpm: 84,
+    avgCadenceSpm: 168,
     startHourUtc: 16,
   },
   6: {
@@ -130,7 +130,7 @@ const WEEK_TEMPLATE: Partial<Record<number, SessionTemplate>> = {
     avgHrBpm: 146,
     hrPeakOffset: 14,
     elevationGainM: 180,
-    avgCadenceSpm: 87,
+    avgCadenceSpm: 174,
     startHourUtc: 7,
   },
 };

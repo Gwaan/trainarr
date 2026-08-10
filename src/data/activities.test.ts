@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getActivityById,
+  groupActivitiesByWeek,
+  listActivitiesByWeek,
   listRecentActivities,
   toActivityDetailDto,
   toActivitySummaryDto,
@@ -17,17 +19,21 @@ const { queryState } = vi.hoisted(() => ({
 }));
 
 vi.mock('./db/client', () => {
-  type QueryChain = {
+  // La chaîne est elle-même « thenable » : toutes les requêtes ne se terminent
+  // pas par `.limit()` (`listActivitiesByWeek` lit l'historique complet).
+  type QueryChain = PromiseLike<unknown[]> & {
     from: () => QueryChain;
     where: () => QueryChain;
     orderBy: () => QueryChain;
-    limit: () => Promise<unknown[]>;
+    limit: () => QueryChain;
   };
   const chain: QueryChain = {
     from: () => chain,
     where: () => chain,
     orderBy: () => chain,
-    limit: () => Promise.resolve(queryState.rows),
+    limit: () => chain,
+    then: (onFulfilled, onRejected) =>
+      Promise.resolve(queryState.rows).then(onFulfilled, onRejected),
   };
   return { db: { select: () => chain } };
 });
@@ -147,6 +153,130 @@ describe('listRecentActivities', () => {
 
   it('retourne un tableau vide quand il n’y a aucune activité', async () => {
     await expect(listRecentActivities()).resolves.toEqual([]);
+  });
+});
+
+/**
+ * Repères ISO utilisés ci-dessous (fuseau Europe/Paris) :
+ * lundi 10 août 2026 ouvre la semaine 33, dimanche 9 août ferme la semaine 32.
+ */
+function activityAt(
+  id: number,
+  startedAt: string,
+  { distanceM = 10_000, movingTimeS = 3_000 }: { distanceM?: number; movingTimeS?: number } = {},
+): Activity {
+  return { ...rawActivity, id, startedAt: new Date(startedAt), distanceM, movingTimeS };
+}
+
+describe('groupActivitiesByWeek', () => {
+  it('regroupe par semaine ISO, semaines et activités en ordre décroissant', () => {
+    const weeks = groupActivitiesByWeek(
+      [
+        activityAt(1, '2026-08-05T17:00:00.000Z'),
+        activityAt(2, '2026-08-11T17:00:00.000Z'),
+        activityAt(3, '2026-08-10T06:00:00.000Z'),
+        activityAt(4, '2026-08-09T09:00:00.000Z'),
+      ].map(toActivitySummaryDto),
+      8,
+    );
+
+    expect(weeks.map((week) => week.weekLabel)).toEqual(['S33', 'S32']);
+    expect(weeks[0]?.activities.map((activity) => activity.id)).toEqual([2, 3]);
+    expect(weeks[1]?.activities.map((activity) => activity.id)).toEqual([4, 1]);
+  });
+
+  it('cumule distance et temps de déplacement de chaque semaine', () => {
+    const weeks = groupActivitiesByWeek(
+      [
+        activityAt(1, '2026-08-10T06:00:00.000Z', { distanceM: 10_500, movingTimeS: 3_000 }),
+        activityAt(2, '2026-08-12T06:00:00.000Z', { distanceM: 5_250.5, movingTimeS: 1_500 }),
+        activityAt(3, '2026-08-05T06:00:00.000Z', { distanceM: 8_000, movingTimeS: 2_400 }),
+      ].map(toActivitySummaryDto),
+      8,
+    );
+
+    expect(weeks[0]).toMatchObject({
+      weekLabel: 'S33',
+      totalDistanceM: 15_750.5,
+      totalMovingTimeS: 4_500,
+    });
+    expect(weeks[1]).toMatchObject({
+      weekLabel: 'S32',
+      totalDistanceM: 8_000,
+      totalMovingTimeS: 2_400,
+    });
+  });
+
+  it('rattache une sortie nocturne au jour civil de l’athlète, pas à UTC', () => {
+    // 9 août 22 h 30 UTC = lundi 10 août 00 h 30 à Paris → semaine 33.
+    const weeks = groupActivitiesByWeek(
+      [activityAt(1, '2026-08-09T22:30:00.000Z')].map(toActivitySummaryDto),
+      8,
+    );
+
+    expect(weeks.map((week) => week.weekLabel)).toEqual(['S33']);
+  });
+
+  it('ne garde que les `limit` semaines les plus récentes', () => {
+    const weeks = groupActivitiesByWeek(
+      [
+        activityAt(1, '2026-08-10T06:00:00.000Z'),
+        activityAt(2, '2026-08-05T06:00:00.000Z'),
+        activityAt(3, '2026-07-29T06:00:00.000Z'),
+      ].map(toActivitySummaryDto),
+      2,
+    );
+
+    expect(weeks.map((week) => week.weekLabel)).toEqual(['S33', 'S32']);
+    // L'activité écartée ne doit pas être reversée dans une semaine conservée.
+    expect(weeks.flatMap((week) => week.activities).map((activity) => activity.id)).toEqual([
+      1, 2,
+    ]);
+  });
+
+  it('saute les semaines sans activité au lieu de les afficher vides', () => {
+    const weeks = groupActivitiesByWeek(
+      [
+        activityAt(1, '2026-08-10T06:00:00.000Z'),
+        activityAt(2, '2026-07-20T06:00:00.000Z'),
+      ].map(toActivitySummaryDto),
+      8,
+    );
+
+    expect(weeks.map((week) => week.weekLabel)).toEqual(['S33', 'S30']);
+  });
+
+  it('ne fusionne pas deux semaines 1 d’années différentes', () => {
+    const weeks = groupActivitiesByWeek(
+      [
+        activityAt(1, '2026-01-01T12:00:00.000Z'),
+        activityAt(2, '2024-12-31T12:00:00.000Z'),
+      ].map(toActivitySummaryDto),
+      8,
+    );
+
+    expect(weeks.map((week) => week.weekLabel)).toEqual(['S1', 'S1']);
+    expect(weeks.map((week) => week.activities.length)).toEqual([1, 1]);
+  });
+
+  it('retourne un tableau vide sans activité ou avec une limite nulle', () => {
+    expect(groupActivitiesByWeek([], 8)).toEqual([]);
+    expect(groupActivitiesByWeek([toActivitySummaryDto(rawActivity)], 0)).toEqual([]);
+  });
+});
+
+describe('listActivitiesByWeek', () => {
+  it('retourne des DTOs, jamais les lignes brutes', async () => {
+    queryState.rows = [rawActivity];
+
+    const weeks = await listActivitiesByWeek(8);
+
+    expect(weeks).toHaveLength(1);
+    expect(Object.keys(weeks[0]?.activities[0] ?? {}).sort()).toEqual(SUMMARY_KEYS);
+  });
+
+  it('retourne un tableau vide quand il n’y a aucune activité', async () => {
+    await expect(listActivitiesByWeek(8)).resolves.toEqual([]);
   });
 });
 
