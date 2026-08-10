@@ -9,8 +9,38 @@ services:
     restart: unless-stopped
     # Toutes les variables (DATABASE_URL, clés Strava/IA) viennent de .env — jamais du repo.
     env_file: .env
+    environment:
+      # Le code fixe déjà le fuseau de l'athlète (src/config/time.ts) ; ceci
+      # aligne aussi les logs et tout code tiers sur la même heure locale.
+      TZ: ${TZ:-Europe/Paris}
     ports:
       - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      # Le serveur ne démarre qu'une fois le schéma à jour. Une migration en échec
+      # bloque le déploiement au lieu de servir l'appli sur une base incohérente.
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - app-staging
+
+  # Applique les migrations Drizzle puis sort. Service dédié plutôt qu'un
+  # `migrate && node server.js` dans le container applicatif : le build standalone
+  # n'expose pas drizzle-orm sous forme de package installable (il est bundlé dans
+  # les chunks de l'app), l'image de runtime reste donc minimale, et la migration
+  # tourne une fois par déploiement — pas à chaque redémarrage du serveur.
+  migrate:
+    container_name: trainarr-migrate
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrator
+    # One-shot : ne pas relancer un container qui a terminé son travail.
+    restart: "no"
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Paris}
     depends_on:
       db:
         condition: service_healthy

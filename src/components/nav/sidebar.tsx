@@ -19,9 +19,11 @@ export function Sidebar({ athlete }: { athlete: AthleteProfile }) {
             <span className="block truncate text-[0.82rem] leading-tight font-medium text-fg">
               {athlete.name}
             </span>
-            <span className="eyebrow mt-1 block truncate">
-              {athlete.subtitle}
-            </span>
+            {athlete.subtitle ? (
+              <span className="eyebrow mt-1 block truncate">
+                {athlete.subtitle}
+              </span>
+            ) : null}
           </span>
         </div>
       </div>

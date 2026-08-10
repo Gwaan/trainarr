@@ -30,6 +30,7 @@ vi.mock('./db/client', () => {
 const rawAthlete: Athlete = {
   id: 1,
   displayName: 'Gwen',
+  sex: 'female',
   maxHrBpm: 191,
   restingHrBpm: 48,
   weightKg: 68.4,

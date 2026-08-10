@@ -20,6 +20,23 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm build
 
+# --- migrator : image éphémère qui applique les migrations avant le démarrage --
+# Stage séparé volontairement : le build standalone n'expose aucun
+# `node_modules/drizzle-orm` (Turbopack bundle les dépendances serveur dans les
+# chunks de l'app ; `.next/standalone/node_modules` ne contient que next/react),
+# donc un script de migration lancé depuis l'image de runtime n'aurait rien à
+# charger. Ce stage réutilise la couche `deps` (aucun téléchargement en plus) et
+# n'est jamais déployé : compose le lance en one-shot puis le container sort.
+FROM base AS migrator
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json ./
+COPY drizzle ./drizzle
+COPY src/data/db/migrate.ts ./src/data/db/migrate.ts
+# Binaire appelé directement plutôt que via `pnpm exec` : corepack tenterait de
+# télécharger pnpm au démarrage du container, ce qui suppose un accès réseau.
+CMD ["node_modules/.bin/tsx", "src/data/db/migrate.ts"]
+
 # --- runner : image finale minimale, sans pnpm ni sources ---------------------
 FROM node:22-alpine AS runner
 WORKDIR /app

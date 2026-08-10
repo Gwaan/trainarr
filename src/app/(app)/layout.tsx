@@ -1,9 +1,16 @@
 import type { ReactNode } from "react";
 
+import type { AthleteProfile } from "@/components/nav/athlete";
 import { BottomNav } from "@/components/nav/bottom-nav";
 import { MobileHeader } from "@/components/nav/mobile-header";
 import { Sidebar } from "@/components/nav/sidebar";
-import { ATHLETE } from "./_lib/mock-data";
+
+/**
+ * Identité affichée dans la navigation. Application mono-utilisateur : c'est une
+ * constante d'interface, pas une donnée d'entraînement — celles-ci viennent
+ * toutes du DAL. La coquille de navigation reste ainsi entièrement statique.
+ */
+const ATHLETE: AthleteProfile = { name: "Gwen", initials: "G" };
 
 export default function AppLayout({ children }: { children: ReactNode }) {
   return (

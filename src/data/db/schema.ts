@@ -26,10 +26,20 @@ import {
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull().defaultNow();
 
+/**
+ * Sexe biologique — nécessaire au TRIMP de Banister, dont le coefficient
+ * exponentiel diffère (1.92 homme / 1.67 femme). Nullable : tant qu'il n'est pas
+ * renseigné, la charge d'entraînement n'est pas calculable (jamais approximée).
+ */
+export const ATHLETE_SEXES = ['male', 'female'] as const;
+
+export type AthleteSex = (typeof ATHLETE_SEXES)[number];
+
 /** Profil de l'athlète. Application mono-utilisateur : une seule ligne en pratique. */
 export const athlete = pgTable('athlete', {
   id: serial('id').primaryKey(),
   displayName: text('display_name').notNull(),
+  sex: text('sex', { enum: ATHLETE_SEXES }),
   maxHrBpm: integer('max_hr_bpm'),
   restingHrBpm: integer('resting_hr_bpm'),
   weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
@@ -120,6 +130,45 @@ export const activityStreams = pgTable(
   (table) => [index('activity_streams_activity_id_idx').on(table.activityId)],
 );
 
+/**
+ * ⚠️ TABLE PROVISOIRE.
+ *
+ * Modèle volontairement plat, strictement limité à ce que le dashboard affiche
+ * aujourd'hui (« séance du jour »). Le vrai modèle de plan — plan, semaines,
+ * blocs, répétitions structurées, adaptation par le coach IA — sera conçu au
+ * sprint dédié et remplacera cette table. Ne pas l'étendre en attendant.
+ */
+export const plannedSessions = pgTable(
+  'planned_sessions',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    /** Date civile (mode `string`, `YYYY-MM-DD`) : une séance est planifiée un jour, pas à une heure. */
+    scheduledOn: date('scheduled_on').notNull(),
+    /** Ex. « VMA courte · piste ». */
+    kind: text('kind').notNull(),
+    /** Ex. « 6 × 800 m ». */
+    title: text('title').notNull(),
+    targetPaceSecPerKm: real('target_pace_sec_per_km'),
+    /** Textes libres affichés tels quels, ex. « 20 min @ 5:30/km ». */
+    warmup: text('warmup'),
+    recovery: text('recovery'),
+    cooldown: text('cooldown'),
+    volumeM: real('volume_m'),
+    durationS: integer('duration_s'),
+    /** Activité qui a réalisé la séance. `null` tant qu'elle n'est pas faite (ou pas rapprochée). */
+    completedActivityId: integer('completed_activity_id').references(() => activities.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index('planned_sessions_athlete_scheduled_on_idx').on(table.athleteId, table.scheduledOn),
+  ],
+);
+
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
@@ -132,3 +181,6 @@ export type NewActivity = InferInsertModel<typeof activities>;
 
 export type ActivityStream = InferSelectModel<typeof activityStreams>;
 export type NewActivityStream = InferInsertModel<typeof activityStreams>;
+
+export type PlannedSession = InferSelectModel<typeof plannedSessions>;
+export type NewPlannedSession = InferInsertModel<typeof plannedSessions>;

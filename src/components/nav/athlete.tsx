@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 export type AthleteProfile = {
   name: string;
   /** Contexte court affiché sous le nom (objectif, semaine en cours…). */
-  subtitle: string;
+  subtitle?: string;
   initials: string;
 };
 
