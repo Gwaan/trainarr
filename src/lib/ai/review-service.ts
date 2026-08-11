@@ -104,10 +104,13 @@ import {
 } from './format';
 import {
   applyImposedPaces,
+  goalPaceSecPerKm,
   mapPlanWeeksToSessions,
   planReviewJsonSchema,
   planReviewOutputSchema,
+  resolveWeeklyTimeBudget,
   type PlanReviewOutput,
+  type PlanSettingsOutput,
 } from './plan-schema';
 import {
   estimatePlanChars,
@@ -279,6 +282,7 @@ export function buildPlanReviewMessages(
 ): ChatMessage[] {
   const system = planSystemPrompt(
     plan.level,
+    plan.goalType,
     paces,
     planReferenceRace(plan),
     REVIEW_SYSTEM_LINES,
@@ -563,6 +567,31 @@ function remainingWindowOrNull(
   }
 }
 
+/**
+ * Les réglages d'une révision, **budget temps effacé écarté**.
+ *
+ * `weeklyTimeMinutes: null` veut dire « je n'ai plus de contrainte de temps »
+ * (cf. `resolveWeeklyTimeBudget`), et c'est une décision qui appartient à
+ * l'athlète : elle n'a de sens que sur le chemin de l'instruction
+ * (`updatePlanFromInstruction`), où quelqu'un l'a demandée. Personne ne demande
+ * une révision — elle se déclenche toute seule après quelques séances, et rien
+ * dans ce qu'elle relit ne peut lui apprendre que le samedi matin s'est libéré.
+ *
+ * La grammaire GBNF ne propose pas ce `null` (cf. `settingsJsonSchema`), mais un
+ * provider qui ne suit pas `response_format` peut l'écrire : ce serait alors le
+ * modèle, seul, effaçant en base une contrainte de vie de l'athlète. Les autres
+ * réglages passent, eux : réduire le nombre de séances ou déplacer la sortie
+ * longue est exactement ce qu'une révision a le droit de conclure.
+ *
+ * Le champ est **retiré**, pas remis à sa valeur : `undefined` est l'état
+ * « l'instruction ne touche pas au budget », celui qui reconduit le budget stocké
+ * des deux côtés — validation comme écriture.
+ */
+function reviewSettings(settings: PlanSettingsOutput | undefined): PlanSettingsOutput | undefined {
+  if (settings === undefined || settings.weeklyTimeMinutes !== null) return settings;
+  return { sessionsPerWeek: settings.sessionsPerWeek, longRunDay: settings.longRunDay };
+}
+
 /** La génération, sous le même contrôle métier qu'un ajustement. */
 function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
   const { plan, window, snapshot, paces } = context;
@@ -595,12 +624,32 @@ function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
       firstWeekFromDay: window.firstWeekFromDay,
       race: raceGoalOf(plan.goalType, plan.goalText),
     }),
-    // « keep » ne porte aucune semaine : il n'y a rien à réécrire.
+    // « keep » ne porte aucune semaine : il n'y a rien à réécrire. L'allure
+    // objectif vient du but du plan, comme à l'ajustement.
     withImposedPaces: (output, table) =>
       output.decision === 'adjust'
-        ? { ...output, weeks: applyImposedPaces(output.weeks, table) }
+        ? {
+            ...output,
+            weeks: applyImposedPaces(output.weeks, table, goalPaceSecPerKm(plan.goalText)),
+          }
         : output,
-    paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
+    // Le budget de vie de l'athlète vaut aussi quand c'est le coach qui reprend
+    // la main : une révision n'a pas plus le droit qu'un ajustement de lui
+    // planifier trois heures là où elle en a deux. Même mécanique qu'un
+    // ajustement, donc : si la révision reporte un budget élargi dans ses
+    // réglages, c'est celui-là qui juge ses semaines. « keep » n'en porte
+    // aucun — et n'a de toute façon aucune semaine à juger. Un budget *effacé*,
+    // lui, est ignoré (cf. `reviewSettings`).
+    weeklyTimeBudgetOf: (output) =>
+      resolveWeeklyTimeBudget(
+        output.decision === 'adjust' ? reviewSettings(output.settings) : undefined,
+        plan.weeklyTimeMinutes,
+      ),
+    paceContext: {
+      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+      paces,
+      // Pas de `recentWeeklyKm` : le plan en cours fait foi (cf. `plan-service`).
+    },
     // Pas de `progressId` : personne ne regarde une révision se dérouler.
     estimatedChars: estimatePlanChars(window.weeks, plan.sessionsPerWeek),
   });
@@ -620,7 +669,7 @@ async function applyReview(
     sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
     settings: planSettingsPatch(
       plan,
-      output.settings,
+      reviewSettings(output.settings),
       withReviewNote(plan.summary, context.snapshot.today, output.reason),
     ),
   });

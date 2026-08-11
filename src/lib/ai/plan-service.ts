@@ -93,14 +93,19 @@ import {
   formatTrainingSnapshot,
 } from './format';
 import {
+  MIN_FIRST_WEEK_DAYS,
   PLAN_OUTPUT_BOUNDS,
   applyImposedPaces,
+  formatFirstFullWeekMaxKm,
+  formatPartialWeekTimeBudget,
+  goalPaceSecPerKm,
   isMarathonGoal,
   mapPlanWeeksToSessions,
   planJsonSchema,
   planOutputSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
+  resolveWeeklyTimeBudget,
   validatePlanBusinessRules,
   type PlanExpectations,
   type PlanRaceGoal,
@@ -287,23 +292,19 @@ function planStart(request: PlanRequest, today: string): string {
 }
 
 /**
- * En deçà de ce nombre de jours restants dans la semaine du départ, la première
- * semaine ne compte **pas** comme une semaine d'entraînement du plan.
+ * La semaine du départ vaut-elle une semaine d'entraînement ?
+ *
+ * Le seuil vit dans `plan-schema.ts` ({@link MIN_FIRST_WEEK_DAYS}), qui l'applique
+ * aussi au budget temps d'une semaine entamée : une semaine trop courte pour
+ * compter dans le plan l'est aussi pour porter un plafond horaire.
  *
  * Arbitrage : un plan de 8 semaines démarré un samedi laisse deux jours dans la
  * semaine en cours. Les compter pour une semaine d'entraînement en volerait une
- * vraie — l'athlète recevrait 7 semaines pleines là où elle en a demandé 8. À
- * partir de quatre jours (un départ du lundi au jeudi), la semaine entamée porte
- * assez de séances pour valoir une semaine du plan, sortie longue du week-end
- * comprise. Pour une course, la durée reste déduite des dates — mais le même
- * seuil décide si cette semaine-là compte dans le minimum
- * ({@link MIN_RACE_PLAN_WEEKS}) : sans lui, un départ un dimanche ferait passer
- * huit jours de préparation pour trois semaines de plan.
- */
-const MIN_FIRST_WEEK_DAYS = 4;
-
-/**
- * La semaine du départ vaut-elle une semaine d'entraînement ?
+ * vraie — l'athlète recevrait 7 semaines pleines là où elle en a demandé 8. Pour
+ * une course, la durée reste déduite des dates — mais le même seuil décide si
+ * cette semaine-là compte dans le minimum ({@link MIN_RACE_PLAN_WEEKS}) : sans
+ * lui, un départ un dimanche ferait passer huit jours de préparation pour trois
+ * semaines de plan.
  *
  * Vrai dès qu'il y reste au moins {@link MIN_FIRST_WEEK_DAYS} jours, jour du
  * départ compris — soit un départ du lundi au jeudi. Exporté parce que le
@@ -456,34 +457,70 @@ const DERIVED_PACES_SECTION_LINES = [
   "- Si l'objectif porte un chiffre (« 10 km sous 50 min » vaut 5:00/km), cette allure objectif est l'ancre des séances de spécificité à l'approche de la course. Confronte-la à l'allure récente : si elle est bien plus rapide que ce que les données soutiennent, le plan reste ancré sur les données et tu le dis honnêtement dans le résumé.",
 ];
 
-/** La suite de la méthodologie, elle aussi indépendante de la façon dont les allures sont fixées. */
-const COACH_RULE_TAIL_LINES = [
-  'PROGRESSION DU VOLUME — ces chiffres sont vérifiés séance par séance, un plan qui les enfreint est refusé et à réécrire',
-  '- Le volume hebdomadaire est la somme des `distanceKm` de la semaine. TOUTE séance déclare sa distance, footings et récupérations compris : sans elle, la semaine ne se compare à rien.',
-  "- D'une semaine à l'autre, le volume n'augmente jamais de plus de 12 %. Vise 5 à 10 % : la marge est un filet, pas une cible. Une baisse est toujours permise.",
-  '- Jamais quatre semaines de suite sans semaine allégée : sur toute fenêtre de 4 semaines, au moins une redescend à 85 % ou moins du volume de la semaine précédente (plans de 6 semaines et plus).',
-  "- Le plan n'est jamais plat : la semaine la plus chargée hors affûtage dépasse d'au moins 10 % la première semaine pleine (plans de 5 semaines et plus). Douze semaines au même volume ne préparent rien.",
-  "- Affûtage avant une course : les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT chaque semaine, et la semaine de la course ne dépasse pas 65 % du volume de la semaine la plus chargée. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
-  "- La première semaine, quand le plan démarre en cours de semaine, est amputée des jours passés : son volume est plus faible, et ce n'est pas une baisse.",
-  "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
-  // Vivait dans la section des allures dérivées, dont elle a suivi le sort à
-  // l'extraction. Sa moitié utile porte pourtant sur le volume — un plan
-  // conservateur quand la charge n'est pas calculable — et vaut donc dans les
-  // deux régimes : elle est rattachée ici plutôt que perdue avec la dérivation.
-  "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
-  '',
-  'FORMAT',
-  "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
-  '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
-  // Un exemple plutôt qu'une règle de plus : les reprises constatées en
-  // production butent toutes sur la même étape (la récupération d'un bloc
-  // répété, écrite avec distance ET durée), alors que l'interdiction est déjà
-  // énoncée dans la section DÉROULÉ. Un petit modèle recopie un exemple bien
-  // plus fidèlement qu'il n'applique un énoncé abstrait.
-  '- Exemple d\'étape de récupération, à recopier tel quel : { "role": "recover", "durationS": 120 } — une mesure, jamais les deux.',
-  "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
-  "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
-];
+/**
+ * Ce que la spécificité veut dire **concrètement** dans une sortie longue, quand
+ * le plan mène à une course.
+ *
+ * La typologie dit déjà « avec un bloc à allure objectif quand la course
+ * approche » ; c'est trop vague pour être suivi, et les sorties longues
+ * produites sortaient 100 % en endurance. Retour d'utilisation à l'appui :
+ * l'athlète comparait avec des plans concurrents qui lui proposaient des
+ * passages à ~7:20/km — exactement sa zone M — sur ses sorties longues de
+ * préparation semi. La ligne est donc prescriptive et chiffrée, la seule forme
+ * qu'un petit modèle applique.
+ *
+ * La note « allure objectif » n'est pas décorative : c'est elle que
+ * {@link applyImposedPaces} reconnaît pour poser sur cette étape-là — au milieu
+ * d'une séance qui reste rangée en endurance — l'allure du but chiffré de
+ * l'athlète quand il en donne une ({@link goalPaceSecPerKm}), la plage M sinon.
+ * Ne pas la changer sans changer `STEP_NOTE_ZONES` dans `plan-schema.ts`.
+ */
+const RACE_SPECIFIC_LONG_RUN_LINE =
+  "- À partir de la moitié du plan, la sortie longue contient un bloc à allure objectif (étape `run` avec note « allure objectif », 10 à 25 % de la distance de la sortie), qui s'allonge de semaine en semaine. L'affûtage le raccourcit sans le supprimer.";
+
+/**
+ * La suite de la méthodologie, elle aussi indépendante de la façon dont les
+ * allures sont fixées.
+ *
+ * @param isRace le plan mène-t-il à une course ? Seul ce régime porte la ligne
+ * de spécificité de la sortie longue ({@link RACE_SPECIFIC_LONG_RUN_LINE}) : sur
+ * un objectif libre, il n'y a pas d'allure objectif à travailler, et prescrire
+ * un bloc à une allure qui n'existe pas ferait fabriquer une échéance au modèle.
+ */
+function coachRuleTailLines(isRace: boolean): string[] {
+  return [
+    'PROGRESSION DU VOLUME — ces chiffres sont vérifiés séance par séance, un plan qui les enfreint est refusé et à réécrire',
+    '- Le volume hebdomadaire est la somme des `distanceKm` de la semaine. TOUTE séance déclare sa distance, footings et récupérations compris : sans elle, la semaine ne se compare à rien.',
+    "- D'une semaine à l'autre, le volume n'augmente jamais de plus de 12 %. Vise 5 à 10 % : la marge est un filet, pas une cible. Une baisse est toujours permise.",
+    '- Jamais quatre semaines de suite sans semaine allégée : sur toute fenêtre de 4 semaines, au moins une redescend à 85 % ou moins du volume de la semaine précédente (plans de 6 semaines et plus).',
+    "- Le plan n'est jamais plat : la semaine la plus chargée hors affûtage dépasse d'au moins 10 % la première semaine pleine (plans de 5 semaines et plus). Douze semaines au même volume ne préparent rien.",
+    "- Affûtage avant une course : les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT chaque semaine, et la semaine de la course ne dépasse pas 65 % du volume de la semaine la plus chargée. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
+    "- La première semaine, quand le plan démarre en cours de semaine, est amputée des jours passés : son volume est plus faible, et ce n'est pas une baisse.",
+    // Le défaut constaté : 3 h 30 planifiées pour 2 h déclarées, sans qu'aucune
+    // règle ne le voie — les durées n'étaient comparées à rien. Le budget est
+    // désormais vérifié semaine par semaine, et il prime sur le volume.
+    "- Le temps hebdomadaire déclaré dans les contraintes est une limite DURE, vérifiée semaine par semaine : la somme des `durationMin` d'une semaine (échauffements, récupérations et retours au calme compris) ne le dépasse pas, tolérance de 10 % au plus. Si le volume visé n'y tient pas, c'est le volume qui baisse — pars d'une première semaine plus courte plutôt que de déborder.",
+    "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
+    ...(isRace ? [RACE_SPECIFIC_LONG_RUN_LINE] : []),
+    // Vivait dans la section des allures dérivées, dont elle a suivi le sort à
+    // l'extraction. Sa moitié utile porte pourtant sur le volume — un plan
+    // conservateur quand la charge n'est pas calculable — et vaut donc dans les
+    // deux régimes : elle est rattachée ici plutôt que perdue avec la dérivation.
+    "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
+    '',
+    'FORMAT',
+    "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
+    '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
+    // Un exemple plutôt qu'une règle de plus : les reprises constatées en
+    // production butent toutes sur la même étape (la récupération d'un bloc
+    // répété, écrite avec distance ET durée), alors que l'interdiction est déjà
+    // énoncée dans la section DÉROULÉ. Un petit modèle recopie un exemple bien
+    // plus fidèlement qu'il n'applique un énoncé abstrait.
+    '- Exemple d\'étape de récupération, à recopier tel quel : { "role": "recover", "durationS": 120 } — une mesure, jamais les deux.',
+    "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
+    "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
+  ];
+}
 
 /**
  * La méthodologie telle qu'elle part au modèle.
@@ -493,11 +530,13 @@ const COACH_RULE_TAIL_LINES = [
  * {@link imposedPacesSection}) est la seule source d'allures du prompt : une
  * consigne absente ne se discute pas, une consigne surchargée si — et c'est
  * exactement ce que le modèle local a tranché de travers en production.
+ * @param isRace le plan mène-t-il à une course ? (cf. {@link coachRuleTailLines})
  */
-function coachRules(hasImposedPaces: boolean): string {
+function coachRules(hasImposedPaces: boolean, isRace: boolean): string {
+  const tail = coachRuleTailLines(isRace);
   const lines = hasImposedPaces
-    ? [...COACH_RULE_HEAD_LINES, '', ...COACH_RULE_TAIL_LINES]
-    : [...COACH_RULE_HEAD_LINES, '', ...DERIVED_PACES_SECTION_LINES, '', ...COACH_RULE_TAIL_LINES];
+    ? [...COACH_RULE_HEAD_LINES, '', ...tail]
+    : [...COACH_RULE_HEAD_LINES, '', ...DERIVED_PACES_SECTION_LINES, '', ...tail];
   return lines.join('\n');
 }
 
@@ -679,17 +718,35 @@ function formatConstraints(request: {
  * pour la même raison : c'est la seule chose qui empêche le modèle de remplir un
  * lundi hors du plan — et {@link validatePlanBusinessRules} le lui repasserait
  * alors en violation, au prix d'une génération entière.
+ *
+ * Le **budget proraté** suit la même logique, et lui manquait : la règle ramène
+ * le budget hebdomadaire aux jours restants
+ * ({@link formatPartialWeekTimeBudget}), sans que rien ne le dise au modèle — qui
+ * produisait donc une semaine entamée à la mesure du budget plein, refusée par un
+ * plafond qu'il ne pouvait pas deviner. La ligne n'apparaît que quand le contrôle
+ * s'applique réellement : sous {@link MIN_FIRST_WEEK_DAYS} jours restants, il n'y
+ * a pas de plafond, donc rien à annoncer.
  */
 function firstWeekLines(request: PlanRequest, window: PlanWindow): string[] {
   if (window.firstWeekFromDay === 1) {
     return [`Chaque semaine compte exactement ${request.sessionsPerWeek} séances.`];
   }
 
+  const proratedBudget = formatPartialWeekTimeBudget(
+    request.weeklyTimeMinutes ?? null,
+    window.firstWeekFromDay,
+  );
+
   return [
     `weeks[0] est déjà entamée : elle ne porte de séances qu'à partir du ${formatIsoDay(window.firstWeekFromDay)} (day ≥ ${window.firstWeekFromDay}), et en compte ${request.sessionsPerWeek} au plus.`,
     request.longRunDay < window.firstWeekFromDay
       ? `Elle n'a pas de sortie longue : le ${formatIsoDay(request.longRunDay)} de cette semaine-là est passé.`
       : `Sa sortie longue reste le ${formatIsoDay(request.longRunDay)}.`,
+    ...(proratedBudget === null
+      ? []
+      : [
+          `Le budget de la semaine entamée est ramené à ${proratedBudget} au prorata des jours restants.`,
+        ]),
     `Les semaines suivantes comptent exactement ${request.sessionsPerWeek} séances.`,
   ];
 }
@@ -703,20 +760,67 @@ function firstWeekLines(request: PlanRequest, window: PlanWindow): string[] {
  * Exporté pour la révision automatique (`review-service.ts`), qui ajoute ses
  * propres consignes en `extra` : un coach qui relit un plan doit le juger avec
  * la méthodologie qui l'a écrit, pas avec une autre.
+ *
+ * `goalType` ne décide de rien d'autre que de la spécificité attendue des
+ * sorties longues ({@link coachRuleTailLines}) : le reste de la méthodologie
+ * vaut pour une course comme pour un objectif libre.
  */
 export function planSystemPrompt(
   level: PlanLevel | null,
+  goalType: PlanGoalType,
   paces: TrainingPaces | null,
   race: ReferenceRace | undefined,
   extra: readonly string[] = [],
 ): string {
   const imposed = paces === null || race === undefined ? null : imposedPacesSection(paces, race);
   return [
-    coachRules(imposed !== null),
+    coachRules(imposed !== null, goalType === 'race'),
     ...(level === null ? [] : ['', LEVEL_RULES[level]]),
     ...(imposed === null ? [] : ['', imposed]),
     ...extra,
   ].join('\n');
+}
+
+/**
+ * Le **meilleur** volume hebdomadaire réellement couru sur la fenêtre du
+ * snapshot, en km — `null` sans historique exploitable.
+ *
+ * Le maximum, et pas la moyenne : c'est ce que l'athlète a démontré pouvoir
+ * faire, et une moyenne tirée vers le bas par une semaine de vacances ferait
+ * démarrer le plan sous son niveau. Sert de deux façons, avec le même chiffre
+ * des deux côtés : le prompt l'annonce comme plafond de départ, la validation le
+ * vérifie ({@link PlanValidationContext.recentWeeklyKm}).
+ *
+ * **Limite connue** : ce chiffre ne vaut que ce que vaut l'historique importé. Un
+ * import FIT partiel — canal de synchronisation cassé, reprise de compte, backfill
+ * en cours — fait passer pour « le meilleur volume récent » ce qui n'est que la
+ * partie visible, et plafonne le plan sans que rien ne le dise. Le remède est du
+ * côté de l'import, pas ici : fabriquer une correction reviendrait à inventer un
+ * volume que les données ne portent pas.
+ */
+function bestRecentWeeklyKm(snapshot: TrainingSnapshotDto): number | null {
+  if (snapshot.weeks.length === 0) return null;
+  const best = Math.max(...snapshot.weeks.map((week) => week.distanceKm));
+  // Quatre semaines à zéro ne disent pas « démarre à zéro », elles disent qu'il
+  // n'y a rien à quoi ancrer le départ.
+  return best > 0 ? best : null;
+}
+
+/**
+ * Le plafond de la première semaine pleine, dit au modèle — ou rien quand
+ * l'historique ne permet pas de l'établir.
+ *
+ * La violation correspondante est le filet ; cette ligne-là est la consigne. Un
+ * plan refusé se paie en minutes de régénération, et le modèle n'a aucun moyen
+ * de deviner que « ta meilleure semaine récente » est un plafond et pas un
+ * point de départ à dépasser.
+ */
+function startVolumeLines(snapshot: TrainingSnapshotDto): string[] {
+  const recent = bestRecentWeeklyKm(snapshot);
+  if (recent === null) return [];
+  return [
+    `Volume de départ : la première semaine pleine ne dépasse pas ${formatFirstFullWeekMaxKm(recent)} (ton volume réel récent).`,
+  ];
 }
 
 /** Les messages d'une génération de plan. */
@@ -746,12 +850,16 @@ export function buildPlanMessages(
     '',
     `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.anchor)}.`,
     ...firstWeekLines(request, window),
+    ...startVolumeLines(snapshot),
   ];
 
   return [
     // La méthodologie générale, puis les seules surcharges qui concernent cet
     // athlète : son niveau, et ses allures calculées quand il a donné un chrono.
-    { role: 'system', content: planSystemPrompt(request.level, paces, request.referenceRace) },
+    {
+      role: 'system',
+      content: planSystemPrompt(request.level, request.goalType, paces, request.referenceRace),
+    },
     { role: 'user', content: lines.join('\n') },
   ];
 }
@@ -832,7 +940,7 @@ export function buildPlanUpdateMessages(
   // Le plan garde le niveau **et le chrono** de sa création : l'ajustement s'y
   // tient. Un plan sans niveau (antérieur au champ) reste sur la seule
   // méthodologie générale.
-  const system = planSystemPrompt(plan.level, paces, planReferenceRace(plan), [
+  const system = planSystemPrompt(plan.level, plan.goalType, paces, planReferenceRace(plan), [
     '',
     "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
     "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
@@ -944,8 +1052,28 @@ export type GenerationOptions<T> = {
    * le chrono de l'athlète quand elle existe, son allure d'entraînement récente
    * sinon (cf. `validatePlanBusinessRules`). Les deux sont fournies des deux
    * côtés — c'est le corridor qui tranche.
+   *
+   * Le budget temps en est **exclu par le type** : il ne se lit pas dans un
+   * contexte figé pour toute la génération, mais dans chaque sortie
+   * ({@link GenerationOptions.weeklyTimeBudgetOf}). Le poser ici serait sans
+   * effet, donc silencieusement faux.
    */
-  paceContext: PlanValidationContext;
+  paceContext: Omit<PlanValidationContext, 'weeklyTimeMinutes'>;
+  /**
+   * Le budget temps hebdomadaire sur lequel **cette tentative** se juge, en
+   * minutes — `null` pour aucun contrôle.
+   *
+   * Calculé depuis la sortie, comme {@link GenerationOptions.expectationsOf} :
+   * une modification ou une révision peut lever ou élargir le budget dans le
+   * même mouvement qu'elle réécrit les semaines, et ces semaines-là se jugent
+   * sur le budget qu'elles déclarent (cf. `resolveWeeklyTimeBudget`). Une
+   * génération, elle, n'a pas de patch : c'est le budget de la requête.
+   *
+   * Obligatoire, et c'est le point : un futur chemin de génération ne peut pas
+   * l'oublier — il devra dire d'où sort son budget, comme
+   * {@link GenerationOptions.withImposedPaces} lui fait dire où sont ses semaines.
+   */
+  weeklyTimeBudgetOf: (output: T) => number | null;
   /**
    * Réécrit la sortie avec les allures de la table calculée
    * ({@link applyImposedPaces}), semaines comprises.
@@ -1100,11 +1228,11 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
     // Rien à juger : la sortie ne réécrit aucune semaine (cf. `weeksOf`).
     if (weeks === null) return output;
 
-    violations = validatePlanBusinessRules(
-      weeks,
-      options.expectationsOf(output),
-      options.paceContext,
-    );
+    violations = validatePlanBusinessRules(weeks, options.expectationsOf(output), {
+      ...options.paceContext,
+      // Le budget de la sortie, pas celui du contexte : cf. `weeklyTimeBudgetOf`.
+      weeklyTimeMinutes: options.weeklyTimeBudgetOf(output),
+    });
     if (violations.length === 0) return output;
 
     const reprise = buildViolationsMessage(violations);
@@ -1225,8 +1353,22 @@ async function writeGeneratedPlan(
       firstWeekFromDay: window.firstWeekFromDay,
       race: raceGoalOf(request.goalType, request.goalText),
     }),
-    withImposedPaces: (plan, table) => ({ ...plan, weeks: applyImposedPaces(plan.weeks, table) }),
-    paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
+    // L'allure objectif vient du but que l'athlète a écrit : « 10 km sous
+    // 50 min » vaut 5:00/km, et les blocs spécifiques la reçoivent au lieu de la
+    // zone M (cf. `goalPaceSecPerKm`).
+    withImposedPaces: (plan, table) => ({
+      ...plan,
+      weeks: applyImposedPaces(plan.weeks, table, goalPaceSecPerKm(request.goalText)),
+    }),
+    // Une création ne porte pas de réglages : le budget est celui de la requête,
+    // rien dans la sortie ne peut le déplacer.
+    weeklyTimeBudgetOf: () => request.weeklyTimeMinutes ?? null,
+    paceContext: {
+      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+      paces,
+      // Une création, et elle seule, se juge sur l'historique d'avant-plan.
+      recentWeeklyKm: bestRecentWeeklyKm(snapshot),
+    },
     progressId,
     estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
   });
@@ -1411,8 +1553,23 @@ async function writeUpdatedPlan(
       // trois — la fenêtre est courte, et c'est le sens conservateur.
       race: raceGoalOf(active.plan.goalType, active.plan.goalText),
     }),
-    withImposedPaces: (plan, table) => ({ ...plan, weeks: applyImposedPaces(plan.weeks, table) }),
-    paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
+    // L'objectif du plan porte l'allure objectif, comme à la génération : un
+    // ajustement réécrit des séances, pas le but qu'elles préparent.
+    withImposedPaces: (plan, table) => ({
+      ...plan,
+      weeks: applyImposedPaces(plan.weeks, table, goalPaceSecPerKm(active.plan.goalText)),
+    }),
+    // Le budget que la sortie déclare, à défaut celui du plan stocké : une
+    // instruction qui élargit ou lève la contrainte de temps produit des
+    // semaines qui se jugent sur cette contrainte-là, pas sur l'ancienne.
+    weeklyTimeBudgetOf: (plan) =>
+      resolveWeeklyTimeBudget(plan.settings, active.plan.weeklyTimeMinutes),
+    paceContext: {
+      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+      paces,
+      // Pas de `recentWeeklyKm` : c'est le plan en cours qui fait foi, pas le
+      // volume d'avant-plan.
+    },
     progressId,
     // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,
     // elle, se cale sur ceux d'aujourd'hui — c'est une estimation, pas un

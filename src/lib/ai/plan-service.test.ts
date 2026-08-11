@@ -529,6 +529,85 @@ describe('buildPlanMessages', () => {
     expect(system).toContain('amputée des jours passés');
   });
 
+  /**
+   * Le budget temps : une limite dure, et dite comme telle.
+   *
+   * Constaté en production : 2 h par semaine déclarées, ~3 h 30 planifiées. La
+   * contrainte figurait bien dans la demande (« 2 h 00 d'entraînement par
+   * semaine au plus »), mais rien ne disait au modèle qu'elle serait vérifiée —
+   * ni ce qui devait céder quand elle ne tenait pas.
+   */
+  it('annonce le temps hebdomadaire comme une limite dure vérifiée', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('limite DURE, vérifiée semaine par semaine');
+    expect(system).toContain("la somme des `durationMin` d'une semaine");
+    expect(system).toContain("c'est le volume qui baisse");
+    // Et la contrainte elle-même figure dans la demande, chiffrée.
+    expect(messages[1].content).toContain("5 h 00 d'entraînement par semaine au plus");
+  });
+
+  /**
+   * Le volume de départ : le modèle doit viser juste du premier coup.
+   *
+   * Constaté en production : 25 km la première semaine, chez une athlète dont
+   * les quatre dernières font 9 à 13,6 km. La violation est le filet ; cette
+   * ligne-là est la consigne, et elle porte exactement le chiffre que la
+   * validation vérifiera.
+   */
+  it('plafonne la première semaine pleine sur le volume réel récent', () => {
+    // Meilleure semaine du snapshot : 42,1 km → max(42,1 × 1,2 ; 42,1 + 3).
+    expect(messages[1].content).toContain(
+      'Volume de départ : la première semaine pleine ne dépasse pas 50,5 km (ton volume réel récent).',
+    );
+  });
+
+  it('ne plafonne rien quand l’historique est vide ou nul', () => {
+    const window = { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 };
+
+    expect(buildPlanMessages(REQUEST, window, { ...SNAPSHOT, weeks: [] })[1].content).not.toContain(
+      'Volume de départ',
+    );
+    expect(
+      buildPlanMessages(REQUEST, window, {
+        ...SNAPSHOT,
+        weeks: [{ startsOn: '2026-08-03', distanceKm: 0, movingTimeS: 0, sessions: 0 }],
+      })[1].content,
+    ).not.toContain('Volume de départ');
+  });
+
+  /**
+   * Le retour d'utilisation qui a imposé cette ligne : les sorties longues
+   * générées sortaient 100 % en endurance, quand les plans concurrents
+   * proposaient des passages à l'allure objectif dès la mi-préparation. « La
+   * spécificité croît vers l'objectif » ne suffit pas — un petit modèle applique
+   * une prescription chiffrée, pas une intention.
+   */
+  it('prescrit un bloc à allure objectif dans les sorties longues d’une préparation course', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain(
+      "- À partir de la moitié du plan, la sortie longue contient un bloc à allure objectif (étape `run` avec note « allure objectif », 10 à 25 % de la distance de la sortie), qui s'allonge de semaine en semaine. L'affûtage le raccourcit sans le supprimer.",
+    );
+    // La note est le pivot : c'est elle que `applyImposedPaces` reconnaît pour
+    // poser la plage M sur cette étape-là, au sein d'une séance rangée en E.
+    expect(system).toContain('« allure objectif »');
+  });
+
+  it('ne prescrit pas de bloc à allure objectif sur un objectif libre', () => {
+    // Sans échéance, il n'y a pas d'allure objectif à travailler : la prescrire
+    // ferait fabriquer une course au modèle.
+    const system = buildPlanMessages(
+      REQUEST,
+      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
+      SNAPSHOT,
+    )[0].content;
+
+    expect(system).not.toContain('À partir de la moitié du plan');
+    // Le reste de la section PROGRESSION, lui, ne bouge pas.
+    expect(system).toContain("La spécificité croît vers l'objectif");
+  });
+
   it('impose la structure des séances de qualité et le format des étapes', () => {
     const system = messages[0].content;
 
@@ -630,6 +709,35 @@ describe('buildPlanMessages', () => {
     );
     expect(user).toContain('Sa sortie longue reste le dimanche.');
     expect(user).toContain('Les semaines suivantes comptent exactement 3 séances.');
+    // Sans budget déclaré, il n'y a pas de plafond à annoncer.
+    expect(user).not.toContain('au prorata');
+  });
+
+  it('annonce le budget de la semaine entamée, ramené au prorata des jours restants', () => {
+    // Départ le jeudi : quatre jours restants, soit 4/7 des 2 h déclarées. Sans
+    // cette ligne, le modèle produisait une semaine entamée à la mesure du
+    // budget plein, refusée ensuite par un plafond qu'il ne pouvait pas deviner.
+    const user = buildPlanMessages(
+      { ...REQUEST, weeklyTimeMinutes: 120 },
+      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
+      SNAPSHOT,
+    )[1].content;
+
+    expect(user).toContain(
+      'Le budget de la semaine entamée est ramené à 1 h 08 au prorata des jours restants.',
+    );
+  });
+
+  it('n’annonce aucun plafond quand la semaine entamée est trop courte pour en porter un', () => {
+    // Départ le samedi : deux jours restants, la règle de budget ne s'applique
+    // pas à cette semaine-là — annoncer 34 min réclamerait l'impossible.
+    const user = buildPlanMessages(
+      { ...REQUEST, weeklyTimeMinutes: 120 },
+      { startsOn: '2026-08-15', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 6 },
+      SNAPSHOT,
+    )[1].content;
+
+    expect(user).not.toContain('au prorata');
   });
 
   it('dispense la semaine entamée de sa sortie longue quand ce jour est passé', () => {
@@ -1562,6 +1670,170 @@ describe('updatePlanFromInstruction', () => {
 
     await expect(updatePlanFromInstruction('allège')).rejects.toThrow(AiUnavailableError);
     expect(dal.getActivePlanWithSessions).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Le budget temps, jugé sur ce que la **sortie** déclare.
+ *
+ * La faille que ces tests ferment : « je peux courir 4 h par semaine
+ * maintenant » fait patcher `settings.weeklyTimeMinutes` par le modèle, mais la
+ * validation lisait le budget **stocké** — les semaines élargies étaient donc
+ * déclarées en violation à chaque tentative, et l'ajustement condamné aux trois
+ * échecs sans qu'aucune correction ne soit possible.
+ */
+describe('budget temps hebdomadaire', () => {
+  /** Un plan de 2 h par semaine, démarré le lundi 10 : reprise demain (mercredi 12). */
+  const ACTIVE_2H = {
+    plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2, weeklyTimeMinutes: 120 },
+    sessions: [planSession({ scheduledOn: '2026-08-16', id: 2 })],
+  };
+
+  /**
+   * La semaine entamée : une seule sortie, **dans** son budget au prorata.
+   *
+   * Le chiffre tient les deux fenêtres où cette fixture sert, et c'est
+   * délibéré — sans quoi les tests ci-dessous constateraient une violation de la
+   * semaine 2 pendant que la semaine 1 en produirait une autre, sans que rien ne
+   * le dise (d'où les `not.toContain` qui les accompagnent) :
+   *
+   * - ajustement, reprise le mercredi 12 → 5 jours restants, 2 h ramenées à
+   *   1 h 25 (1 h 34 tolérance comprise) ;
+   * - génération, départ le jeudi 13 → 4 jours restants, 2 h ramenées à 1 h 08
+   *   (1 h 15 tolérance comprise).
+   */
+  const PARTIAL_WEEK = {
+    sessions: [
+      { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 },
+    ],
+  };
+
+  /** Une semaine pleine conforme, durées déclarées : 3 h 00 au total. */
+  function timedWeek(durationsMin: [number, number, number]) {
+    return {
+      sessions: [
+        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, durationMin: durationsMin[0] },
+        {
+          day: 4,
+          kind: 'Seuil',
+          title: '3 × 8 min',
+          distanceKm: 10,
+          durationMin: durationsMin[1],
+          steps: THRESHOLD_STEPS,
+        },
+        {
+          day: 7,
+          kind: 'Sortie longue',
+          title: 'Endurance',
+          distanceKm: 16,
+          durationMin: durationsMin[2],
+        },
+      ],
+    };
+  }
+
+  /** 3 h 00 sur la semaine pleine : au-dessus des 2 h du plan, sous 4 h. */
+  const THREE_HOURS_WEEK = timedWeek([45, 55, 80]);
+
+  it("juge l'ajustement sur le budget que la sortie déclare, pas sur celui du plan", async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Quatre heures par semaine désormais.',
+      settings: { weeklyTimeMinutes: 240 },
+      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+    });
+
+    await updatePlanFromInstruction('je peux courir 4 h par semaine maintenant');
+
+    // Une seule tentative : 3 h tiennent dans les 4 h que l'instruction déclare.
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(dal.applyPlanUpdate.mock.calls[0][1].settings).toEqual({
+      summary: 'Quatre heures par semaine désormais.',
+      weeklyTimeMinutes: 240,
+    });
+  });
+
+  it('retombe sur le budget du plan quand la sortie ne porte pas de réglages', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+    });
+
+    await expect(updatePlanFromInstruction('rien de spécial')).rejects.toThrow(
+      AiInvalidOutputError,
+    );
+
+    expect(loggedText()).toContain(
+      "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00 — " +
+        'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+    );
+    // La semaine entamée, elle, tient dans son prorata : une violation de plus
+    // passerait inaperçue d'un `toContain`, et ferait juger cette fixture sur un
+    // manquement qu'elle n'est pas censée porter.
+    expect(loggedText()).not.toContain('déjà entamée');
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+  });
+
+  it('ne contrôle plus rien quand la sortie efface le budget', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
+    chatCompletionJson.mockResolvedValue({
+      summary: "Plus de contrainte d'horaire.",
+      settings: { weeklyTimeMinutes: null },
+      weeks: [PARTIAL_WEEK, timedWeek([120, 120, 160])],
+    });
+
+    await updatePlanFromInstruction("je n'ai plus de contrainte de temps");
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    // Le budget effacé part en base : la sortie est jugée sur la contrainte
+    // qu'elle fait enregistrer, jamais sur une autre.
+    expect(dal.applyPlanUpdate.mock.calls[0][1].settings).toEqual({
+      summary: "Plus de contrainte d'horaire.",
+      weeklyTimeMinutes: null,
+    });
+  });
+
+  it('juge la génération sur le budget de la requête', async () => {
+    // Une création ne porte pas de réglages : rien dans sa sortie ne peut
+    // déplacer le budget que le formulaire a déclaré.
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK] });
+
+    // Départ le jeudi 13 : première semaine entamée, puis une semaine pleine.
+    await expect(
+      generatePlan({ ...REQUEST, weeklyTimeMinutes: 120, startsOn: '2026-08-13' }),
+    ).rejects.toThrow(AiInvalidOutputError);
+
+    expect(loggedText()).toContain(
+      "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
+    );
+    expect(loggedText()).not.toContain('déjà entamée');
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+  });
+
+  it('exempte du budget une semaine entamée de moins de quatre jours', async () => {
+    // Le défaut constaté : un ajustement lancé le samedi reprend le dimanche, et
+    // les 2 h se prorataient en 17 min — alors que la règle de sortie longue
+    // exige une sortie longue ce dimanche-là. Aucune semaine n'était
+    // satisfaisable, et les trois tentatives étaient perdues d'avance.
+    vi.setSystemTime(new Date('2026-08-15T09:00:00.000Z'));
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [
+        {
+          sessions: [
+            { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 85 },
+          ],
+        },
+        timedWeek([25, 25, 42]),
+      ],
+    });
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(dal.applyPlanUpdate).toHaveBeenCalled();
   });
 });
 

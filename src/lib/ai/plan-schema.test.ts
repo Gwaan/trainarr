@@ -6,6 +6,7 @@ import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/
 import {
   PLAN_OUTPUT_BOUNDS,
   applyImposedPaces,
+  goalPaceSecPerKm,
   isMarathonGoal,
   sessionPaceZone,
   mapPlanWeeksToSessions,
@@ -15,6 +16,7 @@ import {
   planReviewOutputSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
+  resolveWeeklyTimeBudget,
   taperWeekCount,
   validatePlanBusinessRules,
   type PlanExpectations,
@@ -229,6 +231,16 @@ describe('planUpdateOutputSchema', () => {
 
     expect(parsed.settings).toEqual({ sessionsPerWeek: 3 });
   });
+
+  it('accepte un budget temps effacé : `null` lève la contrainte, il ne la tait pas', () => {
+    const parsed = planUpdateOutputSchema.parse({
+      summary: 'Plus de contrainte de temps.',
+      settings: { weeklyTimeMinutes: null },
+      weeks: [week([7])],
+    });
+
+    expect(parsed.settings).toEqual({ weeklyTimeMinutes: null });
+  });
 });
 
 describe('planReviewOutputSchema', () => {
@@ -277,6 +289,34 @@ describe('planReviewOutputSchema', () => {
     expect(
       planReviewOutputSchema.safeParse({ decision: 'rewrite', reason: 'x' }).success,
     ).toBe(false);
+  });
+});
+
+/**
+ * Les trois états du budget temps dans un patch de réglages.
+ *
+ * La faille qu'ils ferment : une sortie qui élargit le budget était jugée contre
+ * l'ancien, donc en violation à chaque tentative — l'ajustement était condamné
+ * aux trois échecs.
+ */
+describe('resolveWeeklyTimeBudget', () => {
+  it('reconduit le budget stocké quand la sortie ne porte pas de réglages', () => {
+    expect(resolveWeeklyTimeBudget(undefined, 120)).toBe(120);
+    expect(resolveWeeklyTimeBudget(undefined, null)).toBeNull();
+  });
+
+  it('reconduit le budget stocké quand le patch ne parle pas du temps', () => {
+    expect(resolveWeeklyTimeBudget({ sessionsPerWeek: 4 }, 120)).toBe(120);
+  });
+
+  it('prend le budget que le patch déclare', () => {
+    expect(resolveWeeklyTimeBudget({ weeklyTimeMinutes: 240 }, 120)).toBe(240);
+    // Et il vaut aussi à la baisse : le patch fait foi, quel que soit le sens.
+    expect(resolveWeeklyTimeBudget({ weeklyTimeMinutes: 90 }, 120)).toBe(90);
+  });
+
+  it('lève toute contrainte quand le patch efface le budget', () => {
+    expect(resolveWeeklyTimeBudget({ weeklyTimeMinutes: null }, 120)).toBeNull();
   });
 });
 
@@ -1330,6 +1370,289 @@ describe('validatePlanBusinessRules — progression du volume', () => {
       expect(violations).toHaveLength(1);
     });
   });
+
+  /**
+   * Le budget temps déclaré — la contrainte de vie que rien ne vérifiait.
+   *
+   * Le plan qui a motivé la règle : 2 h par semaine déclarées, ~3 h 30
+   * planifiées. Aucune règle de volume ne pouvait le voir, les durées n'étaient
+   * comparées à rien.
+   */
+  describe('budget temps hebdomadaire', () => {
+    /** Une semaine de trois séances, distances **et** durées déclarées. */
+    function timedWeek(distancesKm: number[], durationsMin: number[]): PlanWeekOutput {
+      return {
+        sessions: [2, 4, 7].map((day, index) =>
+          session(day, { distanceKm: distancesKm[index], durationMin: durationsMin[index] }),
+        ),
+      };
+    }
+
+    /** Une semaine qui tient largement dans deux heures. */
+    const modest = timedWeek([3, 3, 5], [25, 25, 42]);
+
+    it('relève la semaine qui déborde, budget et plafond en toutes lettres', () => {
+      const weeks = [modest, timedWeek([3.3, 3.3, 5.5], [55, 55, 98])];
+
+      expect(validatePlanBusinessRules(weeks, free(2), { weeklyTimeMinutes: 120 })).toEqual([
+        "Semaine 2 : 3 h 28 d'entraînement pour un budget déclaré de 2 h 00 — " +
+          'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+      ]);
+    });
+
+    it('tolère 10 % pile, et pas une minute de plus', () => {
+      // 132 min pour un budget de 120 : la tolérance, exactement.
+      expect(
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [44, 44, 44])], free(1), {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([]);
+
+      expect(
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [44, 44, 45])], free(1), {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toHaveLength(1);
+    });
+
+    it('ne contrôle rien sans budget déclaré', () => {
+      const huge = timedWeek([3, 3, 5], [120, 120, 180]);
+      expect(validatePlanBusinessRules([huge], free(1))).toEqual([]);
+      expect(validatePlanBusinessRules([huge], free(1), { weeklyTimeMinutes: null })).toEqual([]);
+    });
+
+    it('ne contrôle pas une semaine dont une séance ne déclare pas sa durée', () => {
+      // Une somme partielle ferait constater un budget respecté qui ne l'est
+      // pas : mieux vaut ne pas juger.
+      const partial: PlanWeekOutput = {
+        sessions: [
+          session(2, { distanceKm: 3, durationMin: 25 }),
+          session(4, { distanceKm: 3 }),
+          session(7, { distanceKm: 5, durationMin: 200 }),
+        ],
+      };
+
+      expect(validatePlanBusinessRules([partial], free(1), { weeklyTimeMinutes: 120 })).toEqual([]);
+    });
+
+    it('ramène le budget au prorata des jours restants d’une première semaine entamée', () => {
+      // Départ un jeudi : quatre jours restants, donc 4/7 de 2 h — la semaine
+      // entamée n'ouvre pas un droit d'y tout concentrer.
+      const started: PlanWeekOutput = {
+        sessions: [
+          session(5, { distanceKm: 4, durationMin: 35 }),
+          session(7, { distanceKm: 6, durationMin: 55 }),
+        ],
+      };
+
+      expect(
+        validatePlanBusinessRules([started, modest], { ...free(2), firstWeekFromDay: 4 }, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([
+        "Semaine 1 (déjà entamée, 4 jours restants) : 1 h 30 d'entraînement pour un budget " +
+          'déclaré de 2 h 00 ramené à 1 h 08 au prorata — réduis distances ou séances ' +
+          '(1 h 15 au plus, tolérance comprise).',
+      ]);
+    });
+
+    it('n’impose aucun budget à une semaine entamée de moins de quatre jours', () => {
+      // Le défaut constaté : un ajustement lancé un samedi reprend le dimanche
+      // (`firstWeekFromDay: 7`), et 2 h se prorataient en 17 min — quand la règle
+      // de sortie longue exige une sortie longue ce dimanche-là. Aucune semaine
+      // ne pouvait satisfaire les deux, et les trois tentatives étaient perdues
+      // d'avance.
+      const sunday: PlanWeekOutput = { sessions: [session(7, { distanceKm: 10, durationMin: 75 })] };
+
+      expect(
+        validatePlanBusinessRules([sunday, modest], { ...free(2), firstWeekFromDay: 7 }, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([]);
+
+      // Un jour de plus dans la semaine ne change rien : le seuil est à quatre.
+      expect(
+        validatePlanBusinessRules([sunday, modest], { ...free(2), firstWeekFromDay: 5 }, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([]);
+    });
+
+    it('contrôle la semaine entamée dès le seuil de quatre jours, et pas en deçà', () => {
+      // La bascule, au jour près, sur une même semaine de 1 h 20 : à quatre jours
+      // restants le plafond vaut 1 h 15 et la semaine déborde ; à trois, il n'y a
+      // plus de plafond du tout.
+      const started: PlanWeekOutput = { sessions: [session(7, { distanceKm: 10, durationMin: 80 })] };
+
+      expect(
+        validatePlanBusinessRules([started, modest], { ...free(2), firstWeekFromDay: 4 }, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toHaveLength(1);
+
+      expect(
+        validatePlanBusinessRules([started, modest], { ...free(2), firstWeekFromDay: 5 }, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([]);
+    });
+
+    it('vaut aussi sur les semaines d’affûtage : c’est du temps, pas du volume', () => {
+      // L'affûtage baisse le volume, pas forcément la durée déclarée : la
+      // semaine de course reste soumise au budget.
+      const weeks = [modest, timedWeek([2.8, 2.8, 4.5], [90, 90, 90])];
+
+      expect(
+        validatePlanBusinessRules(weeks, race(2), { weeklyTimeMinutes: 120 }).filter((violation) =>
+          violation.includes('budget déclaré'),
+        ),
+      ).toEqual([
+        "Semaine 2 : 4 h 30 d'entraînement pour un budget déclaré de 2 h 00 — " +
+          'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+      ]);
+    });
+  });
+
+  /**
+   * L'ancrage du départ sur le volume réellement couru.
+   *
+   * Le plan qui a motivé la règle : 25 km la première semaine, chez une athlète
+   * dont les quatre dernières semaines font 9 à 13,6 km.
+   */
+  describe('ancrage de la première semaine au volume réel récent', () => {
+    it('relève un départ trop haut, avec les chiffres réels', () => {
+      const start = volumeWeek(5, 5, 8);
+
+      expect(
+        validatePlanBusinessRules([start, start], free(2), { recentWeeklyKm: 13.6 }),
+      ).toEqual([
+        'Semaine 1 : 18,0 km pour une première semaine pleine — ta meilleure semaine récente ' +
+          'fait 13,6 km ; la première semaine pleine reste sous 16,6 km.',
+      ]);
+    });
+
+    it('accepte le plafond annoncé, à l’unité affichée', () => {
+      // 13,6 + 3 = 16,6 km : le chiffre du message satisfait la règle qui
+      // l'annonce (le `+3 km` l'emporte ici sur les +20 %, qui donneraient 16,3).
+      const start = volumeWeek(5.3, 5.3, 6);
+
+      expect(validatePlanBusinessRules([start, start], free(2), { recentWeeklyKm: 13.6 })).toEqual(
+        [],
+      );
+    });
+
+    it('n’étrangle pas les tout petits volumes : le `+3 km` l’emporte', () => {
+      // 4 km récents : +20 % ne laisserait que 800 m de latitude, moins qu'une
+      // séance. Le plancher additif ouvre à 7 km.
+      const seven = volumeWeek(2, 2, 3);
+      expect(validatePlanBusinessRules([seven, seven], free(2), { recentWeeklyKm: 4 })).toEqual([]);
+
+      expect(
+        validatePlanBusinessRules([volumeWeek(2, 2, 3.1), seven], free(2), { recentWeeklyKm: 4 }),
+      ).toEqual([
+        'Semaine 1 : 7,1 km pour une première semaine pleine — ta meilleure semaine récente ' +
+          'fait 4,0 km ; la première semaine pleine reste sous 7,0 km.',
+      ]);
+    });
+
+    it('juge la première semaine PLEINE, pas la semaine entamée du départ', () => {
+      const started = week([5, 7], [4, 6]);
+
+      expect(
+        validatePlanBusinessRules([started, volumeWeek(5, 5, 8)], { ...free(2), firstWeekFromDay: 5 }, {
+          recentWeeklyKm: 13.6,
+        }),
+      ).toEqual([
+        'Semaine 2 : 18,0 km pour une première semaine pleine — ta meilleure semaine récente ' +
+          'fait 13,6 km ; la première semaine pleine reste sous 16,6 km.',
+      ]);
+    });
+
+    it('ne contrôle rien sans historique', () => {
+      const start = volumeWeek(5, 5, 8);
+
+      expect(validatePlanBusinessRules([start, start], free(2))).toEqual([]);
+      expect(validatePlanBusinessRules([start, start], free(2), { recentWeeklyKm: null })).toEqual([]);
+      expect(validatePlanBusinessRules([start, start], free(2), { recentWeeklyKm: 0 })).toEqual([]);
+    });
+
+    it('ne s’applique qu’aux créations : un plan en cours fait foi, pas son avant', () => {
+      const start = volumeWeek(5, 5, 8);
+
+      expect(
+        validatePlanBusinessRules([start, start], { ...free(2), scope: 'adjustment' }, {
+          recentWeeklyKm: 13.6,
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  /**
+   * Budget serré et anti-plat : satisfaisables **ensemble**.
+   *
+   * Le cas qui a fait poser la question — 13 km récents, 2 h par semaine, une
+   * athlète à ~8:20/km — donne un plafond de volume (~15,8 km) plus bas que ce
+   * que la progression voudrait. Les deux règles ne se contredisent pourtant
+   * pas : le budget est absolu, l'anti-plat relatif à une première semaine que
+   * le modèle choisit. Aucune ne cède, c'est le départ qui descend.
+   */
+  describe('satisfaisabilité budget × progression', () => {
+    /** Une semaine de trois séances chronométrées à 8:20/km — l'allure de l'athlète. */
+    function slowWeek(distancesKm: number[]): PlanWeekOutput {
+      return {
+        sessions: [2, 4, 7].map((day, index) =>
+          session(day, {
+            distanceKm: distancesKm[index],
+            durationMin: Math.round((distancesKm[index] * 500) / 60),
+          }),
+        ),
+      };
+    }
+
+    const context = { weeklyTimeMinutes: 120, recentWeeklyKm: 13.6 };
+
+    it('accepte un plan de 6 semaines qui part du volume réel et tient dans 2 h', () => {
+      // 13 → 14,5 → 12 → 13,4 → 14,9 → 13 km : hausses sous 12 %, semaine
+      // allégée en 3, pic à +14,6 %, départ sous le plafond, et 2 h 05 au pire.
+      const weeks = [
+        slowWeek([4, 4, 5]),
+        slowWeek([4.5, 4.5, 5.5]),
+        slowWeek([3.5, 3.5, 5]),
+        slowWeek([4, 4, 5.4]),
+        slowWeek([4.5, 4.5, 5.9]),
+        slowWeek([4, 4, 5]),
+      ];
+
+      expect(validatePlanBusinessRules(weeks, free(6), context)).toEqual([]);
+    });
+
+    it('fait céder le départ, pas l’anti-plat, quand le budget plafonne le volume', () => {
+      // Cinq semaines collées au plafond du budget (15,8 km, 2 h 12 pile) : le
+      // budget est tenu, mais le plan ne monte plus. C'est l'anti-plat qui parle.
+      const capped = slowWeek([5, 5, 5.8]);
+      const violations = validatePlanBusinessRules([capped, capped, capped, capped, capped], free(5), context);
+
+      expect(violations).toEqual([
+        'Plan trop plat : la semaine la plus chargée hors affûtage (15,8 km) doit dépasser ' +
+          "d'au moins 10,0 % la première semaine pleine (15,8 km), soit 17,4 km au minimum.",
+      ]);
+
+      // Et la réponse attendue du modèle — démarrer plus bas — satisfait tout.
+      expect(
+        validatePlanBusinessRules(
+          [
+            slowWeek([4, 4, 5]),
+            slowWeek([4.5, 4.5, 5.5]),
+            slowWeek([3.75, 3.75, 5]),
+            slowWeek([4.25, 4.25, 5.5]),
+            slowWeek([4, 4, 5]),
+          ],
+          free(5),
+          context,
+        ),
+      ).toEqual([]);
+    });
+  });
 });
 
 describe('taperWeekCount', () => {
@@ -1375,6 +1698,46 @@ describe('isMarathonGoal', () => {
 
   it('reste faux sur tout le reste', () => {
     expect(isMarathonGoal('10 km sous 50 min')).toBe(false);
+  });
+});
+
+describe('goalPaceSecPerKm', () => {
+  it('dérive l’allure d’une distance connue et d’un temps, quelle qu’en soit l’écriture', () => {
+    // 10 km en 50 min = 5:00/km, quelle que soit la façon de dire les 50 min.
+    expect(goalPaceSecPerKm('10 km sous 50 min')).toBe(300);
+    expect(goalPaceSecPerKm('Courir 10 km en 50:00')).toBe(300);
+    expect(goalPaceSecPerKm('10km, objectif 50 minutes')).toBe(300);
+
+    // 21,0975 km en 1 h 45 = 4:58,6/km, arrondi à la seconde.
+    expect(goalPaceSecPerKm('Semi-marathon de Nantes en 1h45')).toBe(299);
+    expect(goalPaceSecPerKm('semi en 1 h 45')).toBe(299);
+
+    // 42,195 km en 3 h 30 et en 4 h pile.
+    expect(goalPaceSecPerKm('Marathon de Paris en 3h30')).toBe(299);
+    expect(goalPaceSecPerKm('marathon sous 4h')).toBe(341);
+    expect(goalPaceSecPerKm('Marathon en 3:30:00')).toBe(299);
+
+    expect(goalPaceSecPerKm('5 km en 25 min')).toBe(300);
+  });
+
+  it('ne prend pas le nom du semi pour celui du marathon', () => {
+    // 1 h 45 sur un marathon donnerait 2:29/km : c'est le semi qui est visé.
+    expect(goalPaceSecPerKm('1/2 marathon en 1h45')).toBe(299);
+  });
+
+  it('rend null quand une des deux moitiés manque', () => {
+    expect(goalPaceSecPerKm('Marathon de Paris')).toBeNull();
+    expect(goalPaceSecPerKm('reprendre le volume')).toBeNull();
+    expect(goalPaceSecPerKm('courir 45 min sans marcher')).toBeNull();
+    // Une distance hors des quatre reconnues : rien n'est deviné.
+    expect(goalPaceSecPerKm('trail de 30 km en 3h30')).toBeNull();
+    expect(goalPaceSecPerKm('15 km en 1h15')).toBeNull();
+  });
+
+  it('écarte ce qui ne ressemble pas à une allure de course à pied', () => {
+    // 1:04/km et 36:00/km : une faute de saisie, pas un objectif.
+    expect(goalPaceSecPerKm('marathon en 45 min')).toBeNull();
+    expect(goalPaceSecPerKm('5 km en 3h')).toBeNull();
   });
 });
 
@@ -1492,13 +1855,45 @@ describe('applyImposedPaces', () => {
     );
     const steps = imposed.sessions[0].steps ?? [];
 
-    // Échauffement et retour au calme : l'endurance, quelle que soit la séance.
+    // Échauffement et retour au calme d'une séance de qualité : l'endurance —
+    // l'écart avec le corps de séance est l'information, et elle est réelle.
     expect(steps[0].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
     expect(steps[2].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
     // L'effort : les bornes du créneau de la séance.
     expect(steps[1].steps[0]).toMatchObject({ paceMinSecPerKm: 280, paceMaxSecPerKm: 292 });
     // La récupération : aucune cible, la seule consigne qui vaille est « lent ».
     expect(steps[1].steps[1]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
+  });
+
+  it('n’encadre pas une séance d’endurance : seul son corps porte la plage E', () => {
+    // Constaté à l'écran : « Échauffement 1 km 7:57–8:43 · Course 9 km
+    // 7:57–8:43 · Retour au calme 10 min 7:57–8:43 ». Trois fois la même plage
+    // ne prescrit rien de plus qu'une fois, et donne l'impression d'un plan
+    // bâclé — sur une séance E, l'enveloppe se court à l'intensité du corps.
+    const [imposed] = applyImposedPaces(
+      [
+        {
+          sessions: [
+            session(7, {
+              kind: 'Sortie longue',
+              steps: [
+                { repeat: 1, steps: [step('warmup', { distanceM: 1000 })] },
+                { repeat: 1, steps: [step('run', { distanceM: 9000 })] },
+                { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+              ],
+            }),
+          ],
+        },
+      ],
+      PACES,
+    );
+    const blocks = imposed.sessions[0].steps ?? [];
+
+    expect(blocks[0].steps[0]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
+    expect(blocks[1].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+    expect(blocks[2].steps[0]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
+    // La cible de séance, elle, ne bouge pas : c'est elle qui porte le créneau.
+    expect(imposed.sessions[0].targetPaceSecPerKm).toBe(353);
   });
 
   it('donne au bloc d’effort le créneau de sa séance, pas un créneau fixe', () => {
@@ -1548,6 +1943,57 @@ describe('applyImposedPaces', () => {
     expect(blocks[2].steps[0]).toMatchObject({ paceMinSecPerKm: 280, paceMaxSecPerKm: 292 }); // T
     // La séance, elle, reste une sortie longue : sa cible ne bouge pas.
     expect(imposed.sessions[0].targetPaceSecPerKm).toBe(353);
+  });
+
+  describe('allure objectif dérivée du but chiffré', () => {
+    /** Une sortie longue dont un seul bloc porte la note « allure objectif ». */
+    const longRun = {
+      sessions: [
+        session(7, {
+          kind: 'Sortie longue',
+          steps: [
+            { repeat: 1, steps: [step('run', { durationS: 2400 })] },
+            { repeat: 1, steps: [step('run', { durationS: 1800, note: 'à allure objectif' })] },
+          ],
+        }),
+      ],
+    };
+
+    /** L'allure posée sur le bloc spécifique, pour l'objectif donné. */
+    function specificPace(goalText: string): { min: number | null; max: number | null } {
+      const [imposed] = applyImposedPaces([longRun], PACES, goalPaceSecPerKm(goalText));
+      const effort = (imposed.sessions[0].steps ?? [])[1].steps[0];
+      return { min: effort.paceMinSecPerKm, max: effort.paceMaxSecPerKm };
+    }
+
+    it('pose l’allure de la course, et non la zone M, quand l’objectif est chiffré', () => {
+      // 10 km sous 50 min = 5:00/km. La zone M de cette table (295–320) est 25 à
+      // 35 s/km plus lente : sur une prépa 10 km, elle n'est pas l'allure de la
+      // course.
+      expect(specificPace('10 km sous 50 min')).toEqual({ min: 292, max: 308 });
+    });
+
+    it('retombe sur la zone M quand l’objectif ne porte pas de chiffre', () => {
+      expect(specificPace('Marathon de Paris')).toEqual({ min: 295, max: 320 });
+      expect(specificPace('reprendre le volume')).toEqual({ min: 295, max: 320 });
+    });
+
+    it('retombe sur la zone M quand l’allure demandée n’est pas plausible', () => {
+      // 3:30/km sur un 10 km, quand la table plafonne les intervalles à 4:12/km :
+      // l'objectif est hors de portée, le plan reste ancré sur les données.
+      expect(specificPace('10 km sous 35 min')).toEqual({ min: 295, max: 320 });
+      // 8:00/km : plus lent que l'endurance, ce n'est plus un bloc spécifique.
+      expect(specificPace('10 km en 1h20')).toEqual({ min: 295, max: 320 });
+    });
+
+    it('ne déborde ni sur le reste de la séance ni sur les autres créneaux', () => {
+      const [imposed] = applyImposedPaces([longRun], PACES, goalPaceSecPerKm('10 km sous 50 min'));
+      const blocks = imposed.sessions[0].steps ?? [];
+
+      // Le corps de la sortie longue reste en E, et la cible de séance aussi.
+      expect(blocks[0].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+      expect(imposed.sessions[0].targetPaceSecPerKm).toBe(353);
+    });
   });
 
   it('ne laisse pas la note d’une étape déborder de son rôle ni de la séance', () => {
@@ -1726,7 +2172,7 @@ describe('applyImposedPaces', () => {
     });
   });
 
-  it('ne touche à rien d’autre : distances, durées, répétitions et notes', () => {
+  it('ne touche à rien d’autre : distances, répétitions et notes', () => {
     const weeks: PlanWeekOutput[] = [
       {
         sessions: [
@@ -1754,7 +2200,11 @@ describe('applyImposedPaces', () => {
       kind: 'Seuil',
       title: '4 × 8 min',
       distanceKm: 10.4,
-      durationMin: 55,
+      // La durée, elle, est recalculée — et le déroulé, entièrement en durée, ne
+      // couvre aucun des 10,4 km déclarés : c'est la distance qui l'emporte
+      // (10,4 km au milieu du créneau T, 286 s/km, soit 50 min), et non les
+      // 40 min des étapes ni les 55 min que le modèle avait écrites.
+      durationMin: 50,
       warmup: '15 min souple',
     });
     expect((session4.steps ?? [])[0].repeat).toBe(4);
@@ -1767,6 +2217,175 @@ describe('applyImposedPaces', () => {
 
     expect(imposed.sessions[0].steps).toBeUndefined();
     expect(imposed.sessions[0].targetPaceSecPerKm).toBe(353);
+  });
+
+  /**
+   * Une table d'allures **lente**, celle de l'athlète du constat de production :
+   * E 7:57–8:43/km, soit un milieu à 8:20/km pile. C'est elle qui rend les
+   * durées recalculées lisibles — 10 km n'y font pas une heure.
+   */
+  const SLOW_PACES: TrainingPaces = {
+    vdot: 30.1,
+    easy: { minSecPerKm: 477, maxSecPerKm: 523 },
+    marathon: { minSecPerKm: 430, maxSecPerKm: 450 },
+    threshold: { minSecPerKm: 400, maxSecPerKm: 420 },
+    interval: { minSecPerKm: 370, maxSecPerKm: 390 },
+    repetition: { minSecPerKm: 340, maxSecPerKm: 360 },
+  };
+
+  describe('durées recalculées', () => {
+    /** La durée posée sur l'unique séance de l'unique semaine. */
+    function durationOf(session: PlanWeekOutput['sessions'][number]): number | undefined {
+      return applyImposedPaces([{ sessions: [session] }], SLOW_PACES)[0].sessions[0].durationMin;
+    }
+
+    it('recalcule une séance sans déroulé depuis sa distance et le créneau de son `kind`', () => {
+      // Le défaut constaté à l'écran : « 10 km · 1 h 00 · @ 8:20/km », alors que
+      // 10 km à 8:20/km font 1 h 23. Le modèle n'avait pas calculé cette heure.
+      expect(durationOf(session(7, { kind: 'Sortie longue', distanceKm: 10, durationMin: 60 }))).toBe(
+        83,
+      );
+    });
+
+    it('somme le déroulé : durées telles quelles, distances converties à l’allure posée', () => {
+      // Échauffement 2 km en E (500 s/km) = 1 000 s, corps 3 km au seuil
+      // (410 s/km) = 1 230 s, retour au calme 600 s → 2 830 s, soit 47 min.
+      const duration = durationOf(
+        session(4, {
+          kind: 'Seuil',
+          durationMin: 90,
+          steps: [
+            { repeat: 1, steps: [step('warmup', { distanceM: 2000 })] },
+            { repeat: 1, steps: [step('run', { distanceM: 3000 })] },
+            { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+          ],
+        }),
+      );
+
+      expect(duration).toBe(47);
+    });
+
+    it('mesure la séance entière quand le déroulé n’en décrit qu’un extrait', () => {
+      // Le défaut constaté : le prompt demande une sortie longue dont le `steps`
+      // ne décrit QUE le bloc à allure objectif. 18 km avec un seul bloc de 3 km
+      // s'affichaient « 18 km · 18 min », et la semaine tombait à 138 min au lieu
+      // de 260. Les 18 km au milieu du créneau E (500 s/km) font 150 min, et
+      // c'est cette durée-là qui compte.
+      const duration = durationOf(
+        session(7, {
+          kind: 'Sortie longue',
+          distanceKm: 18,
+          durationMin: 18,
+          steps: [
+            {
+              repeat: 1,
+              steps: [step('run', { distanceM: 3000, note: 'à allure objectif' })],
+            },
+          ],
+        }),
+      );
+
+      expect(duration).toBe(150);
+    });
+
+    it('laisse le déroulé décider quand il couvre toute la distance déclarée', () => {
+      // 3 km d'échauffement en E (500 s/km) + 4 km au seuil (410) + 3 km de
+      // retour au calme en E = 4 640 s, soit 77 min — plus que les 68 min des
+      // 10 km pris à l'allure du seuil, parce que l'enveloppe est plus lente.
+      // Le déroulé complet est le calcul le plus fin : c'est lui qui l'emporte.
+      const duration = durationOf(
+        session(4, {
+          kind: 'Seuil',
+          distanceKm: 10,
+          steps: [
+            { repeat: 1, steps: [step('warmup', { distanceM: 3000 })] },
+            { repeat: 1, steps: [step('run', { distanceM: 4000 })] },
+            { repeat: 1, steps: [step('cooldown', { distanceM: 3000 })] },
+          ],
+        }),
+      );
+
+      expect(duration).toBe(77);
+    });
+
+    it('compte chaque passage d’un bloc répété', () => {
+      // 600 s d'échauffement + 4 × (400 m à 350 s/km + 90 s de récup) = 1 520 s.
+      const duration = durationOf(
+        session(5, {
+          kind: 'Répétitions',
+          steps: [
+            { repeat: 1, steps: [step('warmup', { durationS: 600 })] },
+            {
+              repeat: 4,
+              steps: [step('run', { distanceM: 400 }), step('recover', { durationS: 90 })],
+            },
+          ],
+        }),
+      );
+
+      expect(duration).toBe(25);
+    });
+
+    it('chronomètre une étape sans cible au créneau de sa séance', () => {
+      // La récupération ne reçoit aucune allure (cf. `stepPaceZone`) : mesurée en
+      // distance, elle se chronomètre au créneau de sa séance — 3 000 m + 400 m
+      // au seuil (410 s/km) = 1 394 s, soit 23 min.
+      const duration = durationOf(
+        session(4, {
+          kind: 'Seuil',
+          steps: [
+            {
+              repeat: 1,
+              steps: [step('run', { distanceM: 3000 }), step('recover', { distanceM: 400 })],
+            },
+          ],
+        }),
+      );
+
+      expect(duration).toBe(23);
+    });
+
+    it('chronomètre une séance de récupération en endurance, faute de créneau', () => {
+      // « Récupération » ne porte aucune cible : le repli est le milieu de E.
+      expect(durationOf(session(3, { kind: 'Récupération', distanceKm: 3 }))).toBe(25);
+    });
+
+    it('laisse la durée du modèle quand rien ne permet de la calculer', () => {
+      // Ni déroulé, ni distance : il n'y a rien à diviser, et inventer serait
+      // exactement le défaut qu'on corrige.
+      expect(durationOf(session(2, { kind: 'Footing', durationMin: 45 }))).toBe(45);
+      expect(durationOf(session(2, { kind: 'Footing' }))).toBeUndefined();
+    });
+
+    it('rend le budget temps vérifiable : ce sont ces durées-là que la règle compte', () => {
+      // Le défaut de production en entier : le modèle déclare 1 h 40 pour une
+      // semaine de 16 km qu'il chiffre en réalité à 2 h 13. Sans recalcul, le
+      // budget de 2 h passait ; avec, il est relevé.
+      const declared: PlanWeekOutput = {
+        sessions: [
+          session(2, { kind: 'Endurance fondamentale', distanceKm: 4, durationMin: 25 }),
+          session(4, { kind: 'Endurance fondamentale', distanceKm: 4, durationMin: 25 }),
+          session(7, { kind: 'Sortie longue', distanceKm: 8, durationMin: 50 }),
+        ],
+      };
+      const expected: PlanExpectations = {
+        scope: 'creation',
+        weeks: 1,
+        sessionsPerWeek: 3,
+        longRunDay: 7,
+      };
+
+      expect(validatePlanBusinessRules([declared], expected, { weeklyTimeMinutes: 120 })).toEqual([]);
+
+      expect(
+        validatePlanBusinessRules(applyImposedPaces([declared], SLOW_PACES), expected, {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([
+        "Semaine 1 : 2 h 13 d'entraînement pour un budget déclaré de 2 h 00 — " +
+          'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+      ]);
+    });
   });
 
   it('est pure : les semaines reçues ne bougent pas', () => {

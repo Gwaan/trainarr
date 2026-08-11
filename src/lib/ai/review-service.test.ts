@@ -517,6 +517,128 @@ describe('maybeReviewActivePlan — décision', () => {
 });
 
 /**
+ * Le budget temps d'une révision, jugé comme celui d'un ajustement : sur ce que
+ * la **sortie** déclare, pas sur ce que le plan stocke. Une révision qui reporte
+ * un budget élargi produirait sinon des semaines déclarées en violation à chaque
+ * tentative, et n'aboutirait jamais.
+ */
+describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
+  /** Le même plan, mais 2 h par semaine. */
+  const AT_2H = { plan: { ...PLAN, weeklyTimeMinutes: 120 }, sessions: ACTIVE.sessions };
+
+  /** La semaine entamée, durée déclarée : dans son budget au prorata (5/7 de 2 h). */
+  const PARTIAL_WEEK = {
+    sessions: [
+      { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 },
+    ],
+  };
+
+  /** La semaine pleine conforme, durées déclarées : 3 h 00 au total. */
+  const THREE_HOURS_WEEK = {
+    sessions: [
+      { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, durationMin: 45 },
+      {
+        day: 4,
+        kind: 'Seuil',
+        title: '3 × 8 min',
+        distanceKm: 10,
+        durationMin: 55,
+        steps: THRESHOLD_STEPS,
+      },
+      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 80 },
+    ],
+  };
+
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue(AT_2H);
+  });
+
+  it('juge les semaines sur le budget que la révision déclare', async () => {
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Le bilan montre 4 h disponibles : le plan les utilise.',
+      settings: { weeklyTimeMinutes: 240 },
+      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+    });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(dal.applyPlanUpdate.mock.calls[0][1].settings.weeklyTimeMinutes).toBe(240);
+  });
+
+  it('retombe sur le budget du plan quand la révision ne touche pas aux réglages', async () => {
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Charge à revoir.',
+      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+    });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    expect(errored).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
+      ),
+    );
+  });
+
+  it('ignore un budget effacé par le modèle : personne ne le lui a demandé', async () => {
+    // Lever la contrainte de temps est une décision de l'athlète, prise sur le
+    // chemin de l'instruction. Une révision se déclenche toute seule : un
+    // provider hors grammaire écrivant `null` effacerait sinon une contrainte de
+    // vie sans que personne ne l'ait demandé.
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Charge à revoir.',
+      settings: { weeklyTimeMinutes: null, sessionsPerWeek: 4 },
+      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+    });
+
+    await maybeReviewActivePlan();
+
+    // Les semaines restent jugées sur les 2 h du plan : la sortie est refusée,
+    // comme si le budget n'avait pas été touché.
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    expect(errored).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
+      ),
+    );
+  });
+
+  it('laisse passer les autres réglages d’une révision qui efface le budget', async () => {
+    // Le budget seul est écarté : réduire le nombre de séances est exactement ce
+    // qu'une révision a le droit de conclure.
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Deux séances suffisent.',
+      settings: { weeklyTimeMinutes: null, sessionsPerWeek: 2 },
+      weeks: [
+        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 }] },
+        {
+          sessions: [
+            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, durationMin: 45, steps: THRESHOLD_STEPS },
+            { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 70 },
+          ],
+        },
+      ],
+    });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    const { settings } = dal.applyPlanUpdate.mock.calls[0][1];
+    expect(settings.sessionsPerWeek).toBe(2);
+    // Ni effacé, ni réécrit : le champ n'est pas dans le patch.
+    expect(settings).not.toHaveProperty('weeklyTimeMinutes');
+  });
+});
+
+/**
  * La révision emprunte le même chemin qu'un ajustement, post-traitement des
  * allures compris : sur un plan qui porte un chrono, aucune allure ne vient du
  * modèle — c'est l'appli qui les pose (cf. `applyImposedPaces`).
