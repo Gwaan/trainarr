@@ -30,39 +30,38 @@ export const PLAN_STEP_ROLE_LABELS: Record<PlanStepRole, string> = {
   cooldown: "Retour au calme",
 };
 
-/** Habillage d'une brique de séance : le bloc coloré, puis son libellé teinté. */
+/** Habillage d'une étape sur la timeline : son segment de rail, son libellé. */
 export type PlanStepRoleStyle = {
-  /** Couleur du filet gauche et du fond doux — les épaisseurs restent à l'UI. */
-  block: string;
+  /** Aplat du segment de rail — la géométrie (largeur, arrondi) reste à l'UI. */
+  rail: string;
   /** Le libellé du rôle, en couleur pleine. */
   label: string;
 };
 
 /**
- * Code couleur des rôles : une brique se reconnaît avant d'être lue.
+ * Code couleur des rôles : une étape se reconnaît avant d'être lue.
  *
  * Quatre tokens **existants** du système, aucun nouveau (cf. design.md) :
  * l'échauffement en `positive` (le vert de la mise en route), la course en
  * `accent` (la seule couleur d'intensité du système), la récupération en
  * `chart-cadence` (bleu ciel, le relâchement) et le retour au calme en
- * `chart-stride` (teal). Fond à 10 % et filet en couleur pleine : la couleur
- * marque, elle ne crie pas — et le filet tient les 3:1 de WCAG 1.4.11 contre
- * `surface-2`, le fond du panneau.
+ * `chart-stride` (teal).
+ *
+ * La couleur ne se pose que sur deux surfaces minuscules — le segment de rail
+ * et le libellé du rôle — jamais en aplat de fond : c'est ce qui laisse la
+ * mesure chiffrée régner sur l'étape. Contre `surface-2` (le fond du panneau),
+ * les quatre teintes tiennent les 3:1 de WCAG 1.4.11 pour le segment **et** les
+ * 4,5:1 du texte pour le libellé : `positive` 11,4:1, `chart-stride` 9,2:1,
+ * `chart-cadence` 8,0:1, `accent` 5,2:1.
  *
  * `Record<PlanStepRole, …>` volontaire : un rôle ajouté au contrat casse la
  * compilation ici tant qu'il n'a pas sa couleur.
  */
 export const PLAN_STEP_ROLE_STYLES: Record<PlanStepRole, PlanStepRoleStyle> = {
-  warmup: { block: "border-l-positive bg-positive/10", label: "text-positive" },
-  run: { block: "border-l-accent bg-accent/10", label: "text-accent" },
-  recover: {
-    block: "border-l-chart-cadence bg-chart-cadence/10",
-    label: "text-chart-cadence",
-  },
-  cooldown: {
-    block: "border-l-chart-stride bg-chart-stride/10",
-    label: "text-chart-stride",
-  },
+  warmup: { rail: "bg-positive", label: "text-positive" },
+  run: { rail: "bg-accent", label: "text-accent" },
+  recover: { rail: "bg-chart-cadence", label: "text-chart-cadence" },
+  cooldown: { rail: "bg-chart-stride", label: "text-chart-stride" },
 };
 
 /**

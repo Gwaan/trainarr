@@ -269,17 +269,20 @@ describe('planSessionDetail', () => {
 describe('PLAN_STEP_ROLE_STYLES', () => {
   it('donne à chaque rôle sa couleur — tokens du système, aucun hex', () => {
     expect(PLAN_STEP_ROLE_STYLES).toEqual({
-      warmup: { block: 'border-l-positive bg-positive/10', label: 'text-positive' },
-      run: { block: 'border-l-accent bg-accent/10', label: 'text-accent' },
-      recover: {
-        block: 'border-l-chart-cadence bg-chart-cadence/10',
-        label: 'text-chart-cadence',
-      },
-      cooldown: {
-        block: 'border-l-chart-stride bg-chart-stride/10',
-        label: 'text-chart-stride',
-      },
+      warmup: { rail: 'bg-positive', label: 'text-positive' },
+      run: { rail: 'bg-accent', label: 'text-accent' },
+      recover: { rail: 'bg-chart-cadence', label: 'text-chart-cadence' },
+      cooldown: { rail: 'bg-chart-stride', label: 'text-chart-stride' },
     });
+  });
+
+  it('ne pose la couleur que sur le rail et le libellé, jamais en fond', () => {
+    // La refonte visuelle tient à ça : aucun aplat de fond teinté sous une
+    // étape (`bg-<token>/10`), sinon on revient aux briques d'avant.
+    for (const style of Object.values(PLAN_STEP_ROLE_STYLES)) {
+      expect(style.rail).toMatch(/^bg-[a-z-]+$/);
+      expect(style.label).toMatch(/^text-[a-z-]+$/);
+    }
   });
 
   it('couvre tous les rôles du contrat, sans teinte partagée', () => {

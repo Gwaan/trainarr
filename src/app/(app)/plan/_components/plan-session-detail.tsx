@@ -12,26 +12,36 @@ import {
   type PlanStepView,
 } from "../_lib/session-detail";
 
-/** Filet gauche + fond doux : la géométrie de la brique, sa couleur vient du rôle. */
-const BRICK = "rounded-r-[6px] border-l-[3px] py-1.5 pr-2.5 pl-2";
+/**
+ * Géométrie d'une étape : le segment de rail (3 px), puis l'air avant le texte.
+ *
+ * `minmax(0,1fr)` et non `1fr` : sans ça une consigne longue sans espace
+ * pousserait la colonne et déborderait sur téléphone.
+ */
+const RAIL_ROW = "grid grid-cols-[3px_minmax(0,1fr)] gap-x-3";
+
+/** Espacement d'une étape à l'autre — le rail se voit dans cet interstice. */
+const STEP_GAP = "flex min-w-0 flex-col gap-3";
+
+/** Micro-label d'étape : la forme de `.eyebrow`, la couleur du rôle. */
+const ROLE_LABEL =
+  "text-[0.68rem] leading-[1.1] font-medium tracking-[0.1em] uppercase";
 
 /**
  * Le déroulé d'une séance, révélé sous sa ligne.
  *
- * Trois strates, dans l'ordre où on les lit avant de partir courir : les blocs
- * d'étapes, les consignes en texte libre (seules données des plans d'avant le
- * déroulé structuré), puis le récapitulatif chiffré.
+ * La forme est une **timeline verticale** : un fil continu descend le long des
+ * étapes, chacune posant sur ce fil son segment coloré. La couleur ne vit plus
+ * que là — plus aucun aplat de fond teinté, plus aucune brique. Ce qui reste
+ * fort à l'œil, c'est la mesure : `800 m`, `90 s`, en mono et en tokens texte,
+ * là où on la cherche en enfilant ses chaussures.
  *
- * Chaque brique est un bloc codé par couleur selon son rôle (cf.
- * `PLAN_STEP_ROLE_STYLES`) : filet coloré à gauche, fond de la même teinte à
- * 10 %, libellé du rôle en couleur pleine. La couleur ne porte jamais
- * l'information seule — le rôle est toujours écrit.
+ * Trois strates, dans l'ordre où on les lit avant de partir courir : le déroulé
+ * (blocs d'étapes, puis consignes en texte libre pour les plans d'avant le
+ * déroulé structuré — même grammaire visuelle), puis le récapitulatif chiffré.
  *
- * Une étape se lit en deux colonnes : à gauche ce qu'on fait (rôle, consigne),
- * à droite ce qui se mesure (mesure puis cible, empilées et alignées à droite —
- * sur téléphone, une seule ligne ne tiendrait pas). Les valeurs restent en tokens
- * texte et en mono tabulaire : jamais de donnée écrite en couleur de rôle, et
- * d'un bloc à l'autre les chiffres restent en colonne.
+ * Le rôle est toujours écrit à côté de son segment : la couleur double
+ * l'information, elle ne la porte jamais seule.
  */
 export function PlanSessionDetailPanel({
   detail,
@@ -41,39 +51,42 @@ export function PlanSessionDetailPanel({
   completedActivityId: number | null;
 }) {
   const hasBlocks = detail.blocks.length > 0;
+  const hasNotes = detail.notes.length > 0;
+  const hasTimeline = hasBlocks || hasNotes;
 
   return (
-    <div className="border-t border-border bg-surface-2 px-4 py-3.5 sm:px-5">
-      {hasBlocks ? (
+    <div className="border-t border-border bg-surface-2 px-4 py-4 sm:px-5">
+      {hasTimeline ? (
         <>
           <p className="eyebrow">Déroulé</p>
-          <ol className="mt-2.5 flex flex-col gap-2.5">
-            {detail.blocks.map((block, index) => (
-              <Block key={index} block={block} />
-            ))}
-          </ol>
-        </>
-      ) : null}
+          <div className="mt-3 flex flex-col gap-4">
+            {hasBlocks ? (
+              <ol className="flex min-w-0 flex-col gap-4">
+                {detail.blocks.map((block, index) => (
+                  <Block key={index} block={block} />
+                ))}
+              </ol>
+            ) : null}
 
-      {detail.notes.length > 0 ? (
-        <dl
-          className={cn(
-            "flex flex-col gap-1.5",
-            hasBlocks && "mt-3.5 border-t border-border pt-3",
-          )}
-        >
-          {detail.notes.map((note) => (
-            <Note key={note.label} note={note} />
-          ))}
-        </dl>
+            {hasNotes ? (
+              <div className="relative min-w-0">
+                <Thread />
+                <dl className={STEP_GAP}>
+                  {detail.notes.map((note) => (
+                    <Note key={note.label} note={note} />
+                  ))}
+                </dl>
+              </div>
+            ) : null}
+          </div>
+        </>
       ) : null}
 
       {detail.totals.length > 0 ? (
         <ul
           className={cn(
             "flex flex-wrap gap-x-4 gap-y-1.5",
-            (hasBlocks || detail.notes.length > 0) &&
-              "mt-3.5 border-t border-border pt-3",
+            hasTimeline && "mt-4 border-t border-border pt-3",
           )}
         >
           {detail.totals.map((total) => (
@@ -86,7 +99,7 @@ export function PlanSessionDetailPanel({
       ) : null}
 
       {completedActivityId === null ? null : (
-        <Button asChild variant="secondary" size="sm" className="mt-3.5 bg-surface">
+        <Button asChild variant="secondary" size="sm" className="mt-4 bg-surface">
           <Link href={`/activities/${completedActivityId}`}>
             Voir l&apos;activité
             <ArrowRight aria-hidden="true" strokeWidth={1.8} />
@@ -98,84 +111,120 @@ export function PlanSessionDetailPanel({
 }
 
 /**
- * Un bloc d'étapes. Répété, il annonce son compteur `6 ×` au-dessus de ses
- * étapes, décalées derrière un filet neutre : la répétition se voit avant d'être
- * lue, et le compteur ne mange plus la largeur des briques sur téléphone.
+ * Le fil de la séance : un cheveu neutre centré sous les segments colorés.
+ *
+ * Il court sur toute la hauteur de la liste mais ne se voit que dans les
+ * interstices — les segments le recouvrent. `left-[1px] w-px` le centre sur les
+ * 3 px du segment ; `fg-faint/20` plutôt que `border`, qui disparaîtrait
+ * complètement sur `surface-2`. Décoratif : les étapes portent l'information.
+ */
+function Thread() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-y-0 left-[1px] w-px bg-fg-faint/20"
+    />
+  );
+}
+
+/**
+ * Un bloc d'étapes.
+ *
+ * Répété, il s'annonce par son compteur `6 ×` sur un filet qui traverse la
+ * largeur, puis serre ses étapes dans un crochet : on voit d'un coup d'œil où la
+ * boucle commence et où elle s'arrête — ce que l'indentation seule ne disait
+ * pas. Le crochet reste neutre : la couleur appartient aux étapes.
  */
 function Block({ block }: { block: PlanStepBlockView }) {
+  // Le fil vit sur un conteneur et non sur la liste : `<ol>` n'accepte que des
+  // `<li>` pour enfants, un `<span>` décoratif n'y a pas sa place.
   const steps = (
-    <ol className="flex min-w-0 flex-col gap-1.5">
-      {block.steps.map((step, index) => (
-        <Step key={index} step={step} />
-      ))}
-    </ol>
+    <div className="relative min-w-0">
+      <Thread />
+      <ol className={STEP_GAP}>
+        {block.steps.map((step, index) => (
+          <Step key={index} step={step} />
+        ))}
+      </ol>
+    </div>
   );
 
   if (block.repeat === 1) return <li className="min-w-0">{steps}</li>;
 
   return (
     <li className="min-w-0">
-      <p className="num text-[0.8rem] leading-none font-medium text-fg">
-        {block.repeat} ×
-      </p>
-      <div className="mt-1.5 min-w-0 border-l border-border pl-2.5">{steps}</div>
+      <div className="flex items-center gap-2.5">
+        <span className="num text-[0.8rem] leading-none font-medium text-fg">
+          {block.repeat} ×
+        </span>
+        <span aria-hidden="true" className="h-px flex-1 bg-fg-faint/20" />
+      </div>
+
+      <div className="relative mt-2.5 min-w-0 pl-3.5">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 w-2 rounded-l-[5px] border-y border-l border-fg-faint/20"
+        />
+        {steps}
+      </div>
     </li>
   );
 }
 
 function Step({ step }: { step: PlanStepView }) {
   const style = PLAN_STEP_ROLE_STYLES[step.role];
+  // Sans mesure, la cible prend la vedette : une étape « Z2 » nue ne doit pas
+  // s'afficher en second rôle sous un libellé qui, lui, serait seul en lumière.
+  const lead = step.measure ?? step.target;
+  const trailing = step.measure === null ? null : step.target;
 
   return (
-    <li className={cn("flex items-baseline justify-between gap-3", BRICK, style.block)}>
-      <span className="min-w-0 flex-1">
-        {/* La couleur du rôle remplace l'ancien contraste de graisse : toutes les
-            étapes portent le même poids, c'est la teinte qui les distingue. */}
-        <span className={cn("block text-[0.82rem] leading-snug font-medium", style.label)}>
-          {step.roleLabel}
-        </span>
-        {step.note === null ? null : (
-          <span className="mt-0.5 block text-[0.75rem] leading-snug text-fg-muted">
-            {step.note}
-          </span>
-        )}
-      </span>
+    <li className={cn(RAIL_ROW, "min-w-0")}>
+      <span aria-hidden="true" className={cn("relative rounded-full", style.rail)} />
 
-      {/* `fg-muted` et non `fg-faint` pour le second niveau : sur le fond teinté,
-          `fg-faint` tombait sous les 4,5:1 de WCAG (4,2:1 sur la brique accent). */}
-      <span className="flex shrink-0 flex-col items-end">
-        {step.measure === null ? null : (
-          <span className="num text-[0.82rem] text-fg">{step.measure}</span>
+      <div className="min-w-0 py-0.5">
+        <p className={cn(ROLE_LABEL, style.label)}>{step.roleLabel}</p>
+
+        {lead === null ? null : (
+          <p className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+            <span className="num text-[0.95rem] leading-tight font-medium text-fg">
+              {lead}
+            </span>
+            {trailing === null ? null : (
+              <span className="num text-[0.78rem] leading-tight text-fg-muted">
+                {trailing}
+              </span>
+            )}
+          </p>
         )}
-        {step.target === null ? null : (
-          <span className="num text-[0.75rem] text-fg-muted">{step.target}</span>
+
+        {/* `fg-faint` tient 4,6:1 sur `surface-2` — la brique teintée d'avant le
+            faisait tomber sous le seuil, plus maintenant. */}
+        {step.note === null ? null : (
+          <p className="mt-1 text-[0.75rem] leading-snug text-fg-faint">{step.note}</p>
         )}
-      </span>
+      </div>
     </li>
   );
 }
 
 /**
- * Une consigne en texte libre — même brique colorée que les étapes.
+ * Une consigne en texte libre — même segment, même micro-label que les étapes.
  *
- * Le libellé reprend la forme de `.eyebrow` mais pas sa couleur : l'utilitaire
- * fixe `fg-faint`, or c'est ici la teinte du rôle qui doit s'appliquer (même
- * parti pris que les badges de `plan-session-row`).
+ * Seule différence : la valeur est une phrase, pas une mesure. Elle se pose donc
+ * en `fg-muted` à la taille du corps, là où une étape mettrait ses chiffres.
  */
 function Note({ note }: { note: PlanSessionNote }) {
   const style = PLAN_STEP_ROLE_STYLES[note.role];
 
   return (
-    <div className={cn(BRICK, style.block)}>
-      <dt
-        className={cn(
-          "text-[0.68rem] leading-[1.1] font-medium tracking-[0.1em] uppercase",
-          style.label,
-        )}
-      >
-        {note.label}
-      </dt>
-      <dd className="mt-1 text-[0.82rem] leading-snug text-fg-muted">{note.value}</dd>
+    <div className={cn(RAIL_ROW, "min-w-0")}>
+      <span aria-hidden="true" className={cn("relative rounded-full", style.rail)} />
+
+      <div className="min-w-0 py-0.5">
+        <dt className={cn(ROLE_LABEL, style.label)}>{note.label}</dt>
+        <dd className="mt-1.5 text-[0.82rem] leading-snug text-fg-muted">{note.value}</dd>
+      </div>
     </div>
   );
 }
