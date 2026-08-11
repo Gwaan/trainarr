@@ -154,6 +154,18 @@ const CONFORMING_WEEK = {
   ],
 };
 
+/**
+ * La même semaine, dont le footing du mardi porte une allure délirante :
+ * 10:00/km pour une athlète qui court en 5:24/km (SNAPSHOT).
+ */
+const ABERRANT_PACE_WEEK = {
+  sessions: [
+    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, targetPaceSecPerKm: 600 },
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
+    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+  ],
+};
+
 /** Une semaine qui viole les règles : deux séances, aucune le dimanche. */
 const BROKEN_WEEK = {
   sessions: [
@@ -404,6 +416,14 @@ describe('buildPlanMessages', () => {
     expect(system).toContain("Tu n'inventes jamais une valeur");
   });
 
+  it('interdit explicitement les miles : un modèle anglophone y glisse tout seul', () => {
+    // Une allure « 10:00 » pensée en min/mile devient un 10:00/km délirant une
+    // fois relue en métrique — le cas constaté en production.
+    expect(messages[0].content).toContain(
+      "Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
+    );
+  });
+
   it('exige la mesure de séance en plus du déroulé, pour que les volumes se comparent', () => {
     expect(messages[0].content).toContain(
       'Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance',
@@ -628,6 +648,27 @@ describe('generatePlan', () => {
     // La sortie fautive n'est pas renvoyée : elle coûterait le double de contexte.
     expect(retryMessages.some((message: { content: string }) => message.content.includes('"sessions"'))).toBe(false);
     expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("renvoie au modèle une allure hors de portée de l'athlète, corridor à l'appui", async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] })
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+
+    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+
+    // Le corridor est dérivé de l'allure récente du snapshot (5:24/km).
+    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
+      "allure 10:00/km hors de la fourchette plausible [3:34/km – 7:34/km] dérivée de l'allure récente de l'athlète (5:24/km).",
+    );
+  });
+
+  it("ne juge aucune allure quand l'athlète n'a pas d'allure de référence", async () => {
+    dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, recentAvgPaceSecPerKm: null });
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] });
+
+    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
   });
 
   it('reprend une sortie hors schéma en pointant le champ fautif, puis écrit le plan', async () => {
@@ -889,6 +930,28 @@ describe('updatePlanFromInstruction', () => {
     expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
       'weeks.0.sessions.1.steps.1.steps.0',
     );
+  });
+
+  it("juge les allures réécrites sur l'allure récente de l'athlète", async () => {
+    // Le prompt de modification ne porte pas le snapshot : le service le charge
+    // pour ce seul contrôle, sans quoi un ajustement pourrait réintroduire les
+    // allures aberrantes que la génération refuse.
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [
+        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, targetPaceSecPerKm: 600 }] },
+        CONFORMING_WEEK,
+      ],
+    });
+
+    await expect(updatePlanFromInstruction('rien de spécial')).rejects.toThrow(AiInvalidOutputError);
+
+    expect(dal.getTrainingSnapshot).toHaveBeenCalled();
+    expect(loggedText()).toContain(
+      "allure 10:00/km hors de la fourchette plausible [3:34/km – 7:34/km] dérivée de l'allure récente de l'athlète (5:24/km).",
+    );
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
   });
 
   it('renonce après trois échecs sans rien écrire', async () => {

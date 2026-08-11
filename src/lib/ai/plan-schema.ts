@@ -30,7 +30,7 @@ import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import { PLAN_STEP_BOUNDS, PLAN_STEP_ROLES, planSessionStepsSchema } from '@/lib/plan-steps/schema';
 
-import { formatIsoDay } from './format';
+import { formatIsoDay, formatPace } from './format';
 
 /**
  * Bornes de la sortie du modèle.
@@ -593,16 +593,99 @@ function sessionStepViolations(session: PlanSessionOutput, label: string): strin
 }
 
 /**
+ * Largeur du corridor de plausibilité des allures, en s/km **autour de l'allure
+ * de référence** de l'athlète (son allure d'entraînement récente).
+ *
+ * Les bornes se déduisent des dérivations que le prompt autorise, en prenant les
+ * plus extrêmes : côté rapide, les répétitions courtes descendent à référence
+ * − 80 à 100 s/km ; côté lent, la récupération trottée monte à référence + 60 à
+ * 120 s/km. Le corridor laisse ~10 à 30 s/km de marge au-delà, de quoi couvrir
+ * un arrondi ou une séance de spécificité ancrée sur un objectif un peu plus
+ * ambitieux. Tout ce qui en sort n'est plus un choix d'entraîneur mais une
+ * aberration : un modèle qui pense en min/mile, ou qui invente une allure sans
+ * la dériver de quoi que ce soit.
+ *
+ * Le prompt le dit déjà — mais une consigne n'est pas une garantie, et une
+ * allure de 10:00/km prescrite à une coureuse qui court en 5:24/km est passée en
+ * production.
+ */
+const PACE_CORRIDOR_MARGINS = { faster: 110, slower: 130 } as const;
+
+/** Les allures admissibles pour une athlète, en s/km. */
+type PaceCorridor = { reference: number; min: number; max: number };
+
+/** Le corridor dérivé de l'allure de référence, ou `null` quand elle est inconnue. */
+function paceCorridor(referencePaceSecPerKm: number | null): PaceCorridor | null {
+  if (referencePaceSecPerKm === null) return null;
+  return {
+    reference: referencePaceSecPerKm,
+    min: referencePaceSecPerKm - PACE_CORRIDOR_MARGINS.faster,
+    max: referencePaceSecPerKm + PACE_CORRIDOR_MARGINS.slower,
+  };
+}
+
+/**
+ * Toutes les allures que la séance prescrit : sa cible globale d'abord, puis les
+ * bornes de chaque étape dans l'ordre du déroulé.
+ */
+function sessionPrescribedPaces(session: PlanSessionOutput): number[] {
+  const paces: number[] = [];
+  if (session.targetPaceSecPerKm !== undefined) paces.push(session.targetPaceSecPerKm);
+
+  for (const block of session.steps ?? []) {
+    for (const step of block.steps) {
+      if (step.paceMinSecPerKm !== null) paces.push(step.paceMinSecPerKm);
+      if (step.paceMaxSecPerKm !== null) paces.push(step.paceMaxSecPerKm);
+    }
+  }
+  return paces;
+}
+
+/**
+ * L'allure aberrante de la séance, s'il y en a une.
+ *
+ * Un seul message par séance, sur la **première** allure hors corridor : une
+ * séance dont les allures dérapent les fait toutes déraper de la même façon, et
+ * en lister six mangerait le plafond du message de reprise pour dire une seule
+ * chose. Le corridor est rappelé en toutes lettres — le modèle a besoin de
+ * savoir dans quoi rentrer, pas seulement qu'il en est sorti.
+ */
+function sessionPaceViolation(
+  session: PlanSessionOutput,
+  label: string,
+  corridor: PaceCorridor,
+): string | null {
+  const outlier = sessionPrescribedPaces(session).find(
+    (pace) => pace < corridor.min || pace > corridor.max,
+  );
+  if (outlier === undefined) return null;
+
+  return (
+    `${label}, séance du ${formatIsoDay(session.day)} (${session.kind}) : allure ${formatPace(outlier)} ` +
+    `hors de la fourchette plausible [${formatPace(corridor.min)} – ${formatPace(corridor.max)}] ` +
+    `dérivée de l'allure récente de l'athlète (${formatPace(corridor.reference)}).`
+  );
+}
+
+/**
  * Ce qui, dans le plan proposé, contredit ce qui a été demandé.
  *
  * Retourne des phrases **en français**, telles quelles renvoyées au modèle pour
  * qu'il se corrige (cf. le retry de `plan-service.ts`) : elles sont écrites pour
  * être lues par lui, pas par un développeur. Liste vide = plan conforme.
+ *
+ * @param referencePaceSecPerKm allure d'entraînement récente de l'athlète, celle
+ * dont le prompt fait dériver toutes les autres. Fournie, elle ouvre le corridor
+ * de plausibilité ({@link PACE_CORRIDOR_MARGINS}) ; absente ou `null`, aucune
+ * allure n'est jugée — le prompt impose alors de cibler par zones cardiaques,
+ * et il n'existe plus rien à quoi comparer.
  */
 export function validatePlanBusinessRules(
   weeks: readonly PlanWeekOutput[],
   expected: PlanExpectations,
+  referencePaceSecPerKm: number | null = null,
 ): string[] {
+  const corridor = paceCorridor(referencePaceSecPerKm);
   const violations: string[] = [];
   const firstWeekFromDay = expected.firstWeekFromDay ?? 1;
   const longRunDayName = formatIsoDay(expected.longRunDay);
@@ -646,9 +729,13 @@ export function validatePlanBusinessRules(
     }
 
     // Avant les règles de sortie longue, qui sortent de la semaine par `return` :
-    // le déroulé d'une séance se juge quelle que soit la place du long run.
+    // le déroulé et les allures d'une séance se jugent quelle que soit la place
+    // du long run.
     for (const session of week.sessions) {
       violations.push(...sessionStepViolations(session, label));
+      if (corridor === null) continue;
+      const paceViolation = sessionPaceViolation(session, label, corridor);
+      if (paceViolation !== null) violations.push(paceViolation);
     }
 
     // Sur une semaine entamée dont le jour de sortie longue est déjà passé, la

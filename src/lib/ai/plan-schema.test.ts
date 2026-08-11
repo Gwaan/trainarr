@@ -526,6 +526,132 @@ describe('validatePlanBusinessRules', () => {
     });
   });
 
+  /**
+   * Le garde-fou dur des allures : le prompt *demande* de dériver les allures de
+   * l'allure récente de l'athlète, il ne peut pas l'imposer. Un 10:00/km prescrit
+   * à une coureuse qui court en 5:30/km est passé en production.
+   */
+  describe('corridor de plausibilité des allures', () => {
+    /** 5:30/km — corridor dérivé : 3:40/km (330 − 110) à 7:40/km (330 + 130). */
+    const REFERENCE = 330;
+    const conforming = week([2, 4, 7], [8, 10, 18]);
+
+    /** Une semaine conforme dont la séance du jeudi porte les allures éprouvées. */
+    function weekWith(tested: Partial<PlanWeekOutput['sessions'][number]>): PlanWeekOutput {
+      return {
+        sessions: [
+          session(2, { distanceKm: 8 }),
+          session(4, { kind: 'Seuil', title: '4 × 8 min', distanceKm: 10, ...tested }),
+          session(7, { kind: 'Sortie longue', title: '16 km', distanceKm: 16 }),
+        ],
+      };
+    }
+
+    /** Un déroulé de séance de qualité complet, dont l'effort porte l'allure donnée. */
+    function stepsAtPace(fast: number, slow = fast): PlanSessionSteps {
+      return [
+        { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+        {
+          repeat: 4,
+          steps: [
+            step('run', { durationS: 480, paceMinSecPerKm: fast, paceMaxSecPerKm: slow }),
+            step('recover', { durationS: 120 }),
+          ],
+        },
+        { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+      ];
+    }
+
+    it('relève une allure d’étape hors du corridor, et rappelle la fourchette', () => {
+      const violations = validatePlanBusinessRules(
+        [weekWith({ steps: stepsAtPace(600) }), conforming],
+        EXPECTED,
+        REFERENCE,
+      );
+
+      expect(violations).toEqual([
+        'Semaine 1, séance du jeudi (Seuil) : allure 10:00/km hors de la fourchette plausible ' +
+          "[3:40/km – 7:40/km] dérivée de l'allure récente de l'athlète (5:30/km).",
+      ]);
+    });
+
+    it('relève une allure de séance hors du corridor', () => {
+      // Kind sans exigence de déroulé : c'est bien le `targetPaceSecPerKm` seul
+      // qui est jugé.
+      const violations = validatePlanBusinessRules(
+        [weekWith({ kind: 'Endurance fondamentale', targetPaceSecPerKm: 200 }), conforming],
+        EXPECTED,
+        REFERENCE,
+      );
+
+      expect(violations).toEqual([
+        'Semaine 1, séance du jeudi (Endurance fondamentale) : allure 3:20/km hors de la fourchette plausible ' +
+          "[3:40/km – 7:40/km] dérivée de l'allure récente de l'athlète (5:30/km).",
+      ]);
+    });
+
+    it('ne relève rien quand les allures prescrites tiennent dans le corridor', () => {
+      const weeks = [
+        weekWith({ targetPaceSecPerKm: 300, steps: stepsAtPace(285, 300) }),
+        conforming,
+      ];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE)).toEqual([]);
+    });
+
+    it('inclut les bornes exactes du corridor', () => {
+      const onBounds = [weekWith({ steps: stepsAtPace(220, 460) }), conforming];
+      expect(validatePlanBusinessRules(onBounds, EXPECTED, REFERENCE)).toEqual([]);
+
+      // Une seconde au-delà, de chaque côté.
+      expect(
+        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(219) }), conforming], EXPECTED, REFERENCE),
+      ).toHaveLength(1);
+      expect(
+        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(461) }), conforming], EXPECTED, REFERENCE),
+      ).toHaveLength(1);
+    });
+
+    it('ne relève qu’une ligne par séance, même quand toutes ses allures dérapent', () => {
+      const weeks = [
+        weekWith({ targetPaceSecPerKm: 600, steps: stepsAtPace(620, 640) }),
+        conforming,
+      ];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE)).toHaveLength(1);
+    });
+
+    it('juge les allures même quand la semaine perd sa sortie longue', () => {
+      // Comme pour le déroulé : la règle de sortie longue sort de la semaine par
+      // `return`, les allures doivent avoir été jugées avant.
+      const weeks: PlanWeekOutput[] = [
+        {
+          sessions: [
+            session(2, { distanceKm: 8 }),
+            session(4, { kind: 'Seuil', distanceKm: 10, steps: stepsAtPace(600) }),
+            session(5, { distanceKm: 16 }),
+          ],
+        },
+        conforming,
+      ];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE).join(' ')).toContain(
+        'hors de la fourchette plausible',
+      );
+    });
+
+    it('ne juge aucune allure sans référence : le plan cible alors des zones FC', () => {
+      const weeks = [
+        weekWith({ targetPaceSecPerKm: 900, steps: stepsAtPace(120, 880) }),
+        conforming,
+      ];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, null)).toEqual([]);
+      // Référence omise : le contrôle n'existe pas non plus.
+      expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
+    });
+  });
+
   describe('première semaine entamée', () => {
     const partial = { ...EXPECTED, firstWeekFromDay: 5 };
 

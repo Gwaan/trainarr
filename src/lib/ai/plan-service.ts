@@ -293,6 +293,7 @@ const COACH_RULES = [
   "- Affûtage avant une course : environ 7 à 10 jours pour un 5 ou 10 km, 10 à 14 jours pour un semi-marathon, 2 à 3 semaines pour un marathon. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
   '',
   'FORMAT',
+  "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
   '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
   "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
   "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
@@ -510,6 +511,13 @@ type GenerationOptions<T> = {
    * réglages patchés qu'il faut la juger.
    */
   expectationsOf: (output: T) => PlanExpectations;
+  /**
+   * Allure d'entraînement récente de l'athlète, en s/km, `null` si inconnue :
+   * l'ancre dont le prompt fait dériver toutes les allures prescrites, et la
+   * seule référence qui permette d'en juger la plausibilité (cf.
+   * `validatePlanBusinessRules`). Vient du snapshot, des deux côtés.
+   */
+  referencePaceSecPerKm: number | null;
 };
 
 /**
@@ -595,7 +603,11 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
       continue;
     }
 
-    violations = validatePlanBusinessRules(options.weeksOf(output), options.expectationsOf(output));
+    violations = validatePlanBusinessRules(
+      options.weeksOf(output),
+      options.expectationsOf(output),
+      options.referencePaceSecPerKm,
+    );
     if (violations.length === 0) return output;
 
     const reprise = buildViolationsMessage(violations);
@@ -675,6 +687,7 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
       sessionsPerWeek: request.sessionsPerWeek,
       longRunDay: request.longRunDay,
     }),
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
   });
 
   const plan = await createPlanWithSessions({
@@ -791,6 +804,12 @@ export async function updatePlanFromInstruction(instruction: string): Promise<Pl
     (session) => session.scheduledOn >= fromDate && session.completedActivityId === null,
   );
 
+  // Le prompt de modification ne porte pas le snapshot (le plan à ajuster suffit
+  // au modèle), mais les allures qu'il réécrit se jugent sur les mêmes données
+  // que celles d'une génération : le snapshot est chargé pour cette seule
+  // référence.
+  const snapshot = await getTrainingSnapshot();
+
   const output = await generateWithBusinessRules({
     messages: buildPlanUpdateMessages(active.plan, upcoming, window, instruction),
     schemaName: 'training_plan_update',
@@ -803,6 +822,7 @@ export async function updatePlanFromInstruction(instruction: string): Promise<Pl
       longRunDay: plan.settings?.longRunDay ?? active.plan.longRunDay,
       firstWeekFromDay: window.firstWeekFromDay,
     }),
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
   });
 
   // Séances et réglages en une seule transaction : un plan ne doit jamais
