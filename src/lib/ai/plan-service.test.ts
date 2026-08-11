@@ -207,9 +207,17 @@ const BROKEN_WEEK = {
  */
 let consoleError: MockInstance<typeof console.error>;
 
+/** Le diagnostic du suivi de progression, lui, part en `console.info`. */
+let consoleInfo: MockInstance<typeof console.info>;
+
+/** Tout ce qui est parti dans un espion de console, en un seul texte. */
+function textOf(spy: { mock: { calls: unknown[][] } }): string {
+  return spy.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+}
+
 /** Tout ce qui est parti dans `console.error`, en un seul texte. */
 function loggedText(): string {
-  return consoleError.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+  return textOf(consoleError);
 }
 
 beforeEach(() => {
@@ -219,6 +227,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date('2026-08-11T09:00:00.000Z'));
   vi.clearAllMocks();
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
   requireAi.mockResolvedValue(undefined);
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
   dal.createDraftPlanWithSessions.mockResolvedValue(DRAFT);
@@ -532,6 +541,16 @@ describe('buildPlanMessages', () => {
     expect(system).toContain('Un bloc ne contient pas de bloc');
   });
 
+  it('montre une étape de récupération plutôt que de la décrire une fois de plus', () => {
+    // La faute qui revient à chaque reprise en production : l'étape de
+    // récupération d'un bloc répété, écrite avec distance ET durée, alors que
+    // l'interdiction est déjà énoncée. Un petit modèle recopie un exemple.
+    const system = messages[0].content;
+
+    expect(system).toContain('{ "role": "recover", "durationS": 120 }');
+    expect(system).toContain('une mesure, jamais les deux');
+  });
+
   it('ancre les allures sur une référence dite pour ce qu’elle est : une allure d’endurance', () => {
     const system = messages[0].content;
 
@@ -698,7 +717,7 @@ describe('buildPlanMessages — allures imposées', () => {
   it('donne la table calculée, chrono et VDOT à l’appui', () => {
     const system = withRace[0].content;
 
-    expect(system).toContain('ALLURES IMPOSÉES');
+    expect(system).toContain('ALLURES — ta table calculée, la seule source');
     expect(system).toContain('Chrono de référence : 10 km en 48:30 → VDOT 41,5.');
     expect(system).toContain('- E (endurance fondamentale, sortie longue) : 5:56–6:32/km');
     expect(system).toContain('- M (allure marathon, allure objectif) : 5:08–5:37/km');
@@ -717,17 +736,48 @@ describe('buildPlanMessages — allures imposées', () => {
     expect(system).toContain('répétitions courtes dans [R]');
     // Les récupérations sont la seule allure qui a le droit de sortir de la table.
     expect(system).toContain('Les récupérations trottées sont plus lentes que 6:32/km');
-    // Et la section prime explicitement sur les règles de dérivation.
-    expect(system).toContain('cette section prime sur « ALLURES CIBLES »');
   });
 
-  it('retire la dérivation des récupérations, que la table contredit', () => {
-    // Deux consignes contradictoires dans le même prompt (« + 60 à 120 s/km »
-    // borné d'un côté, « plus lentes que E.max » sans borne de l'autre), c'est le
-    // modèle qui tranche — donc au hasard. La ligne dépassée n'est pas envoyée.
-    expect(withRace[0].content).not.toContain('récupération trottée : référence + 60 à 120 s/km');
-    // Le reste de la section de dérivation, lui, reste en place.
-    expect(withRace[0].content).toContain('seuil : référence − 30 à 45 s/km');
+  /**
+   * Le défaut constaté en production : les deux sections d'allures partaient
+   * ensemble, avec une mention de préséance, et le modèle local suivait la
+   * mauvaise — EF à 12:00/km quand la table calculée disait 5:56–6:32/km. Une
+   * priorité entre consignes contradictoires ne se résout pas à cette taille de
+   * modèle : il n'en voit plus qu'une.
+   */
+  it('supprime entièrement la section de dérivation : une seule source d’allures', () => {
+    const system = withRace[0].content;
+
+    expect(system).not.toContain('ALLURES CIBLES');
+    expect(system).not.toContain('Référence = ');
+    expect(system).not.toContain('récupération trottée : référence + 60 à 120 s/km');
+    expect(system).not.toContain('seuil : référence − 30 à 45 s/km');
+    // Plus de section à départager, donc plus de préséance à annoncer.
+    expect(system).not.toContain('prime sur « ALLURES CIBLES »');
+    // La consigne de repli par zones cardiaques ne concerne que le chemin sans
+    // table : ici, toutes les allures sont calculées.
+    expect(system).not.toContain("Si l'allure de référence est inconnue");
+    // La table, elle, est bien là.
+    expect(system).toContain('- T (seuil) : 4:57–5:11/km');
+  });
+
+  it('reprend dans la table ce que la dérivation portait : l’allure d’un objectif chiffré', () => {
+    const system = withRace[0].content;
+
+    // Le rôle de la ligne supprimée est repris par la zone M, pour que le modèle
+    // ne se retrouve pas sans ancre pour les séances de spécificité.
+    expect(system).toContain('« 10 km sous 50 min »');
+    expect(system).toContain("c'est la zone M");
+    // Et l'allure moyenne des dernières sorties est explicitement disqualifiée :
+    // elle reste dans le contexte, mais elle n'est plus une consigne d'allure.
+    expect(system).toContain("n'est PAS une allure de séance");
+  });
+
+  it('garde hors des allures les consignes qui valent dans les deux régimes', () => {
+    // Elles vivaient dans la section de dérivation mais portent sur le volume et
+    // le format : les perdre avec elle changerait le plan produit.
+    expect(withRace[0].content).toContain("Tu n'inventes jamais une valeur");
+    expect(withRace[0].content).toContain('PROGRESSION DU VOLUME');
   });
 
   it('ne dit rien de tel sans chrono : les règles de dérivation restent le repli', () => {
@@ -737,8 +787,11 @@ describe('buildPlanMessages — allures imposées', () => {
       SNAPSHOT,
     )[0].content;
 
-    expect(system).not.toContain('ALLURES IMPOSÉES');
+    expect(system).not.toContain('ta table calculée');
+    expect(system).toContain('ALLURES CIBLES — dérivées des seules données fournies');
     expect(system).toContain('seuil : référence − 30 à 45 s/km');
+    expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
+    expect(system).toContain("Si l'allure de référence est inconnue");
   });
 });
 
@@ -1138,7 +1191,9 @@ describe('updatePlanFromInstruction — chrono de référence', () => {
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain('ALLURES IMPOSÉES');
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
+      'ALLURES — ta table calculée, la seule source',
+    );
     expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
       '- T (seuil) : 4:57–5:11/km',
     );
@@ -1159,7 +1214,9 @@ describe('updatePlanFromInstruction — chrono de référence', () => {
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).not.toContain('ALLURES IMPOSÉES');
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).not.toContain(
+      'ta table calculée',
+    );
   });
 });
 
@@ -1642,6 +1699,55 @@ describe('progression de la génération', () => {
 
     expect(during).toMatchObject({ attempt: 1, maxAttempts: 3 });
     expect(getPlanProgress(PROGRESS_ID)).toBeNull();
+  });
+
+  /**
+   * Le maillon le plus fragile de la chaîne « modale → action → service →
+   * registre → route » est le premier : l'identifiant est tiré par le
+   * navigateur et joint au `FormData`, et l'action l'écarte sans bruit s'il
+   * n'est pas un UUID. Une attente muette ne disait pas lequel avait lâché.
+   */
+  it('journalise que la génération est suivie, avec le début de l’identifiant', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST, PROGRESS_ID);
+
+    expect(textOf(consoleInfo)).toContain('[plan] progression suivie (id a1b2c3d4)');
+    // L'identifiant complet ne part pas au journal : huit caractères suffisent
+    // à rapprocher la ligne des requêtes `/api/plan-progress`.
+    expect(textOf(consoleInfo)).not.toContain(PROGRESS_ID);
+  });
+
+  it('journalise aussi une génération non suivie : le silence était le problème', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    expect(textOf(consoleInfo)).toContain('[plan] génération sans suivi de progression');
+  });
+
+  it('journalise de la même façon un ajustement', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
+      sessions: [],
+    });
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Ajusté.',
+      weeks: [
+        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+        CONFORMING_WEEK,
+      ],
+    });
+
+    await updatePlanFromInstruction('allège la semaine prochaine', PROGRESS_ID);
+
+    expect(textOf(consoleInfo)).toContain('[plan] progression suivie (id a1b2c3d4)');
   });
 
   it('ne streame pas et ne suit rien sans identifiant', async () => {

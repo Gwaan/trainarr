@@ -26,7 +26,7 @@ import {
   type PlanFormValues,
 } from "../_lib/plan-steps";
 
-import { GenerationProgressBar, useGenerationProgress } from "./generation-progress";
+import { GenerationProgressMeter, useGenerationProgress } from "./generation-progress";
 import { PlanStepFields, type PlanDateBounds } from "./plan-form-steps";
 
 /**
@@ -167,7 +167,6 @@ export function PlanCreateDialog(bounds: PlanCreateDialogProps) {
   // envoyé depuis l'ouverture : ni bannière, ni erreur de champ.
   const showsFailure = submittedSinceOpen && !isPending && state.status === "error";
   const errors = submittedSinceOpen ? state.fieldErrors : undefined;
-  const hasFeedback = isPending || showsFailure;
 
   function setValue<K extends keyof PlanFormValues>(field: K, value: PlanFormValues[K]) {
     setValues((previous) => ({ ...previous, [field]: value }));
@@ -302,25 +301,71 @@ export function PlanCreateDialog(bounds: PlanCreateDialogProps) {
               Région live permanente : elle doit exister avant la mise à jour pour
               que le retour d'action soit annoncé. Sans message, `sr-only` la sort
               du flux, donc de l'espacement de la colonne.
+
+              Pendant l'attente, elle ne porte que la phrase — l'écran, lui,
+              affiche le pourcentage juste en dessous, et l'annoncer toutes les
+              deux secondes couvrirait tout le reste.
             */}
-            <div aria-live="polite" className={hasFeedback ? "mb-4" : "sr-only"}>
-              {isPending ? (
-                <Banner tone="neutral" title={PENDING_MESSAGE}>
-                  {/* Avant la première mesure, la bannière seule : annoncer « 0 % »
-                      sur une génération qui n'a pas encore écrit un mot ne dirait
-                      rien de plus que le message. */}
-                  {progress === null ? null : <GenerationProgressBar progress={progress} />}
-                </Banner>
-              ) : null}
+            <div aria-live="polite" className={showsFailure ? "mb-4" : "sr-only"}>
+              {isPending ? <p>{PENDING_MESSAGE}</p> : null}
               {showsFailure ? (
                 <Banner tone="negative" title={state.message ?? GENERIC_FAILURE} />
               ) : null}
             </div>
 
+            {/*
+              L'attente prend toute la place de l'étape : Gwen ne voyait pas
+              avancer sa génération derrière une bannière de trois lignes. Le
+              pourcentage est la donnée, il est donc en mono et en grand
+              (signature du système), la jauge le double d'un mouvement.
+
+              La rotative n'a pas de garde `prefers-reduced-motion` locale :
+              `globals.css` neutralise déjà toutes les animations sous ce
+              réglage, et l'icône immobile au-dessus du pourcentage — qui, lui,
+              continue de monter — reste un état d'attente lisible.
+            */}
             {isPending ? (
-              <p className="text-[0.8rem] leading-relaxed text-fg-faint">
-                Garde cette fenêtre ouverte : ton plan s&apos;affichera dès qu&apos;il sera écrit.
-              </p>
+              <div
+                aria-busy="true"
+                className="flex flex-col items-center gap-4 py-6 text-center"
+              >
+                <Loader2 aria-hidden="true" className="size-12 animate-spin text-accent" />
+
+                <div aria-live="off" className="w-full max-w-[16rem]">
+                  {progress === null ? (
+                    // Rien n'est encore mesuré : la rotative et la phrase, plutôt
+                    // qu'un « 0 % » sur une génération qui n'a pas écrit un mot.
+                    // `aria-hidden` parce que la région live ci-dessus porte déjà
+                    // ce texte, mot pour mot : c'est elle qui l'annonce, et
+                    // l'entendre deux fois de suite n'apprend rien.
+                    <p
+                      aria-hidden="true"
+                      className="text-[0.85rem] leading-relaxed text-fg-muted"
+                    >
+                      {PENDING_MESSAGE}
+                    </p>
+                  ) : (
+                    <>
+                      <p className="num text-[2rem] leading-none font-semibold text-fg">
+                        {progress.percent}&nbsp;%
+                      </p>
+                      <p className="mt-1.5 text-[0.76rem] text-fg-faint">
+                        tentative{" "}
+                        <span className="num">
+                          {progress.attempt}/{progress.maxAttempts}
+                        </span>
+                      </p>
+                      <div className="mt-3">
+                        <GenerationProgressMeter percent={progress.percent} />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <p className="text-[0.8rem] leading-relaxed text-fg-faint">
+                  Garde cette fenêtre ouverte : ton plan s&apos;affichera dès qu&apos;il sera écrit.
+                </p>
+              </div>
             ) : null}
 
             {confirmingClose ? (

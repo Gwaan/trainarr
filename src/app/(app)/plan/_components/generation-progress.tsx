@@ -154,32 +154,46 @@ export function useGenerationProgress(
 }
 
 /**
- * La barre d'avancement, à glisser dans la bannière d'attente.
+ * La jauge seule : le rail et son remplissage, sans légende.
+ *
+ * Exportée parce que les deux formulaires ne l'entourent pas de la même chose —
+ * la modale de création affiche le pourcentage en grand au-dessus d'elle et
+ * n'aurait que faire de la légende de {@link GenerationProgressBar}, qui le
+ * répéterait.
+ *
+ * Pas d'autre animation que la transition de largeur (150 ms, `ease-out`) :
+ * c'est le mouvement qui porte l'information, tout le reste serait décoratif.
+ */
+export function GenerationProgressMeter({ percent }: { percent: number }) {
+  return (
+    <div
+      role="progressbar"
+      aria-label="Avancement de la génération"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent}
+      className="h-1.5 w-full overflow-hidden rounded-full bg-bg"
+    >
+      <div
+        className="h-full rounded-full bg-accent transition-[width] duration-150 ease-out"
+        style={{ width: `${percent}%` }}
+      />
+    </div>
+  );
+}
+
+/**
+ * La barre d'avancement légendée, à glisser dans la bannière d'attente.
  *
  * `aria-live="off"` : la bannière qui l'accueille est une région live, et une
  * valeur qui change toutes les deux secondes y serait annoncée toutes les deux
  * secondes. La barre reste accessible à la lecture (rôle `progressbar` et
  * `aria-valuenow`), elle cesse simplement de parler par-dessus.
- *
- * Pas d'autre animation que la transition de largeur (150 ms, `ease-out`) :
- * c'est le mouvement qui porte l'information, tout le reste serait décoratif.
  */
 export function GenerationProgressBar({ progress }: { progress: GenerationProgress }) {
   return (
     <div aria-live="off">
-      <div
-        role="progressbar"
-        aria-label="Avancement de la génération"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={progress.percent}
-        className="h-1.5 w-full overflow-hidden rounded-full bg-bg"
-      >
-        <div
-          className="h-full rounded-full bg-accent transition-[width] duration-150 ease-out"
-          style={{ width: `${progress.percent}%` }}
-        />
-      </div>
+      <GenerationProgressMeter percent={progress.percent} />
       <p className="num mt-1.5 text-[0.76rem] text-fg-muted">
         {progress.percent}&nbsp;% — tentative {progress.attempt}/{progress.maxAttempts}
       </p>

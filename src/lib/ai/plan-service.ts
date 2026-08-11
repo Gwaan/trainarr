@@ -33,7 +33,7 @@ import 'server-only';
  * 32 k de contexte, partagés entre le prompt et la **sortie** — et un plan de
  * douze semaines fait déjà plusieurs milliers de tokens à écrire.
  *
- * Le poste le plus lourd est la méthodologie ({@link COACH_RULE_LINES}, ~1 500
+ * Le poste le plus lourd est la méthodologie ({@link coachRules}, ~1 500
  * tokens), et c'est le seul qui vaut son prix : sans elle, le modèle produit un
  * plan bien formé et sans logique d'entraînement. Tout le reste est compté au
  * plus juste — le contexte de l'athlète tient en ~120 tokens, les consignes de
@@ -194,7 +194,7 @@ const MAX_ATTEMPTS = 3;
  * Poids moyen d'une séance dans la sortie JSON, en caractères.
  *
  * Mesuré, pas deviné : la fixture de `plan-service.test.ts` (« calibrage de
- * l'estimation ») sérialise des semaines conformes à `COACH_RULE_LINES` en JSON
+ * l'estimation ») sérialise des semaines conformes à la méthodologie en JSON
  * compact — le format que produit une génération contrainte par grammaire — et
  * le test vérifie que l'estimation reste dans ±25 % de leur taille réelle.
  * Refaire la mesure si le schéma de sortie change.
@@ -379,19 +379,8 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
  */
 
 /**
- * La dérivation des récupérations trottées depuis l'allure moyenne — la seule
- * ligne de la méthodologie que la table d'allures rend **fausse**.
- *
- * `imposedPacesSection` dit l'inverse (« plus lentes que E.max, ou sans cible »,
- * sans borne), et la validation applique cette version-là. Deux consignes
- * contradictoires dans le même prompt, c'est le modèle qui tranche — donc au
- * hasard. La ligne est retirée quand la table existe ({@link coachRules}).
- */
-const RECOVERY_DERIVATION_LINE =
-  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.';
-
-/**
- * La méthodologie du coach, commune à la création et à la modification.
+ * La méthodologie du coach, **hors allures** : tout ce qui vaut avec ou sans
+ * table d'allures calculée.
  *
  * C'est le cœur de la qualité des plans produits : un petit modèle sait écrire
  * du JSON, il ne sait pas *entraîner*. Le contenu reprend donc les références
@@ -402,11 +391,8 @@ const RECOVERY_DERIVATION_LINE =
  * Dense par nécessité : ~900 tokens partagés avec la sortie sur les 32 k du
  * modèle cible. Chaque ligne doit changer une décision du plan ; les
  * explications physiologiques, elles, n'en changent aucune et n'y sont pas.
- *
- * Ligne à ligne, et pas d'un bloc : {@link coachRules} en retire celles que la
- * table d'allures rend fausses.
  */
-const COACH_RULE_LINES = [
+const COACH_RULE_HEAD_LINES = [
   "Tu es un coach de course à pied francophone. Tu appliques les méthodes établies de l'entraînement en endurance (distribution polarisée de Seiler, typologie des allures de Daniels, périodisation), et tu cales chaque plan sur le niveau réel de l'athlète — jamais sur un modèle générique.",
   '',
   'RÉPARTITION DE LA CHARGE',
@@ -433,20 +419,37 @@ const COACH_RULE_LINES = [
   "- Tout bloc répété contient la récupération de l'effort (`role: 'recover'`) : sans elle, la séance décrite n'est pas celle qui sera courue.",
   "- Une étape porte : `role` ('warmup', 'run', 'recover', 'cooldown'), exactement UNE mesure (`distanceM` en mètres OU `durationS` en secondes, jamais les deux), et AU PLUS une cible (`paceMinSecPerKm` avec `paceMaxSecPerKm`, en secondes par kilomètre, OU `hrZone` de 1 à 5, jamais les deux). Un footing peut n'avoir aucune cible.",
   "- Une séance d'endurance simple se réduit à un bloc d'une étape ; elle peut aussi n'avoir aucun `steps`.",
-  '',
+];
+
+/**
+ * La dérivation des allures depuis l'allure moyenne d'entraînement — le
+ * **repli**, et lui seul : cette section ne part au modèle que lorsqu'il n'y a
+ * pas de table calculée ({@link coachRules}).
+ *
+ * Ce n'est pas une préférence de rédaction, c'est un constat de production. Tant
+ * que les deux sections coexistaient — celle-ci dérivant tout d'une allure
+ * d'entraînement lente, la table imposée prescrivant des plages calculées, avec
+ * une simple mention de préséance entre elles — le modèle local suivait
+ * celle-ci : EF prescrite à 12:00/km sur les trois tentatives quand la table
+ * disait 7:57–8:43/km. Un petit modèle ne résout pas une priorité entre deux
+ * consignes contradictoires ; il n'en voit donc qu'une.
+ */
+const DERIVED_PACES_SECTION_LINES = [
   'ALLURES CIBLES — dérivées des seules données fournies',
   "- Référence = « Allure moyenne des dernières sorties » du contexte. Ce n'est pas une allure de tempo : c'est l'allure d'entraînement courante de l'athlète, donc à peu près son allure d'endurance, puisque l'essentiel de son volume est couru en endurance. Toutes les allures s'en déduisent, en secondes par kilomètre (un nombre plus petit est plus rapide) :",
   "  · endurance fondamentale et sortie longue : référence + 0 à 15 s/km — la référence EST déjà l'allure d'endurance, ne ralentis pas l'athlète artificiellement ;",
   '  · seuil : référence − 30 à 45 s/km ;',
   '  · VMA : référence − 60 à 80 s/km ;',
   '  · répétitions courtes : référence − 80 à 100 s/km ;',
-  RECOVERY_DERIVATION_LINE,
+  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.',
   "- Ces écarts sont des maxima prudents : reste dans le bas de la fourchette si le volume récent est faible, si la charge (TSB) est très négative, ou si l'historique est court.",
   "- La VO2max estimée et les zones FC servent à vérifier la cohérence de ces allures, jamais à en fabriquer une.",
   "- Si l'allure de référence est inconnue, tu ne cibles AUCUNE allure : tu cibles par `hrZone` (endurance et sortie longue Z2, seuil Z4, VMA Z5, récupération Z1) et tu le dis dans le résumé.",
   "- Si l'objectif porte un chiffre (« 10 km sous 50 min » vaut 5:00/km), cette allure objectif est l'ancre des séances de spécificité à l'approche de la course. Confronte-la à l'allure récente : si elle est bien plus rapide que ce que les données soutiennent, le plan reste ancré sur les données et tu le dis honnêtement dans le résumé.",
-  "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
-  '',
+];
+
+/** La suite de la méthodologie, elle aussi indépendante de la façon dont les allures sont fixées. */
+const COACH_RULE_TAIL_LINES = [
   'PROGRESSION DU VOLUME — ces chiffres sont vérifiés séance par séance, un plan qui les enfreint est refusé et à réécrire',
   '- Le volume hebdomadaire est la somme des `distanceKm` de la semaine. TOUTE séance déclare sa distance, footings et récupérations compris : sans elle, la semaine ne se compare à rien.',
   "- D'une semaine à l'autre, le volume n'augmente jamais de plus de 12 %. Vise 5 à 10 % : la marge est un filet, pas une cible. Une baisse est toujours permise.",
@@ -455,10 +458,21 @@ const COACH_RULE_LINES = [
   "- Affûtage avant une course : les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT chaque semaine, et la semaine de la course ne dépasse pas 65 % du volume de la semaine la plus chargée. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
   "- La première semaine, quand le plan démarre en cours de semaine, est amputée des jours passés : son volume est plus faible, et ce n'est pas une baisse.",
   "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
+  // Vivait dans la section des allures dérivées, dont elle a suivi le sort à
+  // l'extraction. Sa moitié utile porte pourtant sur le volume — un plan
+  // conservateur quand la charge n'est pas calculable — et vaut donc dans les
+  // deux régimes : elle est rattachée ici plutôt que perdue avec la dérivation.
+  "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
   '',
   'FORMAT',
   "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
   '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
+  // Un exemple plutôt qu'une règle de plus : les reprises constatées en
+  // production butent toutes sur la même étape (la récupération d'un bloc
+  // répété, écrite avec distance ET durée), alors que l'interdiction est déjà
+  // énoncée dans la section DÉROULÉ. Un petit modèle recopie un exemple bien
+  // plus fidèlement qu'il n'applique un énoncé abstrait.
+  '- Exemple d\'étape de récupération, à recopier tel quel : { "role": "recover", "durationS": 120 } — une mesure, jamais les deux.',
   "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
   "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
 ];
@@ -467,14 +481,15 @@ const COACH_RULE_LINES = [
  * La méthodologie telle qu'elle part au modèle.
  *
  * @param hasImposedPaces la table d'allures existe-t-elle ? Si oui, la section
- * « ALLURES IMPOSÉES » suivra et fait foi : les lignes de dérivation qu'elle
- * contredit sont retirées d'ici plutôt que surchargées plus bas — une consigne
- * absente ne se discute pas, une consigne surchargée si.
+ * de dérivation est **entièrement absente** et la table (cf.
+ * {@link imposedPacesSection}) est la seule source d'allures du prompt : une
+ * consigne absente ne se discute pas, une consigne surchargée si — et c'est
+ * exactement ce que le modèle local a tranché de travers en production.
  */
 function coachRules(hasImposedPaces: boolean): string {
   const lines = hasImposedPaces
-    ? COACH_RULE_LINES.filter((line) => line !== RECOVERY_DERIVATION_LINE)
-    : COACH_RULE_LINES;
+    ? [...COACH_RULE_HEAD_LINES, '', ...COACH_RULE_TAIL_LINES]
+    : [...COACH_RULE_HEAD_LINES, '', ...DERIVED_PACES_SECTION_LINES, '', ...COACH_RULE_TAIL_LINES];
   return lines.join('\n');
 }
 
@@ -487,7 +502,7 @@ const LEVEL_LABELS: Record<PlanLevel, string> = {
 
 /**
  * Ce que le niveau change à la méthodologie — **une seule** de ces sections part
- * au modèle, à la suite de {@link COACH_RULE_LINES}.
+ * au modèle, à la suite de {@link coachRules}.
  *
  * La méthodologie générale reste volontairement générique : elle décrit
  * l'entraînement en endurance, pas un athlète. C'est ici que se prennent les
@@ -593,22 +608,30 @@ export function planTrainingPaces(plan: PlanDto): TrainingPaces | null {
 }
 
 /**
- * La prescription d'allures, telle qu'elle part au modèle — **en surcharge** de
- * la section « ALLURES CIBLES » de la méthodologie.
+ * La prescription d'allures, telle qu'elle part au modèle — **la seule section
+ * d'allures du prompt** quand elle existe, la dérivation étant alors retirée de
+ * la méthodologie ({@link coachRules}).
  *
  * Le renversement est tout l'objet de la manœuvre : sans chrono, le modèle
  * *dérive* des allures d'une moyenne d'entraînement, et le résultat constaté en
  * production allait de l'à-peu-près au délire. Avec un chrono, les cinq créneaux
  * sont **calculés** (Daniels) et le modèle n'a plus qu'à ranger chaque séance
  * dans le bon.
+ *
+ * Le titre ne revendique plus de « primer » sur quoi que ce soit : il n'y a plus
+ * de seconde section à départager, et une préséance annoncée est justement ce
+ * que le modèle local n'appliquait pas. Elle reprend en revanche ce que la
+ * dérivation portait d'utile et qui disparaît avec elle : l'allure d'un objectif
+ * chiffré, désormais la zone M.
  */
 function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string {
   return [
-    'ALLURES IMPOSÉES — cette section prime sur « ALLURES CIBLES » ci-dessus',
+    'ALLURES — ta table calculée, la seule source',
     formatTrainingPaces(paces, race),
     "Tes allures sont CALCULÉES, tu ne les choisis pas : endurance fondamentale et sortie longue dans [E], allure marathon ou allure objectif dans [M], seuil dans [T], VMA dans [I], répétitions courtes dans [R].",
     `Les récupérations trottées sont plus lentes que ${formatPace(paces.easy.maxSecPerKm)} (borne lente de [E]), ou sans cible.`,
-    "Toute allure prescrite hors de ces plages est refusée : ne dérive plus rien de l'allure moyenne des dernières sorties, elle ne sert plus qu'à vérifier que le volume est tenable.",
+    "Allure de course, allure objectif d'un but chiffré (« 10 km sous 50 min ») : c'est la zone M, et rien d'autre — c'est elle qui ancre les séances de spécificité à l'approche de la course. Si l'objectif visé est plus rapide que [M], le plan reste sur la table et tu le dis honnêtement dans le résumé.",
+    "Toute allure prescrite hors de ces plages est refusée. L'« allure moyenne des dernières sorties » du contexte n'est PAS une allure de séance : c'est une donnée de volume, tu n'en dérives aucune allure.",
   ].join('\n');
 }
 
@@ -941,6 +964,27 @@ function logRejectedAttempt(
 }
 
 /**
+ * Journalise si la génération qui démarre est **suivie** ou non.
+ *
+ * Le pourcentage n'existe que si le formulaire a joint son identifiant de suivi
+ * au `FormData` (cf. `useGenerationProgress`), et une modale muette ne dit pas
+ * lequel des maillons a lâché : l'identifiant n'est pas parti, l'action l'a
+ * écarté (UUID mal formé), ou c'est l'interrogation de la route qui échoue. Les
+ * deux premiers cas se lisent maintenant dans les logs du serveur.
+ *
+ * Huit caractères de l'UUID : de quoi rapprocher la ligne de la requête
+ * `/api/plan-progress` correspondante, sans recopier un identifiant entier dans
+ * le journal.
+ */
+function logProgressTracking(progressId: string | undefined): void {
+  console.info(
+    progressId === undefined
+      ? '[plan] génération sans suivi de progression'
+      : `[plan] progression suivie (id ${progressId.slice(0, 8)})`,
+  );
+}
+
+/**
  * Génère, vérifie le contrat **et** les règles métier, et reprend en cas de
  * manquement — quel qu'en soit le genre — dans la limite de
  * {@link MAX_ATTEMPTS} tentatives.
@@ -1101,6 +1145,7 @@ export async function afterActivePlanChanged(planId: number): Promise<void> {
  * après une reprise.
  */
 export async function generatePlan(request: PlanRequest, progressId?: string): Promise<PlanDto> {
+  logProgressTracking(progressId);
   await requireAi();
 
   const window = planWindow(request, todayCivilDate());
@@ -1272,6 +1317,7 @@ export async function updatePlanFromInstruction(
   instruction: string,
   progressId?: string,
 ): Promise<PlanDto> {
+  logProgressTracking(progressId);
   try {
     return await writeUpdatedPlan(instruction, progressId);
   } finally {
