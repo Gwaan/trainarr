@@ -24,8 +24,10 @@ import {
   type PlanInputField,
 } from '@/data/plans';
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
+import { isoDayIndex } from '@/lib/dates/civil';
 import {
   MAX_PLAN_WEEKS,
+  MIN_RACE_PLAN_WEEKS,
   generatePlan,
   updatePlanFromInstruction,
   type PlanRequest,
@@ -33,7 +35,13 @@ import {
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
 import { ARCHIVE_CONFIRMATION } from './form-options';
-import { latestRaceDate } from './plan-window';
+import {
+  MAX_PLAN_START_LEAD_WEEKS,
+  earliestPlanStart,
+  earliestRaceDate,
+  latestPlanStart,
+  latestRaceDate,
+} from './plan-window';
 
 /*
  * États retournés aux formulaires. La valeur de retour est sérialisée vers le
@@ -47,6 +55,7 @@ export type PlanFormField =
   | 'goalText'
   | 'raceDate'
   | 'weeks'
+  | 'startsOn'
   | 'sessionsPerWeek'
   | 'weeklyTimeHours'
   | 'longRunDay';
@@ -148,6 +157,8 @@ const planFormSchema = z
     // Ces deux-là s'excluent : seul celui qu'impose `goalType` est vérifié.
     raceDate: z.string().trim(),
     weeks: z.string().trim(),
+    /** Facultatif : vide = le prochain lundi (le défaut du service). */
+    startsOn: z.string().trim(),
     sessionsPerWeek: boundedInteger(
       BOUNDS.sessionsPerWeek,
       `Entre ${BOUNDS.sessionsPerWeek.min} et ${BOUNDS.sessionsPerWeek.max} séances par semaine.`,
@@ -156,8 +167,56 @@ const planFormSchema = z
     longRunDay: boundedInteger(BOUNDS.longRunDay, 'Sortie longue : choisis un jour de la semaine.'),
   })
   .superRefine((form, ctx) => {
+    const today = todayCivilDate();
+    // Date de démarrage : facultative, mais si elle est là c'est elle qui ancre
+    // la fenêtre du plan — donc les bornes de la course en dépendent.
+    const startsOn = form.startsOn === '' ? earliestPlanStart(today) : form.startsOn;
+    let validStart = true;
+
+    if (form.startsOn !== '') {
+      if (!isCivilDate(form.startsOn)) {
+        validStart = false;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['startsOn'],
+          message: 'Début du programme : indique une date valide.',
+        });
+      } else if (form.startsOn < earliestPlanStart(today)) {
+        validStart = false;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['startsOn'],
+          // Une date passée et un mercredi tombent dans le même refus : dans les
+          // deux cas, le premier démarrage possible est le prochain lundi.
+          message: 'Le programme démarre au plus tôt le prochain lundi.',
+        });
+      } else if (form.startsOn > latestPlanStart(today)) {
+        validStart = false;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['startsOn'],
+          message: `Démarrage trop lointain : ${MAX_PLAN_START_LEAD_WEEKS} semaines à l'avance au plus, tes données auront changé d'ici là.`,
+        });
+      } else if (isoDayIndex(form.startsOn) !== 0) {
+        validStart = false;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['startsOn'],
+          // Cf. `planStart` dans le service : le jour d'une séance est un jour
+          // ISO compté depuis le départ du plan.
+          message: 'Un programme démarre un lundi : choisis un lundi.',
+        });
+      }
+    }
+
     if (form.goalType === 'race') {
-      const today = todayCivilDate();
+      // La course est jugée sur la fenêtre réelle du plan : tant que la date de
+      // démarrage est fautive, il n'y a pas de fenêtre à opposer à la course.
+      if (!validStart) return;
+
+      // Le désaccord entre les deux dates se signale sur celle que l'athlète
+      // peut déplacer : sa course a lieu le jour qu'elle a, pas un autre.
+      const conflictField = form.startsOn === '' ? 'raceDate' : 'startsOn';
 
       if (!isCivilDate(form.raceDate)) {
         ctx.addIssue({
@@ -171,7 +230,13 @@ const planFormSchema = z
           path: ['raceDate'],
           message: 'La course doit être à venir.',
         });
-      } else if (form.raceDate > latestRaceDate(today)) {
+      } else if (form.raceDate < earliestRaceDate(startsOn)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [conflictField],
+          message: `Il faut au moins ${MIN_RACE_PLAN_WEEKS} semaines entre le début du programme et la course pour le périodiser.`,
+        });
+      } else if (form.raceDate > latestRaceDate(startsOn)) {
         // Même borne que celle du service, dite ici sur le champ : sans elle,
         // l'utilisatrice attend une génération de plusieurs minutes pour se voir
         // refuser une date que le formulaire pouvait écarter tout de suite.
@@ -205,20 +270,22 @@ const PLAN_FORM_FIELDS = [
   'goalText',
   'raceDate',
   'weeks',
+  'startsOn',
   'sessionsPerWeek',
   'weeklyTimeHours',
   'longRunDay',
 ] as const satisfies readonly PlanFormField[];
 
 /**
- * Champ du DAL → champ du formulaire. `startsOn` et `sessions` n'en ont aucun :
- * ils sont calculés par le service, leur message reste général.
+ * Champ du DAL → champ du formulaire. `sessions` n'en a aucun : il est calculé
+ * par le service, son message reste général.
  */
 const FIELD_OF_PLAN_INPUT: Partial<Record<PlanInputField, PlanFormField>> = {
   goalType: 'goalType',
   goalText: 'goalText',
   raceDate: 'raceDate',
   weeks: 'weeks',
+  startsOn: 'startsOn',
   sessionsPerWeek: 'sessionsPerWeek',
   weeklyTimeMinutes: 'weeklyTimeHours',
   longRunDay: 'longRunDay',
@@ -263,6 +330,7 @@ export async function createPlanAction(
     goalText: textField(formData, 'goalText'),
     raceDate: textField(formData, 'raceDate'),
     weeks: textField(formData, 'weeks'),
+    startsOn: textField(formData, 'startsOn'),
     sessionsPerWeek: textField(formData, 'sessionsPerWeek'),
     weeklyTimeHours: textField(formData, 'weeklyTimeHours'),
     longRunDay: textField(formData, 'longRunDay'),
@@ -284,6 +352,8 @@ export async function createPlanAction(
     goalText: form.goalText,
     raceDate: form.goalType === 'race' ? form.raceDate : undefined,
     weeks: form.goalType === 'free' ? Number(form.weeks) : undefined,
+    // Vide : le service repart de son défaut, le prochain lundi.
+    startsOn: form.startsOn === '' ? undefined : form.startsOn,
     sessionsPerWeek: form.sessionsPerWeek,
     weeklyTimeMinutes: form.weeklyTimeHours ?? undefined,
     longRunDay: form.longRunDay,

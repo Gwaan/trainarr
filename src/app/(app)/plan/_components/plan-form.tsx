@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 import { createPlanAction, type PlanFormState } from "../_lib/actions";
+import { formatCivilDay } from "../_lib/format-plan";
 import {
   DEFAULT_LONG_RUN_DAY,
   DEFAULT_SESSIONS_PER_WEEK,
@@ -36,7 +37,7 @@ import {
 const HINTS = {
   goalText:
     "Ce que tu veux atteindre, en une phrase : c'est ce que le coach cherchera à préparer.",
-  raceDate: "Le plan démarre lundi prochain et se termine le jour de la course.",
+  raceDate: "Le plan court jusqu'au jour de la course, affûtage compris.",
   weeks: "La durée du bloc d'entraînement, sans échéance particulière.",
   sessionsPerWeek: "Le nombre de sorties que tu peux tenir chaque semaine, durablement.",
   weeklyTimeHours:
@@ -131,13 +132,27 @@ export type PlanFormProps = {
   minRaceDate: string;
   /** Date civile la plus lointaine qu'une course puisse porter (même source). */
   maxRaceDate: string;
+  /**
+   * Premier lundi où le programme peut démarrer — à la fois la borne basse du
+   * champ et sa valeur par défaut, celle que le service appliquera si l'athlète
+   * ne choisit rien.
+   */
+  defaultStartDate: string;
+  /** Dernier lundi proposé au démarrage (même source). */
+  maxStartDate: string;
 };
 
-export function PlanForm({ minRaceDate, maxRaceDate }: PlanFormProps) {
+export function PlanForm({
+  minRaceDate,
+  maxRaceDate,
+  defaultStartDate,
+  maxStartDate,
+}: PlanFormProps) {
   const [state, formAction, isPending] = useActionState(createPlanAction, INITIAL_STATE);
   const [goalType, setGoalType] = useState<GoalType>("race");
   const [goalText, setGoalText] = useState("");
   const [raceDate, setRaceDate] = useState("");
+  const [startsOn, setStartsOn] = useState("");
   const [weeks, setWeeks] = useState(String(DEFAULT_WEEKS));
   const [sessionsPerWeek, setSessionsPerWeek] = useState(String(DEFAULT_SESSIONS_PER_WEEK));
   const [weeklyTimeHours, setWeeklyTimeHours] = useState("");
@@ -310,6 +325,35 @@ export function PlanForm({ minRaceDate, maxRaceDate }: PlanFormProps) {
               </Select>
             </Field>
           )}
+
+          <Field
+            id={fieldId("startsOn")}
+            label="Début du programme"
+            hint={`Sans réponse, le plan démarre le prochain lundi (${formatCivilDay(defaultStartDate)}). Un programme démarre toujours un lundi : les semaines se comparent entre elles.`}
+            error={errors?.startsOn}
+            optional
+          >
+            <Input
+              id={fieldId("startsOn")}
+              name="startsOn"
+              type="date"
+              min={defaultStartDate}
+              max={maxStartDate}
+              // Pas de sept jours depuis `min` (un lundi) : indication au
+              // sélecteur, sans garantie — `noValidate` désactive la contrainte
+              // et tous les moteurs ne grisent pas les jours hors pas. Un autre
+              // jour saisi est refusé par l'action, sur ce champ.
+              step={7}
+              aria-invalid={errors?.startsOn ? true : undefined}
+              aria-describedby={describedBy(
+                `${fieldId("startsOn")}-hint`,
+                Boolean(errors?.startsOn) && `${fieldId("startsOn")}-error`,
+              )}
+              value={startsOn}
+              onChange={(event) => setStartsOn(event.target.value)}
+              className="num w-full sm:w-48"
+            />
+          </Field>
         </div>
       </Panel>
 

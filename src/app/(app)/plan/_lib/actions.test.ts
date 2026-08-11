@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createPlanAction, type PlanFormState } from './actions';
-import { latestRaceDate } from './plan-window';
+import { earliestPlanStart, latestPlanStart, latestRaceDate } from './plan-window';
 
 vi.mock('server-only', () => ({}));
 
@@ -38,6 +38,7 @@ const VALID_FIELDS: Record<string, string> = {
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
   weeks: '',
+  startsOn: '',
   sessionsPerWeek: '3',
   weeklyTimeHours: '',
   longRunDay: '7',
@@ -62,13 +63,16 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Date de course la plus lointaine acceptée quand le départ reste au défaut. */
+const LATEST_RACE = latestRaceDate(earliestPlanStart(TODAY));
+
 describe('createPlanAction — date de course', () => {
   it('accepte la course la plus lointaine que le plan puisse couvrir', async () => {
-    const state = await createPlanAction(IDLE, form({ raceDate: latestRaceDate(TODAY) }));
+    const state = await createPlanAction(IDLE, form({ raceDate: LATEST_RACE }));
 
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
-      expect.objectContaining({ goalType: 'race', raceDate: latestRaceDate(TODAY) }),
+      expect.objectContaining({ goalType: 'race', raceDate: LATEST_RACE }),
     );
   });
 
@@ -86,5 +90,80 @@ describe('createPlanAction — date de course', () => {
 
     expect(state.fieldErrors?.raceDate).toContain('à venir');
     expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+});
+
+describe('createPlanAction — date de démarrage', () => {
+  it('laisse le service appliquer son défaut quand le champ est vide', async () => {
+    const state = await createPlanAction(IDLE, form());
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ startsOn: undefined }),
+    );
+  });
+
+  it('transmet le lundi choisi', async () => {
+    const startsOn = latestPlanStart(TODAY);
+    // La course est repoussée d'autant : les deux dates doivent rester cohérentes.
+    const state = await createPlanAction(IDLE, form({ startsOn, raceDate: '2026-11-15' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(expect.objectContaining({ startsOn }));
+  });
+
+  it('refuse un démarrage passé, sur le champ, sans appeler le coach', async () => {
+    const state = await createPlanAction(IDLE, form({ startsOn: '2026-08-10' }));
+
+    expect(state.status).toBe('error');
+    expect(state.fieldErrors?.startsOn).toContain('au plus tôt le prochain lundi');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it('refuse un démarrage au-delà de huit semaines', async () => {
+    const state = await createPlanAction(IDLE, form({ startsOn: '2026-10-12' }));
+
+    expect(state.fieldErrors?.startsOn).toContain('Démarrage trop lointain');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it("refuse un jour qui n'est pas un lundi", async () => {
+    const state = await createPlanAction(IDLE, form({ startsOn: '2026-08-19' }));
+
+    expect(state.fieldErrors?.startsOn).toContain('démarre un lundi');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it('refuse une course devenue trop proche du démarrage choisi, sur ce champ-là', async () => {
+    // Course le 13 septembre, départ le 31 août : plus que deux semaines.
+    const state = await createPlanAction(
+      IDLE,
+      form({ startsOn: '2026-08-31', raceDate: '2026-09-13' }),
+    );
+
+    expect(state.status).toBe('error');
+    // Le refus porte sur la date que l'athlète peut déplacer, pas sur sa course.
+    expect(state.fieldErrors?.startsOn).toContain('au moins 3 semaines');
+    expect(state.fieldErrors?.raceDate).toBeUndefined();
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it("signale l'incohérence sur la course tant qu'aucun démarrage n'est choisi", async () => {
+    const state = await createPlanAction(IDLE, form({ raceDate: '2026-08-30' }));
+
+    expect(state.fieldErrors?.raceDate).toContain('au moins 3 semaines');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it('accepte un objectif libre démarrant plus tard', async () => {
+    const state = await createPlanAction(
+      IDLE,
+      form({ goalType: 'free', weeks: '8', raceDate: '', startsOn: '2026-09-07' }),
+    );
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ goalType: 'free', weeks: 8, startsOn: '2026-09-07' }),
+    );
   });
 });

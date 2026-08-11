@@ -8,14 +8,12 @@ import 'server-only';
  * l'écriture appartient au DAL. Ce qui vit ici, ce sont les prompts et la boucle
  * de correction.
  *
- * ## La boucle de correction, et pourquoi elle est bornée à un seul retry
+ * ## La boucle de correction, et pourquoi elle est bornée
  *
  * La grammaire garantit la forme, pas le sens : le modèle peut rendre un JSON
  * impeccable qui compte onze semaines au lieu de douze. On lui renvoie alors la
- * liste des violations, en français, et on regénère **une fois**. Si la seconde
- * passe échoue aussi, on s'arrête : sur un modèle de 6 Go, une troisième
- * tentative coûte des minutes pour la même erreur, et une génération de plan est
- * déclenchée par un clic — l'utilisatrice attend devant.
+ * liste des violations, en français, et on regénère — au plus
+ * {@link MAX_ATTEMPTS} fois au total.
  *
  * La même boucle rattrape les sorties **hors schéma**. Les invariants croisés
  * d'une étape (exactement une mesure, allure ou zone cardiaque mais pas les
@@ -24,6 +22,11 @@ import 'server-only';
  * d'un plan de douze semaines suffirait à tout perdre. Le message de reprise
  * porte alors les chemins des champs en défaut, comme il porte ailleurs les
  * violations métier.
+ *
+ * Chaque rejet est **journalisé** côté serveur, avec sa nature et le détail
+ * renvoyé au modèle : l'UI, elle, ne dira jamais qu'« un plan valide n'a pas pu
+ * être produit », et sans cette trace un échec en production n'est pas
+ * diagnosticable.
  *
  * ## Budget de contexte
  *
@@ -97,6 +100,11 @@ export type PlanRequest = {
   weeklyTimeMinutes?: number;
   /** Jour ISO de la sortie longue : 1 = lundi … 7 = dimanche. */
   longRunDay: number;
+  /**
+   * Premier jour du programme, choisi par l'athlète. Absent : le prochain lundi
+   * ({@link nextPlanStart}). Un lundi dans les deux cas — cf. {@link planStart}.
+   */
+  startsOn?: string;
 };
 
 /** La fenêtre calendaire que le plan couvrira. */
@@ -118,12 +126,21 @@ export const MAX_PLAN_WEEKS = PLAN_OUTPUT_BOUNDS.weeksPerPlan.max;
 /** Température basse : on veut un plan reproductible, pas de la créativité. */
 const PLAN_TEMPERATURE = 0.3;
 
-/** Une seule reprise après violation des règles métier (cf. l'en-tête). */
-const MAX_ATTEMPTS = 2;
+/**
+ * Nombre total de générations tentées, reprises comprises (cf. l'en-tête).
+ *
+ * Arbitrage : sur un modèle local de 6 Go, chaque tentative coûte des minutes
+ * d'attente devant l'écran — mais un abandon en coûte davantage, puisqu'il faut
+ * alors tout resoumettre à la main pour repartir de zéro. Deux reprises restent
+ * dans l'ordre de grandeur d'une génération lente, et rattrapent le cas
+ * fréquent d'un petit modèle qui corrige une faute en en introduisant une autre.
+ */
+const MAX_ATTEMPTS = 3;
 
 /**
- * Premier jour du plan : le **prochain lundi**, ou aujourd'hui si l'on est déjà
- * lundi.
+ * Premier jour du plan **par défaut** : le prochain lundi, ou aujourd'hui si
+ * l'on est déjà lundi. L'athlète peut lui préférer un lundi plus lointain
+ * (`PlanRequest.startsOn`), jamais un autre jour de la semaine.
  *
  * Deux raisons de partir un lundi plutôt que demain : le volume hebdomadaire ne
  * se compare qu'entre semaines pleines, et l'alignement sur la semaine ISO fait
@@ -137,6 +154,35 @@ export function nextPlanStart(today: string): string {
 }
 
 /**
+ * Premier jour du programme : celui que l'athlète a choisi, sinon le prochain
+ * lundi.
+ *
+ * Un plan démarre **toujours un lundi**, et ce n'est pas une préférence de
+ * présentation : le `day` d'une séance produite par le modèle est un jour ISO
+ * (1 = lundi), et `mapPlanWeeksToSessions` le pose à `startsOn + (day − 1)`.
+ * Partir un mercredi placerait la sortie longue « du dimanche » un mardi, sans
+ * que rien ne le signale — un plan faux et muet sur son défaut.
+ *
+ * @throws {InvalidPlanError} date inexploitable, passée, ou qui n'est pas un
+ * lundi.
+ */
+function planStart(request: PlanRequest, today: string): string {
+  const { startsOn } = request;
+  if (startsOn === undefined) return nextPlanStart(today);
+
+  if (!isCivilDate(startsOn)) {
+    throw new InvalidPlanError('startsOn', 'Début du programme : format AAAA-MM-JJ attendu.');
+  }
+  if (startsOn < today) {
+    throw new InvalidPlanError('startsOn', "Le programme ne peut pas démarrer dans le passé.");
+  }
+  if (isoDayIndex(startsOn) !== 0) {
+    throw new InvalidPlanError('startsOn', 'Le programme démarre un lundi : choisis un lundi.');
+  }
+  return startsOn;
+}
+
+/**
  * Fenêtre du plan, à partir de l'objectif.
  *
  * Pour une course, la durée se **déduit** de la date : le nombre de semaines
@@ -144,12 +190,13 @@ export function nextPlanStart(today: string): string {
  * sans le `+ 1`, une course tombant un lundi sortirait de la fenêtre du plan
  * censé y mener.
  *
- * @throws {InvalidPlanError} date de course absente/invalide, course trop
- * proche ({@link MIN_RACE_PLAN_WEEKS}) ou trop lointaine
- * ({@link MAX_PLAN_WEEKS}), ou durée manquante pour un objectif libre.
+ * @throws {InvalidPlanError} date de démarrage inexploitable ({@link planStart}),
+ * date de course absente/invalide, course trop proche
+ * ({@link MIN_RACE_PLAN_WEEKS}) ou trop lointaine ({@link MAX_PLAN_WEEKS}), ou
+ * durée manquante pour un objectif libre.
  */
 export function planWindow(request: PlanRequest, today: string): PlanWindow {
-  const startsOn = nextPlanStart(today);
+  const startsOn = planStart(request, today);
 
   if (request.goalType === 'race') {
     const { raceDate } = request;
@@ -386,11 +433,22 @@ export function buildPlanUpdateMessages(
   ];
 }
 
-/** Le message de reprise : les violations, telles que le modèle doit les corriger. */
+/**
+ * Le message de reprise : les violations, telles que le modèle doit les corriger.
+ *
+ * Plafonné comme {@link buildSchemaIssuesMessage}, et pour la même raison : un
+ * modèle qui oublie la sortie longue de chaque semaine produit une violation
+ * par semaine, et deux reprises non plafonnées (3 tentatives) grossiraient le
+ * prompt au point d'exposer la tentative corrective à la troncature — celle-là
+ * même qu'elle est censée réparer.
+ */
 export function buildViolationsMessage(violations: readonly string[]): string {
+  const reported = violations.slice(0, MAX_REPORTED_ISSUES);
+  const remainder = violations.length - reported.length;
   return [
     'Ce plan ne respecte pas les contraintes demandées :',
-    ...violations.map((violation) => `- ${violation}`),
+    ...reported.map((violation) => `- ${violation}`),
+    ...(remainder > 0 ? [`… et ${remainder} autres violations du même ordre.`] : []),
     'Régénère le plan complet en corrigeant ces points, dans le même format.',
   ].join('\n');
 }
@@ -455,8 +513,39 @@ type GenerationOptions<T> = {
 };
 
 /**
- * Génère, vérifie le contrat **et** les règles métier, et reprend une fois en
- * cas de manquement — quel qu'en soit le genre.
+ * Ce qu'on soupçonne quand une sortie hors schéma ne porte **aucune** anomalie
+ * Zod : le contenu n'était même pas du JSON (cf. {@link AiInvalidOutputError}).
+ *
+ * Sur llama.cpp, ce n'est presque jamais un modèle qui répond en texte libre —
+ * la grammaire GBNF le lui interdit token par token — mais une génération
+ * **coupée en plein JSON**. `chatCompletionJson` n'envoie pas de `max_tokens` :
+ * le serveur s'arrête donc de lui-même, en butant sur la fin du contexte. C'est
+ * la première piste à vérifier en production.
+ */
+const TRUNCATION_HINT = 'sortie probablement tronquée (contexte plein ?)';
+
+/**
+ * Journalise une tentative rejetée, avec ce qui est renvoyé au modèle.
+ *
+ * L'utilisatrice, elle, ne verra qu'un message générique : sans cette trace, un
+ * échec de génération en production n'est rattachable à rien — ni au schéma, ni
+ * aux règles d'entraînement, ni à un contexte saturé.
+ */
+function logRejectedAttempt(
+  attempt: number,
+  schemaName: string,
+  nature: string,
+  detail: string,
+): void {
+  console.error(
+    `[plan] tentative ${attempt}/${MAX_ATTEMPTS} (${schemaName}) rejetée — ${nature} :\n${detail}`,
+  );
+}
+
+/**
+ * Génère, vérifie le contrat **et** les règles métier, et reprend en cas de
+ * manquement — quel qu'en soit le genre — dans la limite de
+ * {@link MAX_ATTEMPTS} tentatives.
  *
  * Les deux échecs se rattrapent de la même façon parce qu'ils ont la même
  * cause : un petit modèle qui a mal lu une consigne. Seul le message de reprise
@@ -466,7 +555,7 @@ type GenerationOptions<T> = {
  * ({@link AiUnavailableError}) ou une réponse HTTP cassée
  * ({@link AiResponseError}) ne s'arrangeront pas en redemandant.
  *
- * @throws {AiInvalidOutputError} si la seconde tentative reste hors schéma (
+ * @throws {AiInvalidOutputError} si la dernière tentative reste hors schéma (
  * l'erreur d'origine, avec ses anomalies) ou viole encore les règles métier —
  * le message porte alors la liste, pour que l'UI dise ce qui n'a pas pu être
  * respecté plutôt qu'« erreur ».
@@ -486,19 +575,40 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
         temperature: PLAN_TEMPERATURE,
       });
     } catch (error) {
-      if (!(error instanceof AiInvalidOutputError) || attempt === MAX_ATTEMPTS) throw error;
-      messages.push({ role: 'user', content: buildSchemaIssuesMessage(error.issues) });
+      if (!(error instanceof AiInvalidOutputError)) throw error;
+
+      const reprise = buildSchemaIssuesMessage(error.issues);
+      logRejectedAttempt(
+        attempt,
+        options.schemaName,
+        error.issues.length === 0 ? `sortie hors schéma — ${TRUNCATION_HINT}` : 'sortie hors schéma',
+        reprise,
+      );
+
+      if (attempt === MAX_ATTEMPTS) {
+        console.error(
+          `[plan] génération abandonnée après ${MAX_ATTEMPTS} tentatives (${options.schemaName}) : ${error.message}`,
+        );
+        throw error;
+      }
+      messages.push({ role: 'user', content: reprise });
       continue;
     }
 
     violations = validatePlanBusinessRules(options.weeksOf(output), options.expectationsOf(output));
     if (violations.length === 0) return output;
 
+    const reprise = buildViolationsMessage(violations);
+    logRejectedAttempt(attempt, options.schemaName, 'violations métier', reprise);
+
     if (attempt < MAX_ATTEMPTS) {
-      messages.push({ role: 'user', content: buildViolationsMessage(violations) });
+      messages.push({ role: 'user', content: reprise });
     }
   }
 
+  console.error(
+    `[plan] génération abandonnée après ${MAX_ATTEMPTS} tentatives (${options.schemaName}) : violations métier non corrigées.`,
+  );
   throw new AiInvalidOutputError(
     `Le coach n'est pas parvenu à respecter les contraintes du plan : ${violations.join(' ')}`,
   );

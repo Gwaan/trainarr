@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
 import type { PlanDto, PlanSessionDto } from '@/data/plans';
@@ -162,11 +162,23 @@ const BROKEN_WEEK = {
   ],
 };
 
+/**
+ * Les rejets du modèle sont journalisés : la console est muselée pour tous les
+ * tests, et inspectée par ceux qui éprouvent la trace elle-même.
+ */
+let consoleError: MockInstance<typeof console.error>;
+
+/** Tout ce qui est parti dans `console.error`, en un seul texte. */
+function loggedText(): string {
+  return consoleError.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   // Un mardi : le prochain lundi est le 17 août 2026.
   vi.setSystemTime(new Date('2026-08-11T09:00:00.000Z'));
   vi.clearAllMocks();
+  consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   requireAi.mockResolvedValue(undefined);
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
   dal.createPlanWithSessions.mockResolvedValue(PLAN);
@@ -239,6 +251,61 @@ describe('planWindow', () => {
     expect(() => planWindow({ ...REQUEST, weeks: undefined }, '2026-08-11')).toThrow(
       /durée en semaines/,
     );
+  });
+
+  describe('date de démarrage choisie', () => {
+    it('démarre le lundi demandé, objectif libre', () => {
+      expect(planWindow({ ...REQUEST, startsOn: '2026-08-31' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-31',
+        weeks: 2,
+      });
+    });
+
+    it('recompte les semaines d’une course depuis ce lundi-là', () => {
+      const race = { ...REQUEST, goalType: 'race', raceDate: '2026-09-27' } as const;
+
+      // Départ par défaut (lundi 17 août) : 6 semaines jusqu'à la course.
+      expect(planWindow(race, '2026-08-11').weeks).toBe(6);
+      // Départ repoussé de deux semaines : le plan raccourcit d'autant.
+      expect(planWindow({ ...race, startsOn: '2026-08-31' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-31',
+        weeks: 4,
+      });
+    });
+
+    it('refuse une course devenue trop proche du démarrage choisi', () => {
+      expect(() =>
+        planWindow(
+          { ...REQUEST, goalType: 'race', raceDate: '2026-09-13', startsOn: '2026-08-31' },
+          '2026-08-11',
+        ),
+      ).toThrow(/trop court/);
+    });
+
+    it('garde le prochain lundi quand rien n’est demandé', () => {
+      expect(planWindow(REQUEST, '2026-08-11').startsOn).toBe('2026-08-17');
+      expect(planWindow({ ...REQUEST, startsOn: undefined }, '2026-08-11').startsOn).toBe(
+        '2026-08-17',
+      );
+    });
+
+    it('refuse un démarrage passé', () => {
+      expect(() => planWindow({ ...REQUEST, startsOn: '2026-08-10' }, '2026-08-11')).toThrow(
+        /ne peut pas démarrer dans le passé/,
+      );
+    });
+
+    it("refuse un jour qui n'est pas un lundi — le jour des séances est un jour ISO", () => {
+      expect(() => planWindow({ ...REQUEST, startsOn: '2026-08-19' }, '2026-08-11')).toThrow(
+        /démarre un lundi/,
+      );
+    });
+
+    it('refuse une date inexploitable', () => {
+      expect(() => planWindow({ ...REQUEST, startsOn: '2026-02-31' }, '2026-08-11')).toThrow(
+        /AAAA-MM-JJ/,
+      );
+    });
   });
 });
 
@@ -531,7 +598,6 @@ describe('generatePlan', () => {
   });
 
   it('rend quand même le plan quand le rapprochement échoue', async () => {
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
       weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
@@ -541,7 +607,7 @@ describe('generatePlan', () => {
     // Le plan est écrit et valide : un rapprochement raté ne l'annule pas, il se
     // journalise.
     await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
-    expect(logged).toHaveBeenCalled();
+    expect(loggedText()).toContain('rapprochement des séances');
     // Et le calendrier est quand même synchronisé : les deux effets de bord sont
     // indépendants.
     expect(syncPlanToIntervalsSafely).toHaveBeenCalled();
@@ -581,11 +647,21 @@ describe('generatePlan', () => {
     expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
   });
 
-  it('renonce quand la sortie reste hors schéma après reprise', async () => {
+  it('reprend jusqu’à deux fois avant de renoncer', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] })
+      .mockRejectedValueOnce(OFF_SCHEMA)
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+
+    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
+  });
+
+  it('renonce quand la sortie reste hors schéma après reprises', async () => {
     chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
 
     await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
     expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
   });
 
@@ -598,11 +674,11 @@ describe('generatePlan', () => {
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
   });
 
-  it("renonce après un second échec, en disant ce qui n'a pas été respecté", async () => {
+  it("renonce après trois échecs, en disant ce qui n'a pas été respecté", async () => {
     chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
 
     await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
     expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
   });
 
@@ -619,6 +695,65 @@ describe('generatePlan', () => {
       /durée en semaines/,
     );
     expect(chatCompletionJson).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Une génération qui échoue ne laisse à l'utilisatrice qu'un message générique :
+ * ces logs sont le seul moyen de savoir, en production, sur quoi le modèle local
+ * a buté. Les taire serait un bug.
+ */
+describe('journal des rejets', () => {
+  it('dit le rang de la tentative, la nature du rejet et les violations', async () => {
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
+
+    await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
+
+    const logged = loggedText();
+    expect(logged).toContain('[plan] tentative 1/3 (training_plan) rejetée — violations métier');
+    expect(logged).toContain('[plan] tentative 2/3 (training_plan) rejetée — violations métier');
+    expect(logged).toContain('[plan] tentative 3/3 (training_plan) rejetée — violations métier');
+    // Le détail exact renvoyé au modèle, pas un « erreur de validation ».
+    expect(logged).toContain('aucune séance le dimanche');
+    expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
+  });
+
+  it('dit les champs en défaut quand la sortie est hors schéma', async () => {
+    chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
+
+    await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
+
+    const logged = loggedText();
+    expect(logged).toContain('[plan] tentative 1/3 (training_plan) rejetée — sortie hors schéma');
+    expect(logged).toContain('weeks.0.sessions.1.steps.1.steps.0');
+    expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
+    // Le schéma a bien été violé sur le fond : rien ne laisse penser à une coupure.
+    expect(logged).not.toContain('tronquée');
+  });
+
+  it('soupçonne une sortie tronquée quand la réponse n’était même pas du JSON', async () => {
+    // Aucune anomalie Zod : `chatCompletionJson` n'a pas pu parser le contenu.
+    chatCompletionJson.mockRejectedValue(
+      new AiInvalidOutputError("Le coach IA n'a pas produit du JSON pour « training_plan ».", []),
+    );
+
+    await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
+
+    expect(loggedText()).toContain(
+      'sortie hors schéma — sortie probablement tronquée (contexte plein ?)',
+    );
+  });
+
+  it('journalise aussi les rejets d’un ajustement, sous son propre schéma', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
+      sessions: [],
+    });
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
+
+    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
+
+    expect(loggedText()).toContain('tentative 1/3 (training_plan_update) rejetée');
   });
 });
 
@@ -690,7 +825,6 @@ describe('updatePlanFromInstruction', () => {
   });
 
   it("ajuste quand même le plan si le rapprochement échoue", async () => {
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
     chatCompletionJson.mockResolvedValue({
       summary: 'ok',
@@ -699,7 +833,7 @@ describe('updatePlanFromInstruction', () => {
     dal.reconcilePlanSessions.mockRejectedValue(new Error('deadlock detected'));
 
     await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
-    expect(logged).toHaveBeenCalled();
+    expect(loggedText()).toContain('rapprochement des séances');
   });
 
   it('ne soumet au modèle que les séances à venir non réalisées', async () => {
@@ -757,12 +891,12 @@ describe('updatePlanFromInstruction', () => {
     );
   });
 
-  it('renonce après un second échec sans rien écrire', async () => {
+  it('renonce après trois échecs sans rien écrire', async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
     chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
 
     await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.reconcilePlanSessions).not.toHaveBeenCalled();
   });

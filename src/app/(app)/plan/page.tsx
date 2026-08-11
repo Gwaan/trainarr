@@ -11,7 +11,12 @@ import { AiSuspendedPanel } from "./_components/ai-suspended-panel";
 import { PlanForm } from "./_components/plan-form";
 import { PlanSkeleton } from "./_components/plan-skeleton";
 import { PlanView } from "./_components/plan-view";
-import { earliestRaceDate, latestRaceDate } from "./_lib/plan-window";
+import {
+  earliestPlanStart,
+  earliestRaceDate,
+  latestPlanStart,
+  latestRaceDate,
+} from "./_lib/plan-window";
 
 export const metadata: Metadata = {
   title: "Plan",
@@ -43,11 +48,23 @@ async function PlanContent() {
   const today = toCivilDate(new Date());
 
   if (active === null) {
+    // Les bornes de la course couvrent tous les démarrages proposés : trop
+    // larges d'au plus quelques semaines, jamais trop étroites — un champ qui
+    // interdirait une date pourtant valide serait une impasse muette, là où
+    // l'action, elle, tranche sur la date de démarrage réellement choisie.
+    const firstStart = earliestPlanStart(today);
+    const lastStart = latestPlanStart(today);
+
     return (
       <>
         <PageHeader title="Plan" subtitle={SUBTITLES.create} />
         {availability.available ? (
-          <PlanForm minRaceDate={earliestRaceDate(today)} maxRaceDate={latestRaceDate(today)} />
+          <PlanForm
+            minRaceDate={earliestRaceDate(firstStart)}
+            maxRaceDate={latestRaceDate(lastStart)}
+            defaultStartDate={firstStart}
+            maxStartDate={lastStart}
+          />
         ) : (
           <AiSuspendedPanel reason={availability.reason} />
         )}
