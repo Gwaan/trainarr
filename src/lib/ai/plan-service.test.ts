@@ -607,6 +607,41 @@ describe('buildPlanMessages', () => {
     );
   });
 
+  /**
+   * Le cran d'après : la cible seule laissait au modèle une division qu'il
+   * posait de travers — cibles de 27 à 37 km, semaines écrites de 44 à 70. Le
+   * prompt lui donne désormais l'arithmétique faite, séance par séance.
+   */
+  it('décompose chaque cible entre les séances, une ligne par semaine', () => {
+    const rows = messages[1].content
+      .split('\n')
+      .filter((row) => row.includes('SL dim'));
+
+    // Trois séances (REQUEST) : la sortie longue le dimanche, une séance de
+    // qualité (intermédiaire, ramené à une seule faute de place) et un footing.
+    expect(rows).toEqual([
+      'S1 (~50,5 km) : SL dim ~26,0 km · qualité ~8,0 km · footing ~16,5 km',
+      'S2 (~52,7 km) : SL dim ~27,0 km · qualité ~8,5 km · footing ~17,2 km',
+      'S3 (~39,5 km) : SL dim ~20,5 km · qualité ~6,5 km · footing ~12,5 km',
+      'S4 (~28,9 km) : SL dim ~15,0 km · qualité ~4,5 km · footing ~9,4 km',
+    ]);
+  });
+
+  it('ne décompose pas la première semaine entamée : son compte de séances est inconnu', () => {
+    const user = buildPlanMessages(
+      REQUEST,
+      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 4, firstWeekFromDay: 4 },
+      SNAPSHOT,
+    )[1].content;
+
+    // Sa cible reste annoncée — c'est la décomposition, et elle seule, qui
+    // n'aurait aucun sens sur une semaine dont on ignore combien de séances elle
+    // portera (« 3 au plus »).
+    expect(user).toContain('S1 ~');
+    expect(user).not.toContain('S1 (~');
+    expect(user).toContain('S2 (~');
+  });
+
   it('dit dans le prompt que la tolérance n’est pas un espace de liberté', () => {
     // La bande de ±10 % juge chaque semaine seule, la hausse et l'allégée jugent
     // deux semaines l'une contre l'autre : s'y promener fait refuser le plan.
@@ -867,8 +902,11 @@ describe('buildPlanMessages', () => {
     expect(user).toContain('VO2max estimée : 48,6');
     expect(user).toContain('5:24/km');
     expect(user).not.toContain('null');
-    // Un prompt de génération reste court : le budget est pour la sortie.
-    expect(user.length).toBeLessThan(1_500);
+    // Un prompt de génération reste court : le budget est pour la sortie. La
+    // décomposition des cibles y ajoute une ligne par semaine (~70 caractères,
+    // une vingtaine de tokens), et c'est le seul poste qui grandit avec le plan
+    // — d'où le découpage en tranches au-delà de six semaines.
+    expect(user.length).toBeLessThan(1_700);
   });
 });
 
@@ -1336,6 +1374,66 @@ describe('generatePlan', () => {
       /durée en semaines/,
     );
     expect(chatCompletionJson).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Le compte de séances devient une contrainte de grammaire, y compris sur le
+ * format le plus courant : sous six semaines, le plan se produit d'un seul
+ * tenant, et rien n'y empêchait le modèle d'écrire la septième séance qu'il
+ * écrit sous message de reprise (cf. la génération par tranches).
+ */
+describe('generatePlan — compte de séances imposé', () => {
+  /** Le sous-schéma du tableau `sessions` d'une semaine, tel qu'il part au modèle. */
+  function sessionsJsonSchemaOf(schema: {
+    properties: { weeks: { items: { properties: { sessions: Record<string, number> } } } };
+  }) {
+    return schema.properties.weeks.items.properties.sessions;
+  }
+
+  /** Un plan d'une semaine de `count` séances, tel qu'un provider hors grammaire l'écrit. */
+  function planOf(count: number) {
+    return {
+      summary: 'x',
+      weeks: [
+        {
+          sessions: [1, 2, 3, 4, 5, 6, 7]
+            .slice(0, count)
+            .map((day) => ({ day, kind: 'Endurance', title: 'Footing' })),
+        },
+      ],
+    };
+  }
+
+  it('impose le compte exact quand toutes les semaines du plan sont pleines', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    // Départ un lundi : aucune semaine entamée dans la fenêtre.
+    await generatePlan({ ...REQUEST, ...MONDAY });
+
+    const [{ jsonSchema, schema }] = chatCompletionJson.mock.calls[0];
+    // Le modèle ne PEUT plus écrire une quatrième séance.
+    expect(sessionsJsonSchemaOf(jsonSchema)).toMatchObject({ minItems: 3, maxItems: 3 });
+    // Et Zod dit la même chose, pour le provider qui ignore la grammaire.
+    expect(schema.safeParse(planOf(3)).success).toBe(true);
+    expect(schema.safeParse(planOf(4)).success).toBe(false);
+  });
+
+  it('garde des bornes souples quand le plan démarre en semaine entamée', async () => {
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: CONFORMING_WEEKS });
+
+    // Sans date demandée, le plan démarre aujourd'hui, un mardi : sa première
+    // semaine compte légitimement moins de séances, et les items d'un tableau
+    // JSON Schema sont uniformes. La règle métier reste le filet.
+    await generatePlan(REQUEST);
+
+    const [{ jsonSchema, schema }] = chatCompletionJson.mock.calls[0];
+    expect(sessionsJsonSchemaOf(jsonSchema)).toMatchObject({ minItems: 1, maxItems: 3 });
+    expect(schema.safeParse(planOf(2)).success).toBe(true);
+    expect(schema.safeParse(planOf(4)).success).toBe(false);
   });
 });
 
@@ -2371,6 +2469,37 @@ describe('generatePlan — par tranches', () => {
       expect(first.required).toEqual(['weeks']);
       expect(second.properties.summary).toBeDefined();
       expect(second.required).toEqual(['weeks', 'summary']);
+    });
+  });
+
+  /**
+   * Le compte de séances devient une contrainte de grammaire.
+   *
+   * Constaté en production : sous message de reprise, le modèle écrit 7 séances
+   * là où 6 sont demandées — la règle métier le voyait, mais après coup, au prix
+   * d'une tranche à régénérer. Ce que la grammaire interdit d'écrire n'a plus à
+   * être corrigé.
+   */
+  it('interdit le mauvais compte de séances, sauf sur la tranche entamée', () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
+
+    return generatePlan(LONG_REQUEST).then(() => {
+      const sessionsOf = (schema: {
+        properties: { weeks: { items: { properties: { sessions: Record<string, number> } } } };
+      }) => schema.properties.weeks.items.properties.sessions;
+
+      const [first, second] = chatCompletionJson.mock.calls.map(
+        (call: { jsonSchema: Parameters<typeof sessionsOf>[0] }[]) => sessionsOf(call[0].jsonSchema),
+      );
+
+      // La première tranche porte la semaine entamée du plan (départ un mardi) :
+      // elle en compte moins, et les items d'un tableau JSON Schema sont
+      // uniformes — bornes souples, la règle métier reste le filet.
+      expect(first).toMatchObject({ minItems: 1, maxItems: 3 });
+      // La seconde n'a que des semaines pleines : compte exact.
+      expect(second).toMatchObject({ minItems: 3, maxItems: 3 });
     });
   });
 

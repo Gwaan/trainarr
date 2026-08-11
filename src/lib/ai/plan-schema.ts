@@ -38,7 +38,14 @@ import {
   type PlanStep,
 } from '@/lib/plan-steps/schema';
 
-import { formatDuration, formatIsoDay, formatNumber, formatPace, formatPaceRange } from './format';
+import {
+  formatDuration,
+  formatIsoDay,
+  formatNumber,
+  formatPace,
+  formatPaceRange,
+  type SessionBudget,
+} from './format';
 
 /**
  * Bornes de la sortie du modèle.
@@ -175,23 +182,53 @@ const planSessionSchema = z.object({
   steps: planSessionStepsOutputSchema.optional(),
 });
 
-const planWeekSchema = z.object({
-  sessions: z
-    .array(planSessionSchema)
-    .min(PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min)
-    .max(PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max),
-});
+/**
+ * Les bornes d'un tableau — des semaines d'un plan, des séances d'une semaine.
+ *
+ * Un intervalle plutôt qu'un nombre parce que les deux cas existent : une
+ * semaine pleine porte **exactement** le nombre de séances demandé, une première
+ * semaine entamée au plus autant (cf. {@link chunkSessionCountBounds}).
+ */
+type CountBounds = { min: number; max: number };
 
-const planWeeksSchema = z
-  .array(planWeekSchema)
-  .min(PLAN_OUTPUT_BOUNDS.weeksPerPlan.min)
-  .max(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
+function planWeekSchemaFor(sessions: CountBounds) {
+  return z.object({
+    sessions: z.array(planSessionSchema).min(sessions.min).max(sessions.max),
+  });
+}
 
-/** Ce que le modèle produit pour une **création** de plan. */
-export const planOutputSchema = z.object({
-  summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars),
-  weeks: planWeeksSchema,
-});
+function planWeeksSchemaFor(sessions: CountBounds) {
+  return z
+    .array(planWeekSchemaFor(sessions))
+    .min(PLAN_OUTPUT_BOUNDS.weeksPerPlan.min)
+    .max(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
+}
+
+const planWeeksSchema = planWeeksSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
+
+/** Le contrat d'une création, aux bornes de séances données ({@link planOutputSchemaFor}). */
+function planSchemaFor(sessions: CountBounds) {
+  return z.object({
+    summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars),
+    weeks: planWeeksSchemaFor(sessions),
+  });
+}
+
+/**
+ * Ce que le modèle produit pour une **création** de plan.
+ *
+ * Aux bornes générales : une génération qui connaît son compte de séances passe
+ * par {@link planOutputSchemaFor}.
+ */
+export const planOutputSchema = planSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
+
+/** Le contrat d'une tranche, aux bornes de séances données ({@link planChunkOutputSchemaFor}). */
+function chunkOutputSchemaFor(sessions: CountBounds) {
+  return z.object({
+    summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars).optional(),
+    weeks: planWeeksSchemaFor(sessions),
+  });
+}
 
 /**
  * Ce que le modèle produit pour **une tranche** d'un plan long (cf. la
@@ -203,11 +240,11 @@ export const planOutputSchema = z.object({
  * c'est le seul moment où il peut être écrit en connaissance de cause. Sur les
  * autres tranches, la grammaire ne propose même pas la clé
  * ({@link planChunkJsonSchema}).
+ *
+ * Aux bornes générales : une tranche qui connaît son compte de séances passe par
+ * {@link planChunkOutputSchemaFor}.
  */
-export const planChunkOutputSchema = z.object({
-  summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars).optional(),
-  weeks: planWeeksSchema,
-});
+export const planChunkOutputSchema = chunkOutputSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
 
 /**
  * Réglages qu'une instruction peut faire bouger. Tous facultatifs : le modèle
@@ -281,8 +318,73 @@ export const planReviewOutputSchema = z.discriminatedUnion('decision', [
   }),
 ]);
 
+/**
+ * Ce qu'une génération sait du **nombre de séances** de ses semaines — une
+ * tranche d'un plan long comme un plan produit d'un seul tenant.
+ *
+ * ## Pourquoi la grammaire s'en mêle
+ *
+ * Constaté sur les premiers plans de production : sous message de reprise — donc
+ * sous pression de correction — le modèle écrit 7 séances là où 6 étaient
+ * demandées. La règle métier le voyait, le disait, et faisait régénérer la
+ * tranche : plusieurs minutes perdues pour un compte que la grammaire peut
+ * rendre **impossible à écrire**. C'est la même bascule que le nombre de
+ * semaines d'une tranche (`minItems` = `maxItems`), d'un cran plus bas.
+ *
+ * ## Pourquoi la première semaine entamée y échappe
+ *
+ * Les items d'un tableau JSON Schema sont uniformes : `sessions` est décrit une
+ * fois pour toutes les semaines produites, et il n'existe pas de bornes par
+ * index que la conversion GBNF de llama.cpp traduise fidèlement. Une génération
+ * qui porte la première semaine entamée — laquelle en compte légitimement moins,
+ * puisque des jours sont déjà passés — garde donc des bornes **souples**
+ * (1 à `sessionsPerWeek`) sur toutes ses semaines, et c'est la règle métier
+ * ({@link validatePlanBusinessRules}, compte exact) qui reste le filet — pour
+ * celle-là comme pour les providers qui ignorent le schéma.
+ */
+export type ChunkSessionBounds = {
+  /** Le nombre de séances hebdomadaires demandé par l'athlète. */
+  sessionsPerWeek: number;
+  /** Les semaines produites comprennent-elles la première, déjà entamée ? */
+  hasStartedWeek: boolean;
+};
+
+/** Les bornes du tableau `sessions`, exactes ou souples — cf. {@link ChunkSessionBounds}. */
+function chunkSessionCountBounds(bounds: ChunkSessionBounds | null): CountBounds {
+  if (bounds === null) return PLAN_OUTPUT_BOUNDS.sessionsPerWeek;
+  return bounds.hasStartedWeek
+    ? { min: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min, max: bounds.sessionsPerWeek }
+    : { min: bounds.sessionsPerWeek, max: bounds.sessionsPerWeek };
+}
+
+/**
+ * Le contrat Zod d'une tranche, **au même resserrement que sa grammaire**
+ * ({@link planChunkJsonSchema}).
+ *
+ * Les deux barrières disent la même chose ou elles ne disent rien : une
+ * grammaire qui interdit la septième séance et un Zod qui l'accepte laisserait
+ * passer, chez un provider hors grammaire, exactement ce que la grammaire
+ * cherche à empêcher.
+ */
+export function planChunkOutputSchemaFor(bounds: ChunkSessionBounds): z.ZodType<PlanChunkOutput> {
+  return chunkOutputSchemaFor(chunkSessionCountBounds(bounds));
+}
+
+/**
+ * Le contrat Zod d'une création **d'un seul tenant**, au même resserrement que
+ * sa grammaire ({@link planJsonSchemaFor}).
+ *
+ * Même raison que pour une tranche ({@link planChunkOutputSchemaFor}) : les deux
+ * barrières disent la même chose ou elles ne disent rien.
+ */
+export function planOutputSchemaFor(bounds: ChunkSessionBounds): z.ZodType<PlanOutput> {
+  return planSchemaFor(chunkSessionCountBounds(bounds));
+}
+
 export type PlanSessionOutput = z.infer<typeof planSessionSchema>;
-export type PlanWeekOutput = z.infer<typeof planWeekSchema>;
+// Depuis la fabrique : les bornes du tableau `sessions` ne changent pas le type
+// d'une semaine, seulement ce que le schéma accepte.
+export type PlanWeekOutput = z.infer<ReturnType<typeof planWeekSchemaFor>>;
 export type PlanOutput = z.infer<typeof planOutputSchema>;
 export type PlanChunkOutput = z.infer<typeof planChunkOutputSchema>;
 export type PlanUpdateOutput = z.infer<typeof planUpdateOutputSchema>;
@@ -417,24 +519,50 @@ const sessionJsonSchema = {
   },
 } as const;
 
-const weeksJsonSchema = {
-  type: 'array',
-  minItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.min,
-  maxItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.max,
-  items: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['sessions'],
-    properties: {
-      sessions: {
-        type: 'array',
-        minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-        maxItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
-        items: sessionJsonSchema,
+/**
+ * Le tableau `weeks`, aux bornes qu'on lui connaît.
+ *
+ * Fabrique plutôt que constante : une tranche resserre le nombre de semaines
+ * (exact) **et** le nombre de séances de chaque semaine (cf.
+ * {@link ChunkSessionBounds}), et ce que la grammaire interdit d'écrire n'a plus
+ * à être corrigé après coup.
+ */
+function weeksJsonSchemaFor(
+  weeks: CountBounds,
+  sessions: CountBounds,
+): Record<string, unknown> {
+  return {
+    type: 'array',
+    minItems: weeks.min,
+    maxItems: weeks.max,
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sessions'],
+      properties: {
+        sessions: {
+          type: 'array',
+          minItems: sessions.min,
+          maxItems: sessions.max,
+          items: sessionJsonSchema,
+        },
       },
     },
-  },
-} as const;
+  };
+}
+
+/**
+ * Les bornes générales : celles d'un plan entier, qui ne sait ni combien de
+ * semaines ni combien de séances lui seront demandées.
+ *
+ * Instance **unique** et partagée par les trois schémas de plan entier : la
+ * révision reprend à la lettre les semaines d'un ajustement, et l'identité le
+ * dit mieux qu'un commentaire.
+ */
+const weeksJsonSchema = weeksJsonSchemaFor(
+  PLAN_OUTPUT_BOUNDS.weeksPerPlan,
+  PLAN_OUTPUT_BOUNDS.sessionsPerWeek,
+);
 
 const summaryJsonSchema = {
   type: 'string',
@@ -442,13 +570,43 @@ const summaryJsonSchema = {
   maxLength: PLAN_OUTPUT_BOUNDS.summaryChars,
 } as const;
 
-/** JSON Schema d'une création de plan — le pendant de {@link planOutputSchema}. */
-export const planJsonSchema: Record<string, unknown> = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['summary', 'weeks'],
-  properties: { summary: summaryJsonSchema, weeks: weeksJsonSchema },
-};
+/** L'enveloppe d'une création, autour du tableau de semaines qu'on lui donne. */
+function planJsonSchemaWith(weeks: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['summary', 'weeks'],
+    properties: { summary: summaryJsonSchema, weeks },
+  };
+}
+
+/**
+ * JSON Schema d'une création de plan — le pendant de {@link planOutputSchema}.
+ *
+ * Aux bornes générales : une génération qui connaît son compte de séances passe
+ * par {@link planJsonSchemaFor}.
+ */
+export const planJsonSchema: Record<string, unknown> = planJsonSchemaWith(weeksJsonSchema);
+
+/**
+ * Le même schéma, dont chaque semaine porte **exactement** le nombre de séances
+ * demandé — le pendant de {@link planOutputSchemaFor}.
+ *
+ * C'est le resserrement des tranches ({@link planChunkJsonSchema}) appliqué au
+ * format le plus courant : sous les six semaines, le plan se produit d'un seul
+ * tenant, et rien n'y empêchait le modèle d'écrire la septième séance qu'il
+ * écrit précisément sous message de reprise. Une génération qui porte la
+ * première semaine entamée garde des bornes souples, pour la raison
+ * d'uniformité rappelée par {@link ChunkSessionBounds}.
+ *
+ * Le nombre de **semaines**, lui, reste aux bornes générales : la fenêtre du
+ * plan n'est pas rappelée ici, et c'est la règle métier qui la vérifie.
+ */
+export function planJsonSchemaFor(sessions: ChunkSessionBounds): Record<string, unknown> {
+  return planJsonSchemaWith(
+    weeksJsonSchemaFor(PLAN_OUTPUT_BOUNDS.weeksPerPlan, chunkSessionCountBounds(sessions)),
+  );
+}
 
 /**
  * JSON Schema d'**une tranche** — le pendant de {@link planChunkOutputSchema},
@@ -463,11 +621,26 @@ export const planJsonSchema: Record<string, unknown> = {
  * peut pas être écrite ; une clé facultative, si — et un modèle qui résume
  * chaque tranche paie trois fois le prix d'un résumé qui sera jeté deux fois.
  *
+ * Un troisième depuis : le nombre de **séances** de chaque semaine, exact lui
+ * aussi dès que la tranche ne porte que des semaines pleines (cf.
+ * {@link ChunkSessionBounds}). Un modèle sous grammaire ne peut alors plus en
+ * écrire sept quand six sont demandées — ce qu'il faisait précisément sous
+ * message de reprise, au prix d'une régénération de plus.
+ *
  * @param weeks nombre de semaines attendues dans cette tranche.
  * @param withSummary la tranche porte-t-elle le résumé du plan (la dernière) ?
+ * @param sessions le compte de séances à imposer, `null` pour les bornes
+ * générales (un provider ou un appelant qui n'a rien à en dire).
  */
-export function planChunkJsonSchema(weeks: number, withSummary: boolean): Record<string, unknown> {
-  const chunkWeeksJsonSchema = { ...weeksJsonSchema, minItems: weeks, maxItems: weeks };
+export function planChunkJsonSchema(
+  weeks: number,
+  withSummary: boolean,
+  sessions: ChunkSessionBounds | null = null,
+): Record<string, unknown> {
+  const chunkWeeksJsonSchema = weeksJsonSchemaFor(
+    { min: weeks, max: weeks },
+    chunkSessionCountBounds(sessions),
+  );
   return withSummary
     ? {
         type: 'object',
@@ -538,7 +711,15 @@ function withWeekCount(schema: Record<string, unknown>, weeks: number): Record<s
   const properties = schema.properties as Record<string, unknown>;
   return {
     ...schema,
-    properties: { ...properties, weeks: { ...weeksJsonSchema, minItems: weeks, maxItems: weeks } },
+    properties: {
+      ...properties,
+      // Le nombre de **séances**, lui, reste aux bornes générales : ces
+      // enveloppes-là portent aussi les réglages, dont `sessionsPerWeek` que
+      // l'instruction peut justement changer (« passe à 5 séances »). Le figer
+      // dans la grammaire interdirait au modèle d'appliquer l'instruction qu'on
+      // lui donne.
+      weeks: weeksJsonSchemaFor({ min: weeks, max: weeks }, PLAN_OUTPUT_BOUNDS.sessionsPerWeek),
+    },
   };
 }
 
@@ -2323,6 +2504,140 @@ export function weeklyVolumeTargets(params: WeeklyVolumeTargetsParams): WeeklyVo
       kind: kinds[index],
     };
   });
+}
+
+/*
+ * Décomposition d'une cible hebdomadaire entre les séances — le même
+ * raisonnement, un cran plus bas.
+ *
+ * Les volumes cibles ont réglé la question « combien la semaine 7 doit-elle
+ * peser ». Les premiers plans de production montrent que la suivante n'est pas
+ * réglée pour autant : cibles de 27 à 37 km, semaines écrites de 44 à 70,
+ * convergence en plusieurs reprises. Le modèle ne désobéit pas — il n'arrive pas
+ * à poser « 27 km sur 6 séances dont une sortie longue de 20 à 40 % et une
+ * séance de qualité ». C'est une division, pas un jugement d'entraîneur : elle
+ * se calcule ici, une fois, et le prompt en donne le résultat.
+ *
+ * La décomposition reste **indicative** : aucune règle ne la vérifie séance par
+ * séance, et le modèle garde la main sur la répartition — c'est la bande de
+ * ±10 % autour de la cible hebdomadaire qui juge, comme avant. Ce qu'elle change
+ * est le point de départ du modèle : une arithmétique faite plutôt qu'une
+ * arithmétique à faire.
+ */
+
+/** Ce que la décomposition pose sur chaque type de séance, en part du volume hebdomadaire. */
+export const SESSION_BUDGET_SHARES = {
+  /**
+   * La sortie longue : 30 %, le milieu de la fourchette 28-32 % qu'un plan
+   * équilibré lui donne — et une part que {@link VOLUME_RULES.longRunShare}
+   * accepte partout (20 à 40 %), quelle que soit la semaine.
+   */
+  longRun: 0.3,
+  /**
+   * Une séance de qualité, **échauffement et récupérations comprises** : 16 %.
+   *
+   * Le milieu de 15-18 %. C'est le total de la séance qui compte ici, pas son
+   * corps : le contrat demande au modèle de déclarer la distance totale d'une
+   * séance à déroulé, et une VMA de 5 km de corps en fait 9 avec son enveloppe.
+   */
+  quality: 0.16,
+} as const;
+
+/** Un budget de séance, au demi-kilomètre — jamais sous la plus petite distance du contrat. */
+function halfKm(value: number): number {
+  return Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, Math.round(value * 2) / 2);
+}
+
+/** Un kilométrage au dixième : la précision des cibles, et celle qui les fait tomber juste. */
+function tenthKm(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * La cible d'une semaine, répartie entre ses séances — sortie longue en tête,
+ * puis les séances de qualité, puis les footings.
+ *
+ * L'arithmétique, dans l'ordre :
+ *
+ * 1. chaque séance de qualité prend {@link SESSION_BUDGET_SHARES.quality} ;
+ * 2. la sortie longue prend {@link SESSION_BUDGET_SHARES.longRun} du volume,
+ *    **relevée** quand le partage égal du reste ferait un footing plus long
+ *    qu'elle — au rapport de 1,6 que la règle retient déjà
+ *    ({@link longRunMaxShare}) —, et **plafonnée** à ce que cette même règle
+ *    laisse à une semaine de ce nombre de séances ;
+ * 3. **ce qui reste** se partage entre les footings — pas leur part théorique :
+ *    c'est ce qui fait tomber la somme sur la cible.
+ *
+ * Les arrondis, et pourquoi ils ne tombent pas au même endroit : la sortie
+ * longue et les séances de qualité s'arrondissent au demi-kilomètre — ce sont
+ * les séances qu'un coureur lit, « 4,5 km » vaut mieux que « 4,4 km » —, les
+ * footings au dixième, parce qu'ils sont les derniers servis et que la somme
+ * doit retomber sur la cible. Une aide au calcul dont les chiffres ne font pas
+ * leur total ne sert à rien : le modèle recopierait un plan systématiquement
+ * sous la cible.
+ *
+ * Ce sont bien les **footings** qui absorbent, et pas la dernière séance, parce
+ * que le prompt imprime un chiffre par *groupe* de séances : un footing
+ * rallongé de 0,7 km serait invisible dans « 4 footings ~3,5 km », alors que
+ * les répartir tous laisse au plus un dixième d'écart entre le groupe et la
+ * somme réelle.
+ *
+ * Fonction **pure**, appelée pour écrire le prompt et éprouvée telle quelle.
+ *
+ * @param targetKm la cible hebdomadaire, telle que {@link weeklyVolumeTargets}
+ * la chiffre et que le prompt l'annonce.
+ * @param hasQuality le nombre de séances de qualité attendues (0, 1 ou 2) —
+ * ramené à `sessionsPerWeek − 2` s'il n'y a pas la place : une semaine garde
+ * toujours un footing à côté de sa sortie longue, c'est la distribution
+ * polarisée.
+ * @param longRunShare la part visée par la sortie longue, pour les cas où
+ * l'appelant en sait plus que le réglage par défaut.
+ */
+export function weeklySessionBudgets(
+  targetKm: number,
+  sessionsPerWeek: number,
+  hasQuality: number,
+  longRunShare: number = SESSION_BUDGET_SHARES.longRun,
+): SessionBudget[] {
+  if (targetKm <= 0 || sessionsPerWeek <= 0) return [];
+  // Une séance unique EST la sortie longue : il n'y a rien à répartir.
+  if (sessionsPerWeek === 1) return [{ role: 'long', km: tenthKm(targetKm) }];
+
+  const quality = Math.min(Math.max(0, Math.trunc(hasQuality)), sessionsPerWeek - 2);
+  const easyCount = sessionsPerWeek - 1 - quality;
+
+  const rest = 1 - quality * SESSION_BUDGET_SHARES.quality;
+  // La sortie longue est la plus longue séance de la semaine : sur peu de
+  // séances, le partage égal du reste la dépasserait.
+  const balanced = (rest * LONG_RUN_SESSION_FACTOR) / (easyCount + LONG_RUN_SESSION_FACTOR);
+  const share = Math.min(Math.max(longRunShare, balanced), longRunMaxShare(sessionsPerWeek));
+
+  // La fourchette de la règle, arrondie du côté qui la satisfait (cf. `kmAtMost`) :
+  // l'arrondi au demi-kilomètre ne peut pas faire sortir la sortie longue de ce
+  // qui lui est permis.
+  const floor = Math.ceil(targetKm * VOLUME_RULES.longRunShare.min * 10) / 10;
+  const ceiling = Math.floor(targetKm * longRunMaxShare(sessionsPerWeek) * 10) / 10;
+  const longKm = Math.min(Math.max(halfKm(targetKm * share), floor), ceiling);
+
+  const qualityKm = halfKm(targetKm * SESSION_BUDGET_SHARES.quality);
+  const budgets: SessionBudget[] = [
+    { role: 'long', km: longKm },
+    ...Array.from({ length: quality }, () => ({ role: 'quality' as const, km: qualityKm })),
+  ];
+
+  // Les footings se partagent ce qui reste, au dixième — le dernier prend le
+  // reliquat de la division, qui ne peut valoir qu'un dixième de kilomètre.
+  let remaining = tenthKm(targetKm - longKm - quality * qualityKm);
+  for (let index = 0; index < easyCount; index += 1) {
+    const km =
+      index === easyCount - 1
+        ? Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, tenthKm(remaining))
+        : Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, tenthKm(remaining / (easyCount - index)));
+    budgets.push({ role: 'easy', km });
+    remaining = tenthKm(remaining - km);
+  }
+
+  return budgets;
 }
 
 /**

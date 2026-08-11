@@ -33,6 +33,13 @@ const ISO_DAY_NAMES = [
   'dimanche',
 ] as const;
 
+/**
+ * Jours ISO abrégés, pour les listes compactes : `SL sam` plutôt que
+ * `SL samedi`. Trois lettres suffisent à lever l'ambiguïté en français, et
+ * chaque caractère se paie en tokens sur une ligne par semaine.
+ */
+const ISO_DAY_SHORT_NAMES = ['lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim'] as const;
+
 const DAY_MS = 86_400_000;
 
 /**
@@ -303,6 +310,106 @@ export function formatWeeklyVolumeTargets(
     'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté : ' +
       'les règles de progression (hausse ≤ 12 %, semaine allégée à 85 %) se vérifient sur les volumes ' +
       'réellement écrits, semaine contre semaine.',
+  ].join('\n');
+}
+
+/*
+ * Décomposition d'une cible hebdomadaire entre les séances, pour les prompts.
+ */
+
+/**
+ * Ce qu'une séance est, du point de vue de la décomposition d'un volume
+ * hebdomadaire.
+ *
+ * Trois rôles et pas la typologie complète : ce qui décide de la part d'une
+ * séance dans sa semaine, c'est qu'elle soit la sortie longue, une séance de
+ * qualité (échauffement et récupérations comprises) ou un footing — pas qu'elle
+ * soit du seuil ou de la VMA.
+ */
+export type SessionBudgetRole = 'long' | 'quality' | 'easy';
+
+/**
+ * Le budget d'**une** séance, en kilomètres.
+ *
+ * Le type vit ici, et non dans `plan-schema.ts` où `weeklySessionBudgets` le
+ * produit : ce module est la feuille de l'arbre de dépendances (`plan-schema`
+ * l'importe déjà), l'inverse fermerait un cycle.
+ */
+export type SessionBudget = { role: SessionBudgetRole; km: number };
+
+/** La décomposition d'**une** semaine, telle que le prompt l'imprime. */
+export type WeeklySessionBudget = {
+  /** Numéro de la semaine dans la numérotation du **plan entier**. */
+  weekNumber: number;
+  targetKm: number;
+  /** Les séances, sortie longue en tête puis qualité puis footings. */
+  sessions: readonly SessionBudget[];
+};
+
+/**
+ * Un groupe de séances de même rôle : `qualité ~4,5 km`, `4 footings ~3,5 km`.
+ *
+ * Un seul chiffre pour tout le groupe — celui de la première séance : les
+ * séances d'un même rôle portent le même budget, à un dixième de kilomètre près
+ * sur les footings, qui absorbent le reliquat de la division.
+ * Le compte n'est écrit que quand il y en a plusieurs, et le pluriel avec.
+ */
+function formatBudgetGroup(
+  sessions: readonly SessionBudget[],
+  singular: string,
+  plural: string,
+): string | null {
+  const first = sessions[0];
+  if (first === undefined) return null;
+  const label = sessions.length === 1 ? singular : `${sessions.length} ${plural}`;
+  return `${label} ~${formatNumber(first.km, 1)} km`;
+}
+
+/**
+ * La décomposition de chaque cible **entre ses séances**, une ligne par
+ * semaine : `S1 (~27,2 km) : SL sam ~8,0 km · qualité ~4,5 km · 4 footings ~3,7 km`.
+ *
+ * Ce qu'elle corrige, constaté sur les premiers plans de production : le modèle
+ * reçoit une cible hebdomadaire et écrit des semaines à 44 puis 70 km pour des
+ * cibles de 27 à 37 — non par désobéissance, mais parce que « répartir 27 km
+ * sur 6 séances dont une sortie longue et une séance de qualité » est une
+ * division qu'un petit modèle ne pose pas de tête. L'appli la pose pour lui,
+ * comme elle pose déjà les volumes hebdomadaires et les allures.
+ *
+ * Compacité : une ligne par semaine, groupée par rôle — pas une ligne par
+ * séance. Comptez ~25 tokens par semaine, à comparer aux ~12 de la ligne des
+ * cibles seules ({@link formatWeeklyVolumeTargets}).
+ *
+ * Les chiffres imprimés **tombent sur la cible** — à un dixième de kilomètre
+ * près, ce que la répartition du reliquat sur les footings laisse d'écart entre
+ * le chiffre d'un groupe et la somme réelle (cf. `weeklySessionBudgets`). Une
+ * aide au calcul dont la somme ne fait pas son total ferait écrire au modèle des
+ * semaines systématiquement sous leur cible.
+ *
+ * @param longRunDay jour ISO de la sortie longue — la seule séance dont le
+ * décompte nomme le jour, parce que c'est le seul qui soit imposé.
+ */
+export function formatWeeklySessionBudgets(
+  weeks: readonly WeeklySessionBudget[],
+  longRunDay: number,
+): string {
+  const day = ISO_DAY_SHORT_NAMES[longRunDay - 1] ?? formatIsoDay(longRunDay);
+
+  const rows = weeks.map((week) => {
+    const of = (role: SessionBudgetRole) => week.sessions.filter((session) => session.role === role);
+    const cells = [
+      formatBudgetGroup(of('long'), `SL ${day}`, `SL ${day}`),
+      formatBudgetGroup(of('quality'), 'qualité', 'qualité'),
+      formatBudgetGroup(of('easy'), 'footing', 'footings'),
+    ].filter((cell): cell is string => cell !== null);
+
+    return `S${week.weekNumber} (~${formatNumber(week.targetKm, 1)} km) : ${cells.join(' · ')}`;
+  });
+
+  return [
+    'Décomposition de chaque cible entre ses séances (échauffement et récupérations compris) — ' +
+      'ces chiffres tombent exactement sur la cible, pars de là plutôt que de refaire la division :',
+    ...rows,
   ].join('\n');
 }
 

@@ -92,7 +92,9 @@ import {
   formatPlanSteps,
   formatTrainingPaces,
   formatTrainingSnapshot,
+  formatWeeklySessionBudgets,
   formatWeeklyVolumeTargets,
+  type WeeklySessionBudget,
 } from './format';
 import {
   MIN_FIRST_WEEK_DAYS,
@@ -103,9 +105,9 @@ import {
   isMarathonGoal,
   mapPlanWeeksToSessions,
   planChunkJsonSchema,
-  planChunkOutputSchema,
-  planJsonSchema,
-  planOutputSchema,
+  planChunkOutputSchemaFor,
+  planJsonSchemaFor,
+  planOutputSchemaFor,
   planUpdateChunkJsonSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
@@ -113,6 +115,7 @@ import {
   resolveWeeklyTimeBudget,
   validatePlanBusinessRules,
   weekVolumeKm,
+  weeklySessionBudgets,
   weeklyVolumeTargets,
   type PlanChunkOutput,
   type PlanExpectations,
@@ -884,6 +887,59 @@ export function planVolumeTargets(
 }
 
 /**
+ * Le nombre de séances de qualité qu'une semaine porte, **par niveau** — la
+ * clé de la décomposition d'une cible ({@link weeklySessionBudgets}).
+ *
+ * Ce sont les chiffres que la surcharge de niveau du prompt annonce déjà
+ * ({@link LEVEL_RULES}) : au plus une pour un débutant, une à deux pour un
+ * intermédiaire, deux pour un confirmé. Le haut de la fourchette : la
+ * décomposition est indicative, et sous-estimer la qualité gonflerait la part
+ * des footings au point de rendre le chiffre inutilisable une semaine sur deux.
+ *
+ * Une semaine qui n'a pas la place les rabat d'elle-même — la décomposition
+ * garde toujours un footing à côté de la sortie longue.
+ */
+const QUALITY_SESSIONS_BY_LEVEL: Record<PlanLevel, number> = {
+  beginner: 1,
+  intermediate: 2,
+  advanced: 2,
+};
+
+/**
+ * La décomposition par séance des cibles d'une tranche (ou du plan entier),
+ * telle que le prompt l'imprime.
+ *
+ * La **première semaine entamée** en est exclue, et c'est le seul cas
+ * particulier : on ne sait pas combien de séances elle portera — le prompt lui
+ * dit « `sessionsPerWeek` au plus » —, et décomposer sa cible en six séances
+ * quand trois jours restent proposerait au modèle une semaine impossible.
+ */
+function sessionBudgetWeeks(
+  request: PlanRequest,
+  window: PlanWindow,
+  targets: readonly WeeklyVolumeTarget[],
+  chunk: PlanChunkSpec | null,
+): WeeklySessionBudget[] {
+  const from = chunk === null ? 0 : chunk.fromWeek;
+  const count = chunk === null ? window.weeks : chunk.weeks;
+  const quality = QUALITY_SESSIONS_BY_LEVEL[request.level];
+
+  const weeks: WeeklySessionBudget[] = [];
+  for (let index = from; index < from + count; index += 1) {
+    const target = targets[index];
+    if (target === undefined) continue;
+    if (index === 0 && window.firstWeekFromDay > 1) continue;
+
+    weeks.push({
+      weekNumber: index + 1,
+      targetKm: target.targetKm,
+      sessions: weeklySessionBudgets(target.targetKm, request.sessionsPerWeek, quality),
+    });
+  }
+  return weeks;
+}
+
+/**
  * Ce qu'une génération par tranches ajoute au message d'une tranche : sa place
  * dans le plan, et ce que la précédente a laissé.
  */
@@ -942,6 +998,7 @@ export function buildPlanMessages(
   const endsOn = shiftCivilDate(window.anchor, window.weeks * 7 - 1);
   const targets = planVolumeTargets(request, window, snapshot, paces);
   const chunk = chunkContext?.chunk ?? null;
+  const budgets = sessionBudgetWeeks(request, window, targets, chunk);
 
   const lines = [
     request.goalType === 'race' && request.raceDate !== undefined
@@ -979,6 +1036,10 @@ export function buildPlanMessages(
       chunk === null ? targets : targets.slice(chunk.fromWeek, chunk.fromWeek + chunk.weeks),
       chunk === null ? 1 : chunk.fromWeek + 1,
     ),
+    // Et la même chose d'un cran plus bas : ce que chaque cible donne, séance
+    // par séance. La cible seule laissait au modèle une division qu'il posait
+    // mal — cibles de 27 à 37 km, semaines écrites de 44 à 70.
+    ...(budgets.length === 0 ? [] : [formatWeeklySessionBudgets(budgets, request.longRunDay)]),
   ];
 
   return [
@@ -1677,12 +1738,20 @@ export async function generateWeeksInChunks(
         : chunkContinuityLine(weeksByChunk[chunk.index - 1], chunk.fromWeek);
     const withSummary = options.withSummary && chunk.index === lastIndex;
     const messages = options.messagesFor(chunk, continuity);
+    // Le compte de séances devient une contrainte de grammaire dès que la
+    // tranche ne porte que des semaines pleines — seule la première peut porter
+    // la semaine entamée, qui en compte légitimement moins (cf.
+    // `ChunkSessionBounds`).
+    const sessionBounds = {
+      sessionsPerWeek: options.sessionsPerWeek,
+      hasStartedWeek: chunk.index === 0 && (options.expectations.firstWeekFromDay ?? 1) > 1,
+    };
 
     const output = await generateWithBusinessRules<PlanChunkOutput>({
       messages: reprise === null ? messages : [...messages, { role: 'user', content: reprise }],
       schemaName: options.schemaName,
-      jsonSchema: planChunkJsonSchema(chunk.weeks, withSummary),
-      schema: planChunkOutputSchema,
+      jsonSchema: planChunkJsonSchema(chunk.weeks, withSummary, sessionBounds),
+      schema: planChunkOutputSchemaFor(sessionBounds),
       // Rien à juger ici : les règles de progression parlent du plan entier, et
       // une tranche n'en est qu'un morceau. La validation a lieu à l'assemblage.
       weeksOf: () => null,
@@ -1862,6 +1931,13 @@ async function writeGeneratedPlan(
   // vaut 5:00/km, et les blocs spécifiques la reçoivent au lieu de la zone M
   // (cf. `goalPaceSecPerKm`).
   const goalPace = goalPaceSecPerKm(request.goalText);
+  // Le compte de séances devient une contrainte de grammaire dès que toutes les
+  // semaines produites sont pleines — même bascule que pour une tranche, sur le
+  // format le plus courant (cf. `ChunkSessionBounds`).
+  const sessionBounds = {
+    sessionsPerWeek: request.sessionsPerWeek,
+    hasStartedWeek: window.firstWeekFromDay > 1,
+  };
 
   const output =
     chunks.length > 1
@@ -1883,8 +1959,8 @@ async function writeGeneratedPlan(
       : await generateWithBusinessRules({
           messages: buildPlanMessages(request, window, snapshot, paces),
           schemaName: 'training_plan',
-          jsonSchema: planJsonSchema,
-          schema: planOutputSchema,
+          jsonSchema: planJsonSchemaFor(sessionBounds),
+          schema: planOutputSchemaFor(sessionBounds),
           weeksOf: (plan) => plan.weeks,
           expectationsOf: () => expectations,
           withPostProcessedWeeks: (plan, postProcess) => ({

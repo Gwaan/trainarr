@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { TrainingPaces } from '@/lib/metrics/vdot';
 import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
-import { formatWeeklyVolumeTargets } from './format';
+import { formatWeeklyVolumeTargets, type SessionBudget } from './format';
 import {
   PLAN_OUTPUT_BOUNDS,
   applyDerivedMeasures,
@@ -12,16 +12,22 @@ import {
   isMarathonGoal,
   sessionPaceZone,
   mapPlanWeeksToSessions,
+  planChunkJsonSchema,
+  planChunkOutputSchemaFor,
   planJsonSchema,
+  planJsonSchemaFor,
   planOutputSchema,
+  planOutputSchemaFor,
   planReviewJsonSchema,
   planReviewOutputSchema,
+  planUpdateChunkJsonSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
   planWeeksPostProcessing,
   resolveWeeklyTimeBudget,
   taperWeekCount,
   validatePlanBusinessRules,
+  weeklySessionBudgets,
   weeklyVolumeTargets,
   type PlanExpectations,
   type PlanWeekOutput,
@@ -367,6 +373,141 @@ describe('JSON Schema', () => {
     expect(review.settings).toBe(
       (planUpdateJsonSchema.properties as Record<string, unknown>).settings,
     );
+  });
+});
+
+describe('JSON Schema — bornes du compte de séances', () => {
+  /** Le sous-schéma du tableau `sessions` d'une semaine. */
+  function sessionsSchemaOf(schema: Record<string, unknown>): Record<string, unknown> {
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    const week = properties.weeks.items as Record<string, Record<string, unknown>>;
+    return week.properties.sessions as Record<string, unknown>;
+  }
+
+  it('impose le compte exact de séances quand la tranche n’a que des semaines pleines', () => {
+    const schema = planChunkJsonSchema(5, false, { sessionsPerWeek: 6, hasStartedWeek: false });
+
+    expect(schema.properties).toMatchObject({ weeks: { minItems: 5, maxItems: 5 } });
+    // Le modèle ne PEUT plus écrire une septième séance : c'est tout l'objet du
+    // resserrement, la règle métier ne pouvait que le constater après coup.
+    expect(sessionsSchemaOf(schema)).toMatchObject({ minItems: 6, maxItems: 6 });
+  });
+
+  it('garde des bornes souples sur la tranche qui porte la semaine entamée', () => {
+    // Les items d'un tableau JSON Schema sont uniformes : imposer 6 séances à
+    // toutes les semaines de la tranche en imposerait 6 à une semaine amputée de
+    // ses premiers jours. C'est la règle métier qui juge celle-là.
+    const schema = planChunkJsonSchema(5, false, { sessionsPerWeek: 6, hasStartedWeek: true });
+
+    expect(sessionsSchemaOf(schema)).toMatchObject({
+      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
+      maxItems: 6,
+    });
+  });
+
+  it('reste aux bornes générales sans compte annoncé, et garde la forme des semaines', () => {
+    const schema = planChunkJsonSchema(3, false);
+    const sessions = sessionsSchemaOf(schema);
+
+    expect(sessions).toMatchObject({
+      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
+      maxItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
+    });
+    // Le resserrement ne touche à rien d'autre : mêmes séances, mêmes
+    // interdictions de propriétés inventées.
+    const week = (schema.properties as Record<string, Record<string, unknown>>).weeks
+      .items as Record<string, unknown>;
+    expect(week).toMatchObject({ additionalProperties: false, required: ['sessions'] });
+    expect(JSON.stringify(sessions.items)).toBe(
+      JSON.stringify(
+        (
+          (planJsonSchema.properties as Record<string, Record<string, unknown>>).weeks
+            .items as Record<string, Record<string, Record<string, unknown>>>
+        ).properties.sessions.items,
+      ),
+    );
+  });
+
+  it('impose le compte exact au plan produit d’un seul tenant', () => {
+    // Le format le plus courant (sous six semaines, pas de découpage) : rien n'y
+    // empêchait le modèle d'écrire la septième séance.
+    const schema = planJsonSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
+
+    expect(sessionsSchemaOf(schema)).toMatchObject({ minItems: 6, maxItems: 6 });
+    // L'enveloppe, elle, ne bouge pas : c'est le schéma d'une création, et le
+    // nombre de semaines y reste aux bornes générales.
+    expect(schema.required).toEqual(['summary', 'weeks']);
+    expect((schema.properties as Record<string, Record<string, unknown>>).weeks).toMatchObject({
+      minItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.min,
+      maxItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.max,
+    });
+  });
+
+  it('garde des bornes souples quand le plan porte la semaine entamée', () => {
+    // Même limite d'uniformité que pour une tranche : les items du tableau sont
+    // décrits une fois pour toutes les semaines.
+    const schema = planJsonSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
+
+    expect(sessionsSchemaOf(schema)).toMatchObject({
+      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
+      maxItems: 6,
+    });
+  });
+
+  it('laisse les enveloppes d’ajustement libres de leur compte de séances', () => {
+    // Leur premier appel porte aussi `settings`, dont `sessionsPerWeek` que
+    // l'instruction peut justement changer : le figer interdirait au modèle
+    // d'appliquer « passe à 5 séances par semaine ».
+    expect(sessionsSchemaOf(planUpdateChunkJsonSchema(4))).toMatchObject({
+      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
+      maxItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
+    });
+  });
+});
+
+describe('planChunkOutputSchemaFor', () => {
+  /** Une tranche d'une semaine de `sessions` séances. */
+  function chunkOf(sessions: number) {
+    return { weeks: [week([1, 2, 3, 4, 5, 6, 7].slice(0, sessions))] };
+  }
+
+  it('refuse le compte que la grammaire interdit, quand un provider l’ignore', () => {
+    const schema = planChunkOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
+
+    expect(schema.safeParse(chunkOf(6)).success).toBe(true);
+    expect(schema.safeParse(chunkOf(7)).success).toBe(false);
+    expect(schema.safeParse(chunkOf(5)).success).toBe(false);
+  });
+
+  it('accepte une semaine plus courte sur la tranche qui porte la semaine entamée', () => {
+    const schema = planChunkOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
+
+    expect(schema.safeParse(chunkOf(2)).success).toBe(true);
+    expect(schema.safeParse(chunkOf(6)).success).toBe(true);
+    expect(schema.safeParse(chunkOf(7)).success).toBe(false);
+  });
+});
+
+describe('planOutputSchemaFor', () => {
+  /** Un plan d'une semaine de `sessions` séances. */
+  function planOf(sessions: number) {
+    return { summary: 'x', weeks: [week([1, 2, 3, 4, 5, 6, 7].slice(0, sessions))] };
+  }
+
+  it('refuse le compte que la grammaire interdit, quand un provider l’ignore', () => {
+    const schema = planOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
+
+    expect(schema.safeParse(planOf(6)).success).toBe(true);
+    expect(schema.safeParse(planOf(7)).success).toBe(false);
+    expect(schema.safeParse(planOf(5)).success).toBe(false);
+  });
+
+  it('accepte une semaine plus courte quand le plan porte la semaine entamée', () => {
+    const schema = planOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
+
+    expect(schema.safeParse(planOf(2)).success).toBe(true);
+    expect(schema.safeParse(planOf(6)).success).toBe(true);
+    expect(schema.safeParse(planOf(7)).success).toBe(false);
   });
 });
 
@@ -2935,6 +3076,92 @@ describe('weeklyVolumeTargets', () => {
   });
 });
 
+describe('weeklySessionBudgets', () => {
+  /** Le total d'une décomposition, arrondi comme les cibles : au dixième. */
+  function total(budgets: readonly SessionBudget[]): number {
+    return Math.round(budgets.reduce((sum, budget) => sum + budget.km, 0) * 10) / 10;
+  }
+
+  it('répartit la cible entre sortie longue, qualité et footings', () => {
+    // 27,2 km sur 6 séances dont 2 de qualité : c'est la division que le modèle
+    // posait de travers, et elle n'a qu'une réponse.
+    expect(weeklySessionBudgets(27.2, 6, 2)).toEqual([
+      { role: 'long', km: 8 },
+      { role: 'quality', km: 4.5 },
+      { role: 'quality', km: 4.5 },
+      { role: 'easy', km: 3.4 },
+      { role: 'easy', km: 3.4 },
+      { role: 'easy', km: 3.4 },
+    ]);
+  });
+
+  it('fait tomber la somme exactement sur la cible', () => {
+    for (const targetKm of [8.3, 14, 27.2, 35.9, 44.4, 70.1]) {
+      for (const sessions of [2, 3, 4, 5, 6, 7]) {
+        for (const quality of [0, 1, 2]) {
+          expect(total(weeklySessionBudgets(targetKm, sessions, quality))).toBe(targetKm);
+        }
+      }
+    }
+  });
+
+  it('garde la sortie longue en tête de semaine et dans la part que la règle lui laisse', () => {
+    for (const targetKm of [8.3, 14, 27.2, 35.9, 44.4, 70.1]) {
+      for (const sessions of [2, 3, 4, 5, 6, 7]) {
+        for (const quality of [0, 1, 2]) {
+          const budgets = weeklySessionBudgets(targetKm, sessions, quality);
+          const [long, ...others] = budgets;
+
+          expect(budgets).toHaveLength(sessions);
+          expect(long.role).toBe('long');
+          // La règle métier lit exactement ces deux choses : la sortie longue est
+          // la plus longue séance, et sa part reste dans la fourchette.
+          expect(Math.max(...others.map((budget) => budget.km))).toBeLessThanOrEqual(long.km);
+          expect(long.km / targetKm).toBeGreaterThanOrEqual(0.2);
+          // 40 %, ou `1,6 / nombre de séances` quand la semaine est trop courte
+          // pour que 40 % suffise (cf. `longRunMaxShare`).
+          expect(long.km / targetKm).toBeLessThanOrEqual(Math.max(0.4, 1.6 / sessions));
+        }
+      }
+    }
+  });
+
+  it('pose la sortie longue autour de 30 % dès que la semaine a la place', () => {
+    // La fourchette annoncée (28-32 %) vaut à partir de 5 séances : en dessous,
+    // le partage égal du reste ferait un footing plus long que la sortie longue,
+    // et c'est elle qui monte — ce que la règle prévoit déjà.
+    for (const sessions of [5, 6, 7]) {
+      const share = weeklySessionBudgets(35.9, sessions, 2)[0].km / 35.9;
+      expect(share).toBeGreaterThanOrEqual(0.28);
+      expect(share).toBeLessThanOrEqual(0.32);
+    }
+    expect(weeklySessionBudgets(35.9, 3, 1)[0].km / 35.9).toBeGreaterThan(0.4);
+  });
+
+  it('ramène les séances de qualité à ce que la semaine peut porter', () => {
+    // Trois séances : une semaine garde un footing à côté de sa sortie longue.
+    const budgets = weeklySessionBudgets(27.2, 3, 2);
+    expect(budgets.filter((budget) => budget.role === 'quality')).toHaveLength(1);
+    expect(budgets.filter((budget) => budget.role === 'easy')).toHaveLength(1);
+    // Deux séances : la sortie longue et un footing, pas de qualité du tout.
+    expect(weeklySessionBudgets(27.2, 2, 2).map((budget) => budget.role)).toEqual(['long', 'easy']);
+  });
+
+  it('rend la cible entière à une semaine d’une seule séance, et rien sans semaine', () => {
+    expect(weeklySessionBudgets(12.4, 1, 2)).toEqual([{ role: 'long', km: 12.4 }]);
+    expect(weeklySessionBudgets(12.4, 0, 1)).toEqual([]);
+    expect(weeklySessionBudgets(0, 6, 1)).toEqual([]);
+  });
+
+  it('suit la part de sortie longue que l’appelant impose', () => {
+    expect(weeklySessionBudgets(40, 6, 1, 0.25)[0].km).toBe(10);
+    expect(weeklySessionBudgets(40, 6, 1, 0.35)[0].km).toBe(14);
+    // Mais jamais au-delà de ce que la règle accepte : 50 % sur 6 séances est
+    // refusé par `longRunMaxShare`, la décomposition s'arrête à 40 %.
+    expect(weeklySessionBudgets(40, 6, 1, 0.5)[0].km).toBe(16);
+  });
+});
+
 /** Une configuration de plan de la grille exhaustive, avec ses cibles chiffrées. */
 type VolumeCase = {
   /** De quoi lire un échec sans dérouler la grille à la main. */
@@ -3087,6 +3314,77 @@ describe('weeklyVolumeTargets × validatePlanBusinessRules', () => {
         testCase,
         violations: violationsForCase(testCase, printed[index]),
       }))
+      .filter(({ violations }) => violations.length > 0)
+      .map(({ testCase, violations }) => `${testCase.label} → ${violations.join(' | ')}`);
+
+    expect(failures).toEqual([]);
+  });
+});
+
+/**
+ * Le pendant du balayage précédent, un cran plus bas : un plan qui suit la
+ * **décomposition par séance** ne viole aucune règle non plus.
+ *
+ * C'est ce que la décomposition promet au modèle. Si une seule configuration
+ * produisait une semaine fautive — une sortie longue hors de sa fourchette, un
+ * total hors de la bande de ±10 % —, le prompt lui donnerait des chiffres que la
+ * validation refuse, et la reprise serait perdue d'avance.
+ */
+describe('weeklySessionBudgets × validatePlanBusinessRules', () => {
+  /** Ce que le service décompose par niveau (`QUALITY_SESSIONS_BY_LEVEL`). */
+  const QUALITY_BY_LEVEL = { beginner: 1, intermediate: 2, advanced: 2 } as const;
+
+  /** Une semaine écrite **en recopiant** la décomposition de sa cible. */
+  function weekFromBudgets(
+    target: Pick<WeeklyVolumeTarget, 'targetKm' | 'targetMinutes'>,
+    sessionsPerWeek: number,
+    longRunDay: number,
+    quality: number,
+  ): PlanWeekOutput {
+    const budgets = weeklySessionBudgets(target.targetKm, sessionsPerWeek, quality);
+    const days = [longRunDay, ...[1, 2, 3, 4, 5, 6, 7].filter((day) => day !== longRunDay)];
+
+    return {
+      sessions: budgets.map((budget, index) => ({
+        day: days[index],
+        kind: budget.role === 'long' ? 'Sortie longue' : budget.role === 'quality' ? 'Seuil' : 'Endurance fondamentale',
+        title: 'Séance',
+        distanceKm: budget.km,
+        ...(budget.role === 'quality' ? { steps: qualitySteps() } : {}),
+      })),
+    };
+  }
+
+  it('produit des semaines qu’aucune règle de volume ne refuse', () => {
+    const failures = volumeCases()
+      .map((testCase) => {
+        const { params, sessionsPerWeek, longRunDay } = testCase;
+        const quality = QUALITY_BY_LEVEL[params.level];
+        const plan = testCase.targets.map((target, index) =>
+          // La première semaine entamée n'est pas décomposée : on ne sait pas
+          // combien de séances elle portera (cf. `sessionBudgetWeeks`).
+          index === 0 && params.firstWeekFromDay > 1
+            ? weekForTarget(target, sessionsPerWeek, longRunDay, params.firstWeekFromDay)
+            : weekFromBudgets(target, sessionsPerWeek, longRunDay, quality),
+        );
+
+        return {
+          testCase,
+          violations: validatePlanBusinessRules(
+            plan,
+            {
+              scope: 'creation',
+              weeks: params.weeks,
+              sessionsPerWeek,
+              longRunDay,
+              firstWeekFromDay: params.firstWeekFromDay,
+              race: params.race,
+              weeklyTargets: testCase.targets,
+            },
+            { weeklyTimeMinutes: params.weeklyTimeMinutes, recentWeeklyKm: params.recentWeeklyKm },
+          ),
+        };
+      })
       .filter(({ violations }) => violations.length > 0)
       .map(({ testCase, violations }) => `${testCase.label} → ${violations.join(' | ')}`);
 

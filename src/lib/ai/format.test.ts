@@ -10,6 +10,7 @@ import {
   formatDaysAgo,
   formatDistanceKm,
   formatDuration,
+  formatWeeklySessionBudgets,
   formatWeeklyVolumeTargets,
   formatIsoDay,
   formatNumber,
@@ -277,6 +278,79 @@ describe('formatPaceRange', () => {
   it('ne répète pas l’unité sur une plage, et la tait sur une allure unique', () => {
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 320 })).toBe('5:00–5:20/km');
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 300 })).toBe('5:00/km');
+  });
+});
+
+describe('formatWeeklySessionBudgets', () => {
+  /** Les lignes de semaines, sans l'en-tête qui les introduit. */
+  function rows(text: string): string[] {
+    return text.split('\n').slice(1);
+  }
+
+  it('tient une semaine sur une ligne, groupée par type de séance', () => {
+    const text = formatWeeklySessionBudgets(
+      [
+        {
+          weekNumber: 1,
+          targetKm: 27.2,
+          sessions: [
+            { role: 'long', km: 8 },
+            { role: 'quality', km: 4.5 },
+            { role: 'easy', km: 3.4 },
+            { role: 'easy', km: 3.4 },
+            { role: 'easy', km: 3.4 },
+            { role: 'easy', km: 3.5 },
+          ],
+        },
+      ],
+      6,
+    );
+
+    // Un chiffre par groupe, pas une ligne par séance : c'est ce qui rend la
+    // décomposition payable sur seize semaines.
+    expect(rows(text)).toEqual([
+      'S1 (~27,2 km) : SL sam ~8,0 km · qualité ~4,5 km · 4 footings ~3,4 km',
+    ]);
+  });
+
+  it('écrit le compte au pluriel seulement, et nomme le jour de la sortie longue', () => {
+    const text = formatWeeklySessionBudgets(
+      [
+        {
+          weekNumber: 7,
+          targetKm: 20,
+          sessions: [
+            { role: 'long', km: 9 },
+            { role: 'quality', km: 4 },
+            { role: 'quality', km: 4 },
+            { role: 'easy', km: 3 },
+          ],
+        },
+      ],
+      3,
+    );
+
+    expect(rows(text)).toEqual([
+      'S7 (~20,0 km) : SL mer ~9,0 km · 2 qualité ~4,0 km · footing ~3,0 km',
+    ]);
+  });
+
+  it('n’écrit pas les groupes vides', () => {
+    const text = formatWeeklySessionBudgets(
+      [{ weekNumber: 2, targetKm: 10, sessions: [{ role: 'long', km: 6 }, { role: 'easy', km: 4 }] }],
+      7,
+    );
+
+    expect(rows(text)).toEqual(['S2 (~10,0 km) : SL dim ~6,0 km · footing ~4,0 km']);
+  });
+
+  it('dit que ces chiffres tombent sur la cible, pour qu’ils servent de départ', () => {
+    const text = formatWeeklySessionBudgets(
+      [{ weekNumber: 1, targetKm: 10, sessions: [{ role: 'long', km: 10 }] }],
+      7,
+    );
+
+    expect(text.split('\n')[0]).toContain('ces chiffres tombent exactement sur la cible');
   });
 });
 
