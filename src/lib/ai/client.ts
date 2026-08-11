@@ -201,6 +201,50 @@ export type ChatMessage = {
   content: string;
 };
 
+/**
+ * Fusionne les tours consécutifs de même rôle en un seul, contenus joints par
+ * une ligne vide.
+ *
+ * Le format OpenAI accepte deux messages `user` d'affilée, mais les templates de
+ * chat strictes ne s'en contentent pas : celle de Mistral, appliquée par
+ * llama-server, exige une alternance `user`/`assistant` après le système
+ * facultatif et répond « After the optional system message, conversation roles
+ * must alternate user/assistant/... » en HTTP 400 — la génération est perdue
+ * avant d'avoir commencé.
+ *
+ * Or la boucle de reprise de `plan-service.ts` empile sciemment des tours `user`
+ * (le rappel des violations métier, la consigne de correction) sans intercaler la
+ * sortie précédente du modèle : chaque tentative réécrit le plan de zéro, et
+ * réinjecter la proposition rejetée coûterait des milliers de tokens dans un
+ * contexte de 16 k. C'est donc ici, à la frontière du provider, que la
+ * conversation est mise en forme : le prompt reste identique mot pour mot, il
+ * voyage simplement en un tour au lieu de trois, et toutes les templates
+ * l'acceptent.
+ *
+ * Sans rien à fusionner, le tableau d'entrée est rendu tel quel ; les messages
+ * ne sont jamais mutés.
+ */
+export function coalesceConsecutiveRoles(messages: ChatMessage[]): ChatMessage[] {
+  const alternates = messages.every(
+    (message, index) => index === 0 || messages[index - 1].role !== message.role,
+  );
+  if (alternates) return messages;
+
+  const coalesced: ChatMessage[] = [];
+  for (const message of messages) {
+    const previous: ChatMessage | undefined = coalesced[coalesced.length - 1];
+    if (previous !== undefined && previous.role === message.role) {
+      coalesced[coalesced.length - 1] = {
+        role: previous.role,
+        content: `${previous.content}\n\n${message.content}`,
+      };
+    } else {
+      coalesced.push(message);
+    }
+  }
+  return coalesced;
+}
+
 export type ChatCompletionOptions = {
   messages: ChatMessage[];
   temperature?: number;
@@ -525,7 +569,9 @@ async function postChatCompletion(
 
   const body = {
     model: env.AI_MODEL ?? DEFAULT_MODEL,
-    messages: options.messages,
+    // Fusionnés au dernier moment : les templates de chat strictes refusent deux
+    // tours de même rôle d'affilée — cf. {@link coalesceConsecutiveRoles}.
+    messages: coalesceConsecutiveRoles(options.messages),
     // `JSON.stringify` écarte les valeurs `undefined` : un paramètre non
     // renseigné n'est pas transmis, le serveur applique son propre défaut.
     temperature: options.temperature,

@@ -13,6 +13,7 @@ import {
   aiEndpointUrl,
   chatCompletion,
   chatCompletionJson,
+  coalesceConsecutiveRoles,
   type ChatMessage,
 } from './client';
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from './errors';
@@ -118,6 +119,83 @@ describe('aiEndpointUrl', () => {
     expect(aiEndpointUrl('https://ia.exemple/llama', '/v1/chat/completions')).toBe(
       'https://ia.exemple/llama/v1/chat/completions',
     );
+  });
+});
+
+describe('coalesceConsecutiveRoles', () => {
+  it('fusionne deux tours user consécutifs, séparés par une ligne vide', () => {
+    expect(
+      coalesceConsecutiveRoles([
+        { role: 'user', content: 'Écris le plan.' },
+        { role: 'user', content: 'Semaine 3 : volume dépassé.' },
+      ]),
+    ).toEqual([{ role: 'user', content: 'Écris le plan.\n\nSemaine 3 : volume dépassé.' }]);
+  });
+
+  it('réduit une suite de trois reprises à un seul tour, après le système', () => {
+    // La forme exacte que produit la boucle de reprise de `plan-service.ts` :
+    // consigne initiale, puis deux rappels de violations, sans jamais réinjecter
+    // la proposition rejetée.
+    expect(
+      coalesceConsecutiveRoles([
+        { role: 'system', content: 'Tu es le coach.' },
+        { role: 'user', content: 'a' },
+        { role: 'user', content: 'b' },
+        { role: 'user', content: 'c' },
+      ]),
+    ).toEqual([
+      { role: 'system', content: 'Tu es le coach.' },
+      { role: 'user', content: 'a\n\nb\n\nc' },
+    ]);
+  });
+
+  it("préserve l'ordre et les rôles d'une conversation à plusieurs blocs", () => {
+    expect(
+      coalesceConsecutiveRoles([
+        { role: 'system', content: 's1' },
+        { role: 'system', content: 's2' },
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'a1' },
+        { role: 'assistant', content: 'a2' },
+        { role: 'user', content: 'u2' },
+      ]),
+    ).toEqual([
+      { role: 'system', content: 's1\n\ns2' },
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1\n\na2' },
+      { role: 'user', content: 'u2' },
+    ]);
+  });
+
+  it('rend telle quelle une conversation déjà alternée', () => {
+    const alternating: ChatMessage[] = [
+      { role: 'system', content: 'Tu es le coach.' },
+      { role: 'user', content: 'Résume ma semaine.' },
+      { role: 'assistant', content: '42 km.' },
+      { role: 'user', content: 'Et la charge ?' },
+    ];
+
+    // Même référence : rien à fusionner, donc rien à reconstruire.
+    expect(coalesceConsecutiveRoles(alternating)).toBe(alternating);
+  });
+
+  it("envoie au provider les messages fusionnés, jamais la pile d'origine", async () => {
+    // Le point de la manœuvre : la template de chat de Mistral, appliquée par
+    // llama-server, rejette deux tours `user` d'affilée en HTTP 400.
+    const { calls } = stubFetch(completion('ok'));
+
+    await chatCompletion({
+      messages: [
+        { role: 'system', content: 'Tu es le coach.' },
+        { role: 'user', content: 'Écris le plan.' },
+        { role: 'user', content: 'Semaine 3 : volume dépassé.' },
+      ],
+    });
+
+    expect(bodyOf(calls[0]).messages).toEqual([
+      { role: 'system', content: 'Tu es le coach.' },
+      { role: 'user', content: 'Écris le plan.\n\nSemaine 3 : volume dépassé.' },
+    ]);
   });
 });
 
