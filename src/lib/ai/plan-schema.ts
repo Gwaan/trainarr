@@ -26,6 +26,7 @@
 
 import { z } from 'zod';
 
+import type { PlanLevel } from '@/data/db/schema';
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import type { PaceZone, TrainingPaces } from '@/lib/metrics/vdot';
@@ -193,6 +194,22 @@ export const planOutputSchema = z.object({
 });
 
 /**
+ * Ce que le modèle produit pour **une tranche** d'un plan long (cf. la
+ * génération par tranches de `plan-service.ts`).
+ *
+ * Les mêmes semaines, sans enveloppe : une tranche n'est pas un plan, elle n'a
+ * ni objectif ni réglages propres. Le `summary` n'y est que parce que la
+ * **dernière** tranche le porte — c'est elle qui a vu passer tout le plan, et
+ * c'est le seul moment où il peut être écrit en connaissance de cause. Sur les
+ * autres tranches, la grammaire ne propose même pas la clé
+ * ({@link planChunkJsonSchema}).
+ */
+export const planChunkOutputSchema = z.object({
+  summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars).optional(),
+  weeks: planWeeksSchema,
+});
+
+/**
  * Réglages qu'une instruction peut faire bouger. Tous facultatifs : le modèle
  * ne renvoie que ce que l'instruction change réellement.
  *
@@ -267,6 +284,7 @@ export const planReviewOutputSchema = z.discriminatedUnion('decision', [
 export type PlanSessionOutput = z.infer<typeof planSessionSchema>;
 export type PlanWeekOutput = z.infer<typeof planWeekSchema>;
 export type PlanOutput = z.infer<typeof planOutputSchema>;
+export type PlanChunkOutput = z.infer<typeof planChunkOutputSchema>;
 export type PlanUpdateOutput = z.infer<typeof planUpdateOutputSchema>;
 export type PlanSettingsOutput = z.infer<typeof planSettingsPatchSchema>;
 export type PlanReviewOutput = z.infer<typeof planReviewOutputSchema>;
@@ -433,6 +451,39 @@ export const planJsonSchema: Record<string, unknown> = {
 };
 
 /**
+ * JSON Schema d'**une tranche** — le pendant de {@link planChunkOutputSchema},
+ * aux bornes de la tranche.
+ *
+ * Deux resserrements par rapport au schéma d'un plan entier, et les deux
+ * comptent sur un petit modèle : le nombre de semaines est **exact** (`minItems`
+ * = `maxItems`), donc la grammaire l'empêche d'en écrire une de trop ou de moins
+ * — ce que la règle métier ne pouvait que constater après coup, au prix d'une
+ * régénération ; et la clé `summary` **n'existe pas** hors de la dernière
+ * tranche, plutôt que d'être facultative. Une clé absente de la grammaire ne
+ * peut pas être écrite ; une clé facultative, si — et un modèle qui résume
+ * chaque tranche paie trois fois le prix d'un résumé qui sera jeté deux fois.
+ *
+ * @param weeks nombre de semaines attendues dans cette tranche.
+ * @param withSummary la tranche porte-t-elle le résumé du plan (la dernière) ?
+ */
+export function planChunkJsonSchema(weeks: number, withSummary: boolean): Record<string, unknown> {
+  const chunkWeeksJsonSchema = { ...weeksJsonSchema, minItems: weeks, maxItems: weeks };
+  return withSummary
+    ? {
+        type: 'object',
+        additionalProperties: false,
+        required: ['weeks', 'summary'],
+        properties: { weeks: chunkWeeksJsonSchema, summary: summaryJsonSchema },
+      }
+    : {
+        type: 'object',
+        additionalProperties: false,
+        required: ['weeks'],
+        properties: { weeks: chunkWeeksJsonSchema },
+      };
+}
+
+/**
  * Les réglages durables, tels que la modification et la révision les rendent.
  *
  * `weeklyTimeMinutes` n'y est qu'un entier, sans `null` : `type: [..., 'null']`
@@ -475,6 +526,28 @@ export const planUpdateJsonSchema: Record<string, unknown> = {
 };
 
 /**
+ * Le même schéma, dont `weeks` compte **exactement** `weeks` éléments.
+ *
+ * Sert aux enveloppes d'un ajustement ou d'une révision découpés en tranches :
+ * leur premier appel porte à la fois les réglages (ou la décision) et les
+ * semaines de la première tranche, pas celles de toute la fenêtre restante. La
+ * grammaire le dit, plutôt que de laisser une règle métier le constater après
+ * coup (cf. {@link planChunkJsonSchema}).
+ */
+function withWeekCount(schema: Record<string, unknown>, weeks: number): Record<string, unknown> {
+  const properties = schema.properties as Record<string, unknown>;
+  return {
+    ...schema,
+    properties: { ...properties, weeks: { ...weeksJsonSchema, minItems: weeks, maxItems: weeks } },
+  };
+}
+
+/** L'enveloppe d'un ajustement, bornée à la première tranche. */
+export function planUpdateChunkJsonSchema(weeks: number): Record<string, unknown> {
+  return withWeekCount(planUpdateJsonSchema, weeks);
+}
+
+/**
  * JSON Schema d'une révision — le pendant de {@link planReviewOutputSchema}.
  *
  * `weeks` et `settings` restent hors de `required` : c'est ce qui permet à une
@@ -502,6 +575,16 @@ export const planReviewJsonSchema: Record<string, unknown> = {
     weeks: weeksJsonSchema,
   },
 };
+
+/**
+ * L'enveloppe d'une révision, bornée à la première tranche.
+ *
+ * `weeks` y reste hors de `required` : une révision qui conclut « keep » n'écrit
+ * aucune semaine, et le compte exact ne vaut que pour celle qui ajuste.
+ */
+export function planReviewChunkJsonSchema(weeks: number): Record<string, unknown> {
+  return withWeekCount(planReviewJsonSchema, weeks);
+}
 
 /*
  * Mapping vers le DAL.
@@ -614,6 +697,16 @@ export type PlanExpectations = {
    * n'y a rien à affûter.
    */
   race?: PlanRaceGoal | null;
+  /**
+   * Les volumes hebdomadaires que l'appli a calculés pour cette fenêtre
+   * ({@link weeklyVolumeTargets}), dans l'ordre des semaines — absents quand
+   * aucune cible n'a été chiffrée, et la règle ne s'applique alors pas.
+   *
+   * Ces cibles sont annoncées au modèle dans le prompt : les lui vérifier n'est
+   * pas une exigence de plus, c'est celle dont toutes les autres découlent (cf.
+   * l'en-tête des volumes cibles).
+   */
+  weeklyTargets?: readonly WeeklyVolumeTarget[] | null;
 };
 
 /**
@@ -731,7 +824,14 @@ export function sessionPaceZone(kind: string): PaceZoneKey {
   return PACE_ZONE_ORDER.find((zone) => PACE_ZONE_PATTERNS[zone].test(normalized)) ?? 'easy';
 }
 
-function isIntensitySession(session: PlanSessionOutput): boolean {
+/**
+ * La séance est-elle une séance de **qualité** (seuil, VMA, répétitions) ?
+ *
+ * Exportée pour le résumé de continuité d'une tranche (`plan-service.ts`) : la
+ * tranche suivante doit savoir quelles séances dures la précédente a placées,
+ * sous peine d'en enchaîner trois du même type.
+ */
+export function isIntensitySession(session: PlanSessionOutput): boolean {
   const kind = normalizeText(session.kind);
   return INTENSITY_ZONES.some((zone) => PACE_ZONE_PATTERNS[zone].test(kind));
 }
@@ -1052,9 +1152,14 @@ function targetsHeartRateOnly(steps: PlanSessionSteps | undefined): boolean {
  *
  * Quand la table existe, l'appli pose les allures ; elle a donc tout ce qu'il
  * faut pour poser aussi les durées, et une durée dérivée d'une distance et d'une
- * allure connues n'est pas une invention — c'est une division. Le régime **sans
- * table** garde les durées du modèle : sans allure certaine, les recalculer
- * reviendrait à fabriquer une métrique, ce que le projet s'interdit.
+ * allure connues n'est pas une invention — c'est une division.
+ *
+ * Le régime **sans table** fait la même comptabilité avec les allures qu'il a
+ * sous la main ({@link applyDerivedMeasures}) : celles que le modèle a écrites,
+ * l'allure récente de l'athlète à défaut. Ce n'est pas une métrique fabriquée —
+ * la somme d'un déroulé est celle des chiffres du modèle lui-même — et c'est ce
+ * qui évite qu'un plan sans chrono de référence reste condamné faute de volumes
+ * vérifiables.
  */
 
 /**
@@ -1073,33 +1178,113 @@ function stepPaceForDuration(step: PlanStep, fallback: number): number {
 }
 
 /**
- * Ce qu'un déroulé totalise : du temps, et la distance qu'il couvre réellement.
+ * L'allure qui sert à convertir la durée d'une **étape** en distance, en s/km —
+ * l'opération inverse de {@link stepPaceForDuration}, et elle n'a pas les mêmes
+ * replis.
  *
- * Les deux sont nécessaires parce qu'un déroulé ne décrit pas forcément toute la
- * séance (cf. {@link imposedDurationMin}) : sans sa distance, rien ne
- * distinguerait un déroulé complet d'un extrait.
+ * L'allure posée sur l'étape d'abord — c'est le cas courant, l'imposition vient
+ * de passer. À défaut (une étape ciblée en fréquence cardiaque, une
+ * récupération), seul le **corps de séance** hérite du créneau de sa séance :
+ * tout le reste se chronomètre en endurance.
+ *
+ * Ce n'est pas un détail de repli. Prêter à un trot de 2 min l'allure VMA de la
+ * séance qui l'entoure lui compterait 500 m au lieu de 250, et prêter la même à
+ * un échauffement en Z2 en compterait deux de trop : ces kilomètres-là
+ * gonfleraient le volume hebdomadaire, celui-là même que les cibles surveillent.
+ * L'endurance reste généreuse pour une récupération (un trot est plus lent),
+ * mais elle est du bon ordre de grandeur — et c'est exactement l'allure à
+ * laquelle un échauffement se court ({@link envelopePaceZone}).
+ *
+ * @param fallback le milieu du créneau de la séance.
+ * @param easy le milieu du créneau d'endurance.
+ */
+function stepPaceForDistance(step: PlanStep, fallback: number, easy: number): number {
+  if (step.paceMinSecPerKm !== null && step.paceMaxSecPerKm !== null) {
+    return Math.round((step.paceMinSecPerKm + step.paceMaxSecPerKm) / 2);
+  }
+  return step.role === 'run' ? fallback : easy;
+}
+
+/**
+ * Ce qu'un déroulé totalise : du temps, la distance qu'il **déclare**, et celle
+ * qu'il **couvre** une fois les étapes chronométrées converties.
+ *
+ * Les trois sont nécessaires, et la distinction entre les deux dernières porte
+ * tout le raisonnement de {@link imposedDistanceKm} :
+ *
+ * - `declaredKm` ne compte que les étapes exprimées en mètres. C'est elle qui
+ *   dit si le déroulé décrit toute la séance ou un extrait ({@link
+ *   imposedDurationMin}) ;
+ * - `coverageKm` y ajoute les étapes exprimées en secondes, divisées par leur
+ *   allure ({@link stepPaceForDistance}) : c'est la distance réellement parcourue
+ *   par la séance décrite, la seule chose à opposer à un `distanceKm` manquant.
  */
 function stepsTotals(
   steps: PlanSessionSteps,
   fallback: number,
-): { seconds: number; distanceKm: number } {
+  easy: number,
+): { seconds: number; declaredKm: number; coverageKm: number } {
   let seconds = 0;
   let meters = 0;
+  let coverage = 0;
 
   for (const block of steps) {
     let blockSeconds = 0;
     let blockMeters = 0;
+    let blockCoverage = 0;
     for (const step of block.steps) {
       // Le schéma garantit exactement une mesure par étape.
       blockSeconds +=
         step.durationS ?? ((step.distanceM ?? 0) / 1000) * stepPaceForDuration(step, fallback);
       blockMeters += step.distanceM ?? 0;
+      blockCoverage +=
+        step.distanceM !== null
+          ? step.distanceM / 1000
+          : (step.durationS ?? 0) / stepPaceForDistance(step, fallback, easy);
     }
     seconds += blockSeconds * block.repeat;
     meters += blockMeters * block.repeat;
+    coverage += blockCoverage * block.repeat;
   }
 
-  return { seconds, distanceKm: meters / 1000 };
+  return { seconds, declaredKm: meters / 1000, coverageKm: coverage };
+}
+
+/** Un volume en kilomètres, arrondi au dixième — la précision qu'un plan écrit. */
+function roundKm(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * La distance d'une séance, **dérivée de son déroulé quand le modèle ne l'a pas
+ * écrite** — et le drapeau qui dit d'où elle sort.
+ *
+ * Le défaut que cela corrige, constaté en production sur toutes les générations
+ * d'une salve : le modèle n'écrit *jamais* `distanceKm` au niveau de la séance.
+ * Sous grammaire GBNF l'ordre des propriétés est contraint — une propriété
+ * facultative sautée ne peut plus être rattrapée plus loin dans l'objet — donc
+ * la reprise ne rattrape rien non plus : les trois tentatives butaient sur
+ * « Volumes hebdomadaires invérifiables », et aucun plan ne sortait.
+ *
+ * Or la distance n'est pas une invention ici, c'est une division : les allures
+ * viennent d'être posées sur chaque étape, et une étape porte exactement une
+ * mesure. Un déroulé complet dit donc la distance de sa séance.
+ *
+ * La valeur du modèle reste **prioritaire quand elle est présente et au moins
+ * égale à la couverture du déroulé** : c'est le cas de la sortie longue à
+ * déroulé partiel (18 km dont un unique bloc de 3 km à allure objectif), où le
+ * déroulé n'est qu'un extrait. En dessous de la couverture, elle contredit le
+ * déroulé qu'elle accompagne, et c'est le déroulé qui fait foi.
+ */
+function imposedDistanceKm(
+  declared: number | undefined,
+  totals: { coverageKm: number } | null,
+): { distanceKm: number | undefined; fromSteps: boolean } {
+  if (totals === null || totals.coverageKm <= 0) return { distanceKm: declared, fromSteps: false };
+  if (declared !== undefined && declared >= totals.coverageKm) {
+    return { distanceKm: declared, fromSteps: false };
+  }
+  return { distanceKm: roundKm(totals.coverageKm), fromSteps: true };
 }
 
 /**
@@ -1130,26 +1315,32 @@ function stepsTotals(
  * Un déroulé qui couvre toute la distance déclarée reste maître de la durée :
  * c'est lui le plus précis, allure par allure.
  *
- * @param session la séance **allures déjà posées** : les étapes portent ce que
- * l'appli a écrit, pas ce que le modèle avait proposé.
- * @param zone le créneau de la séance, `null` sur une récupération.
+ * Et quand la distance vient d'être **dérivée du déroulé**
+ * ({@link imposedDistanceKm}), le second calcul n'a plus lieu d'être : il
+ * repasserait par la même distance, à l'allure moyenne de la séance cette fois,
+ * et compterait deux fois les étapes chronométrées. Le déroulé est alors la
+ * seule source, et il est complet par construction.
+ *
+ * @param distanceKm la distance de la séance, telle que {@link imposedDistanceKm}
+ * l'a arrêtée.
+ * @param fromSteps cette distance sort-elle du déroulé ?
+ * @param totals les totaux du déroulé, `null` quand la séance n'en porte pas.
+ * @param fallback le milieu du créneau de la séance.
  */
 function imposedDurationMin(
   session: PlanSessionOutput,
-  zone: PaceZone | null,
-  paces: TrainingPaces,
+  distanceKm: number | undefined,
+  fromSteps: boolean,
+  totals: { seconds: number; declaredKm: number } | null,
+  fallback: number,
 ): number | undefined {
-  const fallback = middleOf(zone ?? paces.easy);
-  const { distanceKm } = session;
-
-  if (session.steps === undefined) {
+  if (totals === null) {
     if (distanceKm === undefined) return session.durationMin;
     return Math.round((distanceKm * fallback) / 60);
   }
 
-  const totals = stepsTotals(session.steps, fallback);
   const bySteps = Math.round(totals.seconds / 60);
-  if (distanceKm === undefined || totals.distanceKm >= distanceKm) return bySteps;
+  if (fromSteps || distanceKm === undefined || totals.declaredKm >= distanceKm) return bySteps;
 
   return Math.max(bySteps, Math.round((distanceKm * fallback) / 60));
 }
@@ -1171,14 +1362,21 @@ function imposeSessionPaces(
     steps: block.steps.map((step) => imposeStepPace(step, zone, envelope, paces, goal)),
   }));
 
-  const imposed = {
+  const fallback = middleOf(zone ?? paces.easy);
+  // Les totaux se calculent une fois, sur les étapes **allures posées** : c'est
+  // d'eux que sortent la distance manquante puis la durée.
+  const totals =
+    steps === undefined ? null : stepsTotals(steps, fallback, middleOf(paces.easy));
+  const { distanceKm, fromSteps } = imposedDistanceKm(session.distanceKm, totals);
+
+  return {
     ...session,
     // Le milieu du créneau : une cible de séance est un chiffre, pas une plage.
     targetPaceSecPerKm: zone === null || targetsHeartRateOnly(steps) ? undefined : middleOf(zone),
     steps,
+    distanceKm,
+    durationMin: imposedDurationMin(session, distanceKm, fromSteps, totals, fallback),
   };
-
-  return { ...imposed, durationMin: imposedDurationMin(imposed, zone, paces) };
 }
 
 /**
@@ -1194,11 +1392,14 @@ function imposeSessionPaces(
  *
  * La **durée** de chaque séance est recalculée dans la foulée
  * ({@link imposedDurationMin}) : les allures venant d'être posées, elle se
- * déduit du contenu au lieu d'être écrite par le modèle.
+ * déduit du contenu au lieu d'être écrite par le modèle. Sa **distance** l'est
+ * aussi, mais seulement quand le modèle ne l'a pas écrite ou qu'elle contredit
+ * le déroulé ({@link imposedDistanceKm}) — sans quoi aucun volume hebdomadaire
+ * ne serait vérifiable.
  *
  * Fonction **pure** : les semaines d'entrée ne sont pas touchées, tout est
  * reconstruit. Rien d'autre de la sortie du modèle n'est modifié — ni les
- * distances, ni les répétitions, ni les notes.
+ * répétitions, ni les notes, ni les mesures des étapes.
  *
  * @param goalPaceSecPerKm l'allure de l'objectif chiffré de l'athlète
  * ({@link goalPaceSecPerKm}), quand son but en donne une : les étapes « allure
@@ -1213,6 +1414,163 @@ export function applyImposedPaces(
   return weeks.map((week) => ({
     sessions: week.sessions.map((session) => imposeSessionPaces(session, paces, goal)),
   }));
+}
+
+/*
+ * Mesures dérivées — le régime **sans table**.
+ *
+ * ## Le trou que cela bouche
+ *
+ * La dérivation de `distanceKm` vivait dans {@link applyImposedPaces}, donc elle
+ * ne tournait **que** quand la table VDOT existait. Or le constat de production
+ * qui l'a motivée ne dépend pas de la table : le modèle n'écrit jamais
+ * `distanceKm` au niveau de la séance, table ou pas. Un plan généré sans chrono
+ * de référence restait donc condamné par « Volumes hebdomadaires
+ * invérifiables » — trois tentatives, aucun plan.
+ *
+ * ## Ce qui change, et ce qui ne change surtout pas
+ *
+ * **Aucune allure n'est écrite ici.** Sans table, il n'y a rien à prescrire que
+ * le modèle ne sache mieux : ses allures restent les siennes, et c'est le
+ * corridor de plausibilité ({@link paceCorridor}) qui continue de les juger.
+ * Seule la **comptabilité** est complétée : la distance manquante et la durée,
+ * exactement comme le régime avec table les calcule ({@link imposedDistanceKm},
+ * {@link imposedDurationMin}) — même machinerie, seule l'allure de conversion
+ * diffère.
+ */
+
+/**
+ * L'allure de dernier recours pour **estimer** un volume, en s/km.
+ *
+ * 8:00/km, l'ordre de grandeur d'un footing. Elle ne sert qu'à convertir une
+ * mesure en l'autre quand plus rien d'autre n'est connu — ni allure d'étape, ni
+ * cible de séance, ni allure récente : une athlète sans historique et sans
+ * chrono. Elle n'est **jamais prescrite** : elle ne s'écrit ni sur une étape ni
+ * sur une séance, et l'athlète ne la lit nulle part. Estimer un volume pour
+ * qu'il soit vérifiable et prescrire une allure sont deux choses différentes ;
+ * seule la première se contente d'un ordre de grandeur.
+ */
+const ESTIMATION_FALLBACK_PACE_SEC_PER_KM = 480;
+
+/**
+ * L'allure à laquelle les mesures d'une séance se convertissent, en s/km, du
+ * plus fiable au moins fiable : la cible que le modèle a posée sur la séance,
+ * l'allure d'entraînement récente de l'athlète, puis le repli
+ * ({@link ESTIMATION_FALLBACK_PACE_SEC_PER_KM}).
+ *
+ * L'allure de l'**étape**, elle, passe avant tout cela — c'est
+ * {@link stepPaceForDuration} et {@link stepPaceForDistance} qui la préfèrent,
+ * étape par étape, et qui ne retombent sur celle-ci qu'à défaut.
+ */
+function sessionEstimationPace(
+  session: PlanSessionOutput,
+  referencePaceSecPerKm: number | null,
+): number {
+  return (
+    session.targetPaceSecPerKm ?? referencePaceSecPerKm ?? ESTIMATION_FALLBACK_PACE_SEC_PER_KM
+  );
+}
+
+/**
+ * Une séance dont les mesures manquantes sont complétées, sans qu'aucune allure
+ * ne bouge.
+ *
+ * Quatre cas, et la ligne qui les sépare est toujours la même : **on complète ce
+ * que le modèle n'a pas écrit, et on ne corrige que ce que le modèle se
+ * contredit à lui-même.**
+ *
+ * - **Déroulé présent** : mêmes calculs qu'avec la table
+ *   ({@link imposedDistanceKm}, {@link imposedDurationMin}, maximum compris) —
+ *   la somme d'un déroulé, ce sont les chiffres du modèle, pas une estimation de
+ *   l'appli. Une durée de séance que son propre déroulé dément est donc refaite.
+ * - **Sans déroulé, distance seule** : la durée s'en déduit, à l'allure de
+ *   conversion ({@link sessionEstimationPace}).
+ * - **Sans déroulé, durée seule** (« Footing 45 min ») : la conversion se fait
+ *   dans l'autre sens, et c'est la durée du modèle qui reste maîtresse — la
+ *   reconvertir depuis la distance qu'on vient d'en tirer serait un aller-retour
+ *   sans information.
+ * - **Sans déroulé, les deux mesures écrites** : rien ne bouge. Sans table,
+ *   l'appli ne prescrit aucune allure ; réécrire cette durée-là depuis l'allure
+ *   moyenne récente de l'athlète ferait juger le plan du coach sur une
+ *   estimation de l'appli — et un budget temps refusé sur cette estimation
+ *   rouvrirait exactement la classe de blocage qu'on ferme ici.
+ *
+ * Quand rien n'est dérivable — ni déroulé, ni distance, ni durée — la séance
+ * ressort telle quelle, et la règle « Volumes hebdomadaires invérifiables » a
+ * toujours quelque chose à reprocher au modèle. C'est le seul cas où elle en a.
+ */
+function deriveSessionMeasures(
+  session: PlanSessionOutput,
+  referencePaceSecPerKm: number | null,
+): PlanSessionOutput {
+  const pace = sessionEstimationPace(session, referencePaceSecPerKm);
+  // Les mêmes totaux que le régime avec table, à ceci près qu'une seule allure y
+  // sert de repli : sans table, il n'y a pas de créneau d'endurance distinct du
+  // créneau de la séance.
+  const totals = session.steps === undefined ? null : stepsTotals(session.steps, pace, pace);
+  if (totals === null && session.distanceKm !== undefined && session.durationMin !== undefined) {
+    return session;
+  }
+
+  const { distanceKm, fromSteps } = imposedDistanceKm(session.distanceKm, totals);
+  if (distanceKm === undefined) {
+    if (session.durationMin === undefined) return session;
+    return { ...session, distanceKm: roundKm((session.durationMin * 60) / pace) };
+  }
+
+  return {
+    ...session,
+    distanceKm,
+    durationMin: imposedDurationMin(session, distanceKm, fromSteps, totals, pace),
+  };
+}
+
+/**
+ * Complète les mesures des semaines produites **sans table d'allures** : la
+ * distance que le modèle n'a pas écrite, la durée que son contenu contredit.
+ *
+ * Fonction **pure**, et volontairement sourde à tout le reste de la sortie : ni
+ * les allures, ni les notes, ni les mesures des étapes ne sont touchées — les
+ * prescriptions du modèle sont ce qu'il a de propre dans ce régime.
+ *
+ * @param referencePaceSecPerKm l'allure d'entraînement récente de l'athlète,
+ * `null` quand elle n'en a pas — cf. {@link sessionEstimationPace} pour l'ordre
+ * des replis.
+ */
+export function applyDerivedMeasures(
+  weeks: readonly PlanWeekOutput[],
+  referencePaceSecPerKm: number | null,
+): PlanWeekOutput[] {
+  return weeks.map((week) => ({
+    sessions: week.sessions.map((session) => deriveSessionMeasures(session, referencePaceSecPerKm)),
+  }));
+}
+
+/**
+ * Le post-traitement d'un lot de semaines, entre le parse de la sortie et la
+ * validation métier.
+ */
+export type PlanWeeksPostProcessing = (weeks: readonly PlanWeekOutput[]) => PlanWeekOutput[];
+
+/**
+ * Le post-traitement qui s'applique, **quel que soit le régime** — c'est la
+ * fonction qui décide, et elle est seule à le faire.
+ *
+ * Avec table, l'appli écrit les allures et en dérive les mesures
+ * ({@link applyImposedPaces}) ; sans table, elle ne complète que la comptabilité
+ * ({@link applyDerivedMeasures}). Les deux chemins passent par ici : c'est ce
+ * qui garantit qu'aucun appelant ne peut oublier le second en n'ayant traité que
+ * le premier — le trou exact que ce module avait.
+ */
+export function planWeeksPostProcessing(
+  context: Pick<PlanValidationContext, 'paces' | 'referencePaceSecPerKm'>,
+  goalPaceSecPerKm: number | null,
+): PlanWeeksPostProcessing {
+  const paces = context.paces ?? null;
+  if (paces !== null) return (weeks) => applyImposedPaces(weeks, paces, goalPaceSecPerKm);
+
+  const reference = context.referencePaceSecPerKm ?? null;
+  return (weeks) => applyDerivedMeasures(weeks, reference);
 }
 
 /**
@@ -1541,6 +1899,17 @@ export const VOLUME_RULES = {
    * qu'une séance, et aucun plan de trois séances ne rentrerait dedans.
    */
   startFromRecent: { ratio: 1.2, bonusKm: 3 },
+  /**
+   * Écart toléré entre le volume d'une semaine et la **cible** que l'appli a
+   * calculée pour elle ({@link weeklyVolumeTargets}), quand il y en a une.
+   *
+   * 10 %, comme partout ailleurs dans ce module. La cible n'est pas une commande
+   * au kilomètre près : elle donne l'échelle de la semaine, et le modèle garde la
+   * main sur la répartition entre ses séances. Mais au-delà de 10 %, ce n'est
+   * plus une répartition — c'est un autre plan que celui qui a été chiffré, et
+   * dont plus rien ne garantit qu'il tient dans le budget ni qu'il progresse.
+   */
+  targetTolerance: 0.1,
 } as const;
 
 /**
@@ -1552,18 +1921,6 @@ export function firstFullWeekMaxKm(recentWeeklyKm: number): number {
     recentWeeklyKm * VOLUME_RULES.startFromRecent.ratio,
     recentWeeklyKm + VOLUME_RULES.startFromRecent.bonusKm,
   );
-}
-
-/**
- * Ce même plafond, **tel qu'il s'écrit dans un prompt** — arrondi du côté
- * satisfiable, comme tout plafond annoncé au modèle (cf. {@link kmAtMost}).
- *
- * Exporté pour que le prompt de génération l'annonce (`plan-service.ts`) avec
- * exactement le chiffre que la validation vérifiera : deux arrondis divergents
- * feraient refuser un plan qui applique la consigne à la lettre.
- */
-export function formatFirstFullWeekMaxKm(recentWeeklyKm: number): string {
-  return kmAtMost(firstFullWeekMaxKm(recentWeeklyKm));
 }
 
 /** Un marathon n'ouvre sa troisième semaine d'affûtage que si le plan est assez long. */
@@ -1584,8 +1941,12 @@ export function taperWeekCount(weeks: number, race: PlanRaceGoal | null | undefi
 /**
  * Volume d'une semaine, en km — `null` dès qu'une séance ne déclare pas sa
  * distance : une somme partielle ferait constater des baisses qui n'existent pas.
+ *
+ * Exportée pour le résumé de continuité d'une tranche (`plan-service.ts`) : ce
+ * qu'on dit à la tranche suivante du volume de la précédente doit être compté
+ * exactement comme la règle le comptera.
  */
-function weekVolumeKm(week: PlanWeekOutput): number | null {
+export function weekVolumeKm(week: PlanWeekOutput): number | null {
   let total = 0;
   for (const session of week.sessions) {
     if (session.distanceKm === undefined) return null;
@@ -1685,6 +2046,285 @@ function weekDurationMin(week: PlanWeekOutput): number | null {
   return total;
 }
 
+/*
+ * Volumes hebdomadaires cibles — « le modèle structure, l'appli chiffre ».
+ *
+ * ## Pourquoi l'appli calcule les volumes
+ *
+ * Constat de production, sur un plan de 16 semaines à 6 séances : quand la
+ * génération passe entière, le modèle ignore le budget temps sur onze semaines
+ * d'affilée — montée linéaire de 5 h 32 à 6 h 22 pour 5 h déclarées. Ce n'est
+ * pas une consigne mal formulée : la progression d'un volume hebdomadaire sous
+ * quatre contraintes simultanées (hausse plafonnée, semaine allégée périodique,
+ * pic minimum, budget de vie) est un problème d'arithmétique, et un modèle de
+ * 6 Go ne résout pas un problème d'arithmétique sur seize lignes.
+ *
+ * L'appli le résout donc à sa place, une fois, exactement : {@link
+ * weeklyVolumeTargets} produit une cible par semaine qui satisfait **par
+ * construction** toutes les règles de {@link volumeViolations}, et le prompt les
+ * annonce. Il ne reste au modèle que ce qu'il sait faire — répartir un volume
+ * donné en séances, choisir leur nature, écrire leur déroulé.
+ *
+ * Les règles de progression restent en place et vérifiées : c'est de la défense
+ * en profondeur.
+ *
+ * ## Ce que « conforme aux cibles » garantit, et ce qu'il ne garantit pas
+ *
+ * Un plan qui écrit les cibles **exactement** — au chiffre imprimé par le prompt
+ * près — passe toutes les règles, et un test l'éprouve sur tout l'éventail des
+ * configurations, à la fois sur les cibles nues et sur les valeurs telles que
+ * `formatWeeklyVolumeTargets` les imprime.
+ *
+ * Rester dans la bande de ±10 % de chaque cible, en revanche, ne garantit rien :
+ * la tolérance juge chaque semaine isolément, là où la hausse et la semaine
+ * allégée jugent deux semaines l'une contre l'autre. Une montée visée à 8 %
+ * contre un plafond de 12 % ne laisse qu'environ 1,8 % de jeu relatif entre deux
+ * semaines voisines, et une allégée posée à 0,85 × exactement n'en laisse aucun.
+ * D'où la consigne portée par le prompt à côté des cibles : viser le chiffre, pas
+ * la bande.
+ */
+
+/** Ce qu'une semaine du plan est, du point de vue du volume. */
+export type WeeklyVolumeTargetKind = 'build' | 'cutback' | 'taper' | 'race' | 'partial';
+
+/** La cible d'une semaine : un volume, le temps qu'il coûte, et son rôle. */
+export type WeeklyVolumeTarget = {
+  /** Volume visé, en kilomètres, au dixième. */
+  targetKm: number;
+  /** Ce que ce volume coûte en temps, en minutes — toujours sous le budget déclaré. */
+  targetMinutes: number;
+  kind: WeeklyVolumeTargetKind;
+};
+
+/** Ce dont le planificateur a besoin pour chiffrer un plan entier. */
+export type WeeklyVolumeTargetsParams = {
+  /** Nombre de semaines du plan, la première (parfois entamée) comprise. */
+  weeks: number;
+  /** Jour ISO à partir duquel la première semaine porte des séances : 1 = lundi. */
+  firstWeekFromDay: number;
+  /** Le **meilleur** volume hebdomadaire réellement couru récemment, `null` sans historique. */
+  recentWeeklyKm: number | null;
+  /** Budget temps hebdomadaire déclaré, en minutes — `null` quand il n'y en a pas. */
+  weeklyTimeMinutes: number | null;
+  /**
+   * Allure d'endurance de l'athlète, en s/km : le taux de change entre les
+   * kilomètres et les minutes. `null` quand rien ne la donne (cf.
+   * {@link VOLUME_TARGET_RULES.fallbackEasyPaceSecPerKm}).
+   */
+  easyPaceSecPerKm: number | null;
+  /** L'objectif, quand c'est une course : elle impose un affûtage. */
+  race: PlanRaceGoal | null;
+  level: PlanLevel;
+};
+
+/**
+ * Ce que le planificateur décide, là où {@link VOLUME_RULES} ne fait que
+ * refuser.
+ *
+ * La distinction est celle d'un plancher et d'une cible : `VOLUME_RULES` dit ce
+ * qui est inacceptable (une hausse de plus de 12 %), ces chiffres-ci disent ce
+ * qu'on vise (7 à 9 % selon le niveau). Viser la limite reviendrait à faire
+ * dépendre chaque plan d'un arrondi.
+ */
+export const VOLUME_TARGET_RULES = {
+  /**
+   * Hausse visée d'une semaine de développement à la suivante, par niveau.
+   *
+   * Un débutant progresse de 5 à 8 % (règle de niveau du prompt), les autres de
+   * 6 à 10 %. Le haut de chaque fourchette : la semaine allégée périodique reprend
+   * de toute façon une bonne part de la montée — sur un cycle de quatre semaines,
+   * 1,07³ × 0,85 ne fait que +4,2 % net.
+   */
+  weeklyGrowth: { beginner: 1.07, intermediate: 1.08, advanced: 1.09 },
+  /** Une semaine allégée toutes les quatre semaines de développement : la quatrième. */
+  cutbackEvery: 4,
+  /**
+   * Part du budget temps que les cibles consomment.
+   *
+   * 95 %, quand la règle tolère 110 % : la marge n'est pas pour le confort, elle
+   * absorbe l'écart entre le temps qu'une cible annonce (des kilomètres à
+   * l'allure d'endurance) et celui que le plan écrit réellement (échauffements,
+   * récupérations, séances de qualité). Le budget est une contrainte de vie : il
+   * se tient par en dessous.
+   */
+  timeBudgetShare: 0.95,
+  /**
+   * Réserve de montée gardée sous le plafond du budget quand l'anti-plat
+   * s'applique.
+   *
+   * C'est la résolution du conflit entre les deux contraintes : le budget
+   * plafonne le volume, l'anti-plat exige un pic 10 % au-dessus de la première
+   * semaine pleine. Partir *au* plafond rendrait les deux inconciliables — le
+   * plan serait plat, donc refusé. On part donc 15 % plus bas, et c'est la montée
+   * qui consomme la marge. Un plan qui monte vaut mieux qu'un plan qui démarre
+   * haut et n'entraîne pas.
+   */
+  peakHeadroom: 1.15,
+  /**
+   * Sans historique exploitable, le volume de départ d'une première semaine
+   * pleine, par niveau, en km.
+   *
+   * Des ordres de grandeur assumés, et volontairement bas : se tromper vers le
+   * bas coûte deux semaines de montée, se tromper vers le haut blesse. La montée
+   * corrige vite, et une révision recalera le plan sur les premières sorties
+   * réelles.
+   */
+  defaultStartKm: { beginner: 12, intermediate: 24, advanced: 32 },
+  /**
+   * Sans allure connue, l'allure d'endurance supposée : 8:00/km.
+   *
+   * Lente à dessein — c'est le sens prudent. Une allure lente compte plus de
+   * minutes au kilomètre, donc le budget temps plafonne le volume plus tôt : le
+   * plan sort plus court que nécessaire, jamais plus long que possible.
+   */
+  fallbackEasyPaceSecPerKm: 480,
+} as const;
+
+/**
+ * L'affûtage, en parts du dernier volume de développement — une par semaine
+ * d'affûtage, strictement décroissantes.
+ *
+ * Rapportées à la **dernière semaine de développement** et non au pic : quand
+ * celle-ci est une semaine allégée, un affûtage calé sur le pic pourrait
+ * commencer *au-dessus* d'elle, ce que la règle d'affûtage (« le volume baisse
+ * strictement chaque semaine ») refuse. La semaine de course reste sous 55 % de
+ * cette base, donc sous les 65 % du pic qu'exige {@link VOLUME_RULES}.
+ */
+function taperFactors(weeks: number): number[] {
+  if (weeks <= 1) return [0.55];
+  if (weeks === 2) return [0.75, 0.55];
+  return [0.8, 0.65, 0.5];
+}
+
+/**
+ * Un volume arrondi au dixième **strictement inférieur** : aucune cible ne se
+ * pose jamais pile sur un plafond.
+ *
+ * Les deux raisons de ne pas se contenter d'un `Math.floor`, et la seconde est
+ * la vraie :
+ *
+ * - `72 × 0,85` vaut 61,199999999999996 en flottant, dont le produit par 10 se
+ *   réarrondit à 612 : `Math.floor` rendrait 61,2, soit *au-dessus* de la valeur
+ *   qu'il devait plafonner ;
+ * - même juste, une cible posée à l'égalité (36,0 km pour un plafond de 36,0)
+ *   ne laisse rien à la somme qui la vérifiera. Un volume hebdomadaire est une
+ *   somme de flottants — six séances à un décimale ne retombent pas exactement
+ *   sur leur total — et un cheveu au-dessus suffit à faire refuser une semaine
+ *   parfaitement conforme. Constaté sur le test exhaustif, sur les semaines
+ *   allégées qui tombaient pile à 85 %.
+ *
+ * Un dixième de kilomètre de marge : invisible dans un plan, définitif pour une
+ * inégalité.
+ */
+function floorKm(value: number): number {
+  return Math.floor((value - 1e-9) * 10) / 10;
+}
+
+/**
+ * Les volumes hebdomadaires cibles d'un plan entier, une entrée par semaine.
+ *
+ * L'algorithme, dans l'ordre :
+ *
+ * 1. **Le départ.** Le plus petit de deux plafonds : l'ancrage sur le réel
+ *    ({@link firstFullWeekMaxKm} — au plus 1,2 × la meilleure semaine récente, ou
+ *    +3 km), et ce que le budget temps permet une fois la réserve de montée
+ *    gardée ({@link VOLUME_TARGET_RULES.peakHeadroom}). Sans historique, un
+ *    départ prudent par niveau.
+ * 2. **La montée.** Chaque semaine de développement vaut la précédente × la
+ *    hausse du niveau, **plafonnée au budget** : c'est le budget qui contraint la
+ *    montée, jamais l'inverse. Toutes les quatre semaines, une semaine allégée à
+ *    85 % de la précédente — mais seulement là où la règle l'exige, un bloc court
+ *    n'a pas de respiration à s'offrir.
+ * 3. **L'affûtage** ({@link taperFactors}), quand le plan mène à une course.
+ * 4. **La première semaine entamée**, au prorata des jours qui y restent.
+ *
+ * Tous les arrondis vont vers le bas : chaque cible est un chiffre que la
+ * validation vérifiera, et un dixième de kilomètre de trop suffit à faire
+ * dépasser un plafond.
+ */
+export function weeklyVolumeTargets(params: WeeklyVolumeTargetsParams): WeeklyVolumeTarget[] {
+  const { weeks, firstWeekFromDay, level } = params;
+  if (weeks <= 0) return [];
+
+  const paceMinPerKm = (params.easyPaceSecPerKm ?? VOLUME_TARGET_RULES.fallbackEasyPaceSecPerKm) / 60;
+  const firstFull = firstWeekFromDay > 1 ? 1 : 0;
+  const taper = taperWeekCount(weeks, params.race);
+  const lastBuild = weeks - taper - 1;
+  const buildWeeks = lastBuild - firstFull + 1;
+
+  // Les mêmes conditions que les règles correspondantes : hors d'elles, la règle
+  // ne s'applique pas, et la satisfaire coûterait des semaines pour rien.
+  const eases =
+    weeks >= VOLUME_RULES.minWeeksForCutback && buildWeeks >= VOLUME_RULES.minBuildWeeksForCutback;
+  const mustClimb =
+    weeks >= VOLUME_RULES.minWeeksForPeak && buildWeeks >= VOLUME_RULES.minBuildWeeksForPeak;
+
+  const budgetKm =
+    params.weeklyTimeMinutes === null || params.weeklyTimeMinutes <= 0
+      ? null
+      : (params.weeklyTimeMinutes * VOLUME_TARGET_RULES.timeBudgetShare) / paceMinPerKm;
+
+  const anchorKm =
+    params.recentWeeklyKm !== null && params.recentWeeklyKm > 0
+      ? firstFullWeekMaxKm(params.recentWeeklyKm)
+      : VOLUME_TARGET_RULES.defaultStartKm[level];
+
+  const start = floorKm(
+    budgetKm === null
+      ? anchorKm
+      : Math.min(anchorKm, budgetKm / (mustClimb ? VOLUME_TARGET_RULES.peakHeadroom : 1)),
+  );
+
+  const kilometers = new Array<number>(weeks).fill(start);
+  const kinds = new Array<WeeklyVolumeTargetKind>(weeks).fill('build');
+
+  for (let index = firstFull + 1; index <= lastBuild; index += 1) {
+    const previous = kilometers[index - 1];
+    const isCutback =
+      eases && (index - firstFull) % VOLUME_TARGET_RULES.cutbackEvery === VOLUME_TARGET_RULES.cutbackEvery - 1;
+    if (isCutback) {
+      kilometers[index] = floorKm(previous * VOLUME_RULES.cutbackRatio);
+      kinds[index] = 'cutback';
+      continue;
+    }
+    const raised = previous * VOLUME_TARGET_RULES.weeklyGrowth[level];
+    kilometers[index] = floorKm(budgetKm === null ? raised : Math.min(raised, budgetKm));
+  }
+
+  // L'affûtage se cale sur la dernière semaine de développement — ou sur le
+  // départ quand le plan est trop court pour en compter une.
+  const taperFrom = weeks - taper;
+  const base = lastBuild >= firstFull ? kilometers[lastBuild] : start;
+  const factors = taperFactors(taper);
+  for (let index = Math.max(taperFrom, firstFull); index < weeks; index += 1) {
+    kilometers[index] = floorKm(base * factors[index - taperFrom]);
+    kinds[index] = index === weeks - 1 ? 'race' : 'taper';
+  }
+
+  const remainingDays = remainingWeekDays(firstWeekFromDay);
+  if (firstFull === 1) {
+    kilometers[0] = floorKm((start * remainingDays) / 7);
+    kinds[0] = 'partial';
+  }
+
+  return kilometers.map((targetKm, index) => {
+    // Le budget d'une semaine entamée est celui de ses jours restants — la même
+    // arithmétique que la règle qui le vérifiera ({@link partialWeekTimeBudget}).
+    const share = index === 0 && firstFull === 1 ? remainingDays / 7 : 1;
+    const budgetMinutes =
+      params.weeklyTimeMinutes === null
+        ? null
+        : Math.floor(params.weeklyTimeMinutes * VOLUME_TARGET_RULES.timeBudgetShare * share);
+    const minutes = Math.round(targetKm * paceMinPerKm);
+
+    return {
+      targetKm,
+      targetMinutes: budgetMinutes === null ? minutes : Math.min(minutes, budgetMinutes),
+      kind: kinds[index],
+    };
+  });
+}
+
 /**
  * Ce qui, dans la progression des volumes hebdomadaires, ne tient pas debout.
  *
@@ -1710,6 +2350,27 @@ function volumeViolations(
       `Volumes hebdomadaires invérifiables : chaque séance déclare sa distance \`distanceKm\`, ` +
         `footings et récupérations compris — il en manque semaine ${undeclared.join(', semaine ')}.`,
     );
+  }
+
+  // 0. Les cibles de volume, quand l'appli en a chiffré : la règle dont toutes
+  // les suivantes découlent, puisque les cibles les satisfont par construction.
+  const targets = expected.weeklyTargets ?? null;
+  if (targets !== null) {
+    const tolerance = VOLUME_RULES.targetTolerance;
+    volumes.forEach((volume, index) => {
+      const target = targets[index];
+      if (volume === null || target === undefined) return;
+
+      const floor = target.targetKm * (1 - tolerance);
+      const ceiling = target.targetKm * (1 + tolerance);
+      if (volume >= floor && volume <= ceiling) return;
+
+      violations.push(
+        `Semaine ${index + 1} : ${km(volume)} pour une cible de ${km(target.targetKm)} — ` +
+          `chaque semaine reste à ${percent(tolerance)} près de sa cible, soit entre ` +
+          `${kmAtLeast(floor)} et ${kmAtMost(ceiling)}.`,
+      );
+    });
   }
 
   // Première semaine pleine : une semaine entamée porte moins de jours, donc

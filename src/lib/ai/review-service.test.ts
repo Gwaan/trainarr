@@ -533,7 +533,13 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
     ],
   };
 
-  /** La semaine pleine conforme, durées déclarées : 3 h 00 au total. */
+  /**
+   * La semaine pleine conforme, durées déclarées : 3 h 00 au total.
+   *
+   * La séance de seuil porte un déroulé, et c'est lui qui décide de sa durée :
+   * `THRESHOLD_STEPS` totalise 900 + 4 × (480 + 120) + 600 = 3 900 s, soit
+   * 65 min (cf. `applyDerivedMeasures`) — la valeur déclarée le dit donc aussi.
+   */
   const THREE_HOURS_WEEK = {
     sessions: [
       { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, durationMin: 45 },
@@ -542,10 +548,10 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
         kind: 'Seuil',
         title: '3 × 8 min',
         distanceKm: 10,
-        durationMin: 55,
+        durationMin: 65,
         steps: THRESHOLD_STEPS,
       },
-      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 80 },
+      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 70 },
     ],
   };
 
@@ -621,8 +627,9 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
         { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 }] },
         {
           sessions: [
-            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, durationMin: 45, steps: THRESHOLD_STEPS },
-            { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 70 },
+            // 65 min de déroulé (cf. `THREE_HOURS_WEEK`) + 60 : dans les 2 h du plan.
+            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, durationMin: 65, steps: THRESHOLD_STEPS },
+            { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 60 },
           ],
         },
       ],
@@ -698,6 +705,57 @@ describe('maybeReviewActivePlan — allures imposées', () => {
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+  });
+
+  it('dérive les mesures sans rien prescrire quand le plan ne porte pas de chrono', async () => {
+    // Le troisième chemin passe par le même post-traitement : sans table, les
+    // volumes se dérivent quand même — sans quoi une révision butait sur
+    // « Volumes hebdomadaires invérifiables » comme le reste.
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Charge à revoir.',
+      weeks: [
+        {
+          sessions: [
+            {
+              day: 7,
+              kind: 'Sortie longue',
+              title: '1 h',
+              steps: [{ repeat: 1, steps: [step('run', { durationS: 3600 })] }],
+            },
+          ],
+        },
+        {
+          sessions: [
+            {
+              day: 2,
+              kind: 'Endurance',
+              title: 'Footing',
+              steps: [{ repeat: 1, steps: [step('run', { distanceM: 8000 })] }],
+            },
+            { day: 4, kind: 'Seuil', title: '4 × 8 min', steps: THRESHOLD_STEPS },
+            {
+              day: 7,
+              kind: 'Sortie longue',
+              title: 'Endurance',
+              steps: [{ repeat: 1, steps: [step('run', { distanceM: 16_000 })] }],
+            },
+          ],
+        },
+      ],
+    });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    const [, update] = dal.applyPlanUpdate.mock.calls[0];
+    expect(update.sessions.map((s: { volumeM: number }) => s.volumeM)).toEqual([
+      11_100, 8_000, 12_400, 16_000,
+    ]);
+    // Aucune allure posée : sans table, les prescriptions restent celles du modèle.
+    expect(update.sessions.map((s: { targetPaceSecPerKm: number | null }) => s.targetPaceSecPerKm))
+      .toEqual([null, null, null, null]);
   });
 });
 
@@ -864,6 +922,106 @@ describe('withReviewNote', () => {
   it('se passe d’un résumé absent', () => {
     expect(withReviewNote(null, '2026-08-11', 'Charge trop élevée.')).toBe(
       'Révision du mardi 11 août 2026 : Charge trop élevée.',
+    );
+  });
+});
+
+/*
+ * Révision par tranches.
+ */
+
+/** Un plan long : douze semaines, dont la première déjà entamée (reprise mercredi). */
+const LONG_PLAN: PlanDto = { ...PLAN, weeks: 12, raceDate: '2026-11-01' };
+
+/** Une semaine de trois séances qui pèse `km`, sortie longue le dimanche. */
+function weekOfKm(km: number) {
+  return {
+    sessions: [
+      { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: km * 0.31 },
+      { day: 4, kind: 'Endurance', title: 'Footing', distanceKm: km * 0.31 },
+      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: km * 0.38 },
+    ],
+  };
+}
+
+/**
+ * Douze semaines conformes aux règles de progression : montée par palier avec
+ * semaine allégée toutes les quatre semaines, puis deux semaines d'affûtage.
+ */
+const LONG_WEEKS = [
+  { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+  ...[30, 32, 34, 28, 30, 32, 34, 28, 30, 24, 18].map(weekOfKm),
+];
+
+describe('maybeReviewActivePlan — par tranches', () => {
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue({ plan: LONG_PLAN, sessions: ACTIVE.sessions });
+  });
+
+  it('décide dans le premier appel, puis écrit la suite tranche par tranche', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({
+        decision: 'adjust',
+        reason: 'Les allures se dégradent à fréquence cardiaque égale.',
+        weeks: LONG_WEEKS.slice(0, 6),
+      })
+      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    // La première tranche est bornée par la grammaire, comme les suivantes.
+    expect(chatCompletionJson.mock.calls[0][0].jsonSchema.properties.weeks).toMatchObject({
+      minItems: 6,
+      maxItems: 6,
+    });
+    expect(chatCompletionJson.mock.calls[1][0].schemaName).toBe('training_plan_review_chunk');
+
+    // Les douze semaines sont écrites en une transaction, tranche 1 comprise.
+    const [, update] = dal.applyPlanUpdate.mock.calls[0];
+    expect(update.sessions).toHaveLength(34);
+    expect(update.sessions[33].scheduledOn).toBe('2026-11-01');
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+  });
+
+  it('rappelle à chaque tranche ce qui a été constaté, et où elle en est', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({
+        decision: 'adjust',
+        reason: 'Trois séances manquées sur quatre.',
+        weeks: LONG_WEEKS.slice(0, 6),
+      })
+      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+
+    await maybeReviewActivePlan();
+
+    const [system, user] = chatCompletionJson.mock.calls[1][0].messages.map(
+      (message: { content: string }) => message.content,
+    );
+
+    expect(system).toContain('Ce que tu as constaté : « Trois séances manquées sur quatre. »');
+    expect(user).toContain('Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 des semaines restantes');
+    expect(user).toContain('Fin de la tranche précédente — semaine 6 :');
+    // Le bilan des séances réalisées ne repart pas : il a servi à décider.
+    expect(user).not.toContain('Séances depuis ta dernière révision');
+  });
+
+  it('ne demande aucune tranche quand le plan reste adapté', async () => {
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+  });
+
+  it('annonce au premier appel qu’il ne rend que le début de la suite', async () => {
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson.mock.calls[0][0].messages[1].content).toContain(
+      "En « adjust », n'écris ici que les 6 premières (semaines 1 à 6 des semaines restantes)",
     );
   });
 });

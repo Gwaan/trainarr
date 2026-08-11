@@ -87,31 +87,41 @@ import {
   formatDistanceKm,
   formatDuration,
   formatIsoDay,
+  formatNumber,
   formatPace,
   formatPlanSteps,
   formatTrainingPaces,
   formatTrainingSnapshot,
+  formatWeeklyVolumeTargets,
 } from './format';
 import {
   MIN_FIRST_WEEK_DAYS,
   PLAN_OUTPUT_BOUNDS,
-  applyImposedPaces,
-  formatFirstFullWeekMaxKm,
   formatPartialWeekTimeBudget,
   goalPaceSecPerKm,
+  isIntensitySession,
   isMarathonGoal,
   mapPlanWeeksToSessions,
+  planChunkJsonSchema,
+  planChunkOutputSchema,
   planJsonSchema,
   planOutputSchema,
+  planUpdateChunkJsonSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
+  planWeeksPostProcessing,
   resolveWeeklyTimeBudget,
   validatePlanBusinessRules,
+  weekVolumeKm,
+  weeklyVolumeTargets,
+  type PlanChunkOutput,
   type PlanExpectations,
   type PlanRaceGoal,
   type PlanSettingsOutput,
   type PlanValidationContext,
   type PlanWeekOutput,
+  type PlanWeeksPostProcessing,
+  type WeeklyVolumeTarget,
 } from './plan-schema';
 
 /** Ce que le formulaire de création soumet au coach. */
@@ -538,6 +548,11 @@ function coachRuleTailLines(isRace: boolean): string[] {
     '- Exemple d\'étape de récupération, à recopier tel quel : { "role": "recover", "durationS": 120 } — une mesure, jamais les deux.',
     "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
     "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
+    // Diagnostic de production : un plan de 16 semaines rendu en JSON indenté
+    // pesait ~40 k caractères et saturait le contexte du serveur, qui coupait la
+    // sortie en plein objet. L'indentation n'a aucun lecteur ici — la réponse est
+    // parsée, jamais lue — et elle coûte le tiers des caractères d'un plan long.
+    '- Réponds en JSON compact, sans indentation ni retours à la ligne — chaque caractère compte.',
   ];
 }
 
@@ -826,32 +841,107 @@ function bestRecentWeeklyKm(snapshot: TrainingSnapshotDto): number | null {
 }
 
 /**
- * Le plafond de la première semaine pleine, dit au modèle — ou rien quand
- * l'historique ne permet pas de l'établir.
+ * L'allure qui convertit les kilomètres cibles en minutes.
  *
- * La violation correspondante est le filet ; cette ligne-là est la consigne. Un
- * plan refusé se paie en minutes de régénération, et le modèle n'a aucun moyen
- * de deviner que « ta meilleure semaine récente » est un plafond et pas un
- * point de départ à dépasser.
+ * La table calculée d'abord (le milieu de son créneau d'endurance), l'allure
+ * d'entraînement récente ensuite : c'est la même hiérarchie que partout ailleurs
+ * dans ce module, et la même raison — un chrono de course dit mieux ce que
+ * l'athlète tient qu'une moyenne de footings. `null` quand ni l'une ni l'autre
+ * n'existe, le planificateur applique alors son repli prudent.
  */
-function startVolumeLines(snapshot: TrainingSnapshotDto): string[] {
-  const recent = bestRecentWeeklyKm(snapshot);
-  if (recent === null) return [];
+function easyPaceSecPerKm(
+  snapshot: TrainingSnapshotDto,
+  paces: TrainingPaces | null,
+): number | null {
+  if (paces === null) return snapshot.recentAvgPaceSecPerKm;
+  return Math.round((paces.easy.minSecPerKm + paces.easy.maxSecPerKm) / 2);
+}
+
+/**
+ * Les volumes hebdomadaires cibles d'une **création**, tels que le prompt les
+ * annonce et que la validation les vérifie.
+ *
+ * Fonction pure et déterministe, appelée des deux côtés plutôt que passée de
+ * l'un à l'autre : deux chiffrages divergents feraient refuser un plan qui
+ * applique la consigne à la lettre — le défaut que ce module passe son temps à
+ * éviter.
+ */
+export function planVolumeTargets(
+  request: PlanRequest,
+  window: PlanWindow,
+  snapshot: TrainingSnapshotDto,
+  paces: TrainingPaces | null = null,
+): WeeklyVolumeTarget[] {
+  return weeklyVolumeTargets({
+    weeks: window.weeks,
+    firstWeekFromDay: window.firstWeekFromDay,
+    recentWeeklyKm: bestRecentWeeklyKm(snapshot),
+    weeklyTimeMinutes: request.weeklyTimeMinutes ?? null,
+    easyPaceSecPerKm: easyPaceSecPerKm(snapshot, paces),
+    race: raceGoalOf(request.goalType, request.goalText),
+    level: request.level,
+  });
+}
+
+/**
+ * Ce qu'une génération par tranches ajoute au message d'une tranche : sa place
+ * dans le plan, et ce que la précédente a laissé.
+ */
+export type PlanChunkContext = {
+  chunk: PlanChunkSpec;
+  /** Le résumé d'une ligne de la tranche précédente, `null` sur la première. */
+  continuity: string | null;
+};
+
+/**
+ * Ce qui, dans le message d'une tranche, remplace la consigne « rends les N
+ * semaines » d'une génération d'un seul tenant.
+ *
+ * Trois choses, et aucune n'est décorative : les **bornes** de la tranche dans
+ * la numérotation du plan entier (c'est elle que porteront les violations
+ * renvoyées en reprise), la **continuité** avec ce qui précède — sans quoi la
+ * tranche 2 rouvre un bloc au lieu de continuer celui-là —, et, sur la
+ * dernière, le fait que le résumé porte sur le plan et non sur la tranche.
+ */
+export function chunkInstructionLines(
+  chunk: PlanChunkSpec,
+  continuity: string | null,
+  weekStart: string,
+  scope = 'du plan',
+  withSummary = true,
+): string[] {
+  const first = chunk.fromWeek + 1;
+  const last = chunk.fromWeek + chunk.weeks;
   return [
-    `Volume de départ : la première semaine pleine ne dépasse pas ${formatFirstFullWeekMaxKm(recent)} (ton volume réel récent).`,
+    `Tranche ${chunk.index + 1}/${chunk.count} : rends UNIQUEMENT les semaines ${first} à ${last} ${scope}, dans l'ordre chronologique — weeks[0] est la semaine du ${formatCivilDate(weekStart)}.`,
+    ...(continuity === null ? [] : [continuity]),
+    ...(withSummary && chunk.index === chunk.count - 1
+      ? ['Le résumé (`summary`) porte sur le plan complet, pas sur cette seule tranche.']
+      : []),
   ];
 }
 
-/** Les messages d'une génération de plan. */
+/**
+ * Les messages d'une génération de plan — d'un seul tenant, ou d'une **tranche**
+ * quand le plan est trop long pour tenir dans un appel ({@link PlanChunkContext}).
+ *
+ * Les deux régimes partagent tout ce qui décrit l'athlète et son objectif : ce
+ * qui change est ce qu'on demande d'écrire, et les volumes cibles qui
+ * l'accompagnent — ceux de la tranche seulement, numérotés dans la numérotation
+ * du plan entier.
+ */
 export function buildPlanMessages(
   request: PlanRequest,
   window: PlanWindow,
   snapshot: TrainingSnapshotDto,
   paces: TrainingPaces | null = null,
+  chunkContext: PlanChunkContext | null = null,
 ): ChatMessage[] {
   // Depuis l'ancre : c'est elle qui porte la grille des semaines, `startsOn`
   // pouvant tomber en milieu de première semaine.
   const endsOn = shiftCivilDate(window.anchor, window.weeks * 7 - 1);
+  const targets = planVolumeTargets(request, window, snapshot, paces);
+  const chunk = chunkContext?.chunk ?? null;
 
   const lines = [
     request.goalType === 'race' && request.raceDate !== undefined
@@ -867,9 +957,28 @@ export function buildPlanMessages(
     // vient du modèle de toute façon (cf. `SnapshotFormatOptions`).
     formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
     '',
-    `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.anchor)}.`,
-    ...firstWeekLines(request, window),
-    ...startVolumeLines(snapshot),
+    ...(chunk === null
+      ? [
+          `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.anchor)}.`,
+        ]
+      : chunkInstructionLines(
+          chunk,
+          chunkContext?.continuity ?? null,
+          shiftCivilDate(window.anchor, chunk.fromWeek * 7),
+        )),
+    // La première semaine entamée n'existe que dans la première tranche ; les
+    // suivantes sont des semaines pleines, et le rappel du compte de séances
+    // vaut pour elles.
+    ...(chunk === null || chunk.index === 0
+      ? firstWeekLines(request, window)
+      : [`Chaque semaine compte exactement ${request.sessionsPerWeek} séances.`]),
+    // La table des cibles **remplace** l'ancienne ligne « Volume de départ » : ce
+    // plafond-là n'était qu'une borne à respecter, celles-ci sont les chiffres à
+    // écrire — et la première d'entre elles porte déjà l'ancrage sur le réel.
+    formatWeeklyVolumeTargets(
+      chunk === null ? targets : targets.slice(chunk.fromWeek, chunk.fromWeek + chunk.weeks),
+      chunk === null ? 1 : chunk.fromWeek + 1,
+    ),
   ];
 
   return [
@@ -915,6 +1024,7 @@ export function formatUpcomingPlan(
   plan: PlanDto,
   upcoming: readonly PlanSessionDto[],
   window: RemainingPlanWindow,
+  firstWeekNumber = 1,
 ): string {
   const lines: string[] = [];
 
@@ -927,7 +1037,7 @@ export function formatUpcomingPlan(
 
     const partial = index === 0 && window.firstWeekFromDay > 1;
     lines.push(
-      `Semaine ${index + 1} (du ${formatCivilDate(weekStart)}${partial ? `, déjà entamée : à replanifier à partir du ${formatIsoDay(window.firstWeekFromDay)}` : ''}) :`,
+      `Semaine ${firstWeekNumber + index} (du ${formatCivilDate(weekStart)}${partial ? `, déjà entamée : à replanifier à partir du ${formatIsoDay(window.firstWeekFromDay)}` : ''}) :`,
     );
     if (sessions.length === 0) {
       lines.push('- aucune séance planifiée');
@@ -948,13 +1058,35 @@ export function formatUpcomingPlan(
   return [...header, ...lines].join('\n');
 }
 
-/** Les messages d'une modification par instruction. */
+/**
+ * La part d'une fenêtre restante que **cette tranche** couvre.
+ *
+ * Ce qui rend le découpage utile côté entrée autant que sortie : sans lui,
+ * chaque tranche recevrait les séances des seize semaines à venir — soit
+ * exactement le contexte que le découpage cherche à ne pas saturer.
+ *
+ * Seule la première tranche hérite du jour de reprise : les suivantes commencent
+ * un lundi, elles ne sont entamées par rien.
+ */
+export function chunkWindow(
+  window: RemainingPlanWindow,
+  chunk: PlanChunkSpec,
+): RemainingPlanWindow {
+  return {
+    firstWeekStart: shiftCivilDate(window.firstWeekStart, chunk.fromWeek * 7),
+    weeks: chunk.weeks,
+    firstWeekFromDay: chunk.index === 0 ? window.firstWeekFromDay : 1,
+  };
+}
+
+/** Les messages d'une modification par instruction — d'un seul tenant ou par tranche. */
 export function buildPlanUpdateMessages(
   plan: PlanDto,
   upcoming: readonly PlanSessionDto[],
   window: RemainingPlanWindow,
   instruction: string,
   paces: TrainingPaces | null = null,
+  chunkContext: PlanChunkContext | null = null,
 ): ChatMessage[] {
   // Le plan garde le niveau **et le chrono** de sa création : l'ajustement s'y
   // tient. Un plan sans niveau (antérieur au champ) reste sur la seule
@@ -967,12 +1099,26 @@ export function buildPlanUpdateMessages(
     "Le résumé décrit le plan modifié dans son ensemble, pas la modification.",
   ]);
 
+  const chunk = chunkContext?.chunk ?? null;
+  const scope = chunk === null ? window : chunkWindow(window, chunk);
   const user = [
-    formatUpcomingPlan(plan, upcoming, window),
+    // Une tranche ne reçoit que ses propres séances : les autres sont écrites, et
+    // les envoyer coûterait le contexte que le découpage libère.
+    formatUpcomingPlan(plan, upcoming, scope, chunk === null ? 1 : chunk.fromWeek + 1),
     '',
     `Instruction de l'athlète : « ${instruction.trim()} »`,
     '',
-    `Rends les ${window.weeks} semaines restantes dans l'ordre chronologique, en appliquant l'instruction.`,
+    ...(chunk === null
+      ? [
+          `Rends les ${window.weeks} semaines restantes dans l'ordre chronologique, en appliquant l'instruction.`,
+        ]
+      : chunkInstructionLines(
+          chunk,
+          chunkContext?.continuity ?? null,
+          scope.firstWeekStart,
+          'des semaines restantes',
+          false,
+        )),
   ].join('\n');
 
   return [
@@ -990,14 +1136,22 @@ export function buildPlanUpdateMessages(
  * prompt au point d'exposer la tentative corrective à la troncature — celle-là
  * même qu'elle est censée réparer.
  */
-export function buildViolationsMessage(violations: readonly string[]): string {
+export function buildViolationsMessage(
+  violations: readonly string[],
+  chunk: PlanChunkSpec | null = null,
+): string {
   const reported = violations.slice(0, MAX_REPORTED_ISSUES);
   const remainder = violations.length - reported.length;
   return [
     'Ce plan ne respecte pas les contraintes demandées :',
     ...reported.map((violation) => `- ${violation}`),
     ...(remainder > 0 ? [`… et ${remainder} autres violations du même ordre.`] : []),
-    'Régénère le plan complet en corrigeant ces points, dans le même format.',
+    // Une tranche ne peut pas régénérer « le plan complet » : elle n'en tient
+    // qu'un morceau, et les autres sont déjà écrits. Les numéros de semaine des
+    // violations sont ceux du plan entier — d'où le rappel des bornes.
+    chunk === null
+      ? 'Régénère le plan complet en corrigeant ces points, dans le même format.'
+      : `Régénère les ${chunk.weeks} semaines de cette tranche (semaines ${chunk.fromWeek + 1} à ${chunk.fromWeek + chunk.weeks} du plan) en corrigeant ces points, dans le même format.`,
   ].join('\n');
 }
 
@@ -1090,20 +1244,36 @@ export type GenerationOptions<T> = {
    *
    * Obligatoire, et c'est le point : un futur chemin de génération ne peut pas
    * l'oublier — il devra dire d'où sort son budget, comme
-   * {@link GenerationOptions.withImposedPaces} lui fait dire où sont ses semaines.
+   * {@link GenerationOptions.withPostProcessedWeeks} lui fait dire où sont ses
+   * semaines.
    */
   weeklyTimeBudgetOf: (output: T) => number | null;
   /**
-   * Réécrit la sortie avec les allures de la table calculée
-   * ({@link applyImposedPaces}), semaines comprises.
+   * Rend la sortie dont les semaines sont passées par le post-traitement
+   * ({@link planWeeksPostProcessing}).
    *
-   * Appelée **entre le parse et la validation métier**, et seulement quand
-   * `paceContext.paces` existe : dans ce régime, aucune allure ne vient du
-   * modèle (cf. l'en-tête de `plan-schema.ts`). Chaque appelant sait où sont ses
-   * semaines dans son enveloppe — une révision qui conclut « keep » n'en porte
-   * aucune et se rend telle quelle.
+   * Appelée **entre le parse et la validation métier**, et **toujours** : c'est
+   * le post-traitement lui-même qui sait ce qu'il fait selon le régime — écrire
+   * les allures et en dériver les mesures quand la table existe, compléter les
+   * seules mesures manquantes sinon. L'appelant, lui, ne dit qu'une chose : où
+   * sont ses semaines dans son enveloppe. Une révision qui conclut « keep » n'en
+   * porte aucune et se rend telle quelle.
+   *
+   * Ce partage n'est pas cosmétique : quand le choix du régime vivait ici, le
+   * chemin sans table n'était branché nulle part et tout plan sans chrono de
+   * référence butait sur « Volumes hebdomadaires invérifiables ».
    */
-  withImposedPaces: (output: T, paces: TrainingPaces) => T;
+  withPostProcessedWeeks: (output: T, postProcess: PlanWeeksPostProcessing) => T;
+  /**
+   * L'allure de l'objectif chiffré de l'athlète, en s/km ({@link
+   * goalPaceSecPerKm}) — `null` quand son but n'en donne pas.
+   *
+   * Obligatoire pour la même raison que {@link
+   * GenerationOptions.weeklyTimeBudgetOf} : le post-traitement est construit
+   * ici, à partir du contexte d'allures et de cette valeur, et un chemin qui
+   * l'omettrait poserait la zone M là où l'athlète vise son chrono.
+   */
+  goalPaceSecPerKm: number | null;
   /**
    * Identifiant de suivi fourni par le client, ou `undefined` : la génération se
    * déroule alors sans streaming ni progression, exactement comme avant.
@@ -1111,6 +1281,14 @@ export type GenerationOptions<T> = {
   progressId?: string;
   /** Taille attendue de la sortie ({@link estimatePlanChars}) — l'échelle du pourcentage. */
   estimatedChars: number;
+  /**
+   * La tranche en cours, quand la génération est découpée — absent sinon.
+   *
+   * Ce que ça change : le pourcentage enregistré devient **global**. Une barre
+   * qui repartirait de zéro à chaque tranche décrirait l'avancement d'un appel,
+   * quand l'athlète attend celui de son plan.
+   */
+  progressChunk?: { index: number; count: number };
 };
 
 /**
@@ -1193,14 +1371,21 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
   const messages = [...options.messages];
   let violations: string[] = [];
 
-  const { progressId } = options;
+  const postProcess = planWeeksPostProcessing(options.paceContext, options.goalPaceSecPerKm);
+
+  const { progressId, progressChunk } = options;
+  /** L'avancement de cet appel, ramené à celui du plan quand il y a des tranches. */
+  const globalPercent = (percent: number): number =>
+    progressChunk === undefined
+      ? percent
+      : Math.min(99, Math.round((progressChunk.index * 100 + percent) / progressChunk.count));
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     // Chaque tentative repart de zéro : une reprise réécrit le plan complet,
     // donc le pourcentage recommence — et le front dit « tentative 2/3 » plutôt
     // que de laisser une barre reculer sans explication.
     if (progressId !== undefined) {
-      setPlanProgress(progressId, { percent: 0, attempt, maxAttempts: MAX_ATTEMPTS });
+      setPlanProgress(progressId, { percent: globalPercent(0), attempt, maxAttempts: MAX_ATTEMPTS });
     }
 
     let output: T;
@@ -1220,7 +1405,9 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
             ? undefined
             : (receivedChars) => {
                 setPlanProgress(progressId, {
-                  percent: planProgressPercent(receivedChars, options.estimatedChars),
+                  percent: globalPercent(
+                    planProgressPercent(receivedChars, options.estimatedChars),
+                  ),
                   attempt,
                   maxAttempts: MAX_ATTEMPTS,
                 });
@@ -1247,11 +1434,11 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
       continue;
     }
 
-    // Allures imposées : quand la table existe, l'appli les écrit elle-même,
-    // avant toute validation. Le corridor qui suit devient alors trivialement
-    // satisfait — c'est voulu, il ne juge plus que le régime sans table.
-    const imposed = options.paceContext.paces ?? null;
-    if (imposed !== null) output = options.withImposedPaces(output, imposed);
+    // Post-traitement, avant toute validation et dans les deux régimes : avec
+    // table, l'appli écrit les allures elle-même — le corridor qui suit devient
+    // alors trivialement satisfait, c'est voulu ; sans table, elle ne complète
+    // que les mesures manquantes, et le corridor juge les allures du modèle.
+    output = options.withPostProcessedWeeks(output, postProcess);
 
     const weeks = options.weeksOf(output);
     // Rien à juger : la sortie ne réécrit aucune semaine (cf. `weeksOf`).
@@ -1278,6 +1465,292 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
   throw new AiInvalidOutputError(
     `Le coach n'est pas parvenu à respecter les contraintes du plan : ${violations.join(' ')}`,
   );
+}
+
+/*
+ * Génération par tranches.
+ *
+ * ## Le constat
+ *
+ * Un plan de 16 semaines à 6 séances pèse ~13 k tokens de JSON, le prompt ~3 k :
+ * le contexte de 16 384 du serveur local est saturé, et la sortie se fait couper
+ * en plein objet — trois tentatives, trois échecs, rien d'exploitable. Un plafond
+ * de génération plus haut n'y peut rien : ce qui manque, c'est du contexte.
+ *
+ * ## Le découpage
+ *
+ * Au-delà de {@link CHUNK_WEEKS} semaines, le plan se génère en appels
+ * successifs d'au plus six semaines. Chaque appel reçoit le système habituel,
+ * **ses** volumes cibles, et un résumé d'une ligne de la tranche précédente pour
+ * la continuité. Les semaines sont ensuite assemblées, post-traitées (allures,
+ * durées, distances), puis jugées **globalement** : les règles de progression
+ * parlent du plan entier, une tranche prise isolément n'a ni pic ni affûtage.
+ *
+ * Une violation désigne une semaine ; une semaine appartient à une tranche.
+ * Seules les tranches fautives sont donc régénérées, dans la même limite de
+ * {@link MAX_ATTEMPTS} tentatives chacune — régénérer les seize semaines parce
+ * que la neuvième déborde coûterait tout ce que le découpage fait gagner.
+ */
+
+/**
+ * Au-delà de ce nombre de semaines, un plan ne se génère plus d'un seul tenant.
+ *
+ * Six : c'est le plus grand nombre qui laisse la sortie (~6 × 6 × 280 = 10 k
+ * caractères, soit ~3 k tokens) et le prompt (~3 k tokens) tenir confortablement
+ * dans les 16 k de contexte du serveur cible, marge de reprise comprise. C'est
+ * aussi un bloc d'entraînement cohérent : trois semaines de montée, une allégée.
+ */
+export const CHUNK_WEEKS = 6;
+
+/** Une tranche de génération : sa place dans le plan, et ce qu'elle doit rendre. */
+export type PlanChunkSpec = {
+  /** Rang de la tranche, à partir de 0. */
+  index: number;
+  /** Nombre total de tranches du plan. */
+  count: number;
+  /** Index de la première semaine couverte, à partir de 0. */
+  fromWeek: number;
+  /** Nombre de semaines de la tranche. */
+  weeks: number;
+};
+
+/**
+ * Le découpage d'une fenêtre de `weeks` semaines en tranches d'au plus
+ * {@link CHUNK_WEEKS}.
+ *
+ * Tranches **équilibrées** plutôt que remplies à ras bord : seize semaines font
+ * 6 + 5 + 5, pas 6 + 6 + 4. Le nombre d'appels est le même, mais aucune tranche
+ * ne se retrouve à décrire une semaine et demie de plan — un dernier appel
+ * famélique paie le même prix de prompt qu'un appel plein pour bien moins de
+ * plan écrit.
+ */
+export function planChunks(weeks: number): PlanChunkSpec[] {
+  const count = Math.max(1, Math.ceil(weeks / CHUNK_WEEKS));
+  const base = Math.floor(weeks / count);
+  const remainder = weeks % count;
+
+  const chunks: PlanChunkSpec[] = [];
+  let fromWeek = 0;
+  for (let index = 0; index < count; index += 1) {
+    const size = base + (index < remainder ? 1 : 0);
+    chunks.push({ index, count, fromWeek, weeks: size });
+    fromWeek += size;
+  }
+  return chunks;
+}
+
+/** La tranche à laquelle appartient la semaine `weekNumber` (numérotée à partir de 1). */
+function chunkOfWeek(chunks: readonly PlanChunkSpec[], weekNumber: number): PlanChunkSpec | null {
+  return (
+    chunks.find(
+      (chunk) => weekNumber > chunk.fromWeek && weekNumber <= chunk.fromWeek + chunk.weeks,
+    ) ?? null
+  );
+}
+
+/**
+ * Les semaines qu'une violation désigne — vide quand elle n'en nomme aucune.
+ *
+ * Les violations sont écrites pour le modèle, en français, et c'est leur seul
+ * format : « Semaine 9 : … », « Semaines 5 à 8 : … », « il en manque semaine 3,
+ * semaine 7 ». On y relit donc les numéros plutôt que de les faire remonter
+ * séparément — le prix à payer pour que ces messages restent des phrases.
+ *
+ * Une violation qui ne nomme rien (« Plan trop plat », « le plan doit compter
+ * exactement N semaines ») parle du plan entier : elle est renvoyée à toutes les
+ * tranches, faute de savoir laquelle est en cause.
+ */
+const VIOLATION_WEEK_PATTERN = /semaines?\s+(\d+)(?:\s*à\s*(\d+))?/gi;
+
+function violationWeeks(violation: string): number[] {
+  const weeks: number[] = [];
+  for (const match of violation.matchAll(VIOLATION_WEEK_PATTERN)) {
+    const from = Number(match[1]);
+    const to = match[2] === undefined ? from : Number(match[2]);
+    for (let week = from; week <= to; week += 1) weeks.push(week);
+  }
+  return weeks;
+}
+
+/** Les violations à renvoyer, tranche par tranche — les tranches saines n'y figurent pas. */
+function violationsByChunk(
+  violations: readonly string[],
+  chunks: readonly PlanChunkSpec[],
+): Map<number, string[]> {
+  const byChunk = new Map<number, string[]>();
+  const add = (index: number, violation: string): void => {
+    const own = byChunk.get(index);
+    if (own === undefined) byChunk.set(index, [violation]);
+    else if (!own.includes(violation)) own.push(violation);
+  };
+
+  for (const violation of violations) {
+    const weeks = violationWeeks(violation);
+    const targets = new Set(
+      weeks
+        .map((week) => chunkOfWeek(chunks, week)?.index)
+        .filter((index): index is number => index !== undefined),
+    );
+    if (targets.size === 0) {
+      for (const chunk of chunks) add(chunk.index, violation);
+      continue;
+    }
+    for (const index of targets) add(index, violation);
+  }
+
+  return byChunk;
+}
+
+/**
+ * Le résumé d'une ligne que la tranche suivante reçoit de la précédente.
+ *
+ * Deux informations, et pas une de plus : le **volume** de la dernière semaine —
+ * sans lui, la tranche suivante repart du volume qu'elle imagine, et la marche
+ * entre deux tranches ne respecte plus rien — et les **séances de qualité** qui
+ * s'y trouvaient, sans lesquelles le modèle enchaîne trois blocs de seuil
+ * identiques d'une tranche à l'autre. Le reste du plan écrit ne remonte pas :
+ * c'est précisément ce que le découpage cherche à ne pas repayer en contexte.
+ */
+function chunkContinuityLine(weeks: readonly PlanWeekOutput[], weekNumber: number): string {
+  const last = weeks[weeks.length - 1];
+  const volume = weekVolumeKm(last);
+  const quality = last.sessions.filter(isIntensitySession).map((session) => session.kind.trim());
+
+  return [
+    `Fin de la tranche précédente — semaine ${weekNumber} :`,
+    volume === null ? 'volume non déclaré,' : `${formatNumber(volume, 1)} km,`,
+    quality.length === 0
+      ? 'aucune séance de qualité.'
+      : `séances de qualité : ${quality.join(', ')}.`,
+  ].join(' ');
+}
+
+/** Ce qu'une génération par tranches produit : le plan assemblé, et son résumé. */
+export type ChunkedWeeks = { weeks: PlanWeekOutput[]; summary: string | null };
+
+export type ChunkedGenerationOptions = {
+  chunks: PlanChunkSpec[];
+  /** Les messages d'une tranche, continuité comprise. */
+  messagesFor: (chunk: PlanChunkSpec, continuity: string | null) => ChatMessage[];
+  /**
+   * Les semaines de la **première** tranche, quand l'appelant les a déjà
+   * obtenues — un ajustement et une révision les tirent d'une enveloppe qui
+   * porte aussi leurs réglages et leur décision, que la tranche suivante n'a
+   * plus à produire. Absentes, la première tranche se génère comme les autres.
+   */
+  firstChunkWeeks?: PlanWeekOutput[] | null;
+  /** La dernière tranche porte-t-elle le résumé du plan ? */
+  withSummary: boolean;
+  /** Nom du schéma, pour la grammaire et les journaux. */
+  schemaName: string;
+  /** Ce que le plan **assemblé** doit respecter. */
+  expectations: PlanExpectations;
+  paceContext: Omit<PlanValidationContext, 'weeklyTimeMinutes'>;
+  weeklyTimeMinutes: number | null;
+  /** L'allure objectif à poser sur les blocs spécifiques ({@link applyImposedPaces}). */
+  goalPaceSecPerKm: number | null;
+  sessionsPerWeek: number;
+  progressId?: string;
+};
+
+/**
+ * Génère un plan long **tranche par tranche**, l'assemble, le juge en entier, et
+ * ne régénère que ce qui cloche.
+ *
+ * @throws {AiInvalidOutputError} si des violations subsistent alors qu'aucune
+ * tranche fautive n'a plus de tentative — l'erreur porte la liste, comme une
+ * génération d'un seul tenant.
+ */
+export async function generateWeeksInChunks(
+  options: ChunkedGenerationOptions,
+): Promise<ChunkedWeeks> {
+  const { chunks } = options;
+  const weeksByChunk: PlanWeekOutput[][] = [];
+  const attempts = chunks.map(() => 0);
+  const lastIndex = chunks.length - 1;
+  let summary: string | null = null;
+
+  const generateChunk = async (chunk: PlanChunkSpec, reprise: string | null): Promise<void> => {
+    const continuity =
+      chunk.index === 0
+        ? null
+        : chunkContinuityLine(weeksByChunk[chunk.index - 1], chunk.fromWeek);
+    const withSummary = options.withSummary && chunk.index === lastIndex;
+    const messages = options.messagesFor(chunk, continuity);
+
+    const output = await generateWithBusinessRules<PlanChunkOutput>({
+      messages: reprise === null ? messages : [...messages, { role: 'user', content: reprise }],
+      schemaName: options.schemaName,
+      jsonSchema: planChunkJsonSchema(chunk.weeks, withSummary),
+      schema: planChunkOutputSchema,
+      // Rien à juger ici : les règles de progression parlent du plan entier, et
+      // une tranche n'en est qu'un morceau. La validation a lieu à l'assemblage.
+      weeksOf: () => null,
+      expectationsOf: () => options.expectations,
+      weeklyTimeBudgetOf: () => options.weeklyTimeMinutes,
+      withPostProcessedWeeks: (chunkOutput, postProcess) => ({
+        ...chunkOutput,
+        weeks: postProcess(chunkOutput.weeks),
+      }),
+      goalPaceSecPerKm: options.goalPaceSecPerKm,
+      paceContext: options.paceContext,
+      progressId: options.progressId,
+      estimatedChars: estimatePlanChars(chunk.weeks, options.sessionsPerWeek),
+      progressChunk: { index: chunk.index, count: chunks.length },
+    });
+
+    attempts[chunk.index] += 1;
+    weeksByChunk[chunk.index] = output.weeks;
+    if (withSummary && output.summary !== undefined) summary = output.summary;
+  };
+
+  const seeded = options.firstChunkWeeks ?? null;
+  if (seeded !== null) {
+    weeksByChunk[0] = seeded;
+    attempts[0] = 1;
+  }
+
+  for (const chunk of chunks) {
+    if (chunk.index === 0 && seeded !== null) continue;
+    await generateChunk(chunk, null);
+  }
+
+  for (;;) {
+    const weeks = weeksByChunk.flat();
+    const violations = validatePlanBusinessRules(weeks, options.expectations, {
+      ...options.paceContext,
+      weeklyTimeMinutes: options.weeklyTimeMinutes,
+    });
+    if (violations.length === 0) return { weeks, summary };
+
+    // Par index croissant, jamais dans l'ordre d'apparition des violations :
+    // une tranche tire sa ligne de continuité de la précédente
+    // ({@link chunkContinuityLine}), donc régénérer la tranche 2 avant la 1 la
+    // calerait sur des semaines qui vont être remplacées dans la foulée.
+    const byChunk = [...violationsByChunk(violations, chunks)]
+      .filter(([index]) => attempts[index] < MAX_ATTEMPTS)
+      .sort(([left], [right]) => left - right);
+    if (byChunk.length === 0) {
+      console.error(
+        `[plan] génération par tranches abandonnée (${options.schemaName}) : violations métier non corrigées.`,
+      );
+      throw new AiInvalidOutputError(
+        `Le coach n'est pas parvenu à respecter les contraintes du plan : ${violations.join(' ')}`,
+      );
+    }
+
+    for (const [index, own] of byChunk) {
+      const chunk = chunks[index];
+      const reprise = buildViolationsMessage(own, chunk);
+      logRejectedAttempt(
+        attempts[index],
+        `${options.schemaName} (tranche ${index + 1}/${chunks.length})`,
+        'violations métier',
+        reprise,
+      );
+      await generateChunk(chunk, reprise);
+    }
+  }
 }
 
 /**
@@ -1365,42 +1838,65 @@ async function writeGeneratedPlan(
   progressId: string | undefined,
 ): Promise<PlanDto> {
   const paces = referenceRacePaces(request.referenceRace);
+  const chunks = planChunks(window.weeks);
 
-  const output = await generateWithBusinessRules({
-    messages: buildPlanMessages(request, window, snapshot, paces),
-    schemaName: 'training_plan',
-    jsonSchema: planJsonSchema,
-    schema: planOutputSchema,
-    weeksOf: (plan) => plan.weeks,
-    expectationsOf: () => ({
-      scope: 'creation',
-      weeks: window.weeks,
-      sessionsPerWeek: request.sessionsPerWeek,
-      longRunDay: request.longRunDay,
-      // > 1 sur un départ en milieu de semaine : la première semaine est jugée
-      // comme une semaine entamée, exactement comme à l'ajustement.
-      firstWeekFromDay: window.firstWeekFromDay,
-      race: raceGoalOf(request.goalType, request.goalText),
-    }),
-    // L'allure objectif vient du but que l'athlète a écrit : « 10 km sous
-    // 50 min » vaut 5:00/km, et les blocs spécifiques la reçoivent au lieu de la
-    // zone M (cf. `goalPaceSecPerKm`).
-    withImposedPaces: (plan, table) => ({
-      ...plan,
-      weeks: applyImposedPaces(plan.weeks, table, goalPaceSecPerKm(request.goalText)),
-    }),
-    // Une création ne porte pas de réglages : le budget est celui de la requête,
-    // rien dans la sortie ne peut le déplacer.
-    weeklyTimeBudgetOf: () => request.weeklyTimeMinutes ?? null,
-    paceContext: {
-      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
-      paces,
-      // Une création, et elle seule, se juge sur l'historique d'avant-plan.
-      recentWeeklyKm: bestRecentWeeklyKm(snapshot),
-    },
-    progressId,
-    estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
-  });
+  const expectations: PlanExpectations = {
+    scope: 'creation',
+    weeks: window.weeks,
+    sessionsPerWeek: request.sessionsPerWeek,
+    longRunDay: request.longRunDay,
+    // > 1 sur un départ en milieu de semaine : la première semaine est jugée
+    // comme une semaine entamée, exactement comme à l'ajustement.
+    firstWeekFromDay: window.firstWeekFromDay,
+    race: raceGoalOf(request.goalType, request.goalText),
+    // Les volumes que l'appli a chiffrés, et que le prompt vient d'annoncer.
+    weeklyTargets: planVolumeTargets(request, window, snapshot, paces),
+  };
+  const paceContext = {
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paces,
+    // Une création, et elle seule, se juge sur l'historique d'avant-plan.
+    recentWeeklyKm: bestRecentWeeklyKm(snapshot),
+  };
+  // L'allure objectif vient du but que l'athlète a écrit : « 10 km sous 50 min »
+  // vaut 5:00/km, et les blocs spécifiques la reçoivent au lieu de la zone M
+  // (cf. `goalPaceSecPerKm`).
+  const goalPace = goalPaceSecPerKm(request.goalText);
+
+  const output =
+    chunks.length > 1
+      ? await generateWeeksInChunks({
+          chunks,
+          messagesFor: (chunk, continuity) =>
+            buildPlanMessages(request, window, snapshot, paces, { chunk, continuity }),
+          withSummary: true,
+          schemaName: 'training_plan_chunk',
+          expectations,
+          paceContext,
+          // Une création ne porte pas de réglages : le budget est celui de la
+          // requête, rien dans la sortie ne peut le déplacer.
+          weeklyTimeMinutes: request.weeklyTimeMinutes ?? null,
+          goalPaceSecPerKm: goalPace,
+          sessionsPerWeek: request.sessionsPerWeek,
+          progressId,
+        })
+      : await generateWithBusinessRules({
+          messages: buildPlanMessages(request, window, snapshot, paces),
+          schemaName: 'training_plan',
+          jsonSchema: planJsonSchema,
+          schema: planOutputSchema,
+          weeksOf: (plan) => plan.weeks,
+          expectationsOf: () => expectations,
+          withPostProcessedWeeks: (plan, postProcess) => ({
+            ...plan,
+            weeks: postProcess(plan.weeks),
+          }),
+          goalPaceSecPerKm: goalPace,
+          weeklyTimeBudgetOf: () => request.weeklyTimeMinutes ?? null,
+          paceContext,
+          progressId,
+          estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
+        });
 
   return createDraftPlanWithSessions({
     goalType: request.goalType,
@@ -1561,56 +2057,107 @@ async function writeUpdatedPlan(
   // les allures que la table impose, il réécrit des séances.
   const paces = referenceRacePaces(planReferenceRace(active.plan));
 
+  const chunks = planChunks(window.weeks);
+  const chunked = chunks.length > 1;
+  // Fenêtre restante, pas plan complet : la règle anti-plat n'y a pas d'objet —
+  // exiger un pic supérieur à la première semaine restante réclamerait de monter
+  // le volume à quelques semaines de la course.
+  const expectationsOf = (settings: PlanSettingsOutput | undefined): PlanExpectations => ({
+    scope: 'adjustment',
+    weeks: window.weeks,
+    sessionsPerWeek: settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
+    longRunDay: settings?.longRunDay ?? active.plan.longRunDay,
+    firstWeekFromDay: window.firstWeekFromDay,
+    // La fenêtre restante se termine avec le plan, donc avec la course : ses
+    // dernières semaines sont bien celles de l'affûtage. Un ajustement demandé
+    // à moins de 8 semaines d'un marathon n'en exigera que deux au lieu de
+    // trois — la fenêtre est courte, et c'est le sens conservateur.
+    race: raceGoalOf(active.plan.goalType, active.plan.goalText),
+    // Pas de cibles de volume : elles s'ancrent sur l'historique d'avant-plan et
+    // sur un départ à chiffrer, deux choses qu'un plan en cours a déjà tranchées.
+  });
+  const paceContext = {
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paces,
+    // Pas de `recentWeeklyKm` : c'est le plan en cours qui fait foi, pas le
+    // volume d'avant-plan.
+  };
+  // L'objectif du plan porte l'allure objectif, comme à la génération : un
+  // ajustement réécrit des séances, pas le but qu'elles préparent.
+  const goalPace = goalPaceSecPerKm(active.plan.goalText);
+
+  // L'enveloppe — réglages et résumé — vient toujours du premier appel : c'est
+  // l'instruction qui la décide, et elle est connue dès la première tranche.
   const output = await generateWithBusinessRules({
-    messages: buildPlanUpdateMessages(active.plan, upcoming, window, instruction, paces),
+    messages: buildPlanUpdateMessages(
+      active.plan,
+      upcoming,
+      window,
+      instruction,
+      paces,
+      chunked ? { chunk: chunks[0], continuity: null } : null,
+    ),
     schemaName: 'training_plan_update',
-    jsonSchema: planUpdateJsonSchema,
+    jsonSchema: chunked ? planUpdateChunkJsonSchema(chunks[0].weeks) : planUpdateJsonSchema,
     schema: planUpdateOutputSchema,
-    weeksOf: (plan) => plan.weeks,
-    expectationsOf: (plan) => ({
-      // Fenêtre restante, pas plan complet : la règle anti-plat n'y a pas
-      // d'objet — exiger un pic supérieur à la première semaine restante
-      // réclamerait de monter le volume à quelques semaines de la course.
-      scope: 'adjustment',
-      weeks: window.weeks,
-      sessionsPerWeek: plan.settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
-      longRunDay: plan.settings?.longRunDay ?? active.plan.longRunDay,
-      firstWeekFromDay: window.firstWeekFromDay,
-      // La fenêtre restante se termine avec le plan, donc avec la course : ses
-      // dernières semaines sont bien celles de l'affûtage. Un ajustement demandé
-      // à moins de 8 semaines d'un marathon n'en exigera que deux au lieu de
-      // trois — la fenêtre est courte, et c'est le sens conservateur.
-      race: raceGoalOf(active.plan.goalType, active.plan.goalText),
-    }),
-    // L'objectif du plan porte l'allure objectif, comme à la génération : un
-    // ajustement réécrit des séances, pas le but qu'elles préparent.
-    withImposedPaces: (plan, table) => ({
+    // Découpé, le premier appel ne rend qu'une tranche : la juger contre les
+    // attentes du plan entier la déclarerait fautive sur son seul compte de
+    // semaines. La validation a lieu à l'assemblage.
+    weeksOf: (plan) => (chunked ? null : plan.weeks),
+    expectationsOf: (plan) => expectationsOf(plan.settings),
+    withPostProcessedWeeks: (plan, postProcess) => ({
       ...plan,
-      weeks: applyImposedPaces(plan.weeks, table, goalPaceSecPerKm(active.plan.goalText)),
+      weeks: postProcess(plan.weeks),
     }),
+    goalPaceSecPerKm: goalPace,
     // Le budget que la sortie déclare, à défaut celui du plan stocké : une
     // instruction qui élargit ou lève la contrainte de temps produit des
     // semaines qui se jugent sur cette contrainte-là, pas sur l'ancienne.
     weeklyTimeBudgetOf: (plan) =>
       resolveWeeklyTimeBudget(plan.settings, active.plan.weeklyTimeMinutes),
-    paceContext: {
-      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
-      paces,
-      // Pas de `recentWeeklyKm` : c'est le plan en cours qui fait foi, pas le
-      // volume d'avant-plan.
-    },
+    paceContext,
     progressId,
     // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,
     // elle, se cale sur ceux d'aujourd'hui — c'est une estimation, pas un
     // contrat.
-    estimatedChars: estimatePlanChars(window.weeks, active.plan.sessionsPerWeek),
+    estimatedChars: estimatePlanChars(
+      chunked ? chunks[0].weeks : window.weeks,
+      active.plan.sessionsPerWeek,
+    ),
+    ...(chunked ? { progressChunk: { index: 0, count: chunks.length } } : {}),
   });
+
+  const weeks = chunked
+    ? (
+        await generateWeeksInChunks({
+          chunks,
+          messagesFor: (chunk, continuity) =>
+            buildPlanUpdateMessages(active.plan, upcoming, window, instruction, paces, {
+              chunk,
+              continuity,
+            }),
+          firstChunkWeeks: output.weeks,
+          // Le résumé est déjà écrit : il accompagne l'enveloppe du premier appel.
+          withSummary: false,
+          schemaName: 'training_plan_update_chunk',
+          expectations: expectationsOf(output.settings),
+          paceContext,
+          weeklyTimeMinutes: resolveWeeklyTimeBudget(
+            output.settings,
+            active.plan.weeklyTimeMinutes,
+          ),
+          goalPaceSecPerKm: goalPace,
+          sessionsPerWeek: output.settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
+          progressId,
+        })
+      ).weeks
+    : output.weeks;
 
   // Séances et réglages en une seule transaction : un plan ne doit jamais
   // annoncer des contraintes que son calendrier ne suit pas.
   await applyPlanUpdate(active.plan.id, {
     fromDate,
-    sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
+    sessions: mapPlanWeeksToSessions(weeks, window.firstWeekStart),
     settings: planSettingsPatch(active.plan, output.settings, output.summary),
   });
   await afterActivePlanChanged(active.plan.id);

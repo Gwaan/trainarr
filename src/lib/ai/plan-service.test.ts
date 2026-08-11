@@ -7,6 +7,7 @@ import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
 
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
+import { weeklyVolumeTargets } from './plan-schema';
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
@@ -16,6 +17,7 @@ import {
   buildViolationsMessage,
   estimatePlanChars,
   generatePlan,
+  planChunks,
   planProgressPercent,
   planWindow,
   remainingPlanWindow,
@@ -159,16 +161,41 @@ const REQUEST: PlanRequest = {
 };
 
 /**
- * Une semaine conforme : 3 séances, la plus longue le dimanche, et la séance de
- * qualité livrée avec son déroulé — sans lui, elle violerait les règles métier.
+ * Une semaine **pleine** conforme : 3 séances, la plus longue le dimanche, et la
+ * séance de qualité livrée avec son déroulé — sans lui, elle violerait les
+ * règles métier.
+ *
+ * Son volume n'est pas libre : il tient dans la cible que l'appli chiffre pour
+ * `REQUEST` + `SNAPSHOT` (meilleure semaine récente 42,1 km → première semaine
+ * pleine à 50,5 km au plus, cf. `weeklyVolumeTargets`). 50 km, donc, à ±10 % de
+ * la cible.
  */
 const CONFORMING_WEEK = {
   sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 12 },
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 15, steps: THRESHOLD_STEPS },
+    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 23 },
   ],
 };
+
+/**
+ * La même semaine, à l'échelle d'une **première semaine entamée un mardi** : la
+ * cible y est proratée sur six jours (50,5 × 6/7 ≈ 43,2 km).
+ */
+const CONFORMING_PARTIAL_WEEK = {
+  sessions: [
+    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10 },
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 13, steps: THRESHOLD_STEPS },
+    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
+  ],
+};
+
+/**
+ * Les deux semaines d'un plan `REQUEST` conforme, dans l'ordre : `REQUEST`
+ * démarre aujourd'hui (un mardi), sa première semaine est donc entamée et porte
+ * une cible plus basse que la seconde.
+ */
+const CONFORMING_WEEKS = [CONFORMING_PARTIAL_WEEK, CONFORMING_WEEK];
 
 /**
  * Une **première semaine entamée** conforme : rien avant le jeudi, et la sortie
@@ -187,9 +214,9 @@ const PARTIAL_FIRST_WEEK = {
  */
 const ABERRANT_PACE_WEEK = {
   sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, targetPaceSecPerKm: 600 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10, targetPaceSecPerKm: 600 },
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 13, steps: THRESHOLD_STEPS },
+    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
   ],
 };
 
@@ -551,29 +578,66 @@ describe('buildPlanMessages', () => {
    * Le volume de départ : le modèle doit viser juste du premier coup.
    *
    * Constaté en production : 25 km la première semaine, chez une athlète dont
-   * les quatre dernières font 9 à 13,6 km. La violation est le filet ; cette
-   * ligne-là est la consigne, et elle porte exactement le chiffre que la
-   * validation vérifiera.
+   * les quatre dernières font 9 à 13,6 km. Ce plafond-là ne s'annonce plus comme
+   * une règle à appliquer — la première cible le porte déjà, chiffrée.
    */
-  it('plafonne la première semaine pleine sur le volume réel récent', () => {
-    // Meilleure semaine du snapshot : 42,1 km → max(42,1 × 1,2 ; 42,1 + 3).
-    expect(messages[1].content).toContain(
-      'Volume de départ : la première semaine pleine ne dépasse pas 50,5 km (ton volume réel récent).',
+  it('ancre la première cible sur le volume réel récent, sans énoncer de plafond', () => {
+    // Meilleure semaine du snapshot : 42,1 km → max(42,1 × 1,2 ; 42,1 + 3) = 50,5.
+    expect(messages[1].content).toContain('S1 ~50,5 km');
+    expect(messages[1].content).not.toContain('Volume de départ');
+  });
+
+  /**
+   * Le cœur du chantier : ce que le modèle reçoit n'est plus une règle de
+   * progression à appliquer lui-même, mais le chiffre de chaque semaine. Un plan
+   * de 16 semaines à 6 séances lui faisait ignorer le budget onze semaines
+   * d'affilée ; l'arithmétique est désormais faite.
+   */
+  it('donne le volume de chaque semaine, temps compris, sur une seule ligne', () => {
+    const line = messages[1].content
+      .split('\n')
+      .find((row) => row.startsWith('Volumes hebdomadaires cibles'));
+
+    // Quatre semaines, dont deux d'affûtage (course) : la montée puis la baisse.
+    // Au dixième, toujours : c'est le chiffre exact que le modèle doit recopier
+    // (cf. `formatTargetKm`), l'entier lui ferait franchir les plafonds.
+    expect(line).toBe(
+      'Volumes hebdomadaires cibles (à ±10 %) : S1 ~50,5 km (≈4 h 33) · S2 ~52,7 km (≈4 h 45) · ' +
+        'S3 ~39,5 km (≈3 h 33) · S4 ~28,9 km (≈2 h 36)',
     );
   });
 
-  it('ne plafonne rien quand l’historique est vide ou nul', () => {
+  it('dit dans le prompt que la tolérance n’est pas un espace de liberté', () => {
+    // La bande de ±10 % juge chaque semaine seule, la hausse et l'allégée jugent
+    // deux semaines l'une contre l'autre : s'y promener fait refuser le plan.
+    expect(messages[1].content).toContain(
+      'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté',
+    );
+  });
+
+  it('impose une sortie compacte : chaque caractère se paie en contexte', () => {
+    // Un plan de 16 semaines indenté pèse ~40 k caractères et sature le contexte
+    // du serveur, qui coupe la sortie en plein objet.
+    expect(messages[0].content).toContain(
+      '- Réponds en JSON compact, sans indentation ni retours à la ligne — chaque caractère compte.',
+    );
+  });
+
+  it('part du volume prudent de son niveau quand l’historique est vide ou nul', () => {
     const window = { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 };
 
-    expect(buildPlanMessages(REQUEST, window, { ...SNAPSHOT, weeks: [] })[1].content).not.toContain(
-      'Volume de départ',
+    // Quatre semaines à zéro ne disent pas « démarre à zéro » : elles ne disent
+    // rien, et un intermédiaire démarre alors à 24 km — 23,9 annoncés, le dixième
+    // de marge que `floorKm` garde sous chaque plafond.
+    expect(buildPlanMessages(REQUEST, window, { ...SNAPSHOT, weeks: [] })[1].content).toContain(
+      'S1 ~23,9 km',
     );
     expect(
       buildPlanMessages(REQUEST, window, {
         ...SNAPSHOT,
         weeks: [{ startsOn: '2026-08-03', distanceKm: 0, movingTimeS: 0, sessions: 0 }],
       })[1].content,
-    ).not.toContain('Volume de départ');
+    ).toContain('S1 ~23,9 km');
   });
 
   /**
@@ -1076,7 +1140,7 @@ describe('generatePlan', () => {
   it('écrit le plan quand la première génération est conforme', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     const plan = await generatePlan(REQUEST);
@@ -1095,7 +1159,7 @@ describe('generatePlan', () => {
     expect(input.raceDate).toBeNull();
     expect(input.summary).toBe('Deux semaines de reprise.');
     expect(input.sessions).toHaveLength(6);
-    expect(input.sessions[0]).toMatchObject({ scheduledOn: '2026-08-11', volumeM: 8_000 });
+    expect(input.sessions[0]).toMatchObject({ scheduledOn: '2026-08-11', volumeM: 10_000 });
     expect(input.sessions[5].scheduledOn).toBe('2026-08-23');
   });
 
@@ -1104,7 +1168,7 @@ describe('generatePlan', () => {
     // plan de seize semaines s'arrêtait au milieu d'un objet, sans rien dire.
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -1140,7 +1204,7 @@ describe('generatePlan', () => {
     // et le jeudi sont derrière nous, ils lui sont renvoyés en violation.
     chatCompletionJson.mockResolvedValue({
       summary: 'x',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await expect(generatePlan({ ...REQUEST, startsOn: '2026-08-15' })).rejects.toThrow(
@@ -1156,7 +1220,7 @@ describe('generatePlan', () => {
   it("n'engage rien : ni rapprochement, ni publication au calendrier", async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -1172,7 +1236,7 @@ describe('generatePlan', () => {
   it('reprend une fois en renvoyant les violations, puis écrit le plan corrigé', async () => {
     chatCompletionJson
       .mockResolvedValueOnce({ summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] })
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
 
     await generatePlan(REQUEST);
 
@@ -1189,7 +1253,7 @@ describe('generatePlan', () => {
   it("renvoie au modèle une allure hors de portée de l'athlète, corridor à l'appui", async () => {
     chatCompletionJson
       .mockResolvedValueOnce({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] })
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
 
     await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
 
@@ -1210,7 +1274,7 @@ describe('generatePlan', () => {
   it('reprend une sortie hors schéma en pointant le champ fautif, puis écrit le plan', async () => {
     chatCompletionJson
       .mockRejectedValueOnce(OFF_SCHEMA)
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
 
     await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
 
@@ -1228,7 +1292,7 @@ describe('generatePlan', () => {
     chatCompletionJson
       .mockResolvedValueOnce({ summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] })
       .mockRejectedValueOnce(OFF_SCHEMA)
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
 
     await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
     expect(chatCompletionJson).toHaveBeenCalledTimes(3);
@@ -1279,7 +1343,7 @@ describe('generatePlan — chrono de référence', () => {
   it('écrit le chrono avec le plan, et impose sa table au modèle', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
@@ -1297,7 +1361,7 @@ describe('generatePlan — chrono de référence', () => {
   it('laisse les deux colonnes nulles quand aucun chrono n’est donné', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -1327,9 +1391,9 @@ describe('generatePlan — chrono de référence', () => {
   it('écrase les allures du modèle au lieu de lui redemander un plan', async () => {
     const fastWeek = {
       sessions: [
-        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-        { day: 4, kind: 'VMA', title: '5 × 3 min', distanceKm: 10, targetPaceSecPerKm: 210, steps: THRESHOLD_STEPS },
-        { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10 },
+        { day: 4, kind: 'VMA', title: '5 × 3 min', distanceKm: 13, targetPaceSecPerKm: 210, steps: THRESHOLD_STEPS },
+        { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
       ],
     };
     chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [fastWeek, CONFORMING_WEEK] });
@@ -1349,7 +1413,7 @@ describe('generatePlan — chrono de référence', () => {
   it('écrit les allures des étapes selon leur rôle, la séance donnant le créneau', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'x',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
@@ -1375,7 +1439,7 @@ describe('generatePlan — chrono de référence', () => {
   it('laisse le modèle poser ses allures quand il n’y a pas de table', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'x',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -1675,6 +1739,59 @@ describe('updatePlanFromInstruction', () => {
     expect(dal.reconcilePlanSessions).not.toHaveBeenCalled();
   });
 
+  it('dérive les volumes du déroulé quand le plan ne porte pas de chrono', async () => {
+    // Le blocage éradiqué : sans table d'allures, rien ne dérivait `distanceKm`,
+    // que le modèle n'écrit jamais — « Volumes hebdomadaires invérifiables »
+    // condamnait les trois tentatives quoi que contienne le plan.
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [
+        {
+          sessions: [
+            {
+              day: 7,
+              kind: 'Sortie longue',
+              title: '1 h',
+              steps: [{ repeat: 1, steps: [step('run', { durationS: 3600 })] }],
+            },
+          ],
+        },
+        {
+          sessions: [
+            {
+              day: 2,
+              kind: 'Endurance',
+              title: 'Footing',
+              steps: [{ repeat: 1, steps: [step('run', { distanceM: 8000 })] }],
+            },
+            { day: 4, kind: 'Seuil', title: '4 × 8 min', steps: THRESHOLD_STEPS },
+            {
+              day: 7,
+              kind: 'Sortie longue',
+              title: 'Endurance',
+              steps: [{ repeat: 1, steps: [step('run', { distanceM: 16_000 })] }],
+            },
+          ],
+        },
+      ],
+    });
+
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
+
+    // Une seule tentative, et les mesures arrivent en base : les durées sont
+    // celles du déroulé, les distances les mêmes converties à l'allure récente
+    // de l'athlète (5:24/km) — sauf les efforts, qui portent celle du modèle.
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    const { sessions } = dal.applyPlanUpdate.mock.calls[0][1];
+    expect(sessions.map((planned: { volumeM: number }) => planned.volumeM)).toEqual([
+      11_100, 8_000, 12_400, 16_000,
+    ]);
+    expect(sessions.map((planned: { durationS: number }) => planned.durationS)).toEqual([
+      3_600, 2_580, 3_900, 5_160,
+    ]);
+  });
+
   it("échoue proprement quand aucun plan n'est actif", async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(null);
 
@@ -1725,7 +1842,14 @@ describe('budget temps hebdomadaire', () => {
     ],
   };
 
-  /** Une semaine pleine conforme, durées déclarées : 3 h 00 au total. */
+  /**
+   * Une semaine pleine conforme, durées déclarées.
+   *
+   * La séance de seuil porte un déroulé, et c'est lui qui décide de sa durée :
+   * `THRESHOLD_STEPS` totalise 900 + 4 × (480 + 120) + 600 = 3 900 s, soit
+   * **65 min** quoi qu'en déclare le modèle (cf. `applyDerivedMeasures`). La
+   * valeur passée pour cette séance n'est donc là que pour rester lisible.
+   */
   function timedWeek(durationsMin: [number, number, number]) {
     return {
       sessions: [
@@ -1750,7 +1874,7 @@ describe('budget temps hebdomadaire', () => {
   }
 
   /** 3 h 00 sur la semaine pleine : au-dessus des 2 h du plan, sous 4 h. */
-  const THREE_HOURS_WEEK = timedWeek([45, 55, 80]);
+  const THREE_HOURS_WEEK = timedWeek([45, 65, 70]);
 
   it("juge l'ajustement sur le budget que la sortie déclare, pas sur celui du plan", async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
@@ -1843,7 +1967,7 @@ describe('budget temps hebdomadaire', () => {
             { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 85 },
           ],
         },
-        timedWeek([25, 25, 42]),
+        timedWeek([25, 65, 40]),
       ],
     });
 
@@ -2024,7 +2148,7 @@ describe('progression de la génération', () => {
       seen.push(getPlanProgress(PROGRESS_ID));
       options.onProgress?.(Math.round(ESTIMATED / 2));
       seen.push(getPlanProgress(PROGRESS_ID));
-      return { summary: 'Deux semaines de reprise.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] };
+      return { summary: 'Deux semaines de reprise.', weeks: CONFORMING_WEEKS };
     });
 
     await generatePlan(REQUEST, PROGRESS_ID);
@@ -2051,7 +2175,7 @@ describe('progression de la génération', () => {
         attempts.push(getPlanProgress(PROGRESS_ID));
         options.onProgress?.(Math.round(ESTIMATED / 10));
         attempts.push(getPlanProgress(PROGRESS_ID));
-        return { summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] };
+        return { summary: 'Corrigé.', weeks: CONFORMING_WEEKS };
       });
 
     await generatePlan(REQUEST, PROGRESS_ID);
@@ -2104,7 +2228,7 @@ describe('progression de la génération', () => {
   it('journalise que la génération est suivie, avec le début de l’identifiant', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST, PROGRESS_ID);
@@ -2118,7 +2242,7 @@ describe('progression de la génération', () => {
   it('journalise aussi une génération non suivie : le silence était le problème', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -2147,7 +2271,7 @@ describe('progression de la génération', () => {
   it('ne streame pas et ne suit rien sans identifiant', async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+      weeks: CONFORMING_WEEKS,
     });
 
     await generatePlan(REQUEST);
@@ -2155,5 +2279,303 @@ describe('progression de la génération', () => {
     // Sans callback, `client.ts` reste en mode non-streamé : rien ne change pour
     // les appelants qui n'affichent pas de progression.
     expect(chatCompletionJson.mock.calls[0][0].onProgress).toBeUndefined();
+  });
+});
+
+/*
+ * Génération par tranches.
+ */
+
+/** Un plan de douze semaines : deux tranches de six, la première entamée un mardi. */
+const LONG_REQUEST: PlanRequest = { ...REQUEST, weeks: 12 };
+
+/** Les cibles que l'appli chiffre pour ce plan-là — l'échelle des semaines mimées. */
+const LONG_TARGETS = weeklyVolumeTargets({
+  weeks: 12,
+  firstWeekFromDay: 2,
+  recentWeeklyKm: 42.1,
+  weeklyTimeMinutes: null,
+  easyPaceSecPerKm: SNAPSHOT.recentAvgPaceSecPerKm,
+  race: null,
+  level: 'intermediate',
+});
+
+/**
+ * Une semaine de trois séances qui pèse exactement `km` : sortie longue le
+ * dimanche à 38 % du volume, le reste en endurance. Aucune séance de qualité —
+ * ces tests éprouvent le découpage, pas la méthodologie.
+ */
+function weekOfKm(km: number) {
+  return {
+    sessions: [
+      { day: 2, kind: 'Endurance fondamentale', title: 'Footing', distanceKm: km * 0.31 },
+      { day: 4, kind: 'Endurance fondamentale', title: 'Footing', distanceKm: km * 0.31 },
+      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: km * 0.38 },
+    ],
+  };
+}
+
+/** Les semaines d'une tranche, conformes à leurs cibles. */
+function chunkWeeks(from: number, to: number) {
+  return LONG_TARGETS.slice(from, to).map((target) => weekOfKm(target.targetKm));
+}
+
+describe('planChunks', () => {
+  it('ne découpe pas ce qui tient en un appel', () => {
+    expect(planChunks(6)).toEqual([{ index: 0, count: 1, fromWeek: 0, weeks: 6 }]);
+  });
+
+  it('équilibre les tranches plutôt que de les remplir à ras bord', () => {
+    // 6 + 5 + 5, et non 6 + 6 + 4 : un dernier appel famélique paie le même
+    // prompt qu'un appel plein.
+    expect(planChunks(16).map((chunk) => chunk.weeks)).toEqual([6, 5, 5]);
+    expect(planChunks(52).map((chunk) => chunk.weeks)).toEqual([6, 6, 6, 6, 6, 6, 6, 5, 5]);
+    expect(planChunks(16).map((chunk) => chunk.fromWeek)).toEqual([0, 6, 11]);
+  });
+});
+
+describe('generatePlan — par tranches', () => {
+  it('génère un plan long en deux appels et les assemble', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Douze semaines de reprise.' });
+
+    await generatePlan(LONG_REQUEST);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
+    expect(input.weeks).toBe(12);
+    expect(input.sessions).toHaveLength(36);
+    // Les semaines s'enchaînent sans trou : la dernière séance tombe douze
+    // semaines après l'ancre (lundi 10 août).
+    expect(input.sessions[35].scheduledOn).toBe('2026-11-01');
+    // Le résumé vient de la dernière tranche : c'est elle qui a vu tout le plan.
+    expect(input.summary).toBe('Douze semaines de reprise.');
+  });
+
+  it('borne la grammaire à la tranche, et ne demande le résumé qu’à la dernière', () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
+
+    return generatePlan(LONG_REQUEST).then(() => {
+      const [first, second] = chatCompletionJson.mock.calls.map(
+        (call: { jsonSchema: { properties: Record<string, unknown>; required: string[] } }[]) =>
+          call[0].jsonSchema,
+      );
+
+      expect(first.properties.weeks).toMatchObject({ minItems: 6, maxItems: 6 });
+      // La clé n'existe pas : un modèle sous grammaire ne peut pas résumer une
+      // tranche dont le résumé serait jeté.
+      expect(first.properties.summary).toBeUndefined();
+      expect(first.required).toEqual(['weeks']);
+      expect(second.properties.summary).toBeDefined();
+      expect(second.required).toEqual(['weeks', 'summary']);
+    });
+  });
+
+  it('annonce à chaque tranche ses bornes, ses cibles et rien de plus', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
+
+    await generatePlan(LONG_REQUEST);
+
+    const [first, second] = chatCompletionJson.mock.calls.map(
+      (call: { messages: { content: string }[] }[]) => call[0].messages[1].content,
+    );
+
+    expect(first).toContain(
+      "Tranche 1/2 : rends UNIQUEMENT les semaines 1 à 6 du plan, dans l'ordre chronologique",
+    );
+    expect(first).toContain('Volumes hebdomadaires cibles (à ±10 %) : S1 ');
+    // Les cibles des semaines qu'on ne demande pas ne partent pas : c'est tout
+    // l'objet du découpage.
+    expect(first).not.toContain('S7 ');
+    expect(second).toContain('Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 du plan');
+    expect(second).toContain('S7 ');
+    expect(second).toContain('Le résumé (`summary`) porte sur le plan complet');
+    // La première semaine entamée n'est annoncée qu'à la tranche qui la porte.
+    expect(first).toContain('weeks[0] est déjà entamée');
+    expect(second).not.toContain('déjà entamée');
+  });
+
+  it('donne à chaque tranche la fin de la précédente, pour qu’elle enchaîne', async () => {
+    // La sixième semaine porte une séance de qualité : c'est ce que la tranche
+    // suivante doit savoir pour ne pas en enchaîner une troisième.
+    const plain = weekOfKm(LONG_TARGETS[5].targetKm).sessions;
+    const sixth = {
+      sessions: [
+        plain[0],
+        { day: 5, kind: 'Seuil', title: '3 × 8 min', distanceKm: 12, steps: THRESHOLD_STEPS },
+        plain[2],
+      ],
+    };
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: [...chunkWeeks(0, 5), sixth] })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
+
+    await generatePlan(LONG_REQUEST).catch(() => undefined);
+
+    const second = chatCompletionJson.mock.calls[1][0].messages[1].content;
+    expect(second).toContain('Fin de la tranche précédente — semaine 6 :');
+    expect(second).toContain('séances de qualité : Seuil.');
+  });
+
+  it('ne régénère que la tranche fautive, pas le plan entier', async () => {
+    // La dixième semaine sort de sa cible : elle est dans la seconde tranche, et
+    // c'est la seule à reprendre.
+    const broken = chunkWeeks(6, 12);
+    broken[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
+
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: broken, summary: 'ok' })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Corrigé.' });
+
+    await generatePlan(LONG_REQUEST);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
+    const retry = chatCompletionJson.mock.calls[2][0].messages;
+    // La reprise porte sur la tranche, avec les numéros de semaine du plan.
+    expect(retry[2].content).toContain('Semaine 10 :');
+    expect(retry[2].content).toContain(
+      'Régénère les 6 semaines de cette tranche (semaines 7 à 12 du plan)',
+    );
+    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('régénère les tranches fautives dans l’ordre, pas dans celui des violations', async () => {
+    // Deux tranches fautives, dont les violations arrivent à l'envers : la
+    // semaine 10 sort de sa cible (tranche 2, règle des cibles, énoncée en
+    // premier), tandis que les semaines 2 et 3 restent dans leur bande mais
+    // enchaînent une hausse de 27 % (tranche 1, règle de la hausse, énoncée
+    // après). Régénérer la tranche 2 d'abord la calerait sur une semaine 6 qui
+    // va être réécrite dans la foulée.
+    const firstChunk = chunkWeeks(0, 6);
+    firstChunk[1] = weekOfKm(LONG_TARGETS[1].targetKm * 0.92);
+    firstChunk[2] = weekOfKm(LONG_TARGETS[2].targetKm * 1.08);
+    const secondChunk = chunkWeeks(6, 12);
+    secondChunk[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
+
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: firstChunk })
+      .mockResolvedValueOnce({ weeks: secondChunk, summary: 'ok' })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Corrigé.' });
+
+    await generatePlan(LONG_REQUEST);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(4);
+    const reprises = chatCompletionJson.mock.calls
+      .slice(2)
+      .map((call: { messages: { content: string }[] }[]) => call[0].messages[2].content);
+
+    expect(reprises[0]).toContain('semaines 1 à 6 du plan');
+    expect(reprises[1]).toContain('semaines 7 à 12 du plan');
+  });
+
+  it('renonce après trois tentatives sur la même tranche', async () => {
+    const broken = chunkWeeks(6, 12);
+    broken[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
+
+    chatCompletionJson
+      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
+      .mockResolvedValue({ weeks: broken, summary: 'ok' });
+
+    await expect(generatePlan(LONG_REQUEST)).rejects.toThrow(AiInvalidOutputError);
+
+    // Une pour la première tranche, trois pour la seconde.
+    expect(chatCompletionJson).toHaveBeenCalledTimes(4);
+    expect(loggedText()).toContain('génération par tranches abandonnée');
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+  });
+
+  it('suit l’avancement global, pas celui de la tranche en cours', async () => {
+    const PROGRESS_ID = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+    const seen: number[] = [];
+
+    chatCompletionJson
+      .mockImplementationOnce(async (options: { onProgress?: (chars: number) => void }) => {
+        options.onProgress?.(estimatePlanChars(6, 3));
+        seen.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
+        return { weeks: chunkWeeks(0, 6) };
+      })
+      .mockImplementationOnce(async (options: { onProgress?: (chars: number) => void }) => {
+        options.onProgress?.(Math.round(estimatePlanChars(6, 3) / 2));
+        seen.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
+        return { weeks: chunkWeeks(6, 12), summary: 'ok' };
+      });
+
+    await generatePlan(LONG_REQUEST, PROGRESS_ID);
+
+    // Première tranche terminée : 99 % de la moitié du plan. Seconde tranche à
+    // moitié : la moitié plus un quart.
+    expect(seen).toEqual([50, 75]);
+  });
+});
+
+describe('updatePlanFromInstruction — par tranches', () => {
+  /** Le plan actif du chantier long : douze semaines à ajuster, reprises demain. */
+  const LONG_PLAN = { ...PLAN, startsOn: '2026-08-10', weeks: 12, raceDate: '2026-11-01' };
+
+  /** Douze semaines conformes : montée par palier, semaine allégée, affûtage. */
+  const LONG_WEEKS = [
+    { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+    ...[30, 32, 34, 28, 30, 32, 34, 28, 30, 24, 18].map(weekOfKm),
+  ];
+
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue({ plan: LONG_PLAN, sessions: [] });
+  });
+
+  it('tient les réglages du premier appel et assemble les tranches suivantes', async () => {
+    chatCompletionJson
+      .mockResolvedValueOnce({
+        summary: 'Ajusté sur douze semaines.',
+        settings: { sessionsPerWeek: 3 },
+        weeks: LONG_WEEKS.slice(0, 6),
+      })
+      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+
+    await updatePlanFromInstruction('plutôt 3 séances');
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan_update');
+    expect(chatCompletionJson.mock.calls[1][0].schemaName).toBe('training_plan_update_chunk');
+
+    const [, update] = dal.applyPlanUpdate.mock.calls[0];
+    expect(update.sessions).toHaveLength(34);
+    // Le résumé vient de l'enveloppe, écrite au premier appel avec l'instruction.
+    expect(update.settings.summary).toBe('Ajusté sur douze semaines.');
+  });
+
+  it('ne montre à chaque tranche que les semaines qu’elle réécrit', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: LONG_PLAN,
+      sessions: [
+        planSession({ scheduledOn: '2026-08-16', kind: 'Sortie longue', title: 'Sortie du début' }),
+        planSession({ scheduledOn: '2026-10-04', kind: 'Sortie longue', title: 'Sortie de la fin' }),
+      ],
+    });
+    chatCompletionJson
+      .mockResolvedValueOnce({ summary: 'ok', weeks: LONG_WEEKS.slice(0, 6) })
+      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    const [first, second] = chatCompletionJson.mock.calls.map(
+      (call: { messages: { content: string }[] }[]) => call[0].messages[1].content,
+    );
+
+    // Les séances de la seconde moitié ne partent pas avec la première tranche :
+    // c'est le contexte que le découpage libère.
+    expect(first).toContain('Sortie du début');
+    expect(first).not.toContain('Sortie de la fin');
+    expect(second).toContain('Sortie de la fin');
+    expect(second).not.toContain('Sortie du début');
+    expect(second).toContain(
+      'Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 des semaines restantes',
+    );
   });
 });

@@ -103,25 +103,31 @@ import {
   formatTrainingSnapshot,
 } from './format';
 import {
-  applyImposedPaces,
   goalPaceSecPerKm,
   mapPlanWeeksToSessions,
+  planReviewChunkJsonSchema,
   planReviewJsonSchema,
   planReviewOutputSchema,
   resolveWeeklyTimeBudget,
+  type PlanExpectations,
   type PlanReviewOutput,
   type PlanSettingsOutput,
 } from './plan-schema';
 import {
+  chunkInstructionLines,
+  chunkWindow,
   estimatePlanChars,
   formatUpcomingPlan,
+  generateWeeksInChunks,
   generateWithBusinessRules,
+  planChunks,
   planSettingsPatch,
   planSystemPrompt,
   planTrainingPaces,
   planReferenceRace,
   raceGoalOf,
   remainingPlanWindow,
+  type PlanChunkSpec,
   type RemainingPlanWindow,
 } from './plan-service';
 
@@ -279,6 +285,7 @@ export function buildPlanReviewMessages(
   review: PlanReviewDto,
   snapshot: TrainingSnapshotDto,
   paces: TrainingPaces | null = null,
+  chunk: PlanChunkSpec | null = null,
 ): ChatMessage[] {
   const system = planSystemPrompt(
     plan.level,
@@ -288,8 +295,12 @@ export function buildPlanReviewMessages(
     REVIEW_SYSTEM_LINES,
   );
 
+  // Découpée, la révision ne montre que la première tranche du plan restant :
+  // c'est sur elle que porteront les semaines qu'elle réécrira, et le bilan des
+  // séances réalisées suffit à décider (cf. la génération par tranches).
+  const scope = chunk === null ? window : chunkWindow(window, chunk);
   const user = [
-    formatUpcomingPlan(plan, upcoming, window),
+    formatUpcomingPlan(plan, upcoming, scope),
     '',
     'Séances depuis ta dernière révision (prévu, puis réalisé) :',
     ...formatOlderSessions(review),
@@ -300,12 +311,71 @@ export function buildPlanReviewMessages(
     // dernières sorties sort du contexte (cf. `SnapshotFormatOptions`).
     formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
     '',
-    `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes.`,
+    chunk === null
+      ? `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes.`
+      : `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes. En « adjust », n'écris ici que les ${chunk.weeks} premières (semaines 1 à ${chunk.weeks} des semaines restantes) : la suite te sera demandée tranche par tranche.`,
   ].join('\n');
 
   return [
     { role: 'system', content: system },
     { role: 'user', content: user },
+  ];
+}
+
+/**
+ * Ce que le système dit à une **tranche** de révision, une fois la décision
+ * prise.
+ *
+ * La décision, le bilan et la raison appartiennent au premier appel : ces
+ * tranches-là n'ont plus qu'à écrire des semaines. Leur rappeler ce qui a été
+ * constaté est en revanche indispensable — c'est la seule chose qui relie les
+ * semaines qu'elles écrivent à la révision qui les a demandées.
+ */
+function reviewChunkSystemLines(reason: string): string[] {
+  return [
+    '',
+    "RÉVISION DU PLAN — tu as relu le plan de l'athlète et décidé de réécrire la suite.",
+    `- Ce que tu as constaté : « ${reason.replace(/\s+/g, ' ').trim()} ». Le plan réécrit en tient compte.`,
+    "- Tu réécris chaque séance en entier, `steps` compris : ce que les résultats ne remettent pas en cause, tu le reconduis tel quel.",
+    '- Tu ne rends que les semaines demandées ci-dessous, dans leur ordre chronologique.',
+  ];
+}
+
+/** Les messages d'une tranche de révision, la décision « adjust » déjà prise. */
+function buildReviewChunkMessages(
+  context: ReviewContext,
+  chunk: PlanChunkSpec,
+  continuity: string | null,
+  reason: string,
+): ChatMessage[] {
+  const { plan, window, paces } = context;
+  const scope = chunkWindow(window, chunk);
+
+  return [
+    {
+      role: 'system',
+      content: planSystemPrompt(
+        plan.level,
+        plan.goalType,
+        paces,
+        planReferenceRace(plan),
+        reviewChunkSystemLines(reason),
+      ),
+    },
+    {
+      role: 'user',
+      content: [
+        formatUpcomingPlan(plan, context.upcoming, scope, chunk.fromWeek + 1),
+        '',
+        ...chunkInstructionLines(
+          chunk,
+          continuity,
+          scope.firstWeekStart,
+          'des semaines restantes',
+          false,
+        ),
+      ].join('\n'),
+    },
   ];
 }
 
@@ -593,10 +663,29 @@ function reviewSettings(settings: PlanSettingsOutput | undefined): PlanSettingsO
 }
 
 /** La génération, sous le même contrôle métier qu'un ajustement. */
-function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
+async function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
   const { plan, window, snapshot, paces } = context;
+  const chunks = planChunks(window.weeks);
+  const chunked = chunks.length > 1;
 
-  return generateWithBusinessRules({
+  // Fenêtre restante, pas plan complet — même portée qu'un ajustement, pour la
+  // même raison (cf. `updatePlanFromInstruction`).
+  const expectationsOf = (settings: PlanSettingsOutput | undefined): PlanExpectations => ({
+    scope: 'adjustment',
+    weeks: window.weeks,
+    sessionsPerWeek: settings?.sessionsPerWeek ?? plan.sessionsPerWeek,
+    longRunDay: settings?.longRunDay ?? plan.longRunDay,
+    firstWeekFromDay: window.firstWeekFromDay,
+    race: raceGoalOf(plan.goalType, plan.goalText),
+  });
+  const paceContext = {
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paces,
+    // Pas de `recentWeeklyKm` : le plan en cours fait foi (cf. `plan-service`).
+  };
+  const goalPace = goalPaceSecPerKm(plan.goalText);
+
+  const output = await generateWithBusinessRules({
     messages: buildPlanReviewMessages(
       plan,
       context.upcoming,
@@ -604,35 +693,23 @@ function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
       context.review,
       snapshot,
       paces,
+      chunked ? chunks[0] : null,
     ),
     schemaName: 'training_plan_review',
-    jsonSchema: planReviewJsonSchema,
+    jsonSchema: chunked ? planReviewChunkJsonSchema(chunks[0].weeks) : planReviewJsonSchema,
     schema: planReviewOutputSchema,
-    // « keep » ne réécrit aucune semaine : il n'y a rien à juger.
-    weeksOf: (output) => (output.decision === 'adjust' ? output.weeks : null),
-    expectationsOf: (output) => ({
-      // Fenêtre restante, pas plan complet — même portée qu'un ajustement, pour
-      // la même raison (cf. `updatePlanFromInstruction`).
-      scope: 'adjustment',
-      weeks: window.weeks,
-      sessionsPerWeek:
-        (output.decision === 'adjust' ? output.settings?.sessionsPerWeek : undefined) ??
-        plan.sessionsPerWeek,
-      longRunDay:
-        (output.decision === 'adjust' ? output.settings?.longRunDay : undefined) ??
-        plan.longRunDay,
-      firstWeekFromDay: window.firstWeekFromDay,
-      race: raceGoalOf(plan.goalType, plan.goalText),
-    }),
-    // « keep » ne porte aucune semaine : il n'y a rien à réécrire. L'allure
+    // « keep » ne réécrit aucune semaine : il n'y a rien à juger. Découpée, la
+    // première tranche non plus — la validation a lieu à l'assemblage.
+    weeksOf: (output) => (output.decision === 'adjust' && !chunked ? output.weeks : null),
+    expectationsOf: (output) =>
+      expectationsOf(output.decision === 'adjust' ? output.settings : undefined),
+    // « keep » ne porte aucune semaine : il n'y a rien à post-traiter. L'allure
     // objectif vient du but du plan, comme à l'ajustement.
-    withImposedPaces: (output, table) =>
+    withPostProcessedWeeks: (output, postProcess) =>
       output.decision === 'adjust'
-        ? {
-            ...output,
-            weeks: applyImposedPaces(output.weeks, table, goalPaceSecPerKm(plan.goalText)),
-          }
+        ? { ...output, weeks: postProcess(output.weeks) }
         : output,
+    goalPaceSecPerKm: goalPace,
     // Le budget de vie de l'athlète vaut aussi quand c'est le coach qui reprend
     // la main : une révision n'a pas plus le droit qu'un ajustement de lui
     // planifier trois heures là où elle en a deux. Même mécanique qu'un
@@ -645,14 +722,35 @@ function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
         output.decision === 'adjust' ? reviewSettings(output.settings) : undefined,
         plan.weeklyTimeMinutes,
       ),
-    paceContext: {
-      referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
-      paces,
-      // Pas de `recentWeeklyKm` : le plan en cours fait foi (cf. `plan-service`).
-    },
+    paceContext,
     // Pas de `progressId` : personne ne regarde une révision se dérouler.
-    estimatedChars: estimatePlanChars(window.weeks, plan.sessionsPerWeek),
+    estimatedChars: estimatePlanChars(
+      chunked ? chunks[0].weeks : window.weeks,
+      plan.sessionsPerWeek,
+    ),
   });
+
+  // Le plan tient, ou il tient en un seul appel : rien à assembler.
+  if (output.decision === 'keep' || !chunked) return output;
+
+  const settings = reviewSettings(output.settings);
+  const { weeks } = await generateWeeksInChunks({
+    chunks,
+    messagesFor: (chunk, continuity) =>
+      buildReviewChunkMessages(context, chunk, continuity, output.reason),
+    firstChunkWeeks: output.weeks,
+    // Une révision ne réécrit pas le résumé du plan : elle y ajoute sa raison
+    // (cf. `withReviewNote`).
+    withSummary: false,
+    schemaName: 'training_plan_review_chunk',
+    expectations: expectationsOf(settings),
+    paceContext,
+    weeklyTimeMinutes: resolveWeeklyTimeBudget(settings, plan.weeklyTimeMinutes),
+    goalPaceSecPerKm: goalPace,
+    sessionsPerWeek: settings?.sessionsPerWeek ?? plan.sessionsPerWeek,
+  });
+
+  return { ...output, weeks };
 }
 
 /** L'écriture d'une révision qui ajuste : exactement le chemin de l'ajustement. */

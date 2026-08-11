@@ -239,6 +239,73 @@ export function formatTrainingPaces(
   ].join('\n');
 }
 
+/*
+ * Volumes hebdomadaires cibles, pour les prompts.
+ */
+
+/**
+ * Un volume cible, **toujours au dixième de kilomètre**.
+ *
+ * L'arrondi à l'entier au-dessus de 10 km a été retiré, et ce n'est pas une
+ * question de goût. Ce qui contraint le chiffre annoncé n'est pas la bande de
+ * ±10 % — large — mais la **marge d'un dixième** que le planificateur laisse
+ * sous ses plafonds (`floorKm` dans `plan-schema.ts`) : semaine allégée à 0,85 ×
+ * exactement, ancrage de la première semaine pleine sur le volume réellement
+ * couru, hausse maximale. Un dixième arrondi vers le haut consomme toute cette
+ * marge : des cibles 23,9 / 25,8 / 27,8 / 23,6 imprimées « 24 · 26 · 28 · 24 »
+ * font une allégée à 0,857 de la semaine précédente, au-dessus des 0,85 permis —
+ * et le plan qui recopie fidèlement les chiffres du prompt se fait refuser. Sur
+ * la grille exhaustive des configurations, 2 716 combinaisons sur 4 860 étaient
+ * dans ce cas.
+ *
+ * Le dixième coûte un token de plus par semaine. Le test de bout en bout de
+ * `plan-schema.test.ts` rejoue toute la grille sur les valeurs **imprimées** :
+ * c'est lui qui interdit d'y revenir.
+ */
+function formatTargetKm(km: number): string {
+  return `${formatNumber(km, 1)} km`;
+}
+
+/**
+ * Les volumes hebdomadaires cibles, en **une ligne** : `S1 ~14 km (≈1 h 56) ·
+ * S2 ~15 km (≈2 h 04) · …`.
+ *
+ * C'est la consigne la plus chargée du prompt de génération — une donnée par
+ * semaine du plan — d'où la compacité : ~12 tokens par semaine, contre la
+ * cinquantaine qu'une phrase par semaine coûterait. Sur seize semaines, l'écart
+ * décide de la place qui reste pour le plan lui-même.
+ *
+ * Le temps accompagne les kilomètres parce que c'est lui la contrainte de vie :
+ * « 45 km » ne dit rien à qui a deux heures par semaine, « 45 km (≈4 h 30) » si.
+ *
+ * La seconde ligne rétablit ce que « à ±10 % » laissait croire : la bande est le
+ * critère de **refus**, pas un espace où se promener. Les règles de progression
+ * se vérifient sur les volumes réellement écrits, or une montée visée à 8 %
+ * contre un plafond de 12 % ne tolère qu'environ 1,8 % de jeu relatif entre deux
+ * semaines, et une allégée posée à 0,85 × exactement n'en tolère aucun — deux
+ * semaines tirées au hasard dans leur bande sont refusées à peu près à coup sûr
+ * (493 fois sur 500, mesuré). Le prompt annonce donc la cible comme un chiffre à
+ * viser, la tolérance comme un filet.
+ *
+ * @param firstWeekNumber numéro de la première semaine listée, dans la
+ * numérotation du **plan entier** : une tranche annonce S7 à S11, pas S1 à S5.
+ */
+export function formatWeeklyVolumeTargets(
+  targets: readonly { targetKm: number; targetMinutes: number }[],
+  firstWeekNumber = 1,
+): string {
+  const cells = targets.map(
+    (target, index) =>
+      `S${firstWeekNumber + index} ~${formatTargetKm(target.targetKm)} (≈${formatDuration(target.targetMinutes * 60)})`,
+  );
+  return [
+    `Volumes hebdomadaires cibles (à ±10 %) : ${cells.join(' · ')}`,
+    'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté : ' +
+      'les règles de progression (hausse ≤ 12 %, semaine allégée à 85 %) se vérifient sur les volumes ' +
+      'réellement écrits, semaine contre semaine.',
+  ].join('\n');
+}
+
 /** Le profil sur une ligne. Les champs absents ne sont pas mentionnés. */
 function formatProfile(profile: TrainingSnapshotDto['profile']): string {
   const parts: string[] = [];

@@ -10,6 +10,7 @@ import {
   formatDaysAgo,
   formatDistanceKm,
   formatDuration,
+  formatWeeklyVolumeTargets,
   formatIsoDay,
   formatNumber,
   formatPace,
@@ -276,5 +277,54 @@ describe('formatPaceRange', () => {
   it('ne répète pas l’unité sur une plage, et la tait sur une allure unique', () => {
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 320 })).toBe('5:00–5:20/km');
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 300 })).toBe('5:00/km');
+  });
+});
+
+describe('formatWeeklyVolumeTargets', () => {
+  /** La ligne des chiffres, sans la consigne qui la suit. */
+  function cells(text: string): string {
+    return text.split('\n')[0];
+  }
+
+  it('tient toutes les semaines sur une ligne, kilomètres et temps', () => {
+    expect(
+      cells(
+        formatWeeklyVolumeTargets([
+          { targetKm: 14, targetMinutes: 116 },
+          { targetKm: 15.4, targetMinutes: 124 },
+        ]),
+      ),
+    ).toBe('Volumes hebdomadaires cibles (à ±10 %) : S1 ~14,0 km (≈1 h 56) · S2 ~15,4 km (≈2 h 04)');
+  });
+
+  it('imprime le dixième à toutes les distances, jamais l’entier', () => {
+    // Le planificateur ne laisse qu'un dixième de marge sous ses plafonds : une
+    // cible de 23,9 km imprimée « 24 km » et recopiée telle quelle fait refuser
+    // le plan le plus obéissant qui soit (cf. le balayage de `plan-schema.test`).
+    expect(formatWeeklyVolumeTargets([{ targetKm: 23.9, targetMinutes: 143 }])).toContain(
+      'S1 ~23,9 km',
+    );
+    expect(formatWeeklyVolumeTargets([{ targetKm: 4.4, targetMinutes: 35 }])).toContain(
+      'S1 ~4,4 km (≈35 min)',
+    );
+  });
+
+  it('annonce la tolérance comme un filet, pas comme un espace de liberté', () => {
+    expect(formatWeeklyVolumeTargets([{ targetKm: 14, targetMinutes: 116 }])).toContain(
+      'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté',
+    );
+  });
+
+  it('numérote dans la numérotation du plan entier, pas dans celle de la tranche', () => {
+    const line = formatWeeklyVolumeTargets(
+      [
+        { targetKm: 45, targetMinutes: 270 },
+        { targetKm: 48, targetMinutes: 288 },
+      ],
+      7,
+    );
+
+    expect(line).toContain('S7 ~45,0 km');
+    expect(line).toContain('S8 ~48,0 km');
   });
 });
