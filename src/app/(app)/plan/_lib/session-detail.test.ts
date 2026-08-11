@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PlanSessionDto } from '@/data/plans';
-import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
+import { PLAN_STEP_ROLES, type PlanSessionSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import {
   PLAN_STEP_ROLE_LABELS,
+  PLAN_STEP_ROLE_STYLES,
   formatStepDistance,
   formatStepDuration,
   formatStepMeasure,
@@ -236,8 +237,8 @@ describe('planSessionDetail', () => {
 
     expect(detail.blocks).toEqual([]);
     expect(detail.notes).toEqual([
-      { label: 'Échauffement', value: '15 min souple' },
-      { label: 'Retour au calme', value: '10 min footing' },
+      { role: 'warmup', label: 'Échauffement', value: '15 min souple' },
+      { role: 'cooldown', label: 'Retour au calme', value: '10 min footing' },
     ]);
     expect(detail.isEmpty).toBe(false);
   });
@@ -247,6 +248,14 @@ describe('planSessionDetail', () => {
     expect(planSessionDetail(session({ volumeM: 10_000 })).isEmpty).toBe(true);
   });
 
+  it('rattache le texte libre de récupération au rôle d’étape correspondant', () => {
+    // `recovery` (colonne) et `recover` (rôle d'étape) ne portent pas le même
+    // nom : c'est le rôle qui décide de la couleur de la brique.
+    expect(planSessionDetail(session({ recovery: '400 m en trottinant' })).notes).toEqual([
+      { role: 'recover', label: 'Récupération', value: '400 m en trottinant' },
+    ]);
+  });
+
   it('couvre les quatre rôles du schéma', () => {
     expect(Object.values(PLAN_STEP_ROLE_LABELS)).toEqual([
       'Échauffement',
@@ -254,5 +263,29 @@ describe('planSessionDetail', () => {
       'Récupération',
       'Retour au calme',
     ]);
+  });
+});
+
+describe('PLAN_STEP_ROLE_STYLES', () => {
+  it('donne à chaque rôle sa couleur — tokens du système, aucun hex', () => {
+    expect(PLAN_STEP_ROLE_STYLES).toEqual({
+      warmup: { block: 'border-l-positive bg-positive/10', label: 'text-positive' },
+      run: { block: 'border-l-accent bg-accent/10', label: 'text-accent' },
+      recover: {
+        block: 'border-l-chart-cadence bg-chart-cadence/10',
+        label: 'text-chart-cadence',
+      },
+      cooldown: {
+        block: 'border-l-chart-stride bg-chart-stride/10',
+        label: 'text-chart-stride',
+      },
+    });
+  });
+
+  it('couvre tous les rôles du contrat, sans teinte partagée', () => {
+    expect(Object.keys(PLAN_STEP_ROLE_STYLES).sort()).toEqual([...PLAN_STEP_ROLES].sort());
+
+    const labels = Object.values(PLAN_STEP_ROLE_STYLES).map((style) => style.label);
+    expect(new Set(labels).size).toBe(PLAN_STEP_ROLES.length);
   });
 });

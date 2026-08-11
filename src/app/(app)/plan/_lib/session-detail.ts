@@ -30,12 +30,52 @@ export const PLAN_STEP_ROLE_LABELS: Record<PlanStepRole, string> = {
   cooldown: "Retour au calme",
 };
 
-/** Textes libres des séances sans déroulé structuré, dans l'ordre de la séance. */
+/** Habillage d'une brique de séance : le bloc coloré, puis son libellé teinté. */
+export type PlanStepRoleStyle = {
+  /** Couleur du filet gauche et du fond doux — les épaisseurs restent à l'UI. */
+  block: string;
+  /** Le libellé du rôle, en couleur pleine. */
+  label: string;
+};
+
+/**
+ * Code couleur des rôles : une brique se reconnaît avant d'être lue.
+ *
+ * Quatre tokens **existants** du système, aucun nouveau (cf. design.md) :
+ * l'échauffement en `positive` (le vert de la mise en route), la course en
+ * `accent` (la seule couleur d'intensité du système), la récupération en
+ * `chart-cadence` (bleu ciel, le relâchement) et le retour au calme en
+ * `chart-stride` (teal). Fond à 10 % et filet en couleur pleine : la couleur
+ * marque, elle ne crie pas — et le filet tient les 3:1 de WCAG 1.4.11 contre
+ * `surface-2`, le fond du panneau.
+ *
+ * `Record<PlanStepRole, …>` volontaire : un rôle ajouté au contrat casse la
+ * compilation ici tant qu'il n'a pas sa couleur.
+ */
+export const PLAN_STEP_ROLE_STYLES: Record<PlanStepRole, PlanStepRoleStyle> = {
+  warmup: { block: "border-l-positive bg-positive/10", label: "text-positive" },
+  run: { block: "border-l-accent bg-accent/10", label: "text-accent" },
+  recover: {
+    block: "border-l-chart-cadence bg-chart-cadence/10",
+    label: "text-chart-cadence",
+  },
+  cooldown: {
+    block: "border-l-chart-stride bg-chart-stride/10",
+    label: "text-chart-stride",
+  },
+};
+
+/**
+ * Textes libres des séances sans déroulé structuré, dans l'ordre de la séance.
+ *
+ * Chacun porte le rôle d'étape qui lui correspond : les séances historiques se
+ * lisent avec le même code couleur que les séances structurées.
+ */
 const NOTE_FIELDS = [
-  { key: "warmup", label: "Échauffement" },
-  { key: "recovery", label: "Récupération" },
-  { key: "cooldown", label: "Retour au calme" },
-] as const;
+  { key: "warmup", role: "warmup", label: "Échauffement" },
+  { key: "recovery", role: "recover", label: "Récupération" },
+  { key: "cooldown", role: "cooldown", label: "Retour au calme" },
+] as const satisfies readonly { key: string; role: PlanStepRole; label: string }[];
 
 /**
  * Distance d'une étape, sans décimale inutile : `800 m`, `2 km`, `2,45 km`.
@@ -125,11 +165,14 @@ export type PlanStepBlockView = {
 /** Une valeur du récapitulatif : libellé discret, valeur chiffrée en mono. */
 export type PlanSessionMetric = { label: string; value: string };
 
+/** Une consigne en texte libre, teintée comme l'étape qu'elle remplace. */
+export type PlanSessionNote = { role: PlanStepRole; label: string; value: string };
+
 export type PlanSessionDetail = {
   /** Vide pour une séance sans déroulé structuré. */
   blocks: PlanStepBlockView[];
   /** Textes libres de la séance, ceux qui sont renseignés. */
-  notes: PlanSessionMetric[];
+  notes: PlanSessionNote[];
   /** Totaux et allure cible — uniquement ce qui est calculable ou annoncé. */
   totals: PlanSessionMetric[];
   /** Rien à déplier : ni déroulé, ni consigne. */
@@ -188,10 +231,10 @@ export function planSessionDetail(session: PlanSessionDto): PlanSessionDetail {
     })),
   }));
 
-  const notes: PlanSessionMetric[] = [];
+  const notes: PlanSessionNote[] = [];
   for (const field of NOTE_FIELDS) {
     const value = session[field.key];
-    if (value !== null) notes.push({ label: field.label, value });
+    if (value !== null) notes.push({ role: field.role, label: field.label, value });
   }
 
   const { distanceM, durationS } = planSessionTotals(session);

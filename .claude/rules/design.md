@@ -91,6 +91,14 @@ dédié), foulée = `--color-chart-stride` (#2DD4BF, token dédié, teal — fam
 froide distincte de la cadence bleue), contraste 10,4:1 vs `bg`. Le texte reste
 en tokens texte, jamais en couleur de série.
 
+`--color-chart-cadence` et `--color-chart-stride` servent **aussi** de marqueurs
+de rôle des étapes d'une séance dans le détail du plan (récupération en cadence,
+retour au calme en stride) — extension validée par Gwen, qui demandait un code
+couleur pour ces étapes : ce sont les deux seules teintes froides du système,
+donc les seules qui distinguent un rôle sans se confondre avec l'accent (l'effort)
+ni avec la rampe de zones. Là encore, les données chiffrées restent en tokens
+texte : la couleur ne porte que le rôle, jamais la valeur.
+
 - Fond transparent, grille quasi invisible (`border` à 40%), courbe 2px, remplissage `accent` à 12–14%, point terminal accentué.
 - Zones cardio avec la rampe dédiée ci-dessus. Tooltips en mono. Suivre le skill dataviz pour tout nouveau graphe.
 
