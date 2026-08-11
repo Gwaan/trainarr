@@ -752,6 +752,14 @@ describe('buildPlanMessages — allures imposées', () => {
     expect(system).toContain('récupérations sans cible');
   });
 
+  it('interdit aussi l’allure écrite en toutes lettres dans le texte libre', () => {
+    // Le champ n'est pas le seul chemin vers l'écran : « à 12:00/km » glissé dans
+    // un titre ou une note s'affiche à côté de l'allure que l'appli a posée.
+    expect(withRace[0].content).toContain(
+      "Tu n'écris pas non plus d'allure en toutes lettres dans les titres, les consignes, les notes ou le résumé — l'affichage les porte déjà.",
+    );
+  });
+
   it('dit que le `kind` porte désormais l’allure, et rappelle son vocabulaire', () => {
     // C'est le seul champ dont dépend l'allure posée : un `kind` fantaisiste
     // n'est plus une coquetterie de rédaction, il change la séance courue.

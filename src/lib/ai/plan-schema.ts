@@ -33,8 +33,8 @@ import {
   PLAN_STEP_BOUNDS,
   PLAN_STEP_ROLES,
   planSessionStepsSchema,
+  type PlanSessionSteps,
   type PlanStep,
-  type PlanStepRole,
 } from '@/lib/plan-steps/schema';
 
 import { formatIsoDay, formatNumber, formatPace, formatPaceRange } from './format';
@@ -666,6 +666,32 @@ const PACE_ZONE_ORDER = ['easy', 'threshold', 'interval', 'repetition', 'maratho
  */
 const INTENSITY_ZONES = ['threshold', 'interval', 'repetition'] as const;
 
+/**
+ * Le **jour J** : une course, une compétition ou un test se court à l'allure de
+ * l'objectif, pas en endurance.
+ *
+ * Testé **avant** {@link PACE_ZONE_ORDER}, et c'est la seule exception au
+ * conservatisme easy-first : « Course », « Compétition » ou « Test 5 km » ne
+ * portent aucun motif d'intensité et tomberaient sinon en E — prescrire 6:14/km
+ * le jour d'un 10 km n'est pas une prudence, c'est un contresens.
+ *
+ * `\bcourse\b` isolé pour ne pas attraper « course à pied », et le vocabulaire
+ * imposé par le prompt n'en contient qu'un seul porteur (« Spécifique allure
+ * course »), déjà rangé en M par ailleurs — le motif ne change donc rien aux
+ * libellés attendus.
+ */
+const RACE_DAY_PATTERN = /\bcourse\b|competition|\btest\b/;
+
+/**
+ * Ce qui, dans un `kind`, désigne une séance de **récupération**.
+ *
+ * Elle se range en E ({@link PACE_ZONE_PATTERNS}) faute de créneau plus lent,
+ * mais la doctrine du module veut qu'une récupération soit « plus lente que E.max,
+ * ou sans cible » : lui prescrire le milieu de E en ferait un footing. Elle ne
+ * reçoit donc aucune cible du tout (cf. {@link imposeSessionPaces}).
+ */
+const RECOVERY_KIND_PATTERN = /recup/;
+
 const COMBINING_MARKS = /[\u0300-\u036f]/gu;
 
 /** Minuscules sans accents : `Côtes`, `cotes` et `COTES` se reconnaissent pareil. */
@@ -681,10 +707,12 @@ function normalizeText(text: string): string {
  *
  * Fonction totale : un libellé que rien ne reconnaît vaut `easy`. C'est ce qui
  * autorise {@link applyImposedPaces} à ne jamais laisser une séance sans allure,
- * et le pire cas est une séance prescrite trop lente — jamais trop rapide.
+ * et le pire cas est une séance prescrite trop lente — jamais trop rapide. Seul
+ * le jour J ({@link RACE_DAY_PATTERN}) passe devant ce conservatisme.
  */
 export function sessionPaceZone(kind: string): PaceZoneKey {
   const normalized = normalizeText(kind);
+  if (RACE_DAY_PATTERN.test(normalized)) return 'marathon';
   return PACE_ZONE_ORDER.find((zone) => PACE_ZONE_PATTERNS[zone].test(normalized)) ?? 'easy';
 }
 
@@ -743,6 +771,30 @@ function middleOf(zone: PaceZone): number {
 }
 
 /**
+ * Ce qui, dans la `note` d'une **étape**, désigne un créneau autre que celui de
+ * sa séance — dans l'ordre de décision, le plus spécifique d'abord.
+ *
+ * C'est le pendant, à l'étape, du conservatisme easy-first de
+ * {@link PACE_ZONE_ORDER}. Une « sortie longue avec un bloc à allure objectif »
+ * — que le prompt encourage explicitement au niveau confirmé — se range en E au
+ * niveau séance, et c'est juste : les 18 km ne se courent pas à l'allure de la
+ * course. Mais son bloc spécifique, lui, se retrouvait ramené en E avec le
+ * reste, ce qui effaçait la séance. Une intention écrite noir sur blanc dans la
+ * note d'une étape isolée n'est pas un risque : elle est honorée.
+ */
+const STEP_NOTE_ZONES = [
+  ['marathon', /allure objectif|allure (de )?course|specifique|marathon/],
+  ['threshold', /seuil|tempo/],
+] as const satisfies readonly (readonly [PaceZoneKey, RegExp])[];
+
+/** Le créneau qu'une note d'étape réclame, `null` si elle n'en nomme aucun. */
+function stepNotePaceZone(note: string | null): PaceZoneKey | null {
+  if (note === null) return null;
+  const normalized = normalizeText(note);
+  return STEP_NOTE_ZONES.find(([, pattern]) => pattern.test(normalized))?.[0] ?? null;
+}
+
+/**
  * Le créneau qui s'applique à une **étape**, selon son rôle — `null` quand elle
  * ne doit porter aucune cible.
  *
@@ -751,14 +803,27 @@ function middleOf(zone: PaceZone): number {
  * VMA. La récupération, elle, ne reçoit rien : la prescrire reviendrait à
  * imposer une allure à un trot, alors que le seul contrat qui vaille est
  * « plus lent que l'endurance ».
+ *
+ * Une étape d'effort suit le créneau de sa séance, sauf si sa note en nomme un
+ * autre ({@link STEP_NOTE_ZONES}). `session` à `null` — une séance de
+ * récupération — ne cible rien du tout, note comprise : « Récupération » et
+ * « allure objectif » ne se contredisent pas à moitié, et c'est le plus lent des
+ * deux qui l'emporte.
  */
-function stepPaceZone(role: PlanStepRole, session: PaceZone, easy: PaceZone): PaceZone | null {
-  switch (role) {
-    case 'run':
-      return session;
+function stepPaceZone(
+  step: PlanStep,
+  session: PaceZone | null,
+  paces: TrainingPaces,
+): PaceZone | null {
+  switch (step.role) {
+    case 'run': {
+      if (session === null) return null;
+      const noted = stepNotePaceZone(step.note);
+      return noted === null ? session : paces[noted];
+    }
     case 'warmup':
     case 'cooldown':
-      return easy;
+      return paces.easy;
     case 'recover':
       return null;
   }
@@ -772,10 +837,10 @@ function stepPaceZone(role: PlanStepRole, session: PaceZone, easy: PaceZone): Pa
  * `lib/plan-steps/schema`), et ce que le modèle a exprimé en fréquence
  * cardiaque n'est pas une allure fautive à corriger.
  */
-function imposeStepPace(step: PlanStep, session: PaceZone, easy: PaceZone): PlanStep {
+function imposeStepPace(step: PlanStep, session: PaceZone | null, paces: TrainingPaces): PlanStep {
   if (step.hrZone !== null) return step;
 
-  const zone = stepPaceZone(step.role, session, easy);
+  const zone = stepPaceZone(step, session, paces);
   return {
     ...step,
     paceMinSecPerKm: zone === null ? null : zone.minSecPerKm,
@@ -783,25 +848,51 @@ function imposeStepPace(step: PlanStep, session: PaceZone, easy: PaceZone): Plan
   };
 }
 
+/**
+ * Le déroulé ne cible-t-il qu'en **fréquence cardiaque** ?
+ *
+ * Une séance dont toutes les étapes ciblées portent une `hrZone` a été pensée en
+ * zones ; lui coller une « Allure cible 6:14/km » à côté d'étapes en Z2 afficherait
+ * deux systèmes de cible pour une seule séance, dont l'un que personne n'a
+ * demandé. Elle ne reçoit donc pas de cible de séance.
+ */
+function targetsHeartRateOnly(steps: PlanSessionSteps | undefined): boolean {
+  if (steps === undefined) return false;
+  const all = steps.flatMap((block) => block.steps);
+  return (
+    all.some((step) => step.hrZone !== null) && all.every((step) => step.paceMinSecPerKm === null)
+  );
+}
+
 function imposeSessionPaces(session: PlanSessionOutput, paces: TrainingPaces): PlanSessionOutput {
-  const zone = paces[sessionPaceZone(session.kind)];
+  const kindZone = sessionPaceZone(session.kind);
+  // Une séance de récupération ne porte aucune cible, ni au niveau séance ni sur
+  // ses étapes d'effort : le seul contrat qui vaille est « plus lent que E.max ».
+  const isRecovery = kindZone === 'easy' && RECOVERY_KIND_PATTERN.test(normalizeText(session.kind));
+  const zone = isRecovery ? null : paces[kindZone];
+
+  const steps = session.steps?.map((block) => ({
+    repeat: block.repeat,
+    steps: block.steps.map((step) => imposeStepPace(step, zone, paces)),
+  }));
 
   return {
     ...session,
     // Le milieu du créneau : une cible de séance est un chiffre, pas une plage.
-    targetPaceSecPerKm: middleOf(zone),
-    steps: session.steps?.map((block) => ({
-      repeat: block.repeat,
-      steps: block.steps.map((step) => imposeStepPace(step, zone, paces.easy)),
-    })),
+    targetPaceSecPerKm: zone === null || targetsHeartRateOnly(steps) ? undefined : middleOf(zone),
+    steps,
   };
 }
 
 /**
  * Réécrit toutes les allures des semaines produites depuis la table calculée :
  * cible de séance au milieu du créneau de son `kind`, étapes d'effort sur les
- * bornes de ce créneau, échauffement et retour au calme en endurance,
- * récupérations sans cible.
+ * bornes de ce créneau (ou de celui que leur note réclame), échauffement et
+ * retour au calme en endurance, récupérations sans cible.
+ *
+ * Deux cas ressortent **sans** cible de séance : les séances de récupération
+ * ({@link RECOVERY_KIND_PATTERN}) et celles qui ne ciblent qu'en fréquence
+ * cardiaque ({@link targetsHeartRateOnly}).
  *
  * Fonction **pure** : les semaines d'entrée ne sont pas touchées, tout est
  * reconstruit. Rien d'autre de la sortie du modèle n'est modifié — ni les

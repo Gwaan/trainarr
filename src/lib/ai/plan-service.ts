@@ -636,6 +636,12 @@ export function planTrainingPaces(plan: PlanDto): TrainingPaces | null {
  *
  * Le `kind` devient en revanche **porteur** : c'est lui, et lui seul, qui décide
  * du créneau posé. D'où le rappel du vocabulaire attendu.
+ *
+ * L'interdiction couvre aussi le **texte libre** : une allure écrite en toutes
+ * lettres dans un titre, une consigne, une note ou le résumé s'affiche telle
+ * quelle à côté de celle que l'appli a posée — et rien ne garantit que les deux
+ * disent la même chose. Le champ n'est pas le seul chemin par lequel une allure
+ * fausse atteint l'écran.
  */
 function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string {
   return [
@@ -643,6 +649,7 @@ function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string 
     formatTrainingPaces(paces, race),
     "Les allures seront calculées et posées automatiquement selon le type de séance : endurance fondamentale et sortie longue en [E], allure course ou allure objectif en [M], seuil en [T], VMA en [I], répétitions courtes en [R], récupérations sans cible. Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.",
     "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes. Concentre-toi sur la structure : types de séances, distances, durées, répétitions, récupérations.",
+    "Tu n'écris pas non plus d'allure en toutes lettres dans les titres, les consignes, les notes ou le résumé — l'affichage les porte déjà.",
     "C'est le `kind` de la séance qui décide de son allure : nomme-le dans le vocabulaire de la typologie (« Endurance fondamentale », « Sortie longue », « Seuil », « VMA », « Répétitions », « Récupération », « Spécifique allure course ») — un libellé hors vocabulaire fera poser une allure d'endurance.",
   ].join('\n');
 }
