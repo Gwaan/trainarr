@@ -7,6 +7,7 @@ import {
   type FitUpsertOutcome,
 } from '@/data/activities';
 import { getAthleteId } from '@/data/athlete';
+import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 
 import { parseFitActivity } from './parse';
 
@@ -70,6 +71,26 @@ const REPORT_STATUS = {
 } as const satisfies Record<FitUpsertOutcome, IngestReport['status']>;
 
 /**
+ * Rapproche l'activité de la séance planifiée qu'elle réalise, quel que soit le
+ * statut d'import : l'appel est idempotent et une activité rapprochée le reste.
+ *
+ * **Le rapprochement n'est pas une condition de l'import**, c'est un
+ * enrichissement : la séance est en base, elle ne doit pas repartir en
+ * `failed/` parce que la jointure avec le plan a échoué. Le prochain passage
+ * (réimport, régénération du plan) rattrapera le lien manquant. En revanche
+ * l'échec se journalise avec son type et son message — un silence ici ferait
+ * passer « aucun plan rapproché » pour un état normal.
+ */
+async function linkToPlannedSession(activityId: number): Promise<void> {
+  try {
+    await linkActivityToPlannedSession(activityId);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : rapprochement du plan impossible — ${reason}`);
+  }
+}
+
+/**
  * Importe le contenu d'un fichier FIT.
  *
  * Les séries temporelles suivent {@link shouldRewriteStreams}.
@@ -100,6 +121,8 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
   if (await shouldRewriteStreams(status, activityId)) {
     await saveActivityStreams(activityId, parsed.streams);
   }
+
+  await linkToPlannedSession(activityId);
 
   return { status, activityId };
 }

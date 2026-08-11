@@ -5,6 +5,7 @@ import {
   formatBinTime,
   formatCadence,
   formatClock,
+  formatDateTimeStamp,
   formatDistanceTick,
   formatElevationGain,
   formatFullDateTime,
@@ -88,6 +89,15 @@ describe("formatFullDateTime", () => {
     expect(formatted).toContain("9 août 2026");
     expect(formatted).toContain("18:42");
     expect(formatted.startsWith("D")).toBe(true);
+  });
+});
+
+describe("formatDateTimeStamp", () => {
+  it("donne la date et l'heure locale, sans jour de la semaine", () => {
+    // 9 août 2026 à 16:42 UTC, soit 18:42 à Paris.
+    expect(formatDateTimeStamp(new Date("2026-08-09T16:42:00Z"))).toBe(
+      "9 août 2026 à 18:42",
+    );
   });
 });
 

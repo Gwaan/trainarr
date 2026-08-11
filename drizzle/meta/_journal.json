@@ -50,6 +50,13 @@
       "when": 1786394710026,
       "tag": "0006_activities_session_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786399430143,
+      "tag": "0007_plans_and_activity_feedbacks",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,21 @@ export function formatFullDateTime(date: Date): string {
   return capitalize(dateTimeFormatter.format(date));
 }
 
+const dateTimeStampFormatter = new Intl.DateTimeFormat("fr-FR", {
+  dateStyle: "long",
+  timeStyle: "short",
+  timeZone: APP_TIME_ZONE,
+});
+
+/**
+ * Horodatage discret, ex. `9 août 2026 à 18:42` — pour les mentions de pied
+ * (« Généré le… »), où le jour de la semaine et la capitale de
+ * `formatFullDateTime` alourdiraient la phrase.
+ */
+export function formatDateTimeStamp(date: Date): string {
+  return dateTimeStampFormatter.format(date);
+}
+
 /**
  * Durée exacte façon chronomètre : `48:12`, `1:04:32`.
  *

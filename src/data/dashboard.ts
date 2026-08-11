@@ -1,13 +1,13 @@
 import 'server-only';
 
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, isNull, or } from 'drizzle-orm';
 
 import { isoWeekEnd, isoWeekNumber, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
 
 import { toActivitySummaryDto, type ActivitySummaryDto } from './activities';
 import { db } from './db/client';
-import { activities, athlete, plannedSessions, type PlannedSession } from './db/schema';
+import { activities, athlete, plannedSessions, plans, type PlannedSession } from './db/schema';
 import {
   buildDailyTrimp,
   buildFitness,
@@ -142,15 +142,28 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
       .from(activities)
       .where(eq(activities.athleteId, profile.id))
       .orderBy(desc(activities.startedAt)),
+    /*
+     * La séance du jour, à condition qu'un plan actif la porte encore.
+     *
+     * Archiver un plan laisse en base ses séances passées ou déjà réalisées : le
+     * filtre sur `plans.status` évite qu'une d'elles ne s'affiche à la place de
+     * celle du plan en cours. Une séance hors plan (`plan_id` nul) reste, elle,
+     * toujours valable.
+     */
     db
-      .select()
+      .select(getTableColumns(plannedSessions))
       .from(plannedSessions)
+      .leftJoin(plans, eq(plannedSessions.planId, plans.id))
       .where(
         and(
           eq(plannedSessions.athleteId, profile.id),
           eq(plannedSessions.scheduledOn, today),
+          or(isNull(plannedSessions.planId), eq(plans.status, 'active')),
         ),
       )
+      // Deux séances peuvent tomber le même jour : la plus récemment créée gagne,
+      // plutôt que celle que Postgres rend en premier ce jour-là.
+      .orderBy(desc(plannedSessions.id))
       .limit(1),
   ]);
 

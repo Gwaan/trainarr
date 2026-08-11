@@ -3,12 +3,16 @@ import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
+import { getActivityFeedback } from "@/data/activity-feedback";
+import { getAiAvailability } from "@/lib/ai/availability";
+
 import { ActivityCharts } from "./_components/activity-charts";
 import { ActivityDetailSkeleton } from "./_components/activity-detail-skeleton";
 import { ActivityMapPanel } from "./_components/activity-map-panel";
 import { ActivitySplits } from "./_components/activity-splits";
 import { ActivityHeader, ActivityStatsPanel } from "./_components/activity-summary";
 import { BestSegmentsPanel } from "./_components/best-segments-panel";
+import { CoachPanel, CoachPanelSkeleton } from "./_components/coach-panel";
 import { DecouplingPanel } from "./_components/decoupling-panel";
 import { DistributionPanel } from "./_components/distribution-panel";
 import { HrZonesPanel } from "./_components/hr-zones-panel";
@@ -48,6 +52,22 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const id = parseActivityId((await params).id);
   const activity = id === null ? null : await loadActivity(id);
   return { title: activity?.detail.name ?? "Activité" };
+}
+
+/**
+ * Le panneau du coach, suspendu à part : lire le feedback interroge la base, et
+ * savoir si le coach répond passe par un ping réseau (jusqu'à 2 s). Ni l'un ni
+ * l'autre ne doit retarder l'affichage de la séance elle-même.
+ */
+async function CoachFeedback({ activityId }: { activityId: number }) {
+  const [feedback, availability] = await Promise.all([
+    getActivityFeedback(activityId),
+    getAiAvailability(),
+  ]);
+
+  return (
+    <CoachPanel activityId={activityId} feedback={feedback} availability={availability} />
+  );
 }
 
 async function ActivityDetail({ params }: PageProps) {
@@ -93,6 +113,10 @@ async function ActivityDetail({ params }: PageProps) {
         />
         {hasMap ? <ActivityMapPanel path={path} className="lg:col-span-3" /> : null}
       </div>
+
+      <Suspense fallback={<CoachPanelSkeleton />}>
+        <CoachFeedback activityId={id} />
+      </Suspense>
 
       {charts === null ? <NoDetailedData /> : <ActivityCharts points={charts.points} />}
 

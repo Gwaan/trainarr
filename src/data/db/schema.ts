@@ -196,13 +196,96 @@ export const activityStreams = pgTable(
   ],
 );
 
+/** États d'un plan. Un seul `active` par athlète à la fois (index partiel ci-dessous). */
+export const PLAN_STATUSES = ['active', 'archived'] as const;
+
+export type PlanStatus = (typeof PLAN_STATUSES)[number];
+
 /**
- * ⚠️ TABLE PROVISOIRE.
+ * Nature de l'objectif, qui décide de ce qui date le plan.
  *
- * Modèle volontairement plat, strictement limité à ce que le dashboard affiche
- * aujourd'hui (« séance du jour »). Le vrai modèle de plan — plan, semaines,
- * blocs, répétitions structurées, adaptation par le coach IA — sera conçu au
- * sprint dédié et remplacera cette table. Ne pas l'étendre en attendant.
+ * - `race` : une échéance réelle (« 10 km sous 50 min le 15 novembre ») —
+ *   `race_date` est alors renseignée et c'est elle qui fixe la fin du travail ;
+ * - `free` : un cap sans date (« améliorer mon endurance ») — la durée est
+ *   donnée en semaines, `race_date` reste `NULL`.
+ */
+export const PLAN_GOAL_TYPES = ['race', 'free'] as const;
+
+export type PlanGoalType = (typeof PLAN_GOAL_TYPES)[number];
+
+/**
+ * Un plan d'entraînement, tel que le coach IA le construit à partir des
+ * contraintes de l'athlète.
+ *
+ * **Invariants** (portés par le DAL, `src/data/plans.ts`) :
+ * - `race_date` est renseignée si et seulement si `goal_type = 'race'` ;
+ * - la fenêtre couverte est `[starts_on, starts_on + weeks × 7)` — toute séance
+ *   du plan y tombe ;
+ * - `weeks ≥ 1`, `1 ≤ sessions_per_week ≤ 7`, `long_run_day ∈ 1..7` ;
+ * - un seul plan actif par athlète, garanti par la base (index partiel) : une
+ *   création archive le précédent dans la même transaction.
+ *
+ * `sessions_per_week`, `weekly_time_minutes` et `long_run_day` restent les
+ * **contraintes déclarées** par l'athlète, pas un résumé des séances écrites :
+ * elles survivent au remplacement des séances futures (« je préfère 3 séances au
+ * lieu de 4 ») et c'est sur elles que le coach régénère.
+ */
+export const plans = pgTable(
+  'plans',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    status: text('status', { enum: PLAN_STATUSES }).notNull(),
+    goalType: text('goal_type', { enum: PLAN_GOAL_TYPES }).notNull(),
+    /** Objectif tel que l'athlète l'a formulé, conservé mot pour mot. */
+    goalText: text('goal_text').notNull(),
+    /**
+     * Date civile (mode `string`, `YYYY-MM-DD`) de la course visée. `NULL` pour
+     * un objectif libre — jamais une date inventée pour combler la colonne.
+     */
+    raceDate: date('race_date'),
+    /** Date civile du premier jour couvert par le plan. */
+    startsOn: date('starts_on').notNull(),
+    /** Durée du plan en semaines pleines à partir de `starts_on`. */
+    weeks: integer('weeks').notNull(),
+    /** Nombre de séances par semaine demandé par l'athlète (1 à 7). */
+    sessionsPerWeek: integer('sessions_per_week').notNull(),
+    /** Temps hebdomadaire disponible, en minutes. `NULL` si non renseigné. */
+    weeklyTimeMinutes: integer('weekly_time_minutes'),
+    /** Jour de la sortie longue, au format ISO-8601 : 1 = lundi … 7 = dimanche. */
+    longRunDay: integer('long_run_day').notNull(),
+    /** Approche du plan rédigée par le coach (markdown). `NULL` tant qu'il n'a rien écrit. */
+    summary: text('summary'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /**
+     * Un seul plan actif par athlète. Index **partiel** : la clé n'existe que
+     * pour les lignes `status = 'active'`, si bien que les plans archivés
+     * s'accumulent librement sous le même athlète.
+     *
+     * Comme pour le singleton d'`athlete`, c'est la contrainte — et non la
+     * lecture préalable du DAL — qui ferme la course : en `READ COMMITTED`, deux
+     * créations simultanées voient toutes les deux l'ancien plan encore actif et
+     * insèrent chacune le leur.
+     */
+    uniqueIndex('plans_active_per_athlete').on(table.athleteId).where(sql`status = 'active'`),
+  ],
+);
+
+/**
+ * Une séance planifiée : une case du calendrier, décrite en texte tel que l'UI
+ * l'affiche (pas de modèle de blocs structurés — le coach rédige, on restitue).
+ *
+ * `plan_id` est **nullable** : une séance peut exister hors plan (jeu de
+ * développement, séances historiques antérieures au premier plan). Rattachée à
+ * un plan, elle disparaît avec lui (`ON DELETE CASCADE`).
+ *
+ * `completed_activity_id` fait la jonction avec le réalisé : une séance déjà
+ * rapprochée d'une activité n'est jamais réécrite par une régénération du plan.
  */
 export const plannedSessions = pgTable(
   'planned_sessions',
@@ -211,6 +294,8 @@ export const plannedSessions = pgTable(
     athleteId: integer('athlete_id')
       .notNull()
       .references(() => athlete.id),
+    /** Plan dont la séance fait partie. `null` pour une séance hors plan. */
+    planId: integer('plan_id').references(() => plans.id, { onDelete: 'cascade' }),
     /** Date civile (mode `string`, `YYYY-MM-DD`) : une séance est planifiée un jour, pas à une heure. */
     scheduledOn: date('scheduled_on').notNull(),
     /** Ex. « VMA courte · piste ». */
@@ -232,8 +317,35 @@ export const plannedSessions = pgTable(
   },
   (table) => [
     index('planned_sessions_athlete_scheduled_on_idx').on(table.athleteId, table.scheduledOn),
+    /** Chemin d'accès des lectures « les séances de ce plan » (affichage, régénération). */
+    index('planned_sessions_plan_id_idx').on(table.planId),
   ],
 );
+
+/**
+ * Le retour du coach sur une séance réalisée, en markdown.
+ *
+ * **Une ligne au plus par activité** (index unique) : le feedback n'est pas un
+ * historique de conversation, c'est l'analyse courante de la séance — la
+ * régénérer écrase la précédente (`ON CONFLICT (activity_id)`).
+ *
+ * `model` garde le modèle qui a rédigé le texte : le coach est multi-provider,
+ * et un feedback ancien doit rester attribuable après un changement de modèle.
+ * `NULL` quand la provenance n'est pas connue.
+ */
+export const activityFeedbacks = pgTable('activity_feedbacks', {
+  id: serial('id').primaryKey(),
+  activityId: integer('activity_id')
+    .notNull()
+    .unique()
+    .references(() => activities.id, { onDelete: 'cascade' }),
+  /** Texte markdown rendu tel quel par l'UI. */
+  content: text('content').notNull(),
+  /** Identifiant du modèle ayant rédigé le feedback, ex. `claude-opus-5`. */
+  model: text('model'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
 
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
@@ -245,5 +357,11 @@ export type NewActivity = InferInsertModel<typeof activities>;
 export type ActivityStream = InferSelectModel<typeof activityStreams>;
 export type NewActivityStream = InferInsertModel<typeof activityStreams>;
 
+export type Plan = InferSelectModel<typeof plans>;
+export type NewPlan = InferInsertModel<typeof plans>;
+
 export type PlannedSession = InferSelectModel<typeof plannedSessions>;
 export type NewPlannedSession = InferInsertModel<typeof plannedSessions>;
+
+export type ActivityFeedback = InferSelectModel<typeof activityFeedbacks>;
+export type NewActivityFeedback = InferInsertModel<typeof activityFeedbacks>;

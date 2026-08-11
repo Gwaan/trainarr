@@ -11,6 +11,7 @@ const { mocks } = vi.hoisted(() => ({
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
     hasActivityStreams: vi.fn(),
+    linkActivityToPlannedSession: vi.fn(),
   },
 }));
 
@@ -26,6 +27,10 @@ vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
   saveActivityStreams: mocks.saveActivityStreams,
   hasActivityStreams: mocks.hasActivityStreams,
+}));
+
+vi.mock('@/data/plan-reconciliation', () => ({
+  linkActivityToPlannedSession: mocks.linkActivityToPlannedSession,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -69,6 +74,7 @@ beforeEach(() => {
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'created' });
   mocks.saveActivityStreams.mockResolvedValue(undefined);
   mocks.hasActivityStreams.mockResolvedValue(false);
+  mocks.linkActivityToPlannedSession.mockResolvedValue(true);
 });
 
 describe('ingestFitBuffer', () => {
@@ -122,6 +128,40 @@ describe('ingestFitBuffer', () => {
     await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 42 });
 
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
+  });
+
+  it('rapproche l’activité de sa séance planifiée, après les séries', async () => {
+    await ingestFitBuffer(BUFFER);
+
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+    // Les séries d'abord : le rapprochement est un enrichissement de fin de course.
+    expect(mocks.saveActivityStreams.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.linkActivityToPlannedSession.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it('rapproche aussi un doublon de séance, dont les séries n’ont pas bougé', async () => {
+    // L'appel est idempotent : le refaire ne coûte rien, ne pas le faire
+    // laisserait une séance « manquée » alors que la sortie est en base.
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
+    mocks.hasActivityStreams.mockResolvedValue(true);
+
+    await ingestFitBuffer(BUFFER);
+
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+  });
+
+  it('journalise un rapprochement en échec sans faire échouer l’import', async () => {
+    // L'activité est en base : la perdre dans `failed/` parce que la jointure
+    // avec le plan a échoué serait une régression bien pire que le lien manquant.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.linkActivityToPlannedSession.mockRejectedValue(new Error('base indisponible'));
+
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('[fit]'));
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('base indisponible'));
+    logged.mockRestore();
   });
 
   it('échoue explicitement si aucun athlète n’est enregistré', async () => {

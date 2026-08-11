@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { computeLoadSeries, computeTrimp, estimateEffectiveVo2max } from '@/lib/metrics';
@@ -21,7 +23,7 @@ vi.mock('server-only', () => ({}));
 const { queryState } = vi.hoisted(() => ({
   queryState: {
     rows: {} as Record<string, unknown[]>,
-    whereClauses: {} as Record<string, unknown>,
+    whereClauses: {} as Record<string, SQL | undefined>,
   },
 }));
 
@@ -30,7 +32,8 @@ vi.mock('./db/client', async () => {
   type Table = Parameters<typeof getTableName>[0];
 
   type Chain = PromiseLike<unknown[]> & {
-    where: (clause: unknown) => Chain;
+    leftJoin: () => Chain;
+    where: (clause: SQL) => Chain;
     orderBy: () => Chain;
     limit: () => Chain;
   };
@@ -38,6 +41,7 @@ vi.mock('./db/client', async () => {
   const chainFor = (table: Table): Chain => {
     const name = getTableName(table);
     const chain: Chain = {
+      leftJoin: () => chain,
       where: (clause) => {
         queryState.whereClauses[name] = clause;
         return chain;
@@ -52,6 +56,15 @@ vi.mock('./db/client', async () => {
 
   return { db: { select: () => ({ from: chainFor }) } };
 });
+
+const dialect = new PgDialect();
+
+/** Clause `WHERE` rendue en SQL + paramètres liés, pour l'affirmer telle qu'elle partira. */
+function renderWhere(clause: SQL | undefined): { sql: string; params: unknown[] } {
+  if (clause === undefined) throw new Error('Aucune clause `WHERE` enregistrée pour cette requête.');
+  const query = dialect.sqlToQuery(clause);
+  return { sql: query.sql, params: query.params };
+}
 
 /**
  * `@/lib/metrics` est mocké : ce fichier teste l'agrégation (construction de la
@@ -133,6 +146,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
 const PLANNED_SESSION: PlannedSession = {
   id: 7,
   athleteId: 1,
+  planId: null,
   scheduledOn: '2026-08-10',
   kind: 'VMA courte · piste',
   title: '6 × 800 m',
@@ -145,15 +159,6 @@ const PLANNED_SESSION: PlannedSession = {
   completedActivityId: null,
   createdAt: new Date('2026-08-01T10:00:00.000Z'),
 };
-
-/** Valeurs liées aux paramètres d'une clause `where` Drizzle (hors morceaux SQL). */
-function boundValues(node: unknown): unknown[] {
-  if (node === null || typeof node !== 'object') return [];
-  const record = node as Record<string, unknown>;
-  if (Array.isArray(record.queryChunks)) return record.queryChunks.flatMap(boundValues);
-  if ('value' in record && !Array.isArray(record.value)) return [record.value];
-  return [];
-}
 
 /** Une activité par jour, du `from` au `to` inclus (dates civiles). */
 function dailyActivities(from: string, to: string): Activity[] {
@@ -570,9 +575,22 @@ describe('getDashboardSummary — séance du jour', () => {
 
     await getDashboardSummary();
 
-    expect(boundValues(queryState.whereClauses.planned_sessions)).toEqual(
-      expect.arrayContaining([1, '2026-08-10']),
-    );
+    const where = renderWhere(queryState.whereClauses.planned_sessions);
+    expect(where.params).toEqual(expect.arrayContaining([1, '2026-08-10']));
+    expect(where.sql).toContain('"athlete_id" = $1');
+    expect(where.sql).toContain('"scheduled_on" = $2');
+  });
+
+  it('écarte les séances d’un plan archivé, mais garde celles hors plan', async () => {
+    queryState.rows.athlete = [ATHLETE];
+
+    await getDashboardSummary();
+
+    const where = renderWhere(queryState.whereClauses.planned_sessions);
+    // Le cœur du filtre : soit la séance n'appartient à aucun plan, soit son plan
+    // est encore actif — un plan archivé ne pilote plus rien.
+    expect(where.sql).toContain('"plan_id" is null or "plans"."status" = $3');
+    expect(where.params).toEqual([1, '2026-08-10', 'active']);
   });
 
   it('expose un DTO minimal, sans identifiant interne', async () => {
