@@ -2059,13 +2059,19 @@ export const VOLUME_RULES = {
   /**
    * Tolérance sur le **temps hebdomadaire déclaré** par l'athlète.
    *
-   * 10 %, comme partout ailleurs dans ce module : le budget est une contrainte
-   * de vie (« deux heures par semaine »), pas un chronomètre, et refuser 2 h 05
-   * pour 2 h 00 ferait relancer des générations de plusieurs minutes. Au-delà,
-   * ce n'est plus un arrondi : constaté en production, 3 h 30 planifiées pour
-   * 2 h déclarées — un plan que l'athlète ne peut pas suivre.
+   * 20 %, et c'est la seule tolérance de ce module qui s'écarte des 10 %
+   * habituels : « 4 h par semaine » est un ordre de grandeur au service d'un
+   * programme cohérent, pas un couperet. Refuser 4 h 25 pour 4 h coûte une
+   * régénération de plusieurs minutes là où l'athlète n'aurait rien vu à
+   * redire ; la contrainte, elle, tient toujours par en dessous — le
+   * planificateur vise 95 % du budget ({@link VOLUME_TARGET_RULES.timeBudgetShare}),
+   * la tolérance n'ouvre que le droit de déborder à la marge.
+   *
+   * Ce qu'elle continue de refuser est ce qui l'a fait naître : constaté en
+   * production, 3 h 30 planifiées pour 2 h déclarées — un plan que l'athlète ne
+   * peut pas suivre.
    */
-  weeklyTimeTolerance: 1.1,
+  weeklyTimeTolerance: 1.2,
   /**
    * Ce qu'une **première semaine pleine** peut dépasser le meilleur volume
    * hebdomadaire réellement couru récemment.
@@ -2322,7 +2328,7 @@ export const VOLUME_TARGET_RULES = {
   /**
    * Part du budget temps que les cibles consomment.
    *
-   * 95 %, quand la règle tolère 110 % : la marge n'est pas pour le confort, elle
+   * 95 %, quand la règle tolère 120 % : la marge n'est pas pour le confort, elle
    * absorbe l'écart entre le temps qu'une cible annonce (des kilomètres à
    * l'allure d'endurance) et celui que le plan écrit réellement (échauffements,
    * récupérations, séances de qualité). Le budget est une contrainte de vie : il

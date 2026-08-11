@@ -99,6 +99,8 @@ import {
 import {
   MIN_FIRST_WEEK_DAYS,
   PLAN_OUTPUT_BOUNDS,
+  VOLUME_RULES,
+  VOLUME_TARGET_RULES,
   formatPartialWeekTimeBudget,
   goalPaceSecPerKm,
   isIntensitySession,
@@ -531,7 +533,9 @@ function coachRuleTailLines(isRace: boolean): string[] {
     // Le défaut constaté : 3 h 30 planifiées pour 2 h déclarées, sans qu'aucune
     // règle ne le voie — les durées n'étaient comparées à rien. Le budget est
     // désormais vérifié semaine par semaine, et il prime sur le volume.
-    "- Le temps hebdomadaire déclaré dans les contraintes est une limite DURE, vérifiée semaine par semaine : la somme des `durationMin` d'une semaine (échauffements, récupérations et retours au calme compris) ne le dépasse pas, tolérance de 10 % au plus. Si le volume visé n'y tient pas, c'est le volume qui baisse — pars d'une première semaine plus courte plutôt que de déborder.",
+    // La tolérance vient de la règle elle-même : deux chiffres divergents
+    // feraient refuser un plan qui applique la consigne à la lettre.
+    `- Le temps hebdomadaire déclaré dans les contraintes est une limite DURE, vérifiée semaine par semaine : la somme des \`durationMin\` d'une semaine (échauffements, récupérations et retours au calme compris) ne le dépasse pas, tolérance de ${Math.round((VOLUME_RULES.weeklyTimeTolerance - 1) * 100)} % au plus. Si le volume visé n'y tient pas, c'est le volume qui baisse — pars d'une première semaine plus courte plutôt que de déborder.`,
     "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
     ...(isRace ? [RACE_SPECIFIC_LONG_RUN_LINE] : []),
     // Vivait dans la section des allures dérivées, dont elle a suivi le sort à
@@ -940,6 +944,70 @@ function sessionBudgetWeeks(
 }
 
 /**
+ * En dessous de cette durée moyenne par séance, le prompt dit explicitement que
+ * les séances sont courtes — **et que c'est voulu**.
+ *
+ * 45 min, parce que c'est précisément le bas du prior constaté en production :
+ * pour le modèle local, une sortie dure 45 à 75 min, et il n'en écrit pas de
+ * plus courtes de lui-même. Un athlète qui déclare 4 h pour 6 séances demande
+ * pourtant des séances de 40 min. Sans cette ligne, le modèle lit les durées
+ * annoncées comme une erreur à corriger et rend des semaines de 40 à 49 km pour
+ * des cibles de 19 à 31.
+ *
+ * Au-dessus du seuil, rien n'est écrit : la moyenne tombe dans ce que le modèle
+ * ferait spontanément, et une consigne de plus ne ferait que diluer les autres.
+ */
+const SHORT_SESSION_MINUTES = 45;
+
+/**
+ * La ligne qui assume les séances courtes, `null` quand il n'y a rien à assumer
+ * (pas de budget déclaré, aucune cible chiffrée, ou des séances d'une durée
+ * ordinaire).
+ *
+ * La moyenne se lit sur les **cibles annoncées**, pas sur le budget brut divisé
+ * par le nombre de séances : les `targetMinutes` sont déjà plafonnées à 95 % du
+ * budget ({@link VOLUME_TARGET_RULES.timeBudgetShare}) et bornées par les
+ * kilomètres, si bien que le budget brut annonçait ~40 min là où la table qui
+ * précède immédiatement cette ligne chiffrait ~27. Se tromper de dix minutes
+ * dans ce sens-là, c'est réarmer le prior qu'on cherche à casser.
+ *
+ * Pour la même raison, la moyenne écarte la **semaine entamée** (`kind:
+ * 'partial'`) : c'est exactement celle que {@link sessionBudgetWeeks} n'imprime
+ * pas, et sa cible au prorata tirait la moyenne sous celle des semaines que le
+ * modèle lit juste en dessous — départ un jeudi, 4 h pour 6 séances, la ligne
+ * annonçait 1 h 25 par semaine quand la table en chiffrait 1 h 36.
+ *
+ * @param targets les cibles **telles qu'elles sont affichées** — celles de la
+ * tranche quand le plan est découpé, pour que la ligne parle des semaines que le
+ * modèle a sous les yeux.
+ */
+function shortSessionsLine(
+  request: PlanRequest,
+  targets: readonly WeeklyVolumeTarget[],
+): string | null {
+  const budget = request.weeklyTimeMinutes ?? null;
+  if (budget === null || budget <= 0 || request.sessionsPerWeek <= 0) return null;
+
+  // Les semaines sans kilomètre chiffré ne portent pas de séance : les compter
+  // tirerait la moyenne vers le bas sans qu'aucune séance n'y corresponde.
+  const minutes = targets
+    .filter((target) => target.targetKm > 0 && target.kind !== 'partial')
+    .map((target) => target.targetMinutes);
+  if (minutes.length === 0) return null;
+
+  const weekly = minutes.reduce((total, value) => total + value, 0) / minutes.length;
+  const average = weekly / request.sessionsPerWeek;
+  if (average >= SHORT_SESSION_MINUTES) return null;
+
+  return (
+    `Tes séances font en moyenne ~${Math.round(average)} min (${formatDuration(weekly * 60)} par ` +
+    `semaine pour ${request.sessionsPerWeek} séances) : c'est court et c'est VOULU, le budget est ` +
+    "serré — n'écris pas des sorties de 45 à 60 min par habitude, suis les durées indiquées " +
+    'ci-dessous.'
+  );
+}
+
+/**
  * Ce qu'une génération par tranches ajoute au message d'une tranche : sa place
  * dans le plan, et ce que la précédente a laissé.
  */
@@ -999,6 +1067,18 @@ export function buildPlanMessages(
   const targets = planVolumeTargets(request, window, snapshot, paces);
   const chunk = chunkContext?.chunk ?? null;
   const budgets = sessionBudgetWeeks(request, window, targets, chunk);
+  // Le **même** taux de change que celui des cibles (cf. `easyPaceSecPerKm`,
+  // repli compris) : la durée d'un groupe de séances et les minutes annoncées
+  // pour la semaine doivent se répondre, sans quoi la décomposition dirait au
+  // modèle autre chose que la ligne qui la précède.
+  const easyPace =
+    easyPaceSecPerKm(snapshot, paces) ?? VOLUME_TARGET_RULES.fallbackEasyPaceSecPerKm;
+  // Les cibles que le message affiche — celles de la tranche, le cas échéant.
+  // La ligne des séances courtes se lit sur les **mêmes** : deux moyennes
+  // différentes dans deux lignes voisines, c'est le prior qui gagne.
+  const shownTargets =
+    chunk === null ? targets : targets.slice(chunk.fromWeek, chunk.fromWeek + chunk.weeks);
+  const shortSessions = shortSessionsLine(request, shownTargets);
 
   const lines = [
     request.goalType === 'race' && request.raceDate !== undefined
@@ -1032,14 +1112,16 @@ export function buildPlanMessages(
     // La table des cibles **remplace** l'ancienne ligne « Volume de départ » : ce
     // plafond-là n'était qu'une borne à respecter, celles-ci sont les chiffres à
     // écrire — et la première d'entre elles porte déjà l'ancrage sur le réel.
-    formatWeeklyVolumeTargets(
-      chunk === null ? targets : targets.slice(chunk.fromWeek, chunk.fromWeek + chunk.weeks),
-      chunk === null ? 1 : chunk.fromWeek + 1,
-    ),
+    formatWeeklyVolumeTargets(shownTargets, chunk === null ? 1 : chunk.fromWeek + 1),
+    // Les kilomètres ne suffisent pas à déloger le prior « une sortie fait 45 à
+    // 75 min » : quand le budget impose plus court, on le dit en toutes lettres.
+    ...(shortSessions === null ? [] : [shortSessions]),
     // Et la même chose d'un cran plus bas : ce que chaque cible donne, séance
     // par séance. La cible seule laissait au modèle une division qu'il posait
     // mal — cibles de 27 à 37 km, semaines écrites de 44 à 70.
-    ...(budgets.length === 0 ? [] : [formatWeeklySessionBudgets(budgets, request.longRunDay)]),
+    ...(budgets.length === 0
+      ? []
+      : [formatWeeklySessionBudgets(budgets, request.longRunDay, easyPace)]),
   ];
 
   return [
@@ -1908,6 +1990,8 @@ async function writeGeneratedPlan(
 ): Promise<PlanDto> {
   const paces = referenceRacePaces(request.referenceRace);
   const chunks = planChunks(window.weeks);
+  // Les volumes que l'appli a chiffrés, et que le prompt vient d'annoncer.
+  const volumeTargets = planVolumeTargets(request, window, snapshot, paces);
 
   const expectations: PlanExpectations = {
     scope: 'creation',
@@ -1918,8 +2002,7 @@ async function writeGeneratedPlan(
     // comme une semaine entamée, exactement comme à l'ajustement.
     firstWeekFromDay: window.firstWeekFromDay,
     race: raceGoalOf(request.goalType, request.goalText),
-    // Les volumes que l'appli a chiffrés, et que le prompt vient d'annoncer.
-    weeklyTargets: planVolumeTargets(request, window, snapshot, paces),
+    weeklyTargets: volumeTargets,
   };
   const paceContext = {
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,

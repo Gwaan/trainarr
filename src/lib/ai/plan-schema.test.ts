@@ -1543,20 +1543,42 @@ describe('validatePlanBusinessRules — progression du volume', () => {
 
       expect(validatePlanBusinessRules(weeks, free(2), { weeklyTimeMinutes: 120 })).toEqual([
         "Semaine 2 : 3 h 28 d'entraînement pour un budget déclaré de 2 h 00 — " +
-          'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+          'réduis distances ou séances (2 h 24 au plus, tolérance comprise).',
       ]);
     });
 
-    it('tolère 10 % pile, et pas une minute de plus', () => {
-      // 132 min pour un budget de 120 : la tolérance, exactement.
+    it('tolère 20 % pile, et pas une minute de plus', () => {
+      // 144 min pour un budget de 120 : la tolérance, exactement.
       expect(
-        validatePlanBusinessRules([timedWeek([3, 3, 5], [44, 44, 44])], free(1), {
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [48, 48, 48])], free(1), {
           weeklyTimeMinutes: 120,
         }),
       ).toEqual([]);
 
       expect(
-        validatePlanBusinessRules([timedWeek([3, 3, 5], [44, 44, 45])], free(1), {
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [48, 48, 49])], free(1), {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toHaveLength(1);
+    });
+
+    /**
+     * Les deux bords de la tolérance, dans les termes de l'athlète : « 2 h par
+     * semaine » est un ordre de grandeur au service d'un programme cohérent, pas
+     * un couperet. Un quart d'heure de plus ne vaut pas une régénération de
+     * plusieurs minutes ; une demi-heure, si.
+     */
+    it('laisse passer un débordement de 15 %, refuse à 25 %', () => {
+      // 138 min pour 120 déclarées.
+      expect(
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [46, 46, 46])], free(1), {
+          weeklyTimeMinutes: 120,
+        }),
+      ).toEqual([]);
+
+      // 150 min : ce n'est plus un arrondi, c'est une demi-heure qui n'existe pas.
+      expect(
+        validatePlanBusinessRules([timedWeek([3, 3, 5], [50, 50, 50])], free(1), {
           weeklyTimeMinutes: 120,
         }),
       ).toHaveLength(1);
@@ -1599,7 +1621,7 @@ describe('validatePlanBusinessRules — progression du volume', () => {
       ).toEqual([
         "Semaine 1 (déjà entamée, 4 jours restants) : 1 h 30 d'entraînement pour un budget " +
           'déclaré de 2 h 00 ramené à 1 h 08 au prorata — réduis distances ou séances ' +
-          '(1 h 15 au plus, tolérance comprise).',
+          '(1 h 22 au plus, tolérance comprise).',
       ]);
     });
 
@@ -1626,10 +1648,10 @@ describe('validatePlanBusinessRules — progression du volume', () => {
     });
 
     it('contrôle la semaine entamée dès le seuil de quatre jours, et pas en deçà', () => {
-      // La bascule, au jour près, sur une même semaine de 1 h 20 : à quatre jours
-      // restants le plafond vaut 1 h 15 et la semaine déborde ; à trois, il n'y a
+      // La bascule, au jour près, sur une même semaine de 1 h 30 : à quatre jours
+      // restants le plafond vaut 1 h 22 et la semaine déborde ; à trois, il n'y a
       // plus de plafond du tout.
-      const started: PlanWeekOutput = { sessions: [session(7, { distanceKm: 10, durationMin: 80 })] };
+      const started: PlanWeekOutput = { sessions: [session(7, { distanceKm: 10, durationMin: 90 })] };
 
       expect(
         validatePlanBusinessRules([started, modest], { ...free(2), firstWeekFromDay: 4 }, {
@@ -1655,7 +1677,7 @@ describe('validatePlanBusinessRules — progression du volume', () => {
         ),
       ).toEqual([
         "Semaine 2 : 4 h 30 d'entraînement pour un budget déclaré de 2 h 00 — " +
-          'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+          'réduis distances ou séances (2 h 24 au plus, tolérance comprise).',
       ]);
     });
   });
@@ -2507,7 +2529,7 @@ describe('applyImposedPaces', () => {
     it('rend le budget temps vérifiable : ce sont ces durées-là que la règle compte', () => {
       // Le défaut de production en entier : le modèle déclare 1 h 40 pour une
       // semaine de 16 km qu'il chiffre en réalité à 2 h 13. Sans recalcul, le
-      // budget de 2 h passait ; avec, il est relevé.
+      // budget de 1 h 50 passait ; avec, il est relevé.
       const declared: PlanWeekOutput = {
         sessions: [
           session(2, { kind: 'Endurance fondamentale', distanceKm: 4, durationMin: 25 }),
@@ -2522,14 +2544,14 @@ describe('applyImposedPaces', () => {
         longRunDay: 7,
       };
 
-      expect(validatePlanBusinessRules([declared], expected, { weeklyTimeMinutes: 120 })).toEqual([]);
+      expect(validatePlanBusinessRules([declared], expected, { weeklyTimeMinutes: 110 })).toEqual([]);
 
       expect(
         validatePlanBusinessRules(applyImposedPaces([declared], SLOW_PACES), expected, {
-          weeklyTimeMinutes: 120,
+          weeklyTimeMinutes: 110,
         }),
       ).toEqual([
-        "Semaine 1 : 2 h 13 d'entraînement pour un budget déclaré de 2 h 00 — " +
+        "Semaine 1 : 2 h 13 d'entraînement pour un budget déclaré de 1 h 50 — " +
           'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
       ]);
     });

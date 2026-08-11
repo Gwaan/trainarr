@@ -347,27 +347,38 @@ export type WeeklySessionBudget = {
 };
 
 /**
- * Un groupe de séances de même rôle : `qualité ~4,5 km`, `4 footings ~3,5 km`.
+ * Un groupe de séances de même rôle : `qualité ~4,5 km`, `4 footings ~3,5 km ≈ 26 min`.
  *
  * Un seul chiffre pour tout le groupe — celui de la première séance : les
  * séances d'un même rôle portent le même budget, à un dixième de kilomètre près
  * sur les footings, qui absorbent le reliquat de la division.
  * Le compte n'est écrit que quand il y en a plusieurs, et le pluriel avec.
+ *
+ * @param easyPaceSecPerKm l'allure d'endurance qui convertit ces kilomètres en
+ * minutes, `null` pour ne pas écrire de durée du tout — c'est le cas du groupe
+ * de qualité, dont la durée dépend de la structure de la séance (échauffement,
+ * récupérations, retour au calme) et non de son seul kilométrage. Annoncer
+ * « 3,0 km ≈ 13 min » sur une VMA serait faux d'un facteur trois.
  */
 function formatBudgetGroup(
   sessions: readonly SessionBudget[],
   singular: string,
   plural: string,
+  easyPaceSecPerKm: number | null,
 ): string | null {
   const first = sessions[0];
   if (first === undefined) return null;
   const label = sessions.length === 1 ? singular : `${sessions.length} ${plural}`;
-  return `${label} ~${formatNumber(first.km, 1)} km`;
+  const distance = `${label} ~${formatNumber(first.km, 1)} km`;
+  return easyPaceSecPerKm === null
+    ? distance
+    : `${distance} ≈ ${formatDuration(first.km * easyPaceSecPerKm)}`;
 }
 
 /**
  * La décomposition de chaque cible **entre ses séances**, une ligne par
- * semaine : `S1 (~27,2 km) : SL sam ~8,0 km · qualité ~4,5 km · 4 footings ~3,7 km`.
+ * semaine : `S1 (~27,2 km) : SL sam ~8,0 km ≈ 1 h 00 · qualité ~4,5 km ·
+ * 4 footings ~3,7 km ≈ 28 min`.
  *
  * Ce qu'elle corrige, constaté sur les premiers plans de production : le modèle
  * reçoit une cible hebdomadaire et écrit des semaines à 44 puis 70 km pour des
@@ -386,21 +397,32 @@ function formatBudgetGroup(
  * aide au calcul dont la somme ne fait pas son total ferait écrire au modèle des
  * semaines systématiquement sous leur cible.
  *
+ * Les **durées** accompagnent les kilomètres depuis le constat de production
+ * suivant : à 4 h de budget pour 6 séances, le modèle recevait « ~2,3 km » par
+ * footing et écrivait des semaines à 40-49 km pour des cibles de 19 à 31. Un
+ * kilométrage ne dit rien à ses priors ; « ≈ 17 min » leur parle directement,
+ * parce que c'est en durée qu'il se représente une sortie. Le groupe de qualité
+ * n'en porte pas — sa durée dépend de sa structure, pas de son kilométrage.
+ *
  * @param longRunDay jour ISO de la sortie longue — la seule séance dont le
  * décompte nomme le jour, parce que c'est le seul qui soit imposé.
+ * @param easyPaceSecPerKm l'allure d'endurance qui convertit ces kilomètres en
+ * minutes — la même que celle des cibles hebdomadaires, sans quoi les deux
+ * lignes du prompt se contrediraient.
  */
 export function formatWeeklySessionBudgets(
   weeks: readonly WeeklySessionBudget[],
   longRunDay: number,
+  easyPaceSecPerKm: number,
 ): string {
   const day = ISO_DAY_SHORT_NAMES[longRunDay - 1] ?? formatIsoDay(longRunDay);
 
   const rows = weeks.map((week) => {
     const of = (role: SessionBudgetRole) => week.sessions.filter((session) => session.role === role);
     const cells = [
-      formatBudgetGroup(of('long'), `SL ${day}`, `SL ${day}`),
-      formatBudgetGroup(of('quality'), 'qualité', 'qualité'),
-      formatBudgetGroup(of('easy'), 'footing', 'footings'),
+      formatBudgetGroup(of('long'), `SL ${day}`, `SL ${day}`, easyPaceSecPerKm),
+      formatBudgetGroup(of('quality'), 'qualité', 'qualité', null),
+      formatBudgetGroup(of('easy'), 'footing', 'footings', easyPaceSecPerKm),
     ].filter((cell): cell is string => cell !== null);
 
     return `S${week.weekNumber} (~${formatNumber(week.targetKm, 1)} km) : ${cells.join(' · ')}`;
@@ -408,7 +430,9 @@ export function formatWeeklySessionBudgets(
 
   return [
     'Décomposition de chaque cible entre ses séances (échauffement et récupérations compris) — ' +
-      'ces chiffres tombent exactement sur la cible, pars de là plutôt que de refaire la division :',
+      'ces chiffres tombent exactement sur la cible, pars de là plutôt que de refaire la division. ' +
+      'Les durées (≈) sont celles de ces kilomètres courus en endurance : écris des séances de cette ' +
+      'longueur-là, même si elles te paraissent courtes :',
     ...rows,
   ].join('\n');
 }

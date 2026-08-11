@@ -619,11 +619,14 @@ describe('buildPlanMessages', () => {
 
     // Trois séances (REQUEST) : la sortie longue le dimanche, une séance de
     // qualité (intermédiaire, ramené à une seule faute de place) et un footing.
+    // Les durées accompagnent les kilomètres partout sauf sur la qualité, dont
+    // le temps tient à la structure et non au kilométrage — et elles sortent de
+    // la même allure que les cibles hebdomadaires (5:24/km ici).
     expect(rows).toEqual([
-      'S1 (~50,5 km) : SL dim ~26,0 km · qualité ~8,0 km · footing ~16,5 km',
-      'S2 (~52,7 km) : SL dim ~27,0 km · qualité ~8,5 km · footing ~17,2 km',
-      'S3 (~39,5 km) : SL dim ~20,5 km · qualité ~6,5 km · footing ~12,5 km',
-      'S4 (~28,9 km) : SL dim ~15,0 km · qualité ~4,5 km · footing ~9,4 km',
+      'S1 (~50,5 km) : SL dim ~26,0 km ≈ 2 h 20 · qualité ~8,0 km · footing ~16,5 km ≈ 1 h 29',
+      'S2 (~52,7 km) : SL dim ~27,0 km ≈ 2 h 26 · qualité ~8,5 km · footing ~17,2 km ≈ 1 h 33',
+      'S3 (~39,5 km) : SL dim ~20,5 km ≈ 1 h 51 · qualité ~6,5 km · footing ~12,5 km ≈ 1 h 08',
+      'S4 (~28,9 km) : SL dim ~15,0 km ≈ 1 h 21 · qualité ~4,5 km · footing ~9,4 km ≈ 51 min',
     ]);
   });
 
@@ -640,6 +643,102 @@ describe('buildPlanMessages', () => {
     expect(user).toContain('S1 ~');
     expect(user).not.toContain('S1 (~');
     expect(user).toContain('S2 (~');
+  });
+
+  /**
+   * Le constat qui a motivé la ligne : 6 séances pour 4 h, cibles de 19 à 31 km,
+   * et le modèle écrit 40 à 49 km deux tentatives de suite. Son prior — « une
+   * sortie dure 45 à 75 min » — résiste aux kilomètres ; il faut lui dire en
+   * toutes lettres que court est voulu.
+   */
+  describe('séances courtes assumées', () => {
+    /** Une athlète qui revient de loin : 12 km la semaine dernière, et le budget ne borne rien. */
+    const RETURNING: TrainingSnapshotDto = {
+      ...SNAPSHOT,
+      weeks: [{ startsOn: '2026-08-03', distanceKm: 12, movingTimeS: 3_900, sessions: 3 }],
+    };
+
+    function userMessage(
+      overrides: Partial<PlanRequest>,
+      snapshot: TrainingSnapshotDto = SNAPSHOT,
+    ): string {
+      return buildPlanMessages(
+        { ...REQUEST, ...overrides },
+        { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
+        snapshot,
+      )[1].content;
+    }
+
+    /*
+     * La moyenne se lit sur les cibles, jamais sur le budget brut : ce sont
+     * elles que la table juste au-dessus annonce, et elles sont plus basses que
+     * le budget. Annoncer 40 min pour des semaines qui en chiffrent 38 (ou 14)
+     * redonnerait au modèle exactement le prior qu'on lui retire.
+     */
+    it('annonce la moyenne des cibles quand c’est le budget qui les borne', () => {
+      // 4 h pour 6 séances feraient 40 min de budget brut ; les cibles, elles,
+      // sont plafonnées à 95 % du budget — 3 h 48 planifiées, soit 38 min.
+      expect(userMessage({ weeklyTimeMinutes: 240, sessionsPerWeek: 6 })).toContain(
+        "Tes séances font en moyenne ~38 min (3 h 48 par semaine pour 6 séances) : c'est court et " +
+          "c'est VOULU, le budget est serré — n'écris pas des sorties de 45 à 60 min par habitude, " +
+          'suis les durées indiquées ci-dessous.',
+      );
+    });
+
+    it('annonce la moyenne des cibles quand ce sont les kilomètres qui les bornent', () => {
+      // Mêmes 4 h déclarées, mais l'ancrage sur le réel tient les semaines très
+      // en dessous : c'est ce chiffre-là qu'il faut dire, pas le budget.
+      expect(
+        userMessage({ weeklyTimeMinutes: 240, sessionsPerWeek: 6 }, RETURNING),
+      ).toContain('Tes séances font en moyenne ~15 min (1 h 30 par semaine pour 6 séances)');
+    });
+
+    it('ne dit rien quand les séances sont d’une durée ordinaire', () => {
+      // 300 min pour 3 séances : 1 h 40 la séance, le modèle n'a besoin d'aucune
+      // permission pour l'écrire.
+      expect(userMessage({ weeklyTimeMinutes: 300, sessionsPerWeek: 3 })).not.toContain(
+        'Tes séances font en moyenne',
+      );
+      // 6 h pour 6 séances : les cibles dépassent l'heure de séance, on est
+      // au-dessus du seuil et une consigne de plus ne ferait que diluer les
+      // autres.
+      expect(userMessage({ weeklyTimeMinutes: 360, sessionsPerWeek: 6 })).not.toContain(
+        'Tes séances font en moyenne',
+      );
+    });
+
+    it('ne dit rien sans budget déclaré : il n’y a rien à assumer', () => {
+      expect(userMessage({ weeklyTimeMinutes: undefined, sessionsPerWeek: 6 })).not.toContain(
+        'Tes séances font en moyenne',
+      );
+    });
+
+    /**
+     * La régression qui a échappé aux cas ci-dessus, tous en semaine pleine : la
+     * ligne et la décomposition qui la suit doivent annoncer **la même** moyenne.
+     * La semaine entamée n'est pas décomposée (cf. `sessionBudgetWeeks`), et sa
+     * cible au prorata tirait la moyenne de la ligne sous celle des semaines
+     * imprimées — 11 minutes d'écart, dans le sens qui réarme le prior.
+     */
+    it('moyenne sur les seules semaines décomposées quand la première est entamée', () => {
+      // Départ un jeudi : la semaine 1 est entamée, la table commence donc à S2.
+      const user = buildPlanMessages(
+        { ...REQUEST, weeklyTimeMinutes: 240, sessionsPerWeek: 6 },
+        { startsOn: '2026-08-13', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 4 },
+        RETURNING,
+      )[1].content;
+
+      // La table ne décompose que S2 à S4, annoncées à 1 h 20, 1 h 26 et 1 h 33
+      // — moyenne 1 h 26. C'est ce chiffre-là que la ligne doit dire, et pas les
+      // 1 h 16 que la cible proratée de S1 (46 min) fabriquait.
+      expect(user).toContain(
+        'S1 ~8,5 km (≈46 min) · S2 ~14,9 km (≈1 h 20) · S3 ~16,0 km (≈1 h 26) · S4 ~17,2 km (≈1 h 33)',
+      );
+      expect(user).not.toContain('S1 (~');
+      expect(user).toContain(
+        'Tes séances font en moyenne ~14 min (1 h 26 par semaine pour 6 séances)',
+      );
+    });
   });
 
   it('dit dans le prompt que la tolérance n’est pas un espace de liberté', () => {
@@ -903,10 +1002,13 @@ describe('buildPlanMessages', () => {
     expect(user).toContain('5:24/km');
     expect(user).not.toContain('null');
     // Un prompt de génération reste court : le budget est pour la sortie. La
-    // décomposition des cibles y ajoute une ligne par semaine (~70 caractères,
-    // une vingtaine de tokens), et c'est le seul poste qui grandit avec le plan
-    // — d'où le découpage en tranches au-delà de six semaines.
-    expect(user.length).toBeLessThan(1_700);
+    // décomposition des cibles y ajoute une ligne par semaine (~90 caractères,
+    // durées comprises), et c'est le seul poste qui grandit avec le plan — d'où
+    // le découpage en tranches au-delà de six semaines. Le plafond est monté de
+    // 1 700 à 1 850 avec les durées de la décomposition : ~30 tokens qui
+    // délogent le prior « une sortie fait 45 à 75 min », lequel coûtait jusqu'à
+    // trois générations entières.
+    expect(user.length).toBeLessThan(1_850);
   });
 });
 
@@ -2005,7 +2107,7 @@ describe('budget temps hebdomadaire', () => {
 
     expect(loggedText()).toContain(
       "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00 — " +
-        'réduis distances ou séances (2 h 12 au plus, tolérance comprise).',
+        'réduis distances ou séances (2 h 24 au plus, tolérance comprise).',
     );
     // La semaine entamée, elle, tient dans son prorata : une violation de plus
     // passerait inaperçue d'un `toContain`, et ferait juger cette fixture sur un

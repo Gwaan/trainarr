@@ -282,6 +282,9 @@ describe('formatPaceRange', () => {
 });
 
 describe('formatWeeklySessionBudgets', () => {
+  /** 7:30/km : les kilomètres et les minutes se lisent l'un dans l'autre. */
+  const EASY_PACE = 450;
+
   /** Les lignes de semaines, sans l'en-tête qui les introduit. */
   function rows(text: string): string[] {
     return text.split('\n').slice(1);
@@ -304,12 +307,13 @@ describe('formatWeeklySessionBudgets', () => {
         },
       ],
       6,
+      EASY_PACE,
     );
 
     // Un chiffre par groupe, pas une ligne par séance : c'est ce qui rend la
     // décomposition payable sur seize semaines.
     expect(rows(text)).toEqual([
-      'S1 (~27,2 km) : SL sam ~8,0 km · qualité ~4,5 km · 4 footings ~3,4 km',
+      'S1 (~27,2 km) : SL sam ~8,0 km ≈ 1 h 00 · qualité ~4,5 km · 4 footings ~3,4 km ≈ 26 min',
     ]);
   });
 
@@ -328,29 +332,63 @@ describe('formatWeeklySessionBudgets', () => {
         },
       ],
       3,
+      EASY_PACE,
     );
 
     expect(rows(text)).toEqual([
-      'S7 (~20,0 km) : SL mer ~9,0 km · 2 qualité ~4,0 km · footing ~3,0 km',
+      'S7 (~20,0 km) : SL mer ~9,0 km ≈ 1 h 08 · 2 qualité ~4,0 km · footing ~3,0 km ≈ 23 min',
     ]);
+  });
+
+  /**
+   * La durée d'une séance de qualité tient à sa structure — échauffement, blocs,
+   * récupérations, retour au calme —, pas à son kilométrage : la convertir à
+   * l'allure d'endurance annoncerait un tiers du temps réel.
+   */
+  it('ne convertit pas le groupe de qualité en minutes', () => {
+    const text = formatWeeklySessionBudgets(
+      [{ weekNumber: 1, targetKm: 20, sessions: [{ role: 'quality', km: 4.5 }] }],
+      7,
+      EASY_PACE,
+    );
+
+    expect(rows(text)).toEqual(['S1 (~20,0 km) : qualité ~4,5 km']);
   });
 
   it('n’écrit pas les groupes vides', () => {
     const text = formatWeeklySessionBudgets(
       [{ weekNumber: 2, targetKm: 10, sessions: [{ role: 'long', km: 6 }, { role: 'easy', km: 4 }] }],
       7,
+      EASY_PACE,
     );
 
-    expect(rows(text)).toEqual(['S2 (~10,0 km) : SL dim ~6,0 km · footing ~4,0 km']);
+    expect(rows(text)).toEqual([
+      'S2 (~10,0 km) : SL dim ~6,0 km ≈ 45 min · footing ~4,0 km ≈ 30 min',
+    ]);
+  });
+
+  it('convertit à l’allure qu’on lui donne, pas à une allure supposée', () => {
+    const text = formatWeeklySessionBudgets(
+      [{ weekNumber: 1, targetKm: 10, sessions: [{ role: 'easy', km: 10 }] }],
+      7,
+      // 6:00/km : les mêmes 10 km valent 1 h 00, pas 1 h 15.
+      360,
+    );
+
+    expect(rows(text)).toEqual(['S1 (~10,0 km) : footing ~10,0 km ≈ 1 h 00']);
   });
 
   it('dit que ces chiffres tombent sur la cible, pour qu’ils servent de départ', () => {
     const text = formatWeeklySessionBudgets(
       [{ weekNumber: 1, targetKm: 10, sessions: [{ role: 'long', km: 10 }] }],
       7,
+      EASY_PACE,
     );
 
-    expect(text.split('\n')[0]).toContain('ces chiffres tombent exactement sur la cible');
+    const header = text.split('\n')[0];
+    expect(header).toContain('ces chiffres tombent exactement sur la cible');
+    // Et que les durées ne sont pas décoratives : c'est la longueur à écrire.
+    expect(header).toContain('même si elles te paraissent courtes');
   });
 });
 
