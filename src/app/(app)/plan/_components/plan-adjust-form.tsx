@@ -46,7 +46,7 @@ export function PlanAdjustForm() {
   const error = state.fieldErrors?.instruction;
   const hasFeedback = isPending || state.status === "error";
 
-  // Suivi de la progression par l'action enveloppante — cf. `plan-form.tsx`.
+  // Suivi de la progression par l'action enveloppante — cf. `plan-create-dialog.tsx`.
   return (
     <form action={submitWithProgress} noValidate className="flex flex-col gap-3">
       <div aria-live="polite" className={hasFeedback ? undefined : "sr-only"}>

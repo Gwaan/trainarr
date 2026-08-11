@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import type { PlanDto, PlanSessionDto } from "@/data/plans";
 
+import { PLAN_PROPOSAL_ANCHOR_ID } from "../_lib/anchors";
 import { groupPlanWeeks } from "../_lib/plan-weeks";
 
 import { PlanDecisionForm } from "./plan-decision-form";
@@ -41,7 +42,16 @@ export function PlanProposal({
   }));
 
   return (
-    <div className="flex flex-col gap-5 sm:gap-6">
+    // `tabIndex={-1}` et l'id : la modale de création vise ce conteneur pour y
+    // poser le focus dès que la proposition remplace le formulaire (cf.
+    // `_lib/anchors.ts`). Pas de contour au focus — le déplacement sert
+    // l'annonce, pas la navigation au clavier, et il n'est jamais atteint par
+    // `Tab`.
+    <div
+      id={PLAN_PROPOSAL_ANCHOR_ID}
+      tabIndex={-1}
+      className="flex flex-col gap-5 focus:outline-none sm:gap-6"
+    >
       <Panel
         title="Proposition du coach"
         meta={<span className="num">{weeks.length} semaines</span>}

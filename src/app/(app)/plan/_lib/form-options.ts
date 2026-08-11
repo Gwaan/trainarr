@@ -7,6 +7,35 @@
 
 import { ISO_DAY_LABELS } from "./format-plan";
 
+/**
+ * Champs du formulaire de création, tels que le client les nomme, dans l'ordre
+ * où le rapport d'erreurs de la Server Action les parcourt.
+ *
+ * **Pourquoi ici et pas dans `actions.ts`**, qui en est pourtant le seul
+ * consommateur applicatif : un fichier `'use server'` ne peut exporter que des
+ * fonctions asynchrones (« A "use server" file can only export async functions »),
+ * la liste y serait donc une valeur exportée illégale. Elle vit à côté, dans le
+ * module des constantes partagées du formulaire, et `actions.ts` la parcourt.
+ *
+ * Cette liste est le contrat que `plan-steps.ts` doit couvrir exactement : un
+ * champ absent des étapes verrait son erreur s'afficher sur une étape
+ * inatteignable, un champ en trop désignerait une étape pour une erreur qui ne
+ * viendra jamais. `plan-steps.test.ts` compare les deux ensembles.
+ */
+export const PLAN_FORM_FIELDS = [
+  "goalType",
+  "level",
+  "goalText",
+  "raceDate",
+  "weeks",
+  "startsOn",
+  "sessionsPerWeek",
+  "weeklyTimeHours",
+  "longRunDay",
+] as const;
+
+export type PlanFormField = (typeof PLAN_FORM_FIELDS)[number];
+
 export type GoalType = "race" | "free";
 
 export const GOAL_TYPE_CHOICES: readonly { value: GoalType; label: string; hint: string }[] = [

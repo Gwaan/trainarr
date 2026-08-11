@@ -8,7 +8,7 @@ import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
 import { AiSuspendedPanel } from "./_components/ai-suspended-panel";
-import { PlanForm } from "./_components/plan-form";
+import { PlanCreatePanel } from "./_components/plan-create-panel";
 import { PlanProposal } from "./_components/plan-proposal";
 import { PlanSkeleton } from "./_components/plan-skeleton";
 import { PlanView } from "./_components/plan-view";
@@ -96,7 +96,7 @@ async function PlanContent() {
       <>
         <PageHeader title="Plan" subtitle={SUBTITLES.create} />
         {availability.available ? (
-          <PlanForm
+          <PlanCreatePanel
             minRaceDate={earliestRaceDate(firstStart)}
             maxRaceDate={latestRaceDate(lastStart)}
             defaultStartDate={firstStart}

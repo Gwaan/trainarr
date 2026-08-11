@@ -37,7 +37,7 @@ import {
 } from '@/lib/ai/plan-service';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
-import { ARCHIVE_CONFIRMATION } from './form-options';
+import { ARCHIVE_CONFIRMATION, PLAN_FORM_FIELDS, type PlanFormField } from './form-options';
 import {
   MAX_PLAN_START_LEAD_WEEKS,
   earliestPlanStart,
@@ -52,17 +52,13 @@ import {
  * que la page relit du DAL après revalidation.
  */
 
-/** Champs du formulaire de création, tels que le client les nomme. */
-export type PlanFormField =
-  | 'goalType'
-  | 'level'
-  | 'goalText'
-  | 'raceDate'
-  | 'weeks'
-  | 'startsOn'
-  | 'sessionsPerWeek'
-  | 'weeklyTimeHours'
-  | 'longRunDay';
+/**
+ * Champs du formulaire de création — déclarés dans `form-options.ts`
+ * (`PLAN_FORM_FIELDS`), qu'un fichier `'use server'` ne peut pas héberger.
+ * Réexportés ici parce que c'est la Server Action qui fait autorité sur ce que
+ * l'UI a le droit d'attendre ; un type ne franchit aucune frontière au runtime.
+ */
+export type { PlanFormField };
 
 export type PlanFormState = {
   status: 'idle' | 'success' | 'error';
@@ -290,19 +286,6 @@ const planFormSchema = z
       });
     }
   });
-
-/** Les champs du formulaire, dans l'ordre où le rapport d'erreurs les parcourt. */
-const PLAN_FORM_FIELDS = [
-  'goalType',
-  'level',
-  'goalText',
-  'raceDate',
-  'weeks',
-  'startsOn',
-  'sessionsPerWeek',
-  'weeklyTimeHours',
-  'longRunDay',
-] as const satisfies readonly PlanFormField[];
 
 /**
  * Champ du DAL → champ du formulaire. `sessions` n'en a aucun : il est calculé
