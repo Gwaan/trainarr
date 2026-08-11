@@ -408,6 +408,26 @@ function failureMessage(error: unknown, context: string, fallback: string): stri
 }
 
 /**
+ * Revalide sans jamais faire échouer l'action appelante.
+ *
+ * `revalidatePath` ne se contente pas de marquer le cache : Next re-rend la
+ * route côté serveur pour joindre sa charge RSC à la réponse de l'action. Une
+ * exception peut donc en sortir — et, survenant **après** une écriture déjà
+ * commitée, elle remonterait jusqu'à la frontière d'erreur : écran cassé pour
+ * une mutation qui, elle, a réussi. On journalise et on rend la main, la
+ * navigation suivante relira la base de toute façon.
+ */
+function revalidateSafely(paths: readonly string[], context: string): void {
+  for (const path of paths) {
+    try {
+      revalidatePath(path);
+    } catch (error) {
+      console.error(`[plan] revalidation de ${path} impossible (${context}) :`, error);
+    }
+  }
+}
+
+/**
  * Génère un plan complet avec le coach et le soumet à l'athlète : le plan est
  * écrit en **proposition**, rien du plan en cours ne bouge. C'est
  * {@link acceptPlanAction} qui l'active.
@@ -510,6 +530,10 @@ const planIdSchema = z
  *
  * L'id vient du client comme tout le reste : c'est le DAL qui vérifie qu'il
  * désigne bien un brouillon de l'athlète, dans la transaction qui l'active.
+ *
+ * Rien ne sort d'ici sous forme d'exception : une Server Action qui lève fait
+ * afficher la frontière d'erreur, écran sur lequel l'utilisatrice n'a plus ni
+ * message ni bouton pour recommencer.
  */
 export async function acceptPlanAction(
   _previous: PlanDecisionState,
@@ -526,23 +550,38 @@ export async function acceptPlanAction(
   } catch (error) {
     if (error instanceof PlanNotFoundError) return { status: 'error', message: NO_DRAFT };
 
-    console.error('[plan] adoption de la proposition impossible :', error);
-    return { status: 'error', message: "Le plan n'a pas pu être adopté. Réessaie." };
+    return {
+      status: 'error',
+      message: failureMessage(error, 'adoption', "L'adoption n'a pas abouti — réessaie."),
+    };
   }
 
-  // La politique d'un plan devenu actif vit dans le service, pas ici : une
-  // adoption produit exactement les mêmes effets qu'un ajustement.
-  await afterActivePlanChanged(planId);
+  // À partir d'ici la transaction est commitée : le plan **est** adopté, et plus
+  // rien ne doit pouvoir transformer ce fait en échec. Ce qui suit n'est que de
+  // la propagation (rapprochement des séances, republication du calendrier), et
+  // rendre une erreur inviterait à refaire une adoption déjà faite.
+  try {
+    // La politique d'un plan devenu actif vit dans le service, pas ici : une
+    // adoption produit exactement les mêmes effets qu'un ajustement.
+    await afterActivePlanChanged(planId);
+  } catch (error) {
+    console.error("[plan] suites de l'adoption impossibles :", error);
+  }
 
-  revalidatePath('/plan');
   // Le tableau de bord affiche la séance du jour : elle vient de changer.
-  revalidatePath('/');
+  revalidateSafely(['/plan', '/'], 'adoption');
   return { status: 'success', message: 'Plan adopté.' };
 }
 
 /**
  * Refuse la proposition : elle disparaît, et rien d'autre ne change — ni le plan
  * en cours, ni le calendrier intervals.icu, qui ne l'ont jamais connue.
+ *
+ * **Idempotent** : le refus vise un état — plus aucune proposition en attente.
+ * Si le brouillon a déjà disparu (refusé depuis un autre onglet, remplacé par
+ * une nouvelle génération), cet état est atteint, donc l'opération a réussi.
+ *
+ * Comme {@link acceptPlanAction}, ne lève jamais.
  */
 export async function rejectPlanAction(
   _previous: PlanDecisionState,
@@ -550,20 +589,26 @@ export async function rejectPlanAction(
 ): Promise<PlanDecisionState> {
   // TODO(auth) : cf. `createPlanAction`.
 
+  // Un identifiant illisible n'est pas un brouillon disparu, c'est une requête
+  // qui ne veut rien dire : elle ne peut pas être tenue pour un refus abouti.
   const parsed = planIdSchema.safeParse(textField(formData, 'planId'));
   if (!parsed.success) return { status: 'error', message: NO_DRAFT };
 
   try {
     await discardDraftPlan(parsed.data);
   } catch (error) {
-    if (error instanceof PlanNotFoundError) return { status: 'error', message: NO_DRAFT };
-
-    console.error('[plan] refus de la proposition impossible :', error);
-    return { status: 'error', message: "La proposition n'a pas pu être écartée. Réessaie." };
+    if (!(error instanceof PlanNotFoundError)) {
+      return {
+        status: 'error',
+        message: failureMessage(error, 'refus', "Le refus n'a pas abouti — réessaie."),
+      };
+    }
+    // Brouillon déjà parti : on tombe dans la revalidation, qui fera disparaître
+    // la carte restée à l'écran.
   }
 
   // Le tableau de bord n'a jamais vu cette proposition : rien à y revalider.
-  revalidatePath('/plan');
+  revalidateSafely(['/plan'], 'refus');
   return { status: 'success', message: 'Proposition écartée.' };
 }
 

@@ -88,6 +88,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
+  // `clearAllMocks` efface les appels, pas les implémentations : les doublons
+  // qui lèvent (revalidation, `after`) doivent être remis à neuf explicitement.
+  mocks.revalidatePath.mockImplementation(() => {});
   mocks.generatePlan.mockResolvedValue(undefined);
   mocks.acceptDraftPlan.mockResolvedValue({ id: 9 });
   mocks.discardDraftPlan.mockResolvedValue(undefined);
@@ -419,6 +422,34 @@ describe('acceptPlanAction', () => {
     expect(state.status).toBe('success');
     expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalled();
   });
+
+  it('adopte quand même le plan si les suites de l’adoption lèvent', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // `after()` hors contexte de requête, par exemple : une exception ici
+    // sortirait de la Server Action et afficherait la frontière d'erreur alors
+    // que la transaction est commitée.
+    mocks.scheduleAfter.mockImplementation(() => {
+      throw new Error('after() was called outside a request scope');
+    });
+
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state).toEqual({ status: 'success', message: 'Plan adopté.' });
+    // L'écran doit quand même être rafraîchi : le plan a changé.
+    expect(mocks.revalidatePath).toHaveBeenCalledWith('/plan');
+  });
+
+  it('adopte quand même le plan si la revalidation lève', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // `revalidatePath` re-rend la route côté serveur : ce rendu peut échouer.
+    mocks.revalidatePath.mockImplementation(() => {
+      throw new Error('render failed');
+    });
+
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('success');
+  });
 });
 
 describe('rejectPlanAction', () => {
@@ -444,13 +475,40 @@ describe('rejectPlanAction', () => {
     },
   );
 
-  it('signale une proposition déjà disparue', async () => {
+  it('tient une proposition déjà disparue pour un refus abouti', async () => {
+    // Refusée depuis un autre onglet, ou remplacée par une nouvelle génération :
+    // l'état voulu — plus aucune proposition — est atteint. Le signaler comme
+    // une panne laisserait la carte à l'écran et l'utilisatrice à cliquer.
     mocks.discardDraftPlan.mockRejectedValue(new PlanNotFoundError());
 
     const state = await rejectPlanAction(DECISION_IDLE, decisionForm('9'));
 
-    expect(state).toEqual({ status: 'error', message: expect.stringContaining('recharge') });
+    expect(state).toEqual({ status: 'success', message: 'Proposition écartée.' });
+    expect(mocks.revalidatePath).toHaveBeenCalledExactlyOnceWith('/plan');
+  });
+
+  it('rend un message générique sur panne, sans lever ni laisser fuir la trace', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.discardDraftPlan.mockRejectedValue(new Error('deadlock detected'));
+
+    const state = await rejectPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('error');
+    expect(state.message).toBe("Le refus n'a pas abouti — réessaie.");
+    expect(state.message).not.toContain('deadlock');
     expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it('écarte quand même la proposition si la revalidation lève', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.revalidatePath.mockImplementation(() => {
+      throw new Error('render failed');
+    });
+
+    const state = await rejectPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('success');
+    expect(mocks.discardDraftPlan).toHaveBeenCalledWith(9);
   });
 });
 
