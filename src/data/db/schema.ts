@@ -216,6 +216,21 @@ export const PLAN_GOAL_TYPES = ['race', 'free'] as const;
 export type PlanGoalType = (typeof PLAN_GOAL_TYPES)[number];
 
 /**
+ * Niveau en course de l'athlète, déclaré à la création du plan.
+ *
+ * - `beginner` : moins d'un an de pratique, ou une pratique intermittente ;
+ * - `intermediate` : un à trois ans de pratique régulière ;
+ * - `advanced` : plusieurs années d'entraînement structuré.
+ *
+ * Il conditionne la méthodologie que le coach applique (volume de qualité,
+ * longueur des blocs, progression). Il se choisit **à la création** et ne bouge
+ * plus : changer de niveau, c'est régénérer un plan.
+ */
+export const PLAN_LEVELS = ['beginner', 'intermediate', 'advanced'] as const;
+
+export type PlanLevel = (typeof PLAN_LEVELS)[number];
+
+/**
  * Un plan d'entraînement, tel que le coach IA le construit à partir des
  * contraintes de l'athlète.
  *
@@ -241,6 +256,12 @@ export const plans = pgTable(
       .references(() => athlete.id),
     status: text('status', { enum: PLAN_STATUSES }).notNull(),
     goalType: text('goal_type', { enum: PLAN_GOAL_TYPES }).notNull(),
+    /**
+     * Niveau déclaré par l'athlète à la création. **Nullable** : les plans
+     * antérieurs à ce champ n'en portent pas, et rien ne permet de le deviner
+     * après coup — mieux vaut ne rien dire au coach que lui inventer un niveau.
+     */
+    level: text('level', { enum: PLAN_LEVELS }),
     /** Objectif tel que l'athlète l'a formulé, conservé mot pour mot. */
     goalText: text('goal_text').notNull(),
     /**

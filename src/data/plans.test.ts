@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import { AthleteNotFoundError } from './athlete';
-import type { Plan, PlannedSession } from './db/schema';
+import type { Plan, PlanLevel, PlannedSession } from './db/schema';
 import {
   InvalidPlanError,
   PlanNotFoundError,
@@ -138,6 +138,7 @@ const PLAN_ROW: Plan = {
   athleteId: 1,
   status: 'active',
   goalType: 'race',
+  level: 'intermediate',
   goalText: '10 km sous 50 min le 15 novembre',
   raceDate: '2026-11-15',
   startsOn: '2026-08-10',
@@ -232,6 +233,7 @@ const PLAN_DTO_KEYS = [
   'goalText',
   'goalType',
   'id',
+  'level',
   'longRunDay',
   'raceDate',
   'sessionsPerWeek',
@@ -266,6 +268,7 @@ const SESSION_INPUT: NewPlanSessionInput = {
 /** Plan valide — chaque test n'en modifie que ce qu'il éprouve. */
 const VALID_INPUT: CreatePlanInput = {
   goalType: 'race',
+  level: 'intermediate',
   goalText: '10 km sous 50 min le 15 novembre',
   raceDate: '2026-11-15',
   startsOn: '2026-08-10',
@@ -309,6 +312,27 @@ describe('validatePlanInput', () => {
     expect(values.raceDate).toBeNull();
     expect(values.weeklyTimeMinutes).toBeNull();
     expect(values.summary).toBeNull();
+  });
+
+  it('recopie le niveau déclaré et accepte les trois', () => {
+    expect(validatePlanInput(VALID_INPUT).level).toBe('intermediate');
+    expect(validatePlanInput({ ...VALID_INPUT, level: 'beginner' }).level).toBe('beginner');
+    expect(validatePlanInput({ ...VALID_INPUT, level: 'advanced' }).level).toBe('advanced');
+  });
+
+  it('refuse un niveau hors des trois, ou absent', () => {
+    // Le DAL n'est pas la seule porte d'entrée (le coach écrit ici aussi) : la
+    // garde vaut pour ce que le typage ne voit pas — d'où les valeurs forcées.
+    const wrongLevels: readonly unknown[] = ['expert', '', undefined];
+    for (const level of wrongLevels) {
+      const input = { ...VALID_INPUT, level: level as PlanLevel };
+      expect(() => validatePlanInput(input)).toThrow(InvalidPlanError);
+      try {
+        validatePlanInput(input);
+      } catch (error) {
+        expect((error as InvalidPlanError).field).toBe('level');
+      }
+    }
   });
 
   it('exige une date de course pour un objectif daté', () => {
@@ -487,16 +511,23 @@ describe('toPlanDto', () => {
     });
   });
 
+  it('expose le niveau du plan', () => {
+    expect(toPlanDto({ ...PLAN_ROW, level: 'advanced' }).level).toBe('advanced');
+  });
+
   it('préserve les champs absents en `null`', () => {
     const dto = toPlanDto({
       ...PLAN_ROW,
       goalType: 'free',
+      // Un plan antérieur au champ : le DTO le dit `null`, il n'en invente pas.
+      level: null,
       raceDate: null,
       weeklyTimeMinutes: null,
       summary: null,
     });
 
     expect(dto.raceDate).toBeNull();
+    expect(dto.level).toBeNull();
     expect(dto.weeklyTimeMinutes).toBeNull();
     expect(dto.summary).toBeNull();
   });
@@ -584,6 +615,7 @@ describe('createPlanWithSessions', () => {
       athleteId: 1,
       status: 'active',
       goalType: 'race',
+      level: 'intermediate',
       raceDate: '2026-11-15',
       weeks: 8,
     });

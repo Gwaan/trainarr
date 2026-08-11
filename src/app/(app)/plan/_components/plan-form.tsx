@@ -12,14 +12,17 @@ import { cn } from "@/lib/utils";
 import { createPlanAction, type PlanFormState } from "../_lib/actions";
 import { formatCivilDay } from "../_lib/format-plan";
 import {
+  DEFAULT_LEVEL,
   DEFAULT_LONG_RUN_DAY,
   DEFAULT_SESSIONS_PER_WEEK,
   DEFAULT_WEEKS,
   GOAL_TYPE_CHOICES,
+  LEVEL_CHOICES,
   LONG_RUN_DAY_CHOICES,
   SESSIONS_PER_WEEK_CHOICES,
   WEEK_CHOICES,
   type GoalType,
+  type Level,
 } from "../_lib/form-options";
 
 /**
@@ -103,6 +106,93 @@ function Field({
 }
 
 /**
+ * Choix exclusif présenté en cartes : libellé, pastille et phrase d'aide.
+ *
+ * Deux groupes s'en servent (type d'objectif, niveau) et ils doivent rester
+ * visuellement identiques — d'où un composant plutôt qu'un second bloc recopié,
+ * qui divergerait à la première retouche.
+ */
+function RadioCards<T extends string>({
+  name,
+  legend,
+  choices,
+  value,
+  onChange,
+  error,
+  errorId,
+  columns,
+}: {
+  name: string;
+  legend: string;
+  choices: readonly { value: T; label: string; hint: string }[];
+  value: T;
+  onChange: (value: T) => void;
+  error?: string;
+  /** Identifiant du message d'erreur, référencé par le `fieldset`. */
+  errorId: string;
+  /** Classe de grille appliquée à partir de `sm` — deux ou trois colonnes. */
+  columns: string;
+}) {
+  return (
+    <fieldset className="min-w-0" aria-describedby={describedBy(Boolean(error) && errorId)}>
+      <legend className="text-[0.85rem] font-medium text-fg">{legend}</legend>
+
+      <div className={cn("mt-2 grid gap-2", columns)}>
+        {choices.map((choice) => {
+          const checked = value === choice.value;
+
+          return (
+            <label
+              key={choice.value}
+              className={cn(
+                "cursor-pointer rounded-button border px-3 py-2.5",
+                "transition-colors duration-150 ease-out",
+                // Le radio natif est masqué : le focus clavier est reporté
+                // sur l'étiquette entière, sans quoi il disparaîtrait.
+                "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent",
+                checked
+                  ? "border-accent bg-accent-soft"
+                  : "border-border bg-surface-2 hover:border-fg-faint/35",
+              )}
+            >
+              <span className="flex items-center gap-2.5">
+                <input
+                  type="radio"
+                  name={name}
+                  value={choice.value}
+                  checked={checked}
+                  onChange={() => onChange(choice.value)}
+                  className="sr-only"
+                />
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "flex size-[1.05rem] shrink-0 items-center justify-center rounded-full border",
+                    checked ? "border-accent" : "border-fg-faint",
+                  )}
+                >
+                  {checked ? <span className="size-2 rounded-full bg-accent" /> : null}
+                </span>
+                <span
+                  className={cn("text-[0.85rem]", checked ? "font-medium text-fg" : "text-fg-muted")}
+                >
+                  {choice.label}
+                </span>
+              </span>
+              <span className="mt-1.5 block text-[0.74rem] leading-snug text-fg-faint">
+                {choice.hint}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      {error ? <FieldError id={errorId} message={error} /> : null}
+    </fieldset>
+  );
+}
+
+/**
  * Liste déroulante native, habillée aux tokens du champ de saisie : sur mobile
  * elle ouvre le sélecteur du système, qu'aucun composant maison n'égale.
  */
@@ -150,6 +240,7 @@ export function PlanForm({
 }: PlanFormProps) {
   const [state, formAction, isPending] = useActionState(createPlanAction, INITIAL_STATE);
   const [goalType, setGoalType] = useState<GoalType>("race");
+  const [level, setLevel] = useState<Level>(DEFAULT_LEVEL);
   const [goalText, setGoalText] = useState("");
   const [raceDate, setRaceDate] = useState("");
   const [startsOn, setStartsOn] = useState("");
@@ -180,73 +271,16 @@ export function PlanForm({
 
       <Panel title="Ton objectif">
         <div className="flex flex-col gap-5">
-          <fieldset
-            className="min-w-0"
-            aria-describedby={describedBy(
-              Boolean(errors?.goalType) && `${fieldId("goalType")}-error`,
-            )}
-          >
-            <legend className="text-[0.85rem] font-medium text-fg">
-              Type d&apos;objectif
-            </legend>
-
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {GOAL_TYPE_CHOICES.map((choice) => {
-                const checked = goalType === choice.value;
-
-                return (
-                  <label
-                    key={choice.value}
-                    className={cn(
-                      "cursor-pointer rounded-button border px-3 py-2.5",
-                      "transition-colors duration-150 ease-out",
-                      // Le radio natif est masqué : le focus clavier est reporté
-                      // sur l'étiquette entière, sans quoi il disparaîtrait.
-                      "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent",
-                      checked
-                        ? "border-accent bg-accent-soft"
-                        : "border-border bg-surface-2 hover:border-fg-faint/35",
-                    )}
-                  >
-                    <span className="flex items-center gap-2.5">
-                      <input
-                        type="radio"
-                        name="goalType"
-                        value={choice.value}
-                        checked={checked}
-                        onChange={() => setGoalType(choice.value)}
-                        className="sr-only"
-                      />
-                      <span
-                        aria-hidden="true"
-                        className={cn(
-                          "flex size-[1.05rem] shrink-0 items-center justify-center rounded-full border",
-                          checked ? "border-accent" : "border-fg-faint",
-                        )}
-                      >
-                        {checked ? <span className="size-2 rounded-full bg-accent" /> : null}
-                      </span>
-                      <span
-                        className={cn(
-                          "text-[0.85rem]",
-                          checked ? "font-medium text-fg" : "text-fg-muted",
-                        )}
-                      >
-                        {choice.label}
-                      </span>
-                    </span>
-                    <span className="mt-1.5 block text-[0.74rem] leading-snug text-fg-faint">
-                      {choice.hint}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-
-            {errors?.goalType ? (
-              <FieldError id={`${fieldId("goalType")}-error`} message={errors.goalType} />
-            ) : null}
-          </fieldset>
+          <RadioCards
+            name="goalType"
+            legend="Type d'objectif"
+            choices={GOAL_TYPE_CHOICES}
+            value={goalType}
+            onChange={setGoalType}
+            error={errors?.goalType}
+            errorId={`${fieldId("goalType")}-error`}
+            columns="sm:grid-cols-2"
+          />
 
           <Field
             id={fieldId("goalText")}
@@ -359,6 +393,22 @@ export function PlanForm({
 
       <Panel title="Tes contraintes">
         <div className="flex flex-col gap-5">
+          {/*
+            Le niveau se déclare ici, avec le reste de ce que le coach doit
+            savoir pour caler le plan : il ne se modifie plus ensuite, changer de
+            niveau revient à régénérer un plan.
+          */}
+          <RadioCards
+            name="level"
+            legend="Ton niveau"
+            choices={LEVEL_CHOICES}
+            value={level}
+            onChange={setLevel}
+            error={errors?.level}
+            errorId={`${fieldId("level")}-error`}
+            columns="sm:grid-cols-3"
+          />
+
           <Field
             id={fieldId("sessionsPerWeek")}
             label="Séances par semaine"

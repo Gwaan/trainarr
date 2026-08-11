@@ -106,6 +106,7 @@ describe('latestRaceDate', () => {
 const RACE = {
   goalType: 'race',
   goalText: '10 km sous 50 min',
+  level: 'intermediate',
   sessionsPerWeek: 3,
   longRunDay: 7,
 } as const;

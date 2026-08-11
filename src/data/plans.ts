@@ -13,12 +13,14 @@ import { AthleteNotFoundError, getAthleteId, isCivilDate, todayCivilDate } from 
 import { db } from './db/client';
 import {
   PLAN_GOAL_TYPES,
+  PLAN_LEVELS,
   plannedSessions,
   plans,
   type NewPlan,
   type NewPlannedSession,
   type Plan,
   type PlanGoalType,
+  type PlanLevel,
   type PlanStatus,
   type PlannedSession,
 } from './db/schema';
@@ -51,6 +53,11 @@ export type PlanDto = {
   id: number;
   status: PlanStatus;
   goalType: PlanGoalType;
+  /**
+   * Niveau déclaré à la création, `null` sur les plans antérieurs à ce champ —
+   * l'UI et le coach s'en passent alors plutôt que d'en supposer un.
+   */
+  level: PlanLevel | null;
   goalText: string;
   /** Date civile `YYYY-MM-DD`, renseignée pour un objectif `race` uniquement. */
   raceDate: string | null;
@@ -120,6 +127,8 @@ export type NewPlanSessionInput = {
 /** Le plan tel que le coach le soumet à la création. */
 export type CreatePlanInput = {
   goalType: PlanGoalType;
+  /** Requis : un plan créé aujourd'hui se cale toujours sur un niveau déclaré. */
+  level: PlanLevel;
   goalText: string;
   raceDate?: string | null;
   startsOn: string;
@@ -134,6 +143,7 @@ export type CreatePlanInput = {
 /** Même chose, une fois les facultatifs normalisés en `null`. */
 export type ValidatedPlanInput = {
   goalType: PlanGoalType;
+  level: PlanLevel;
   goalText: string;
   raceDate: string | null;
   startsOn: string;
@@ -145,7 +155,12 @@ export type ValidatedPlanInput = {
   sessions: NewPlanSessionInput[];
 };
 
-/** Les réglages qu'une instruction (« plutôt 3 séances ») peut faire bouger. */
+/**
+ * Les réglages qu'une instruction (« plutôt 3 séances ») peut faire bouger.
+ *
+ * Le niveau n'en fait volontairement pas partie : il fonde la méthodologie de
+ * tout le plan, pas seulement de sa suite. En changer, c'est régénérer un plan.
+ */
 export type PlanSettingsPatch = {
   sessionsPerWeek?: number;
   /** `null` efface la contrainte de temps hebdomadaire. */
@@ -174,6 +189,7 @@ export const PLAN_LIMITS = {
 /** Champ d'un plan mis en cause par {@link InvalidPlanError}. */
 export type PlanInputField =
   | 'goalType'
+  | 'level'
   | 'goalText'
   | 'raceDate'
   | 'startsOn'
@@ -222,6 +238,7 @@ export function toPlanDto(row: Plan): PlanDto {
     id: row.id,
     status: row.status,
     goalType: row.goalType,
+    level: row.level,
     goalText: row.goalText,
     raceDate: row.raceDate,
     startsOn: row.startsOn,
@@ -351,6 +368,12 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
     throw new InvalidPlanError('goalType', "Type d'objectif inattendu.");
   }
 
+  // Le niveau n'a pas de valeur de repli : un plan calé sur un niveau supposé
+  // serait faux sans le dire.
+  if (!PLAN_LEVELS.includes(input.level)) {
+    throw new InvalidPlanError('level', 'Niveau inattendu : choisis ton niveau en course.');
+  }
+
   const goalText = input.goalText.trim();
   if (goalText.length === 0) {
     throw new InvalidPlanError('goalText', "L'objectif est requis : c'est lui qui date le plan.");
@@ -405,6 +428,7 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
 
   return {
     goalType: input.goalType,
+    level: input.level,
     goalText,
     raceDate,
     startsOn: input.startsOn,
@@ -706,6 +730,7 @@ export async function createPlanWithSessions(input: CreatePlanInput): Promise<Pl
         athleteId,
         status: 'active',
         goalType: values.goalType,
+        level: values.level,
         goalText: values.goalText,
         raceDate: values.raceDate,
         startsOn: values.startsOn,

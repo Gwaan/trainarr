@@ -79,6 +79,7 @@ const PLAN: PlanDto = {
   id: 3,
   status: 'active',
   goalType: 'race',
+  level: 'intermediate',
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
   startsOn: '2026-08-03',
@@ -136,6 +137,7 @@ const THRESHOLD_STEPS = [
 
 const REQUEST: PlanRequest = {
   goalType: 'free',
+  level: 'intermediate',
   goalText: 'reprendre le volume',
   weeks: 2,
   sessionsPerWeek: 3,
@@ -441,6 +443,47 @@ describe('buildPlanMessages', () => {
     expect(user).toContain("5 h 00 d'entraînement par semaine au plus");
   });
 
+  it("dit le niveau à la demande et n'envoie que la section correspondante", () => {
+    const system = messages[0].content;
+
+    expect(messages[1].content).toContain('Niveau déclaré : intermédiaire.');
+    expect(system).toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
+    expect(system).toContain('1 à 2 séances de qualité par semaine');
+    // Les deux autres niveaux ne sont pas envoyés : le budget de contexte est
+    // compté, et deux méthodologies contradictoires ne s'appliquent pas.
+    expect(system).not.toContain("NIVEAU DE L'ATHLÈTE : DÉBUTANT");
+    expect(system).not.toContain("NIVEAU DE L'ATHLÈTE : CONFIRMÉ");
+  });
+
+  it('bride la qualité et la progression de volume pour un débutant', () => {
+    const system = buildPlanMessages(
+      { ...REQUEST, level: 'beginner' },
+      { startsOn: '2026-08-17', weeks: 4 },
+      SNAPSHOT,
+    );
+
+    expect(system[1].content).toContain('Niveau déclaré : débutant.');
+    expect(system[0].content).toContain('AU PLUS UNE séance de qualité par semaine');
+    expect(system[0].content).toContain("de 5 à 8 % d'une semaine à l'autre");
+    expect(system[0].content).toContain('marche/course');
+    expect(system[0].content).not.toContain('2 à 3 × 8 à 12 min');
+  });
+
+  it('ouvre les blocs longs et la troisième séance de qualité au confirmé', () => {
+    const system = buildPlanMessages(
+      { ...REQUEST, level: 'advanced' },
+      { startsOn: '2026-08-17', weeks: 4 },
+      SNAPSHOT,
+    );
+
+    expect(system[1].content).toContain('Niveau déclaré : confirmé.');
+    expect(system[0].content).toContain('2 à 3 × 8 à 12 min');
+    expect(system[0].content).toContain('3 ponctuellement');
+    expect(system[0].content).not.toContain('AU PLUS UNE séance de qualité par semaine');
+    // La méthodologie générale, elle, ne bouge pas d'un niveau à l'autre.
+    expect(system[0].content).toContain('coach de course à pied');
+  });
+
   it('porte le snapshot chiffré et rien qui ressemble à une série de points', () => {
     const user = messages[1].content;
 
@@ -508,6 +551,24 @@ describe('buildPlanUpdateMessages', () => {
   it('reprend l’instruction détourée', () => {
     expect(messages[1].content).toContain('« je pars en déplacement la semaine prochaine »');
   });
+
+  it('réaffiche le niveau du plan et garde sa méthodologie à l’ajustement', () => {
+    const advanced = buildPlanUpdateMessages({ ...PLAN, level: 'advanced' }, [], window, 'plus de seuil');
+
+    expect(advanced[1].content).toContain('Niveau déclaré : confirmé.');
+    expect(advanced[0].content).toContain("NIVEAU DE L'ATHLÈTE : CONFIRMÉ");
+    expect(advanced[0].content).not.toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
+  });
+
+  it('ne dit rien du niveau d’un plan qui n’en porte pas', () => {
+    // Plan antérieur au champ : on ne lui en suppose pas un, l'ajustement reste
+    // sur la seule méthodologie générale.
+    const legacy = buildPlanUpdateMessages({ ...PLAN, level: null }, [], window, 'plus de seuil');
+
+    expect(legacy[1].content).not.toContain('Niveau déclaré');
+    expect(legacy[0].content).not.toContain("NIVEAU DE L'ATHLÈTE");
+    expect(legacy[0].content).toContain('coach de course à pied');
+  });
 });
 
 describe('buildViolationsMessage', () => {
@@ -571,6 +632,7 @@ describe('generatePlan', () => {
     expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan');
 
     const input = dal.createPlanWithSessions.mock.calls[0][0];
+    expect(input.level).toBe('intermediate');
     expect(input.startsOn).toBe('2026-08-17');
     expect(input.weeks).toBe(2);
     expect(input.raceDate).toBeNull();

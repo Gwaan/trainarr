@@ -6,6 +6,7 @@ import type { PlanDto, PlanSessionDto } from "@/data/plans";
 import type { AiUnavailableReason } from "@/lib/ai/errors";
 
 import { formatDuration } from "../../_lib/format";
+import { LEVEL_LABELS } from "../_lib/form-options";
 import { formatCivilDay, formatIsoDay } from "../_lib/format-plan";
 import { formatPlanProgress, groupPlanWeeks, planEndsOn } from "../_lib/plan-weeks";
 
@@ -83,6 +84,12 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
           <span className="num text-[0.72rem] text-fg-faint">
             {formatCivilDay(plan.startsOn)} → {formatCivilDay(endsOn)}
           </span>
+          {/* Les plans antérieurs au champ n'ont pas de niveau : rien ne s'affiche. */}
+          {plan.level === null ? null : (
+            <span className="text-[0.72rem] text-fg-faint">
+              Niveau : {LEVEL_LABELS[plan.level]}
+            </span>
+          )}
         </div>
 
         <p className="mt-3 text-[1.15rem] leading-snug font-semibold text-balance text-fg">

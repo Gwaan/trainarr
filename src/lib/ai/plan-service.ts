@@ -48,6 +48,7 @@ import type { z } from 'zod';
 
 import { isCivilDate, todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
+import type { PlanLevel } from '@/data/db/schema';
 import { reconcilePlanSessions } from '@/data/plan-reconciliation';
 import {
   InvalidPlanError,
@@ -91,6 +92,8 @@ import {
 /** Ce que le formulaire de création soumet au coach. */
 export type PlanRequest = {
   goalType: 'race' | 'free';
+  /** Niveau en course déclaré par l'athlète : il choisit la méthodologie appliquée. */
+  level: PlanLevel;
   goalText: string;
   /** Date civile de la course, exigée par `goalType: 'race'`. */
   raceDate?: string;
@@ -299,6 +302,53 @@ const COACH_RULES = [
   "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
 ].join('\n');
 
+/** Le niveau, tel que les prompts le nomment. */
+const LEVEL_LABELS: Record<PlanLevel, string> = {
+  beginner: 'débutant',
+  intermediate: 'intermédiaire',
+  advanced: 'confirmé',
+};
+
+/**
+ * Ce que le niveau change à la méthodologie — **une seule** de ces sections part
+ * au modèle, à la suite de {@link COACH_RULES}.
+ *
+ * La méthodologie générale reste volontairement générique : elle décrit
+ * l'entraînement en endurance, pas un athlète. C'est ici que se prennent les
+ * décisions qui dépendent de l'expérience réelle — combien de qualité, quelle
+ * longueur de bloc, quelle progression de volume — et les trois sections se
+ * lisent comme des surcharges des règles générales, pas comme un rappel.
+ *
+ * Comptez ~120 tokens : le prix d'un plan qui ne propose pas 3 × 12 min au seuil
+ * à quelqu'un qui court depuis six mois.
+ */
+const LEVEL_RULES: Record<PlanLevel, string> = {
+  beginner: [
+    "NIVEAU DE L'ATHLÈTE : DÉBUTANT — ces règles priment sur la méthodologie générale.",
+    "- La régularité prime sur tout le reste : mieux vaut trois semaines tenues qu'une semaine ambitieuse.",
+    "- Le volume hebdomadaire n'augmente que de 5 à 8 % d'une semaine à l'autre, jamais 10 %.",
+    "- AU PLUS UNE séance de qualité par semaine, courte et douce : fractionné court type 6 à 8 × 30 s à 1 min vite avec 1 à 2 min de trot. Jamais de bloc de seuil long.",
+    "- La sortie longue se court en aisance respiratoire totale ; l'alternance marche/course y est acceptée si l'aisance le demande.",
+    '- Échauffement long : 15 à 20 min de footing très souple avant toute séance de qualité.',
+    "- L'objectif premier est de finir chaque séance frais, pas fatigué : dans le doute, allège.",
+  ].join('\n'),
+  intermediate: [
+    "NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE — la méthodologie générale ci-dessus s'applique telle quelle.",
+    '- 1 à 2 séances de qualité par semaine selon le volume : une seule si le volume récent est faible, deux quand il est installé.',
+    "- Le travail au seuil est introduit avant la VMA longue : à ce stade, c'est lui qui porte la progression.",
+    "- Les blocs de seuil restent dans la fourchette générale (8 à 15 min), la VMA dans la sienne (3 à 5 min).",
+    "- La sortie longue s'allonge progressivement avant de gagner en intensité.",
+  ].join('\n'),
+  advanced: [
+    "NIVEAU DE L'ATHLÈTE : CONFIRMÉ — ces règles priment sur la méthodologie générale.",
+    '- 2 séances de qualité par semaine, 3 ponctuellement sur une semaine de pic si le volume le soutient.',
+    '- Blocs de seuil plus longs : 2 à 3 × 8 à 12 min, ou 25 à 40 min en continu.',
+    "- VMA structurée : séries complètes de 4 à 6 × 3 à 5 min, récupération calibrée sur la durée de l'effort.",
+    "- Séances combinées possibles : sortie longue avec un bloc à allure objectif dans son dernier tiers.",
+    "- L'affûtage réduit nettement le volume mais garde une touche d'intensité courte pour rester vif.",
+  ].join('\n'),
+};
+
 /** Les contraintes déclarées par l'athlète, en une ligne lisible. */
 function formatConstraints(request: {
   sessionsPerWeek: number;
@@ -327,6 +377,7 @@ export function buildPlanMessages(
     request.goalType === 'race' && request.raceDate !== undefined
       ? `Objectif : la course « ${request.goalText} », le ${formatCivilDate(request.raceDate)}.`
       : `Objectif : ${request.goalText}.`,
+    `Niveau déclaré : ${LEVEL_LABELS[request.level]}.`,
     `Plan à produire : ${window.weeks} semaines, du ${formatCivilDate(window.startsOn)} au ${formatCivilDate(endsOn)}.`,
     `Contraintes : ${formatConstraints(request)}.`,
     '',
@@ -337,7 +388,8 @@ export function buildPlanMessages(
   ];
 
   return [
-    { role: 'system', content: COACH_RULES },
+    // La méthodologie générale, puis la seule surcharge qui concerne cet athlète.
+    { role: 'system', content: [COACH_RULES, '', LEVEL_RULES[request.level]].join('\n') },
     { role: 'user', content: lines.join('\n') },
   ];
 }
@@ -397,6 +449,9 @@ export function formatUpcomingPlan(
 
   const header = [
     `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+    // Les plans antérieurs au champ n'en portent pas : rien n'est dit plutôt
+    // qu'un niveau supposé, qui orienterait tout l'ajustement.
+    ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
     `Réglages actuels : ${formatConstraints(plan)}.`,
     `Séances restantes (${window.weeks} semaines) :`,
   ];
@@ -413,6 +468,9 @@ export function buildPlanUpdateMessages(
 ): ChatMessage[] {
   const system = [
     COACH_RULES,
+    // Le plan garde le niveau de sa création : l'ajustement s'y tient. Un plan
+    // sans niveau (antérieur au champ) reste sur la seule méthodologie générale.
+    ...(plan.level === null ? [] : ['', LEVEL_RULES[plan.level]]),
     '',
     "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
     "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
@@ -692,6 +750,7 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
 
   const plan = await createPlanWithSessions({
     goalType: request.goalType,
+    level: request.level,
     goalText: request.goalText,
     raceDate: request.goalType === 'race' ? (request.raceDate ?? null) : null,
     startsOn: window.startsOn,

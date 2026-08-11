@@ -1,6 +1,6 @@
 /**
- * Choix proposés par le formulaire de création — constantes partagées entre le
- * composant client et rien d'autre : les bornes qui font autorité sont celles de
+ * Choix proposés par le formulaire de création (et leurs libellés, que
+ * l'affichage du plan réutilise) : les bornes qui font autorité sont celles de
  * la Server Action (`actions.ts`), qui accepte un intervalle plus large que ces
  * listes.
  */
@@ -21,6 +21,41 @@ export const GOAL_TYPE_CHOICES: readonly { value: GoalType; label: string; hint:
     hint: "Un bloc de la durée que tu choisis, sans échéance.",
   },
 ];
+
+/**
+ * Niveau en course de l'athlète. Repris de l'union du schéma (`PLAN_LEVELS`),
+ * mais redéclaré ici comme `GoalType` : ce module est importé par un composant
+ * client, et le schéma Drizzle n'a rien à faire dans ce bundle.
+ */
+export type Level = "beginner" | "intermediate" | "advanced";
+
+/** Libellé français d'un niveau — le formulaire et l'en-tête du plan le partagent. */
+export const LEVEL_LABELS: Record<Level, string> = {
+  beginner: "Débutant",
+  intermediate: "Intermédiaire",
+  advanced: "Confirmé",
+};
+
+export const LEVEL_CHOICES: readonly { value: Level; label: string; hint: string }[] = [
+  {
+    value: "beginner",
+    label: LEVEL_LABELS.beginner,
+    hint: "Tu cours depuis moins d'un an, ou par intermittence.",
+  },
+  {
+    value: "intermediate",
+    label: LEVEL_LABELS.intermediate,
+    hint: "Tu cours régulièrement depuis un à trois ans.",
+  },
+  {
+    value: "advanced",
+    label: LEVEL_LABELS.advanced,
+    hint: "Tu t'entraînes de façon structurée depuis plusieurs années.",
+  },
+];
+
+/** Le cas le plus courant, et le moins risqué des trois à se voir appliquer. */
+export const DEFAULT_LEVEL: Level = "intermediate";
 
 /** Durées d'un objectif libre. Au-delà de 16 semaines, un bloc perd son sens. */
 export const WEEK_CHOICES = [4, 6, 8, 10, 12, 16] as const;

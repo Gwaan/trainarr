@@ -35,6 +35,7 @@ const TODAY = '2026-08-11';
 
 const VALID_FIELDS: Record<string, string> = {
   goalType: 'race',
+  level: 'intermediate',
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
   weeks: '',
@@ -89,6 +90,30 @@ describe('createPlanAction — date de course', () => {
     const state = await createPlanAction(IDLE, form({ raceDate: '2026-08-10' }));
 
     expect(state.fieldErrors?.raceDate).toContain('à venir');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+});
+
+describe('createPlanAction — niveau', () => {
+  it('transmet le niveau déclaré au service', async () => {
+    const state = await createPlanAction(IDLE, form({ level: 'advanced' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'advanced' }),
+    );
+  });
+
+  it('refuse un niveau hors des trois, sur le champ, sans appeler le coach', async () => {
+    // L'action est un endpoint public : un POST direct peut porter n'importe
+    // quoi, et il n'y a pas de repli — un plan calé sur un niveau supposé serait
+    // faux sans le dire.
+    for (const level of ['expert', '']) {
+      const state = await createPlanAction(IDLE, form({ level }));
+
+      expect(state.status).toBe('error');
+      expect(state.fieldErrors?.level).toBe('Choisis ton niveau en course.');
+    }
     expect(mocks.generatePlan).not.toHaveBeenCalled();
   });
 });

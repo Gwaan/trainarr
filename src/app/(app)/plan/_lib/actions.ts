@@ -52,6 +52,7 @@ import {
 /** Champs du formulaire de création, tels que le client les nomme. */
 export type PlanFormField =
   | 'goalType'
+  | 'level'
   | 'goalText'
   | 'raceDate'
   | 'weeks'
@@ -146,6 +147,12 @@ const weeklyTimeHoursField = z
 const planFormSchema = z
   .object({
     goalType: z.enum(['race', 'free'], { error: "Choisis un type d'objectif." }),
+    // Le niveau n'a pas de défaut côté serveur : le formulaire en propose un,
+    // mais un POST direct qui l'omet est refusé plutôt que rangé d'office parmi
+    // les intermédiaires.
+    level: z.enum(['beginner', 'intermediate', 'advanced'], {
+      error: 'Choisis ton niveau en course.',
+    }),
     goalText: z
       .string()
       .trim()
@@ -267,6 +274,7 @@ const planFormSchema = z
 /** Les champs du formulaire, dans l'ordre où le rapport d'erreurs les parcourt. */
 const PLAN_FORM_FIELDS = [
   'goalType',
+  'level',
   'goalText',
   'raceDate',
   'weeks',
@@ -282,6 +290,7 @@ const PLAN_FORM_FIELDS = [
  */
 const FIELD_OF_PLAN_INPUT: Partial<Record<PlanInputField, PlanFormField>> = {
   goalType: 'goalType',
+  level: 'level',
   goalText: 'goalText',
   raceDate: 'raceDate',
   weeks: 'weeks',
@@ -327,6 +336,7 @@ export async function createPlanAction(
 
   const parsed = planFormSchema.safeParse({
     goalType: textField(formData, 'goalType'),
+    level: textField(formData, 'level'),
     goalText: textField(formData, 'goalText'),
     raceDate: textField(formData, 'raceDate'),
     weeks: textField(formData, 'weeks'),
@@ -349,6 +359,7 @@ export async function createPlanAction(
   const form = parsed.data;
   const request: PlanRequest = {
     goalType: form.goalType,
+    level: form.level,
     goalText: form.goalText,
     raceDate: form.goalType === 'race' ? form.raceDate : undefined,
     weeks: form.goalType === 'free' ? Number(form.weeks) : undefined,

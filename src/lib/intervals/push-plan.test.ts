@@ -44,6 +44,7 @@ const PLAN: PlanDto = {
   id: 3,
   status: 'active',
   goalType: 'race',
+  level: 'intermediate',
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
   startsOn: '2026-08-03',
