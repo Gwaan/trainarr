@@ -15,6 +15,13 @@ import 'server-only';
  * liste des violations, en français, et on regénère — au plus
  * {@link MAX_ATTEMPTS} fois au total.
  *
+ * Cette boucle porte aussi le **post-traitement des allures** : quand l'athlète
+ * a donné un chrono, la table calculée est appliquée à la sortie entre le parse
+ * et la validation métier ({@link applyImposedPaces}) — le modèle n'écrit plus
+ * aucune allure, et celles qu'il écrirait quand même sont écrasées. Le pourquoi
+ * de ce renversement est en tête de `plan-schema.ts`, avec le constat de
+ * production qui l'a imposé.
+ *
  * La même boucle rattrape les sorties **hors schéma**. Les invariants croisés
  * d'une étape (exactement une mesure, allure ou zone cardiaque mais pas les
  * deux, bornes d'allure ordonnées) ne s'expriment pas dans la grammaire GBNF :
@@ -87,6 +94,7 @@ import {
 } from './format';
 import {
   PLAN_OUTPUT_BOUNDS,
+  applyImposedPaces,
   isMarathonGoal,
   mapPlanWeeksToSessions,
   planJsonSchema,
@@ -608,30 +616,34 @@ export function planTrainingPaces(plan: PlanDto): TrainingPaces | null {
 }
 
 /**
- * La prescription d'allures, telle qu'elle part au modèle — **la seule section
- * d'allures du prompt** quand elle existe, la dérivation étant alors retirée de
- * la méthodologie ({@link coachRules}).
+ * La section d'allures du régime **avec table**, telle qu'elle part au modèle —
+ * une information, plus une injonction.
  *
- * Le renversement est tout l'objet de la manœuvre : sans chrono, le modèle
- * *dérive* des allures d'une moyenne d'entraînement, et le résultat constaté en
- * production allait de l'à-peu-près au délire. Avec un chrono, les cinq créneaux
- * sont **calculés** (Daniels) et le modèle n'a plus qu'à ranger chaque séance
- * dans le bon.
+ * Le renversement est tout l'objet de la manœuvre. Prescrire la table n'a pas
+ * marché : deux déploiements de suite, la table en unique section d'allures, le
+ * modèle local a ressorti les mêmes allures absurdes (EF à 12:00/km quand la
+ * table disait 5:56–6:32/km) à chaque tentative. Les allures sont donc
+ * désormais **posées par l'appli** ({@link applyImposedPaces}), et ce qu'on
+ * demande au modèle est de n'en écrire aucune : ce qu'il ne produit pas, il ne
+ * peut plus le produire de travers.
  *
- * Le titre ne revendique plus de « primer » sur quoi que ce soit : il n'y a plus
- * de seconde section à départager, et une préséance annoncée est justement ce
- * que le modèle local n'appliquait pas. Elle reprend en revanche ce que la
- * dérivation portait d'utile et qui disparaît avec elle : l'allure d'un objectif
- * chiffré, désormais la zone M.
+ * La table reste dans le prompt, mais pour une autre raison : elle situe le
+ * niveau de l'athlète, et c'est ce niveau qui doit décider des distances et des
+ * durées. Ce qui a disparu, c'est l'injonction — et avec elle la mention de
+ * l'« allure moyenne des dernières sorties », retirée du contexte de ce régime
+ * (cf. {@link buildPlanMessages}) : disqualifier une ligne absente ne ferait que
+ * la rappeler.
+ *
+ * Le `kind` devient en revanche **porteur** : c'est lui, et lui seul, qui décide
+ * du créneau posé. D'où le rappel du vocabulaire attendu.
  */
 function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string {
   return [
-    'ALLURES — ta table calculée, la seule source',
+    "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
     formatTrainingPaces(paces, race),
-    "Tes allures sont CALCULÉES, tu ne les choisis pas : endurance fondamentale et sortie longue dans [E], allure marathon ou allure objectif dans [M], seuil dans [T], VMA dans [I], répétitions courtes dans [R].",
-    `Les récupérations trottées sont plus lentes que ${formatPace(paces.easy.maxSecPerKm)} (borne lente de [E]), ou sans cible.`,
-    "Allure de course, allure objectif d'un but chiffré (« 10 km sous 50 min ») : c'est la zone M, et rien d'autre — c'est elle qui ancre les séances de spécificité à l'approche de la course. Si l'objectif visé est plus rapide que [M], le plan reste sur la table et tu le dis honnêtement dans le résumé.",
-    "Toute allure prescrite hors de ces plages est refusée. L'« allure moyenne des dernières sorties » du contexte n'est PAS une allure de séance : c'est une donnée de volume, tu n'en dérives aucune allure.",
+    "Les allures seront calculées et posées automatiquement selon le type de séance : endurance fondamentale et sortie longue en [E], allure course ou allure objectif en [M], seuil en [T], VMA en [I], répétitions courtes en [R], récupérations sans cible. Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.",
+    "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes. Concentre-toi sur la structure : types de séances, distances, durées, répétitions, récupérations.",
+    "C'est le `kind` de la séance qui décide de son allure : nomme-le dans le vocabulaire de la typologie (« Endurance fondamentale », « Sortie longue », « Seuil », « VMA », « Répétitions », « Récupération », « Spécifique allure course ») — un libellé hors vocabulaire fera poser une allure d'endurance.",
   ].join('\n');
 }
 
@@ -720,7 +732,10 @@ export function buildPlanMessages(
     `Contraintes : ${formatConstraints(request)}.`,
     '',
     `État de l'athlète au ${snapshot.today} :`,
-    formatTrainingSnapshot(snapshot),
+    // Avec une table, l'allure moyenne des dernières sorties sort du contexte :
+    // c'est l'ancre parasite constatée en production, et plus aucune allure ne
+    // vient du modèle de toute façon (cf. `SnapshotFormatOptions`).
+    formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
     '',
     `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.anchor)}.`,
     ...firstWeekLines(request, window),
@@ -925,6 +940,17 @@ export type GenerationOptions<T> = {
    */
   paceContext: PlanValidationContext;
   /**
+   * Réécrit la sortie avec les allures de la table calculée
+   * ({@link applyImposedPaces}), semaines comprises.
+   *
+   * Appelée **entre le parse et la validation métier**, et seulement quand
+   * `paceContext.paces` existe : dans ce régime, aucune allure ne vient du
+   * modèle (cf. l'en-tête de `plan-schema.ts`). Chaque appelant sait où sont ses
+   * semaines dans son enveloppe — une révision qui conclut « keep » n'en porte
+   * aucune et se rend telle quelle.
+   */
+  withImposedPaces: (output: T, paces: TrainingPaces) => T;
+  /**
    * Identifiant de suivi fourni par le client, ou `undefined` : la génération se
    * déroule alors sans streaming ni progression, exactement comme avant.
    */
@@ -1057,6 +1083,12 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
       continue;
     }
 
+    // Allures imposées : quand la table existe, l'appli les écrit elle-même,
+    // avant toute validation. Le corridor qui suit devient alors trivialement
+    // satisfait — c'est voulu, il ne juge plus que le régime sans table.
+    const imposed = options.paceContext.paces ?? null;
+    if (imposed !== null) output = options.withImposedPaces(output, imposed);
+
     const weeks = options.weeksOf(output);
     // Rien à juger : la sortie ne réécrit aucune semaine (cf. `weeksOf`).
     if (weeks === null) return output;
@@ -1186,6 +1218,7 @@ async function writeGeneratedPlan(
       firstWeekFromDay: window.firstWeekFromDay,
       race: raceGoalOf(request.goalType, request.goalText),
     }),
+    withImposedPaces: (plan, table) => ({ ...plan, weeks: applyImposedPaces(plan.weeks, table) }),
     paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
     progressId,
     estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
@@ -1371,6 +1404,7 @@ async function writeUpdatedPlan(
       // trois — la fenêtre est courte, et c'est le sens conservateur.
       race: raceGoalOf(active.plan.goalType, active.plan.goalText),
     }),
+    withImposedPaces: (plan, table) => ({ ...plan, weeks: applyImposedPaces(plan.weeks, table) }),
     paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
     progressId,
     // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,

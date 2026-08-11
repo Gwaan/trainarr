@@ -7,6 +7,7 @@ import {
   PROGRESS_TTL_MS,
   clearPlanProgress,
   getPlanProgress,
+  resetPlanProgress,
   setPlanProgress,
 } from './progress';
 
@@ -16,8 +17,9 @@ const OTHER_ID = 'b2a1c0d9-8e7f-4a6b-9c5d-4e3f2a1b0c9d';
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-08-11T09:00:00.000Z'));
-  clearPlanProgress(ID);
-  clearPlanProgress(OTHER_ID);
+  // Le registre vit sur `globalThis` : il survit au rechargement du module, donc
+  // une entrée laissée par un cas en ferait passer un autre pour suivi.
+  resetPlanProgress();
 });
 
 afterEach(() => {
@@ -91,5 +93,38 @@ describe('registre de progression', () => {
     setPlanProgress(ID, { percent: 7, attempt: 1, maxAttempts: 3 });
 
     expect(getPlanProgress(ID)?.startedAt).toBe(Date.now());
+  });
+
+  /**
+   * Le bug de production, reproduit : la Server Action écrit, la route lit, et
+   * en build standalone les deux n'embarquent pas la même instance du module.
+   * Recharger le module ici joue exactement ce dédoublement — avec une `Map` de
+   * module, la seconde instance repartait vide et la route rendait `null`.
+   */
+  it('partage son registre entre deux instances du module', async () => {
+    setPlanProgress(ID, { percent: 42, attempt: 2, maxAttempts: 3 });
+
+    vi.resetModules();
+    const reloaded = await import('./progress');
+
+    expect(reloaded.getPlanProgress(ID)).toEqual({
+      percent: 42,
+      attempt: 2,
+      maxAttempts: 3,
+      startedAt: Date.now(),
+    });
+    // Et l'effacement porte lui aussi d'une instance à l'autre.
+    reloaded.clearPlanProgress(ID);
+    expect(getPlanProgress(ID)).toBeNull();
+  });
+
+  it('oublie tout ce qu’il portait quand on le remet à zéro', () => {
+    setPlanProgress(ID, { percent: 42, attempt: 1, maxAttempts: 3 });
+    setPlanProgress(OTHER_ID, { percent: 7, attempt: 1, maxAttempts: 3 });
+
+    resetPlanProgress();
+
+    expect(getPlanProgress(ID)).toBeNull();
+    expect(getPlanProgress(OTHER_ID)).toBeNull();
   });
 });

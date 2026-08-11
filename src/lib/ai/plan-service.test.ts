@@ -702,8 +702,10 @@ describe('buildPlanMessages', () => {
 
 /**
  * Le chrono change la nature du prompt : les allures ne sont plus dérivées d'une
- * moyenne d'entraînement, elles sont **calculées** et imposées. C'est la réponse
- * aux allures délirantes constatées en production.
+ * moyenne d'entraînement, elles sont **calculées** — et, la prescription ayant
+ * échoué trois déploiements de suite, plus demandées du tout au modèle. C'est
+ * l'appli qui les pose (cf. `applyImposedPaces`), le prompt ne fait plus que
+ * l'annoncer.
  */
 describe('buildPlanMessages — allures imposées', () => {
   const paces = trainingPacesFromRace(REFERENCE_DISTANCES[REFERENCE_RACE.distance], REFERENCE_RACE.timeS);
@@ -717,7 +719,7 @@ describe('buildPlanMessages — allures imposées', () => {
   it('donne la table calculée, chrono et VDOT à l’appui', () => {
     const system = withRace[0].content;
 
-    expect(system).toContain('ALLURES — ta table calculée, la seule source');
+    expect(system).toContain("ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE");
     expect(system).toContain('Chrono de référence : 10 km en 48:30 → VDOT 41,5.');
     expect(system).toContain('- E (endurance fondamentale, sortie longue) : 5:56–6:32/km');
     expect(system).toContain('- M (allure marathon, allure objectif) : 5:08–5:37/km');
@@ -726,16 +728,52 @@ describe('buildPlanMessages — allures imposées', () => {
     expect(system).toContain('- R (répétitions courtes) : 4:08–4:17/km');
   });
 
-  it('prescrit au lieu de suggérer, et range chaque type de séance dans son créneau', () => {
+  /**
+   * Le constat de production qui a imposé le renversement : même avec la table
+   * en unique section d'allures, le modèle local prescrivait 12:00/km en EF,
+   * 11:00 au seuil et 10:10 en VMA, à chaque tentative de chaque génération. Une
+   * consigne numérique ne s'applique pas à cette taille de modèle ; ce qu'on lui
+   * demande maintenant, c'est de n'écrire aucune allure.
+   */
+  it('interdit toute allure au modèle au lieu de lui en prescrire', () => {
     const system = withRace[0].content;
 
-    expect(system).toContain('Tes allures sont CALCULÉES, tu ne les choisis pas');
-    expect(system).toContain('sortie longue dans [E]');
-    expect(system).toContain('seuil dans [T]');
-    expect(system).toContain('VMA dans [I]');
-    expect(system).toContain('répétitions courtes dans [R]');
-    // Les récupérations sont la seule allure qui a le droit de sortir de la table.
-    expect(system).toContain('Les récupérations trottées sont plus lentes que 6:32/km');
+    expect(system).toContain(
+      "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes.",
+    );
+    expect(system).toContain('Concentre-toi sur la structure');
+    // Plus aucune injonction à ranger une allure dans un créneau : l'appli le
+    // fait, et le prompt ne fait que dire lequel ira où.
+    expect(system).not.toContain('Tes allures sont CALCULÉES, tu ne les choisis pas');
+    expect(system).toContain('endurance fondamentale et sortie longue en [E]');
+    expect(system).toContain('seuil en [T]');
+    expect(system).toContain('VMA en [I]');
+    expect(system).toContain('répétitions courtes en [R]');
+    expect(system).toContain('récupérations sans cible');
+  });
+
+  it('dit que le `kind` porte désormais l’allure, et rappelle son vocabulaire', () => {
+    // C'est le seul champ dont dépend l'allure posée : un `kind` fantaisiste
+    // n'est plus une coquetterie de rédaction, il change la séance courue.
+    const system = withRace[0].content;
+
+    expect(system).toContain("C'est le `kind` de la séance qui décide de son allure");
+    expect(system).toContain('« Endurance fondamentale »');
+    expect(system).toContain('« Répétitions »');
+    expect(system).toContain("un libellé hors vocabulaire fera poser une allure d'endurance");
+  });
+
+  /**
+   * L'ancre parasite, telle qu'elle a été diagnostiquée : le modèle calait ses
+   * allures sur l'allure d'entraînement moyenne de l'athlète (lente) plutôt que
+   * sur la table. Elle sort donc du contexte de ce régime — plus aucune allure
+   * ne vient du modèle, elle n'y a plus aucun rôle.
+   */
+  it('retire du contexte l’allure moyenne des dernières sorties', () => {
+    expect(withRace[1].content).not.toContain('Allure moyenne des dernières sorties');
+    // Le reste du snapshot, lui, ne bouge pas : c'est lui qui cale les volumes.
+    expect(withRace[1].content).toContain('CTL 52');
+    expect(withRace[1].content).toContain('42,1 km');
   });
 
   /**
@@ -761,16 +799,13 @@ describe('buildPlanMessages — allures imposées', () => {
     expect(system).toContain('- T (seuil) : 4:57–5:11/km');
   });
 
-  it('reprend dans la table ce que la dérivation portait : l’allure d’un objectif chiffré', () => {
+  it('garde la table, mais pour ce qu’elle dit du niveau de l’athlète', () => {
     const system = withRace[0].content;
 
-    // Le rôle de la ligne supprimée est repris par la zone M, pour que le modèle
-    // ne se retrouve pas sans ancre pour les séances de spécificité.
-    expect(system).toContain('« 10 km sous 50 min »');
-    expect(system).toContain("c'est la zone M");
-    // Et l'allure moyenne des dernières sorties est explicitement disqualifiée :
-    // elle reste dans le contexte, mais elle n'est plus une consigne d'allure.
-    expect(system).toContain("n'est PAS une allure de séance");
+    // Elle ne prescrit plus rien ; elle situe l'athlète, et c'est ce qui doit
+    // caler les distances et les durées des séances.
+    expect(system).toContain("Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.");
+    expect(system).toContain('allure course ou allure objectif en [M]');
   });
 
   it('garde hors des allures les consignes qui valent dans les deux régimes', () => {
@@ -781,13 +816,17 @@ describe('buildPlanMessages — allures imposées', () => {
   });
 
   it('ne dit rien de tel sans chrono : les règles de dérivation restent le repli', () => {
-    const system = buildPlanMessages(
+    const messages = buildPlanMessages(
       REQUEST,
       { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
       SNAPSHOT,
-    )[0].content;
+    );
+    const system = messages[0].content;
 
-    expect(system).not.toContain('ta table calculée');
+    expect(system).not.toContain("posées par l'application");
+    // Sans table, le modèle dérive encore ses allures — l'allure moyenne reste
+    // donc dans le contexte, c'est la seule référence qu'il ait.
+    expect(messages[1].content).toContain('Allure moyenne des dernières sorties : 5:24/km.');
     expect(system).toContain('ALLURES CIBLES — dérivées des seules données fournies');
     expect(system).toContain('seuil : référence − 30 à 45 s/km');
     expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
@@ -1146,10 +1185,13 @@ describe('generatePlan — chrono de référence', () => {
     expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
-  it('juge les allures sur la table plutôt que sur l’allure moyenne', async () => {
-    // Une VMA prescrite à 3:30/km, soit 38 s/km plus vite que les répétitions
-    // de la table : le corridor calculé la refuse, et le message rappelle la
-    // table plutôt que l'allure moyenne des dernières sorties.
+  /**
+   * Le cas qui a fait basculer l'architecture : le modèle sort une allure
+   * absurde, et la table existe. Avant, il fallait le lui renvoyer et
+   * regénérer — trois fois de suite pour rien. Maintenant l'allure est écrasée,
+   * la génération passe du premier coup, et le corridor n'a plus rien à dire.
+   */
+  it('écrase les allures du modèle au lieu de lui redemander un plan', async () => {
     const fastWeek = {
       sessions: [
         { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
@@ -1157,15 +1199,62 @@ describe('generatePlan — chrono de référence', () => {
         { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
       ],
     };
-    chatCompletionJson
-      .mockResolvedValueOnce({ summary: 'x', weeks: [fastWeek, CONFORMING_WEEK] })
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [fastWeek, CONFORMING_WEEK] });
 
     await expect(generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE })).resolves.toBe(DRAFT);
 
-    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
-      "allure 3:30/km hors de la fourchette plausible [3:58/km – 7:32/km] de ta table d'allures calculée",
-    );
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+
+    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
+    // VMA → milieu de [I] (4:28–4:39/km), et non les 3:30/km écrits ; footing et
+    // sortie longue au milieu de [E] (5:56–6:32/km).
+    expect(sessions[1]).toMatchObject({ kind: 'VMA', targetPaceSecPerKm: 274 });
+    expect(sessions[0]).toMatchObject({ kind: 'Endurance', targetPaceSecPerKm: 374 });
+    expect(sessions[2]).toMatchObject({ kind: 'Sortie longue', targetPaceSecPerKm: 374 });
+  });
+
+  it('écrit les allures des étapes selon leur rôle, la séance donnant le créneau', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'x',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
+
+    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
+    const [warmup, block, cooldown] = sessions[1].steps;
+
+    // L'échauffement du déroulé porte une `hrZone` : elle est conservée, et
+    // aucune allure ne vient s'y ajouter (une étape ne porte jamais les deux).
+    expect(warmup.steps[0]).toMatchObject({
+      hrZone: 2,
+      paceMinSecPerKm: null,
+      paceMaxSecPerKm: null,
+    });
+    // L'effort d'une séance au seuil : les bornes de [T].
+    expect(block.steps[0]).toMatchObject({ paceMinSecPerKm: 297, paceMaxSecPerKm: 311 });
+    // Sa récupération : aucune cible.
+    expect(block.steps[1]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
+    // Le retour au calme se court en endurance, pas au seuil.
+    expect(cooldown.steps[0]).toMatchObject({ paceMinSecPerKm: 356, paceMaxSecPerKm: 392 });
+  });
+
+  it('laisse le modèle poser ses allures quand il n’y a pas de table', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'x',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
+    // Sans chrono, rien n'est écrasé : le corridor dérivé de l'allure récente
+    // reste le seul filet.
+    expect(sessions[0].targetPaceSecPerKm).toBeNull();
+    expect(sessions[1].steps[1].steps[0]).toMatchObject({
+      paceMinSecPerKm: 300,
+      paceMaxSecPerKm: 310,
+    });
   });
 });
 
@@ -1192,11 +1281,16 @@ describe('updatePlanFromInstruction — chrono de référence', () => {
     await updatePlanFromInstruction('rien de spécial');
 
     expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
-      'ALLURES — ta table calculée, la seule source',
+      "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
     );
     expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
       '- T (seuil) : 4:57–5:11/km',
     );
+
+    // Et l'ajustement passe par le même post-traitement : la sortie longue
+    // écrite sans allure ressort au milieu de [E].
+    const [, { sessions }] = dal.applyPlanUpdate.mock.calls[0];
+    expect(sessions[0]).toMatchObject({ kind: 'Sortie longue', targetPaceSecPerKm: 374 });
   });
 
   it('s’en passe sur un plan qui n’en porte pas', async () => {
@@ -1215,8 +1309,11 @@ describe('updatePlanFromInstruction — chrono de référence', () => {
     await updatePlanFromInstruction('rien de spécial');
 
     expect(chatCompletionJson.mock.calls[0][0].messages[0].content).not.toContain(
-      'ta table calculée',
+      "posées par l'application",
     );
+    // Rien n'est écrasé non plus : sans table, il n'y a rien à imposer.
+    const [, { sessions }] = dal.applyPlanUpdate.mock.calls[0];
+    expect(sessions[0].targetPaceSecPerKm).toBeNull();
   });
 });
 

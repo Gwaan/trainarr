@@ -5,7 +5,9 @@ import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/
 
 import {
   PLAN_OUTPUT_BOUNDS,
+  applyImposedPaces,
   isMarathonGoal,
+  sessionPaceZone,
   mapPlanWeeksToSessions,
   planJsonSchema,
   planOutputSchema,
@@ -1373,5 +1375,240 @@ describe('isMarathonGoal', () => {
 
   it('reste faux sur tout le reste', () => {
     expect(isMarathonGoal('10 km sous 50 min')).toBe(false);
+  });
+});
+
+describe('sessionPaceZone', () => {
+  it('range chaque libellé de la typologie dans son créneau', () => {
+    expect(sessionPaceZone('Endurance fondamentale')).toBe('easy');
+    expect(sessionPaceZone('Footing')).toBe('easy');
+    expect(sessionPaceZone('EF')).toBe('easy');
+    expect(sessionPaceZone('Sortie longue')).toBe('easy');
+    expect(sessionPaceZone('Récupération')).toBe('easy');
+    expect(sessionPaceZone('Seuil')).toBe('threshold');
+    expect(sessionPaceZone('Tempo')).toBe('threshold');
+    expect(sessionPaceZone('VMA')).toBe('interval');
+    expect(sessionPaceZone('Intervalles')).toBe('interval');
+    expect(sessionPaceZone('Fractionné court')).toBe('interval');
+    expect(sessionPaceZone('Séance sur piste')).toBe('interval');
+    expect(sessionPaceZone('Répétitions')).toBe('repetition');
+    expect(sessionPaceZone('Côtes')).toBe('repetition');
+    expect(sessionPaceZone('Spécifique allure course')).toBe('marathon');
+    expect(sessionPaceZone('Allure marathon')).toBe('marathon');
+    expect(sessionPaceZone("Bloc à allure objectif")).toBe('marathon');
+  });
+
+  it('reconnaît accents et casse indifféremment', () => {
+    expect(sessionPaceZone('COTES')).toBe('repetition');
+    expect(sessionPaceZone('répétitions 400 m')).toBe('repetition');
+    expect(sessionPaceZone('SEUIL')).toBe('threshold');
+  });
+
+  it('range en endurance ce qu’il ne reconnaît pas', () => {
+    // Le pire cas d'un libellé inventé est une séance prescrite trop lente ;
+    // c'est le sens conservateur, et la génération n'est jamais perdue pour ça.
+    expect(sessionPaceZone('Séance mystère')).toBe('easy');
+    expect(sessionPaceZone('')).toBe('easy');
+  });
+
+  it('tranche en faveur de l’endurance quand deux créneaux se disputent le libellé', () => {
+    // Une sortie longue spécifique est une séance d'endurance avec un bloc à
+    // allure objectif : la prescrire entièrement en M enverrait l'athlète courir
+    // 18 km à l'allure de sa course.
+    expect(sessionPaceZone('Sortie longue spécifique')).toBe('easy');
+    expect(sessionPaceZone('Endurance avec bloc allure marathon')).toBe('easy');
+  });
+
+  it('ne prend pas « effort » pour de l’endurance', () => {
+    // La racine « ef » se retrouve dans « effort » comme dans « bref » : elle ne
+    // vaut qu'isolée, sans quoi une séance d'intensité passerait en E.
+    expect(sessionPaceZone('Effort au seuil')).toBe('threshold');
+    expect(sessionPaceZone('Efforts courts sur piste')).toBe('interval');
+  });
+});
+
+describe('applyImposedPaces', () => {
+  /** Une séance de qualité dont le modèle a écrit les allures — toutes fausses. */
+  const wrongPaceSteps: PlanSessionSteps = [
+    { repeat: 1, steps: [step('warmup', { durationS: 900, paceMinSecPerKm: 700, paceMaxSecPerKm: 700 })] },
+    {
+      repeat: 4,
+      steps: [
+        step('run', { durationS: 480, paceMinSecPerKm: 660, paceMaxSecPerKm: 720 }),
+        step('recover', { durationS: 120, paceMinSecPerKm: 700, paceMaxSecPerKm: 700 }),
+      ],
+    },
+    { repeat: 1, steps: [step('cooldown', { durationS: 600, paceMinSecPerKm: 700, paceMaxSecPerKm: 700 })] },
+  ];
+
+  it('pose la cible de séance au milieu du créneau de son `kind`', () => {
+    const [imposed] = applyImposedPaces(
+      [
+        {
+          sessions: [
+            session(2, { kind: 'Endurance', targetPaceSecPerKm: 720 }),
+            session(3, { kind: 'Seuil' }),
+            session(4, { kind: 'VMA' }),
+            session(5, { kind: 'Côtes' }),
+            session(6, { kind: 'Spécifique allure course' }),
+            session(7, { kind: 'Séance mystère' }),
+          ],
+        },
+      ],
+      PACES,
+    );
+
+    expect(imposed.sessions.map((s) => s.targetPaceSecPerKm)).toEqual([
+      353, // E, et les 12:00/km du modèle sont écrasés
+      286, // T
+      259, // I
+      240, // R
+      308, // M
+      353, // libellé inconnu : E
+    ]);
+  });
+
+  it('écrit chaque étape selon son rôle : effort au créneau, enveloppe en endurance', () => {
+    const [imposed] = applyImposedPaces(
+      [{ sessions: [session(4, { kind: 'Seuil', steps: wrongPaceSteps })] }],
+      PACES,
+    );
+    const steps = imposed.sessions[0].steps ?? [];
+
+    // Échauffement et retour au calme : l'endurance, quelle que soit la séance.
+    expect(steps[0].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+    expect(steps[2].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+    // L'effort : les bornes du créneau de la séance.
+    expect(steps[1].steps[0]).toMatchObject({ paceMinSecPerKm: 280, paceMaxSecPerKm: 292 });
+    // La récupération : aucune cible, la seule consigne qui vaille est « lent ».
+    expect(steps[1].steps[1]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
+  });
+
+  it('donne au bloc d’effort le créneau de sa séance, pas un créneau fixe', () => {
+    const [imposed] = applyImposedPaces(
+      [
+        {
+          sessions: [
+            session(4, { kind: 'VMA', steps: wrongPaceSteps }),
+            session(5, { kind: 'Répétitions', steps: wrongPaceSteps }),
+            session(6, { kind: 'Sortie longue', steps: wrongPaceSteps }),
+          ],
+        },
+      ],
+      PACES,
+    );
+    const effortOf = (index: number) => (imposed.sessions[index].steps ?? [])[1].steps[0];
+
+    expect(effortOf(0)).toMatchObject({ paceMinSecPerKm: 252, paceMaxSecPerKm: 265 });
+    expect(effortOf(1)).toMatchObject({ paceMinSecPerKm: 235, paceMaxSecPerKm: 245 });
+    expect(effortOf(2)).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+  });
+
+  it('conserve une zone cardiaque et ne lui ajoute pas d’allure', () => {
+    // Une étape ne porte jamais les deux cibles : ce que le modèle a exprimé en
+    // fréquence cardiaque n'est pas une allure fautive à corriger.
+    const [imposed] = applyImposedPaces(
+      [
+        {
+          sessions: [
+            session(4, {
+              kind: 'Seuil',
+              steps: [
+                {
+                  repeat: 1,
+                  steps: [
+                    step('warmup', { durationS: 900, hrZone: 2 }),
+                    step('run', { durationS: 480, hrZone: 4 }),
+                  ],
+                },
+              ],
+            }),
+          ],
+        },
+      ],
+      PACES,
+    );
+
+    expect((imposed.sessions[0].steps ?? [])[0].steps).toEqual([
+      step('warmup', { durationS: 900, hrZone: 2 }),
+      step('run', { durationS: 480, hrZone: 4 }),
+    ]);
+  });
+
+  it('cible une étape que le modèle a laissée sans consigne', () => {
+    // C'est tout l'objet du renversement : le modèle décrit la structure, et
+    // l'appli remplit les allures — y compris celles qu'il n'a pas écrites.
+    const [imposed] = applyImposedPaces(
+      [
+        {
+          sessions: [
+            session(4, {
+              kind: 'VMA',
+              steps: [{ repeat: 5, steps: [step('run', { durationS: 180 })] }],
+            }),
+          ],
+        },
+      ],
+      PACES,
+    );
+
+    expect((imposed.sessions[0].steps ?? [])[0].steps[0]).toMatchObject({
+      paceMinSecPerKm: 252,
+      paceMaxSecPerKm: 265,
+    });
+  });
+
+  it('ne touche à rien d’autre : distances, durées, répétitions et notes', () => {
+    const weeks: PlanWeekOutput[] = [
+      {
+        sessions: [
+          session(4, {
+            kind: 'Seuil',
+            title: '4 × 8 min',
+            distanceKm: 10.4,
+            durationMin: 55,
+            warmup: '15 min souple',
+            steps: [
+              {
+                repeat: 4,
+                steps: [step('run', { durationS: 480, note: 'régulier' }), step('recover', { durationS: 120 })],
+              },
+            ],
+          }),
+        ],
+      },
+    ];
+    const [imposed] = applyImposedPaces(weeks, PACES);
+    const session4 = imposed.sessions[0];
+
+    expect(session4).toMatchObject({
+      day: 4,
+      kind: 'Seuil',
+      title: '4 × 8 min',
+      distanceKm: 10.4,
+      durationMin: 55,
+      warmup: '15 min souple',
+    });
+    expect((session4.steps ?? [])[0].repeat).toBe(4);
+    expect((session4.steps ?? [])[0].steps[0].note).toBe('régulier');
+    expect((session4.steps ?? [])[0].steps[0].durationS).toBe(480);
+  });
+
+  it('laisse une séance sans déroulé sans déroulé', () => {
+    const [imposed] = applyImposedPaces([{ sessions: [session(2, { kind: 'Footing' })] }], PACES);
+
+    expect(imposed.sessions[0].steps).toBeUndefined();
+    expect(imposed.sessions[0].targetPaceSecPerKm).toBe(353);
+  });
+
+  it('est pure : les semaines reçues ne bougent pas', () => {
+    const weeks: PlanWeekOutput[] = [
+      { sessions: [session(4, { kind: 'Seuil', targetPaceSecPerKm: 720, steps: wrongPaceSteps })] },
+    ];
+    const before = structuredClone(weeks);
+
+    applyImposedPaces(weeks, PACES);
+
+    expect(weeks).toEqual(before);
   });
 });

@@ -28,8 +28,14 @@ import { z } from 'zod';
 
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
-import type { TrainingPaces } from '@/lib/metrics/vdot';
-import { PLAN_STEP_BOUNDS, PLAN_STEP_ROLES, planSessionStepsSchema } from '@/lib/plan-steps/schema';
+import type { PaceZone, TrainingPaces } from '@/lib/metrics/vdot';
+import {
+  PLAN_STEP_BOUNDS,
+  PLAN_STEP_ROLES,
+  planSessionStepsSchema,
+  type PlanStep,
+  type PlanStepRole,
+} from '@/lib/plan-steps/schema';
 
 import { formatIsoDay, formatNumber, formatPace, formatPaceRange } from './format';
 
@@ -613,30 +619,52 @@ function weekSessionMeasures(week: PlanWeekOutput): number[] | null {
   return null;
 }
 
+/** Les cinq créneaux de la table d'allures (Daniels), tels qu'un `kind` en désigne un. */
+export type PaceZoneKey = 'easy' | 'marathon' | 'threshold' | 'interval' | 'repetition';
+
 /**
- * Ce qui, dans un `kind`, désigne une séance de qualité.
+ * Ce qui, dans un `kind`, désigne le créneau d'allure d'une séance.
  *
  * Le `kind` est une chaîne libre, mais le prompt en impose le vocabulaire
- * (« Seuil », « VMA », « Répétitions », « Côtes »…) : ces racines couvrent ce
- * vocabulaire et ses variantes courantes. Le doute profite au modèle — un
- * libellé non reconnu n'entraîne aucune violation plutôt qu'une régénération de
- * plusieurs minutes pour une séance peut-être correcte.
+ * (« Endurance fondamentale », « Sortie longue », « Seuil », « VMA »,
+ * « Répétitions », « Côtes »…) : ces motifs couvrent ce vocabulaire et ses
+ * variantes courantes, sur un texte déjà mis en minuscules et désaccentué
+ * ({@link normalizeText}).
  *
- * « Spécifique » n'en fait délibérément pas partie : le prompt encourage la
- * « sortie longue spécifique », qui est une séance d'endurance avec un bloc à
- * allure objectif — la classer en qualité lui réclamerait un déroulé complet
- * qu'elle n'a pas à porter.
+ * `\bef\b` plutôt que `ef` : la racine seule se retrouve dans « effort » comme
+ * dans « bref », et rangerait une séance d'intensité en endurance.
  */
-const INTENSITY_KIND_ROOTS = [
-  'vma',
-  'seuil',
-  'tempo',
-  'fractionn',
-  'interval',
-  'repetition',
-  'cote',
-  'piste',
-] as const;
+const PACE_ZONE_PATTERNS = {
+  easy: /\bef\b|endurance|footing|longue|recup|facile|souple/,
+  threshold: /seuil|tempo/,
+  interval: /vma|interval|fractionn|piste/,
+  repetition: /repetition|cote/,
+  marathon: /specifique|allure de course|allure course|allure objectif|marathon/,
+} as const satisfies Record<PaceZoneKey, RegExp>;
+
+/**
+ * L'ordre de décision : le **premier** créneau dont le motif apparaît l'emporte.
+ *
+ * L'endurance d'abord, et c'est le sens conservateur : une « sortie longue
+ * spécifique » ou une « endurance avec bloc allure marathon » reste une séance
+ * d'endurance qui porte un bloc plus rapide, pas une séance d'allure course —
+ * lui prescrire M de bout en bout enverrait l'athlète courir 18 km à l'allure de
+ * son objectif. Le doute range donc en E, comme le libellé non reconnu.
+ */
+const PACE_ZONE_ORDER = ['easy', 'threshold', 'interval', 'repetition', 'marathon'] as const;
+
+/**
+ * Les créneaux qui font d'une séance une séance de **qualité**, celle qui doit
+ * porter un déroulé complet.
+ *
+ * Ni E ni M n'en sont : le prompt encourage la « sortie longue spécifique », qui
+ * est une séance d'endurance avec un bloc à allure objectif — la classer en
+ * qualité lui réclamerait un échauffement et un retour au calme qu'elle n'a pas
+ * à porter. Le doute profite au modèle : un libellé non reconnu n'entraîne
+ * aucune violation plutôt qu'une régénération de plusieurs minutes pour une
+ * séance peut-être correcte.
+ */
+const INTENSITY_ZONES = ['threshold', 'interval', 'repetition'] as const;
 
 const COMBINING_MARKS = /[\u0300-\u036f]/gu;
 
@@ -648,9 +676,21 @@ function normalizeText(text: string): string {
     .toLowerCase();
 }
 
+/**
+ * Le créneau d'allure d'une séance, déduit de son seul `kind`.
+ *
+ * Fonction totale : un libellé que rien ne reconnaît vaut `easy`. C'est ce qui
+ * autorise {@link applyImposedPaces} à ne jamais laisser une séance sans allure,
+ * et le pire cas est une séance prescrite trop lente — jamais trop rapide.
+ */
+export function sessionPaceZone(kind: string): PaceZoneKey {
+  const normalized = normalizeText(kind);
+  return PACE_ZONE_ORDER.find((zone) => PACE_ZONE_PATTERNS[zone].test(normalized)) ?? 'easy';
+}
+
 function isIntensitySession(session: PlanSessionOutput): boolean {
   const kind = normalizeText(session.kind);
-  return INTENSITY_KIND_ROOTS.some((root) => kind.includes(root));
+  return INTENSITY_ZONES.some((zone) => PACE_ZONE_PATTERNS[zone].test(kind));
 }
 
 /**
@@ -672,6 +712,108 @@ const HALF_MARATHON_NAMES = /(semi|demi|half|1\/2)[\s‑-]*marathon/g;
  */
 export function isMarathonGoal(goalText: string): boolean {
   return normalizeText(goalText).replace(HALF_MARATHON_NAMES, '').includes('marathon');
+}
+
+/*
+ * Allures imposées — l'appli les pose, le modèle ne les choisit plus.
+ *
+ * ## Le constat de production
+ *
+ * Sur deux déploiements successifs, table VDOT en unique section d'allures du
+ * prompt, le modèle local a ressorti les mêmes allures absurdes à chaque
+ * tentative — EF à 12:00/km, seuil à 11:00/km, VMA à 10:10/km — quand la table
+ * prescrivait 5:56–6:32/km en E. Il s'ancrait sur l'« allure moyenne des
+ * dernières sorties » du contexte, très lente chez cette athlète, et
+ * n'appliquait aucune consigne numérique. Trois tentatives par génération,
+ * plusieurs générations : échec systématique.
+ *
+ * La conclusion tirée est une décision d'architecture, pas un réglage de
+ * prompt : **quand la table existe, aucune allure ne vient du modèle**. Il
+ * décide de la structure (types de séances, distances, durées, répétitions),
+ * l'appli écrit les allures depuis le `kind` — un post-traitement déterministe,
+ * pur et testable, appliqué entre le parse de la sortie et la validation métier
+ * (cf. `plan-service.ts`). Le corridor de validation reste en place et devient
+ * trivialement satisfait : c'est voulu, il continue de couvrir le régime sans
+ * table, où le modèle dérive encore ses allures.
+ */
+
+/** Le milieu d'un créneau, arrondi à la seconde : la cible d'une séance entière. */
+function middleOf(zone: PaceZone): number {
+  return Math.round((zone.minSecPerKm + zone.maxSecPerKm) / 2);
+}
+
+/**
+ * Le créneau qui s'applique à une **étape**, selon son rôle — `null` quand elle
+ * ne doit porter aucune cible.
+ *
+ * L'échauffement et le retour au calme se courent en endurance quelle que soit
+ * la séance : les caler sur le créneau de la séance ferait échauffer à allure
+ * VMA. La récupération, elle, ne reçoit rien : la prescrire reviendrait à
+ * imposer une allure à un trot, alors que le seul contrat qui vaille est
+ * « plus lent que l'endurance ».
+ */
+function stepPaceZone(role: PlanStepRole, session: PaceZone, easy: PaceZone): PaceZone | null {
+  switch (role) {
+    case 'run':
+      return session;
+    case 'warmup':
+    case 'cooldown':
+      return easy;
+    case 'recover':
+      return null;
+  }
+}
+
+/**
+ * L'étape, allure imposée.
+ *
+ * Une `hrZone` posée par le modèle est **conservée telle quelle**, et l'étape
+ * ressort intacte : une étape ne porte jamais les deux cibles (cf.
+ * `lib/plan-steps/schema`), et ce que le modèle a exprimé en fréquence
+ * cardiaque n'est pas une allure fautive à corriger.
+ */
+function imposeStepPace(step: PlanStep, session: PaceZone, easy: PaceZone): PlanStep {
+  if (step.hrZone !== null) return step;
+
+  const zone = stepPaceZone(step.role, session, easy);
+  return {
+    ...step,
+    paceMinSecPerKm: zone === null ? null : zone.minSecPerKm,
+    paceMaxSecPerKm: zone === null ? null : zone.maxSecPerKm,
+  };
+}
+
+function imposeSessionPaces(session: PlanSessionOutput, paces: TrainingPaces): PlanSessionOutput {
+  const zone = paces[sessionPaceZone(session.kind)];
+
+  return {
+    ...session,
+    // Le milieu du créneau : une cible de séance est un chiffre, pas une plage.
+    targetPaceSecPerKm: middleOf(zone),
+    steps: session.steps?.map((block) => ({
+      repeat: block.repeat,
+      steps: block.steps.map((step) => imposeStepPace(step, zone, paces.easy)),
+    })),
+  };
+}
+
+/**
+ * Réécrit toutes les allures des semaines produites depuis la table calculée :
+ * cible de séance au milieu du créneau de son `kind`, étapes d'effort sur les
+ * bornes de ce créneau, échauffement et retour au calme en endurance,
+ * récupérations sans cible.
+ *
+ * Fonction **pure** : les semaines d'entrée ne sont pas touchées, tout est
+ * reconstruit. Rien d'autre de la sortie du modèle n'est modifié — ni les
+ * distances, ni les durées, ni les répétitions, ni les notes.
+ */
+export function applyImposedPaces(
+  weeks: readonly PlanWeekOutput[],
+  paces: TrainingPaces,
+): PlanWeekOutput[] {
+  return weeks.map((week) => ({
+    sessions: week.sessions.map((session) => imposeSessionPaces(session, paces)),
+  }));
 }
 
 /**

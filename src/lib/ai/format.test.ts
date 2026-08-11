@@ -202,6 +202,37 @@ describe('formatTrainingSnapshot', () => {
       ].join('\n'),
     );
   });
+
+  /**
+   * L'ancre parasite diagnostiquée en production : le modèle calait les allures
+   * d'un plan sur cette moyenne d'entraînement lente au lieu d'appliquer la
+   * table VDOT. Les prompts de plan qui portent une table la retirent donc.
+   */
+  it('retire l’allure moyenne des dernières sorties à la demande', () => {
+    const text = formatTrainingSnapshot(SNAPSHOT, { withRecentPace: false });
+
+    expect(text).not.toContain('Allure moyenne des dernières sorties');
+    // Et rien d'autre ne bouge : la charge et les volumes calent les séances.
+    expect(text).toContain('CTL 52 · ATL 61 · TSB -9');
+    expect(text).toContain('semaine du 2026-07-20 : 42,1 km · 3 h 45 · 4 séances');
+  });
+
+  it('retire aussi la ligne quand il n’y a pas d’allure connue', () => {
+    // Sans cela, un contexte censé n'en rien dire annoncerait quand même une
+    // « allure de référence », inconnue mais présente.
+    const text = formatTrainingSnapshot(
+      { ...SNAPSHOT, recentAvgPaceSecPerKm: null },
+      { withRecentPace: false },
+    );
+
+    expect(text).not.toContain('Allure de référence');
+  });
+
+  it('garde la ligne par défaut : le feedback la commente', () => {
+    expect(formatTrainingSnapshot(SNAPSHOT, {})).toContain(
+      'Allure moyenne des dernières sorties : 5:24/km.',
+    );
+  });
 });
 
 describe('formatClockTime', () => {

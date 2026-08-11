@@ -31,14 +31,15 @@ import 'server-only';
  *
  * Une génération dure des minutes ; l'import, lui, peut enchaîner des dizaines
  * de fichiers (rapatriement intervals.icu). Le verrou en mémoire
- * ({@link reviewing}) garantit qu'un seul review tourne : un déclenchement
- * pendant ce temps est simplement ignoré, le prochain import retentera. Le
- * verrou n'est pas un verrou de base — il ne protège que de la concurrence
- * interne au process.
+ * ({@link PlanReviewState}) garantit qu'un seul review tourne : un déclenchement
+ * pendant ce temps est simplement ignoré, le prochain import retentera. Il vit
+ * sur `globalThis`, pour être le même quel que soit le bundle qui déclenche
+ * (cf. {@link REVIEW_STATE_KEY}) — mais ce n'est pas un verrou de base, il ne
+ * protège que de la concurrence interne au process.
  *
  * Il ne protège donc pas de tout : un ajustement demandé depuis la page du plan
- * (`updatePlanFromInstruction`) ne le prend pas, et rien ne garantit qu'un
- * handler de route et le watcher partagent la même instance de module. D'où le
+ * (`updatePlanFromInstruction`) ne le prend pas, et rien ne le protège d'un
+ * second processus. D'où le
  * **contrôle de fraîcheur** : la révision retient l'`updatedAt` du plan au
  * moment du bilan et le relit juste avant d'écrire — s'il a bougé, elle
  * abandonne (marqueur intact, le prochain palier repartira de l'état à jour).
@@ -102,6 +103,7 @@ import {
   formatTrainingSnapshot,
 } from './format';
 import {
+  applyImposedPaces,
   mapPlanWeeksToSessions,
   planReviewJsonSchema,
   planReviewOutputSchema,
@@ -142,30 +144,59 @@ export const REVIEW_EVERY_SESSIONS = 4;
  */
 export const REVIEW_COOLDOWN_MS = 30 * 60 * 1000;
 
-/**
- * Une révision est-elle en cours ? Verrou de process, cf. l'en-tête.
- *
- * Une variable de module suffit : le déclencheur est l'import de fichiers FIT,
- * qui tourne dans le process du serveur Next (cf. `.claude/rules/data-import`).
- */
-let reviewing = false;
+/** L'état de process du service : le verrou, et la garde d'après-échec. */
+type PlanReviewState = {
+  /** Une révision est-elle en cours ? Verrou de process, cf. l'en-tête. */
+  reviewing: boolean;
+  /**
+   * Instant (epoch ms) avant lequel aucune nouvelle tentative n'est faite, après
+   * un échec transitoire. `0` tant qu'il n'y en a pas eu.
+   */
+  retryNotBefore: number;
+};
 
 /**
- * Instant (epoch ms) avant lequel aucune nouvelle tentative n'est faite, après
- * un échec transitoire. `0` tant qu'il n'y en a pas eu.
+ * La clé de l'état partagé.
+ *
+ * Une variable de module ne suffit **pas**, et c'est le même défaut que celui
+ * diagnostiqué sur le registre de progression (cf. l'en-tête de `progress.ts`) :
+ * en build standalone, le watcher FIT et un route handler n'embarquent pas
+ * forcément la même instance de ce fichier. Deux instances, ce sont deux
+ * verrous — donc deux révisions simultanées qui se réécriraient le même plan, et
+ * un cooldown qu'une moitié du serveur ignorerait. Posé sur `globalThis` via le
+ * registre global de symboles, l'état est unique pour le processus.
  */
-let retryNotBefore = 0;
+const REVIEW_STATE_KEY: unique symbol = Symbol.for('trainarr.plan-review-state');
+
+/** `globalThis` vu comme le porteur de cet état — la seule façon de le typer sans `any`. */
+type GlobalWithReviewState = typeof globalThis & {
+  [REVIEW_STATE_KEY]?: PlanReviewState;
+};
+
+/** L'état partagé, créé au premier accès quel que soit le bundle appelant. */
+function reviewState(): PlanReviewState {
+  const store = globalThis as GlobalWithReviewState;
+
+  const existing = store[REVIEW_STATE_KEY];
+  if (existing !== undefined) return existing;
+
+  const created: PlanReviewState = { reviewing: false, retryNotBefore: 0 };
+  store[REVIEW_STATE_KEY] = created;
+  return created;
+}
 
 /**
  * Remet le service à son état initial : verrou libre, aucun cooldown.
  *
- * Exportée pour les tests uniquement — l'état de ce module survit d'un cas à
- * l'autre dans un même fichier, et un cooldown posé par un scénario d'échec
- * ferait sortir les suivants sans rien faire.
+ * Exportée pour les tests uniquement — l'état survit d'un cas à l'autre (et
+ * même d'un module rechargé à l'autre, puisqu'il vit sur `globalThis`), et un
+ * cooldown posé par un scénario d'échec ferait sortir les suivants sans rien
+ * faire.
  */
 export function resetReviewState(): void {
-  reviewing = false;
-  retryNotBefore = 0;
+  const state = reviewState();
+  state.reviewing = false;
+  state.retryNotBefore = 0;
 }
 
 /*
@@ -261,7 +292,9 @@ export function buildPlanReviewMessages(
     ...review.sessions.map(formatReviewSession),
     '',
     `État de l'athlète au ${snapshot.today} :`,
-    formatTrainingSnapshot(snapshot),
+    // Même régime qu'une génération : avec une table, l'allure moyenne des
+    // dernières sorties sort du contexte (cf. `SnapshotFormatOptions`).
+    formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
     '',
     `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes.`,
   ].join('\n');
@@ -344,33 +377,34 @@ type PreparedReview =
  * de {@link REVIEW_EVERY_SESSIONS} séances n'est pas atteint.
  */
 export async function maybeReviewActivePlan(): Promise<void> {
-  if (reviewing) {
+  const state = reviewState();
+  if (state.reviewing) {
     console.log('[plan/review] déclenchement ignoré : une révision est déjà en cours.');
     return;
   }
 
   const now = Date.now();
-  if (now < retryNotBefore) {
-    const minutes = Math.ceil((retryNotBefore - now) / 60_000);
+  if (now < state.retryNotBefore) {
+    const minutes = Math.ceil((state.retryNotBefore - now) / 60_000);
     console.log(
       `[plan/review] déclenchement ignoré : échec récent, nouvelle tentative dans ${minutes} min au plus tôt.`,
     );
     return;
   }
 
-  reviewing = true;
+  state.reviewing = true;
   try {
     await reviewActivePlan();
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     // Échec transitoire : marqueur inchangé — la révision reste due — mais pas
     // avant la fin du cooldown, sans quoi l'import suivant la redemanderait.
-    retryNotBefore = Date.now() + REVIEW_COOLDOWN_MS;
+    state.retryNotBefore = Date.now() + REVIEW_COOLDOWN_MS;
     console.error(
       `[plan/review] révision impossible — ${reason} ; nouvelle tentative dans ${Math.round(REVIEW_COOLDOWN_MS / 60_000)} min au plus tôt.`,
     );
   } finally {
-    reviewing = false;
+    state.reviewing = false;
   }
 }
 
@@ -561,6 +595,11 @@ function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
       firstWeekFromDay: window.firstWeekFromDay,
       race: raceGoalOf(plan.goalType, plan.goalText),
     }),
+    // « keep » ne porte aucune semaine : il n'y a rien à réécrire.
+    withImposedPaces: (output, table) =>
+      output.decision === 'adjust'
+        ? { ...output, weeks: applyImposedPaces(output.weeks, table) }
+        : output,
     paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
     // Pas de `progressId` : personne ne regarde une révision se dérouler.
     estimatedChars: estimatePlanChars(window.weeks, plan.sessionsPerWeek),

@@ -251,6 +251,21 @@ function formatProfile(profile: TrainingSnapshotDto['profile']): string {
   return parts.length === 0 ? 'Profil : non renseigné.' : `Profil : ${parts.join(' · ')}.`;
 }
 
+/** Ce que l'appelant retire du snapshot, quand son prompt ne doit pas le voir. */
+export type SnapshotFormatOptions = {
+  /**
+   * Faire figurer l'« Allure moyenne des dernières sorties » ? `true` par
+   * défaut — le feedback la garde, c'est la donnée qu'il commente.
+   *
+   * Les prompts de plan qui portent une table VDOT la retirent : constaté en
+   * production, c'est **l'ancre parasite** du modèle local, qui prescrivait des
+   * séances autour de cette allure d'entraînement lente au lieu d'appliquer la
+   * table (cf. l'en-tête de `plan-schema.ts`). Les allures y étant désormais
+   * posées par l'appli, la ligne n'a plus aucun rôle et ne peut plus qu'égarer.
+   */
+  withRecentPace?: boolean;
+};
+
 /**
  * L'état d'entraînement en quelques lignes — le bloc de contexte commun aux
  * prompts de génération de plan et de feedback.
@@ -259,7 +274,10 @@ function formatProfile(profile: TrainingSnapshotDto['profile']): string {
  * c'est ce qui autorise le coach à annoncer un plan conservateur plutôt que
  * d'extrapoler une charge qu'il n'a pas. Comptez ~120 tokens.
  */
-export function formatTrainingSnapshot(snapshot: TrainingSnapshotDto): string {
+export function formatTrainingSnapshot(
+  snapshot: TrainingSnapshotDto,
+  options: SnapshotFormatOptions = {},
+): string {
   const lines: string[] = [formatProfile(snapshot.profile)];
 
   lines.push(
@@ -283,11 +301,13 @@ export function formatTrainingSnapshot(snapshot: TrainingSnapshotDto): string {
     }
   }
 
-  lines.push(
-    snapshot.recentAvgPaceSecPerKm === null
-      ? 'Allure de référence : inconnue (aucune course récente).'
-      : `Allure moyenne des dernières sorties : ${formatPace(snapshot.recentAvgPaceSecPerKm)}.`,
-  );
+  if (options.withRecentPace !== false) {
+    lines.push(
+      snapshot.recentAvgPaceSecPerKm === null
+        ? 'Allure de référence : inconnue (aucune course récente).'
+        : `Allure moyenne des dernières sorties : ${formatPace(snapshot.recentAvgPaceSecPerKm)}.`,
+    );
+  }
 
   return lines.join('\n');
 }

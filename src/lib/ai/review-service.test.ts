@@ -516,6 +516,69 @@ describe('maybeReviewActivePlan — décision', () => {
   });
 });
 
+/**
+ * La révision emprunte le même chemin qu'un ajustement, post-traitement des
+ * allures compris : sur un plan qui porte un chrono, aucune allure ne vient du
+ * modèle — c'est l'appli qui les pose (cf. `applyImposedPaces`).
+ */
+describe('maybeReviewActivePlan — allures imposées', () => {
+  /** Le même plan, avec le chrono de référence : 10 km en 48:30 → VDOT 41,5. */
+  const WITH_RACE = {
+    plan: { ...PLAN, referenceDistance: '10k' as const, referenceTimeS: 2_910 },
+    sessions: ACTIVE.sessions,
+  };
+
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue(WITH_RACE);
+  });
+
+  it('annonce au modèle que les allures sont posées par l’appli, et retire l’ancre parasite', async () => {
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+
+    await maybeReviewActivePlan();
+
+    const [{ messages }] = chatCompletionJson.mock.calls[0];
+    expect(messages[0].content).toContain(
+      "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
+    );
+    expect(messages[0].content).toContain('- T (seuil) : 4:57–5:11/km');
+    // L'allure moyenne des dernières sorties égarait le modèle : elle sort du
+    // contexte dès qu'une table existe.
+    expect(messages[1].content).not.toContain('Allure moyenne des dernières sorties');
+  });
+
+  it('écrase les allures des semaines réécrites', async () => {
+    chatCompletionJson.mockResolvedValue({
+      decision: 'adjust',
+      reason: 'Charge trop élevée.',
+      weeks: ADJUST_WEEKS,
+    });
+
+    await maybeReviewActivePlan();
+
+    const [, update] = dal.applyPlanUpdate.mock.calls[0];
+    // Sortie longue et endurance au milieu de [E] (5:56–6:32/km), seuil au
+    // milieu de [T] (4:57–5:11/km).
+    expect(update.sessions.map((s: { targetPaceSecPerKm: number }) => s.targetPaceSecPerKm)).toEqual(
+      [374, 374, 304, 374],
+    );
+    // L'étape d'effort de la séance au seuil prend les bornes de [T].
+    expect(update.sessions[2].steps[1].steps[0]).toMatchObject({
+      paceMinSecPerKm: 297,
+      paceMaxSecPerKm: 311,
+    });
+  });
+
+  it('ne touche à rien quand la révision conserve le plan', async () => {
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+
+    await maybeReviewActivePlan();
+
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+  });
+});
+
 describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
   beforeEach(() => {
     chatCompletionJson.mockResolvedValue({
@@ -600,6 +663,32 @@ describe('maybeReviewActivePlan — échecs', () => {
     await maybeReviewActivePlan();
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
     expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+  });
+
+  /**
+   * Verrou et délai de garde vivent sur `globalThis`, et pas dans le module :
+   * en build standalone, le watcher FIT et un route handler n'embarquent pas
+   * forcément la même instance de ce fichier — deux instances, ce seraient deux
+   * verrous, donc deux révisions concurrentes sur le même plan. Recharger le
+   * module ici joue ce dédoublement.
+   */
+  it('partage verrou et délai de garde entre deux instances du module', async () => {
+    chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
+    await maybeReviewActivePlan();
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+
+    vi.resetModules();
+    const reloaded = await import('./review-service');
+
+    // La seconde instance voit le cooldown posé par la première.
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+    await reloaded.maybeReviewActivePlan();
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+
+    // Et le lever depuis l'une le lève pour l'autre.
+    reloaded.resetReviewState();
+    await maybeReviewActivePlan();
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
   });
 });
 
