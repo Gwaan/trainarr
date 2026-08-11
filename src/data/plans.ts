@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, asc, eq, gte, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lt } from 'drizzle-orm';
 
 import { isoWeekStart, shiftCivilDate } from '@/lib/dates/civil';
 import {
@@ -11,6 +11,7 @@ import {
 
 import { AthleteNotFoundError, getAthleteId, isCivilDate, todayCivilDate } from './athlete';
 import { db } from './db/client';
+import { isUniqueViolation } from './db/errors';
 import {
   PLAN_GOAL_TYPES,
   PLAN_LEVELS,
@@ -26,16 +27,24 @@ import {
 } from './db/schema';
 
 /**
- * Plans d'entraînement : création par le coach, lecture par l'UI, régénération
- * partielle quand l'athlète change ses contraintes en cours de route.
+ * Plans d'entraînement : proposition par le coach, validation par l'athlète,
+ * lecture par l'UI, régénération partielle quand l'athlète change ses
+ * contraintes en cours de route.
  *
- * Deux règles structurent tout ce module :
+ * Trois règles structurent tout ce module :
  *
- * 1. **Un seul plan actif par athlète.** La base le garantit (index partiel
- *    `plans_active_per_athlete`) ; ici, créer un plan archive le précédent dans
- *    la même transaction, et emporte avec lui ses séances encore à venir — sans
- *    quoi elles continueraient d'apparaître au calendrier et au tableau de bord.
- * 2. **Le passé ne se réécrit pas.** Une régénération ne touche qu'aux séances
+ * 1. **Le coach propose, l'athlète dispose.** Une génération écrit un plan
+ *    `draft` et ne touche à rien d'autre : le plan en cours reste le plan en
+ *    cours tant que la proposition n'est pas adoptée ({@link acceptDraftPlan}),
+ *    et la refuser ({@link discardDraftPlan}) ne laisse aucune trace. Au plus un
+ *    brouillon par athlète : en écrire un efface le précédent, et la base le
+ *    garantit aussi (index partiel `plans_draft_per_athlete`).
+ * 2. **Un seul plan actif par athlète.** La base le garantit (index partiel
+ *    `plans_active_per_athlete`) ; ici, **adopter** une proposition archive le
+ *    plan actif dans la même transaction, et emporte avec lui ses séances encore
+ *    à venir — sans quoi elles continueraient d'apparaître au calendrier et au
+ *    tableau de bord.
+ * 3. **Le passé ne se réécrit pas.** Une régénération ne touche qu'aux séances
  *    futures encore non réalisées : une séance rapprochée d'une activité
  *    (`completedActivityId`) survit à toute instruction du coach.
  */
@@ -216,7 +225,9 @@ export class InvalidPlanError extends Error {
 }
 
 /**
- * Le plan visé n'existe pas, n'appartient pas à l'athlète, ou n'est plus actif.
+ * Le plan visé n'existe pas, n'appartient pas à l'athlète, ou n'est pas dans
+ * l'état qu'exigeait l'opération (actif pour un ajustement, brouillon pour une
+ * décision).
  *
  * Les trois cas partagent volontairement la même erreur : distinguer « il existe
  * mais il n'est pas à toi » de « il n'existe pas » révélerait l'existence de la
@@ -224,8 +235,27 @@ export class InvalidPlanError extends Error {
  */
 export class PlanNotFoundError extends Error {
   constructor() {
-    super("Aucun plan actif ne correspond : il n'existe pas, ou il a été archivé.");
+    super("Aucun plan ne correspond : il n'existe pas, ou il a changé d'état.");
     this.name = 'PlanNotFoundError';
+  }
+}
+
+/**
+ * Deux générations ont voulu écrire une proposition en même temps, et l'index
+ * partiel `plans_draft_per_athlete` a tranché.
+ *
+ * C'est le comportement voulu : en `READ COMMITTED`, la transaction perdante ne
+ * voit pas le brouillon que l'autre vient d'insérer, donc son `DELETE`
+ * préalable ne l'emporte pas — sans contrainte, elle laisserait un second
+ * brouillon que plus rien ne distingue. Mieux vaut une génération qui échoue en
+ * le disant qu'un doublon silencieux dont la lecture montrerait l'un ou l'autre.
+ */
+export class ConcurrentDraftError extends Error {
+  constructor() {
+    super(
+      "Une autre génération vient d'écrire une proposition : recharge la page pour la voir avant d'en relancer une.",
+    );
+    this.name = 'ConcurrentDraftError';
   }
 }
 
@@ -489,21 +519,28 @@ function toPlannedSessionValues(
  * Lectures.
  */
 
+/** Un plan et ses séances, tel que l'UI l'affiche. */
+export type PlanWithSessions = { plan: PlanDto; sessions: PlanSessionDto[] };
+
 /**
- * Le plan actif et ses séances (ordonnées dans le temps), `null` s'il n'y en a
- * pas — ou si l'onboarding n'a pas encore eu lieu.
+ * Le plan de l'athlète dans l'état demandé, avec ses séances ordonnées dans le
+ * temps. `null` s'il n'y en a pas — ou si l'onboarding n'a pas encore eu lieu.
+ *
+ * Le statut est toujours dans le `WHERE` : c'est lui qui garantit qu'un
+ * brouillon ne sorte jamais par la porte du plan actif (et réciproquement).
  */
-export async function getActivePlanWithSessions(): Promise<{
-  plan: PlanDto;
-  sessions: PlanSessionDto[];
-} | null> {
+async function getPlanWithSessions(status: PlanStatus): Promise<PlanWithSessions | null> {
   const athleteId = await getAthleteId();
   if (athleteId === null) return null;
 
   const planRows = await db
     .select()
     .from(plans)
-    .where(and(eq(plans.athleteId, athleteId), eq(plans.status, 'active')))
+    .where(and(eq(plans.athleteId, athleteId), eq(plans.status, status)))
+    // Ceinture et bretelles : les deux index partiels rendent la ligne unique
+    // pour `active` comme pour `draft`, mais un `LIMIT 1` sans ordre choisirait
+    // au hasard si l'un d'eux venait à manquer. Le plus récent fait foi.
+    .orderBy(desc(plans.createdAt), desc(plans.id))
     .limit(1);
 
   const plan = planRows[0];
@@ -518,6 +555,27 @@ export async function getActivePlanWithSessions(): Promise<{
     .orderBy(asc(plannedSessions.scheduledOn), asc(plannedSessions.id));
 
   return { plan: toPlanDto(plan), sessions: sessionRows.map(toPlanSessionDto) };
+}
+
+/**
+ * Le plan **actif** et ses séances, `null` s'il n'y en a pas.
+ *
+ * C'est la seule lecture que le reste de l'appli utilise (page du plan,
+ * ajustement, synchronisation intervals.icu) : une proposition en attente n'en
+ * sort jamais.
+ */
+export function getActivePlanWithSessions(): Promise<PlanWithSessions | null> {
+  return getPlanWithSessions('active');
+}
+
+/**
+ * La **proposition** du coach en attente de décision, `null` s'il n'y en a pas.
+ *
+ * Lecture réservée à l'écran qui la soumet à l'athlète : tant qu'elle n'est pas
+ * adoptée, ce plan ne pilote rien.
+ */
+export function getDraftPlanWithSessions(): Promise<PlanWithSessions | null> {
+  return getPlanWithSessions('draft');
 }
 
 /**
@@ -612,6 +670,24 @@ async function deleteUpcomingSessions(
     );
 }
 
+/**
+ * Supprime les séances du plan **antérieures** à `beforeDate`.
+ *
+ * Symétrique de {@link deleteUpcomingSessions}, mais sans sa garde sur le
+ * rapprochement : l'appelant est l'adoption d'une proposition, et un brouillon
+ * n'a jamais de séance rapprochée (le rapprochement ignore les plans non
+ * actifs). Il n'y a donc rien à préserver dans ce passé-là.
+ */
+async function deletePastSessions(
+  tx: PlanWriter,
+  planId: number,
+  beforeDate: string,
+): Promise<void> {
+  await tx
+    .delete(plannedSessions)
+    .where(and(eq(plannedSessions.planId, planId), lt(plannedSessions.scheduledOn, beforeDate)));
+}
+
 /** Remplace la suite du plan : validation de la fenêtre, purge, réinsertion. */
 async function replacePlanSessions(
   tx: PlanWriter,
@@ -703,44 +779,74 @@ async function writePlanSettings(
 }
 
 /**
- * Crée un plan et ses séances, en archivant le plan actif précédent.
+ * Écrit la **proposition** du coach : un plan `draft` et ses séances.
  *
- * Le tout dans une transaction : sans elle, un échec d'insertion des séances
- * laisserait l'athlète avec un plan vide et son ancien plan archivé — c'est-à-
- * dire sans plan du tout.
+ * Rien d'autre ne bouge — le plan actif reste actif, ses séances restent en
+ * place, et aucun effet de bord (rapprochement, synchronisation) n'a lieu : tant
+ * que l'athlète n'a pas tranché, cette proposition ne pilote rien. C'est
+ * {@link acceptDraftPlan} qui bascule.
+ *
+ * **Au plus un brouillon par athlète** : le précédent est supprimé d'abord, dans
+ * la même transaction. Ses séances partent avec lui (`plan_id … ON DELETE
+ * CASCADE`) — aucune ne peut être « réalisée », le rapprochement ignorant les
+ * plans non actifs, donc rien de l'histoire de l'athlète n'y est attaché.
+ *
+ * L'ordre `DELETE` puis `INSERT` ne heurte pas l'index partiel
+ * `plans_draft_per_athlete` **au sein d'une transaction** : au moment de
+ * l'insertion, la ligne précédente est déjà supprimée. Entre transactions
+ * concurrentes, en revanche, c'est l'index qui tranche — et c'est voulu, cf.
+ * {@link ConcurrentDraftError}.
+ *
+ * La transaction couvre tout : sans elle, un échec d'insertion des séances
+ * laisserait un brouillon vide, et aurait déjà effacé le précédent.
  *
  * @throws {AthleteNotFoundError} si l'onboarding n'a pas eu lieu.
  * @throws {InvalidPlanError} si un invariant du plan n'est pas tenu.
+ * @throws {ConcurrentDraftError} si une autre génération a écrit sa proposition
+ * entre-temps.
  */
-export async function createPlanWithSessions(input: CreatePlanInput): Promise<PlanDto> {
+export async function createDraftPlanWithSessions(input: CreatePlanInput): Promise<PlanDto> {
   const values = validatePlanInput(input);
 
   const athleteId = await getAthleteId();
   if (athleteId === null) throw new AthleteNotFoundError();
 
-  const created = await db.transaction(async (tx) => {
-    // L'index partiel `plans_active_per_athlete` refuserait deux lignes actives :
-    // l'archivage précède donc l'insertion, dans la même transaction.
-    const archived = await tx
-      .update(plans)
-      .set({ status: 'archived', updatedAt: new Date() })
-      .where(and(eq(plans.athleteId, athleteId), eq(plans.status, 'active')))
-      .returning({ id: plans.id });
+  const created = await writeDraftPlan(athleteId, values);
 
-    // Sans cette purge, les séances à venir de l'ancien plan cohabiteraient avec
-    // celles du nouveau : deux séances le même jour, dont une que plus rien ne
-    // pilote.
-    await deleteUpcomingSessions(
-      tx,
-      archived.map((row) => row.id),
-      todayCivilDate(),
-    );
+  return toPlanDto(created);
+}
+
+/**
+ * Écrit la proposition et traduit la collision d'unicité en erreur métier.
+ *
+ * La violation est reconnue sur le **code** Postgres (`23505`) et non sur un
+ * nom de contrainte : le pilote ne le transmet pas toujours, et l'insertion ne
+ * peut de toute façon heurter que `plans_draft_per_athlete` — l'autre index
+ * partiel ne couvre que les lignes `active`, et celle-ci naît `draft`. Tout
+ * autre échec remonte tel quel : un `catch` qui avale l'inattendu ferait passer
+ * une panne pour une course.
+ */
+async function writeDraftPlan(athleteId: number, values: ValidatedPlanInput): Promise<Plan> {
+  try {
+    return await draftPlanTransaction(athleteId, values);
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new ConcurrentDraftError();
+    throw error;
+  }
+}
+
+/** La transaction proprement dite : purge du brouillon précédent, plan, séances. */
+function draftPlanTransaction(athleteId: number, values: ValidatedPlanInput): Promise<Plan> {
+  return db.transaction(async (tx) => {
+    await tx
+      .delete(plans)
+      .where(and(eq(plans.athleteId, athleteId), eq(plans.status, 'draft')));
 
     const inserted = await tx
       .insert(plans)
       .values({
         athleteId,
-        status: 'active',
+        status: 'draft',
         goalType: values.goalType,
         level: values.level,
         goalText: values.goalText,
@@ -763,8 +869,97 @@ export async function createPlanWithSessions(input: CreatePlanInput): Promise<Pl
 
     return plan;
   });
+}
 
-  return toPlanDto(created);
+/**
+ * Adopte la proposition : le plan actif est archivé, le brouillon devient le
+ * plan de l'athlète.
+ *
+ * Tout tient dans une transaction, et l'ordre n'est pas négociable : l'index
+ * partiel `plans_active_per_athlete` refuserait deux lignes actives, l'archivage
+ * précède donc l'activation. La purge des séances à venir de l'ancien plan est
+ * la même que partout ailleurs ({@link deleteUpcomingSessions}) — sans elle, ses
+ * séances futures cohabiteraient avec celles du nouveau plan, deux séances le
+ * même jour dont une que plus rien ne pilote.
+ *
+ * **Le passé du brouillon est purgé au passage.** Une proposition générée lundi
+ * et adoptée mercredi porte des séances de lundi et mardi : l'athlète a couru
+ * ces jours-là, mais ses activités ont été rapprochées des séances du plan
+ * *alors* actif, et une activité ne réalise qu'une séance — celles du nouveau
+ * plan resteraient donc « manquées » à tort dès l'ouverture de la page. Le plan
+ * adopté prend la main à partir du jour de l'adoption ; son passé théorique n'a
+ * jamais piloté personne, il n'a rien à afficher.
+ *
+ * L'appartenance et l'état sont dans le `WHERE` de l'`UPDATE` : aucune fenêtre
+ * entre le contrôle et l'écriture, et un id venu du client ne peut pas activer
+ * le brouillon d'un autre. C'est aussi pourquoi la purge du brouillon vient
+ * **après** cette activation : à ce moment-là seulement, le plan est prouvé
+ * sien.
+ *
+ * @throws {PlanNotFoundError} si l'id ne désigne pas un brouillon de l'athlète.
+ */
+export async function acceptDraftPlan(draftId: number): Promise<PlanDto> {
+  const athleteId = await getAthleteId();
+  if (athleteId === null) throw new PlanNotFoundError();
+
+  const today = todayCivilDate();
+
+  const activated = await db.transaction(async (tx) => {
+    const archived = await tx
+      .update(plans)
+      .set({ status: 'archived', updatedAt: new Date() })
+      .where(and(eq(plans.athleteId, athleteId), eq(plans.status, 'active')))
+      .returning({ id: plans.id });
+
+    await deleteUpcomingSessions(
+      tx,
+      archived.map((row) => row.id),
+      today,
+    );
+
+    const rows = await tx
+      .update(plans)
+      .set({ status: 'active', updatedAt: new Date() })
+      .where(
+        and(eq(plans.id, draftId), eq(plans.athleteId, athleteId), eq(plans.status, 'draft')),
+      )
+      .returning();
+
+    // Le brouillon n'existe pas (ou plus) : la transaction est annulée, et le
+    // plan actif reste actif. Refuser après avoir archivé laisserait l'athlète
+    // sans aucun plan.
+    const plan = rows[0];
+    if (!plan) throw new PlanNotFoundError();
+
+    // Les jours déjà écoulés de la proposition ne deviennent pas rétroactivement
+    // le programme de l'athlète (cf. l'en-tête de cette fonction).
+    await deletePastSessions(tx, plan.id, today);
+
+    return plan;
+  });
+
+  return toPlanDto(activated);
+}
+
+/**
+ * Refuse la proposition : le brouillon disparaît, et rien d'autre ne bouge.
+ *
+ * Ses séances partent avec lui par cascade (`planned_sessions.plan_id … ON
+ * DELETE CASCADE`) : un brouillon n'ayant jamais pu être rapproché d'une
+ * activité, il n'emporte aucune trace du réel.
+ *
+ * @throws {PlanNotFoundError} si l'id ne désigne pas un brouillon de l'athlète.
+ */
+export async function discardDraftPlan(draftId: number): Promise<void> {
+  const athleteId = await getAthleteId();
+  if (athleteId === null) throw new PlanNotFoundError();
+
+  const deleted = await db
+    .delete(plans)
+    .where(and(eq(plans.id, draftId), eq(plans.athleteId, athleteId), eq(plans.status, 'draft')))
+    .returning({ id: plans.id });
+
+  if (deleted.length === 0) throw new PlanNotFoundError();
 }
 
 /** Ce qu'une instruction du coach fait bouger d'un coup sur le plan actif. */

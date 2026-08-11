@@ -298,6 +298,19 @@ describe('linkActivityToPlannedSession', () => {
     expect(where.sql).toContain('"plan_id" is null');
   });
 
+  it('ne retient que le plan actif : une proposition en attente n’est jamais rapprochée', async () => {
+    givenPendingSession();
+
+    await linkActivityToPlannedSession(42);
+
+    const where = renderWhere(dbState.selects.find((select) => select.table === 'plans')?.where);
+    // Le statut est dans le `WHERE` : les séances d'un brouillon (comme celles
+    // d'un plan archivé) restent hors d'atteinte — les marquer « réalisées »
+    // ferait raconter à un plan que l'athlète n'a pas choisi une histoire qui
+    // n'est pas la sienne.
+    expect(where.params).toEqual([1, 'active']);
+  });
+
   it('n’accepte que les séances hors plan quand aucun plan n’est actif', async () => {
     givenPendingSession([{ id: 7, planId: null }]);
     dbState.rows.plans = [[]];

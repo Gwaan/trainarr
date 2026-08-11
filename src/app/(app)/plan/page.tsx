@@ -3,12 +3,13 @@ import { Suspense } from "react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
-import { getActivePlanWithSessions } from "@/data/plans";
+import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
 import { AiSuspendedPanel } from "./_components/ai-suspended-panel";
 import { PlanForm } from "./_components/plan-form";
+import { PlanProposal } from "./_components/plan-proposal";
 import { PlanSkeleton } from "./_components/plan-skeleton";
 import { PlanView } from "./_components/plan-view";
 import {
@@ -25,6 +26,7 @@ export const metadata: Metadata = {
 const SUBTITLES = {
   create:
     "Décris ton objectif : le coach écrit le plan autour de ta charge d'entraînement actuelle.",
+  review: "Le coach te propose un plan. Lis-le en entier, puis adopte-le ou refuse-le.",
   view: "Ton programme semaine par semaine, ajusté à ta charge réelle.",
 } as const;
 
@@ -35,17 +37,52 @@ const SUBTITLES = {
  * la page pendant `next build` (image Docker), où ni la base ni l'API IA
  * n'existent. Cf. `.claude/rules/nextjs.md`.
  *
- * Les deux lectures sont indépendantes : le plan vient de la base, la
+ * Les trois lectures sont indépendantes : les plans viennent de la base, la
  * disponibilité du coach d'un ping réseau mémorisé — elles partent ensemble.
  */
 async function PlanContent() {
   await connection();
-  const [active, availability] = await Promise.all([
+  const [active, draft, availability] = await Promise.all([
     getActivePlanWithSessions(),
+    getDraftPlanWithSessions(),
     getAiAvailability(),
   ]);
 
   const today = toCivilDate(new Date());
+
+  /*
+   * Une proposition en attente prend toute la place : c'est la décision du
+   * moment, et rien d'autre ne doit s'y superposer. Le formulaire de création
+   * disparaît donc tant qu'elle est là — en générer un second n'écraserait que
+   * celle-ci — et le plan en cours, s'il existe, passe dessous : il reste
+   * consultable, c'est à lui que la proposition se compare.
+   */
+  if (draft !== null) {
+    return (
+      <>
+        <PageHeader title="Plan" subtitle={SUBTITLES.review} />
+        <PlanProposal
+          plan={draft.plan}
+          sessions={draft.sessions}
+          today={today}
+          hasActivePlan={active !== null}
+        />
+        {active === null ? null : (
+          <div className="flex flex-col gap-3 sm:gap-4">
+            <h2 className="eyebrow px-0.5">Ton plan en cours</h2>
+            <div className="flex flex-col gap-5 sm:gap-6">
+              <PlanView
+                plan={active.plan}
+                sessions={active.sessions}
+                today={today}
+                unavailableReason={availability.available ? null : availability.reason}
+              />
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
 
   if (active === null) {
     // Les bornes de la course couvrent tous les démarrages proposés : trop

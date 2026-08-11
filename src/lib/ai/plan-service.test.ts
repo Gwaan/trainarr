@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
-import type { PlanDto, PlanSessionDto } from '@/data/plans';
+import { PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
@@ -31,7 +31,7 @@ const { requireAi } = vi.hoisted(() => ({ requireAi: vi.fn() }));
 const { dal } = vi.hoisted(() => ({
   dal: {
     getTrainingSnapshot: vi.fn(),
-    createPlanWithSessions: vi.fn(),
+    createDraftPlanWithSessions: vi.fn(),
     getActivePlanWithSessions: vi.fn(),
     applyPlanUpdate: vi.fn(),
     reconcilePlanSessions: vi.fn(),
@@ -63,7 +63,7 @@ vi.mock('@/data/plans', async () => {
   const actual = await vi.importActual<typeof import('@/data/plans')>('@/data/plans');
   return {
     ...actual,
-    createPlanWithSessions: dal.createPlanWithSessions,
+    createDraftPlanWithSessions: dal.createDraftPlanWithSessions,
     getActivePlanWithSessions: dal.getActivePlanWithSessions,
     applyPlanUpdate: dal.applyPlanUpdate,
   };
@@ -93,6 +93,9 @@ const PLAN: PlanDto = {
   summary: 'Bloc de 6 semaines.',
   createdAt: '2026-08-01T10:00:00.000Z',
 };
+
+/** Ce qu'une génération écrit : une proposition, pas un plan en cours. */
+const DRAFT: PlanDto = { ...PLAN, id: 9, status: 'draft' };
 
 function planSession(overrides: Partial<PlanSessionDto> & { scheduledOn: string }): PlanSessionDto {
   return {
@@ -210,7 +213,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   requireAi.mockResolvedValue(undefined);
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
-  dal.createPlanWithSessions.mockResolvedValue(PLAN);
+  dal.createDraftPlanWithSessions.mockResolvedValue(DRAFT);
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
   dal.applyPlanUpdate.mockResolvedValue(undefined);
   dal.reconcilePlanSessions.mockResolvedValue(0);
@@ -770,11 +773,12 @@ describe('generatePlan', () => {
 
     const plan = await generatePlan(REQUEST);
 
-    expect(plan).toBe(PLAN);
+    // Une proposition, pas un plan en cours : c'est l'athlète qui l'active.
+    expect(plan).toBe(DRAFT);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
     expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan');
 
-    const input = dal.createPlanWithSessions.mock.calls[0][0];
+    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
     expect(input.level).toBe('intermediate');
     // Sans date demandée, le plan démarre aujourd'hui (mardi 11 août) et sa
     // grille de jours ISO s'ancre sur le lundi 10.
@@ -797,7 +801,7 @@ describe('generatePlan', () => {
 
     await generatePlan({ ...REQUEST, startsOn: '2026-08-13' });
 
-    const input = dal.createPlanWithSessions.mock.calls[0][0];
+    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
     // Le plan stocke le jour réel du départ, pas l'ancre.
     expect(input.startsOn).toBe('2026-08-13');
     expect(input.weeks).toBe(2);
@@ -821,10 +825,10 @@ describe('generatePlan', () => {
     expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
       'aucune séance avant samedi',
     );
-    expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
-  it('rapproche le plan écrit des activités déjà en base', async () => {
+  it("n'engage rien : ni rapprochement, ni publication au calendrier", async () => {
     chatCompletionJson.mockResolvedValue({
       summary: 'Deux semaines de reprise.',
       weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
@@ -832,49 +836,12 @@ describe('generatePlan', () => {
 
     await generatePlan(REQUEST);
 
-    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(PLAN.id);
-  });
-
-  it('publie le plan écrit au calendrier intervals.icu, hors du fil de la requête', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
-    });
-
-    await generatePlan(REQUEST);
-
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${PLAN.id}`);
-    // Par `after` : une API injoignable ne doit pas ajouter ses délais de garde
-    // au temps d'attente de l'utilisatrice.
-    expect(scheduleAfter).toHaveBeenCalledTimes(1);
-  });
-
-  it("n'attend pas la synchronisation du calendrier pour rendre le plan", async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
-    });
-    // La tâche différée n'est pas exécutée : le plan doit sortir quand même.
-    scheduleAfter.mockImplementation(() => {});
-
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    // Une proposition ne pilote rien tant qu'elle n'est pas adoptée : rapprocher
+    // ses séances des activités ou les publier sur la montre reviendrait à
+    // l'imposer. Les deux effets partent de l'adoption (`_lib/actions.ts`).
+    expect(dal.reconcilePlanSessions).not.toHaveBeenCalled();
     expect(syncPlanToIntervalsSafely).not.toHaveBeenCalled();
-  });
-
-  it('rend quand même le plan quand le rapprochement échoue', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
-    });
-    dal.reconcilePlanSessions.mockRejectedValue(new Error('deadlock detected'));
-
-    // Le plan est écrit et valide : un rapprochement raté ne l'annule pas, il se
-    // journalise.
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
-    expect(loggedText()).toContain('rapprochement des séances');
-    // Et le calendrier est quand même synchronisé : les deux effets de bord sont
-    // indépendants.
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalled();
+    expect(scheduleAfter).not.toHaveBeenCalled();
   });
 
   it('reprend une fois en renvoyant les violations, puis écrit le plan corrigé', async () => {
@@ -891,7 +858,7 @@ describe('generatePlan', () => {
     expect(retryMessages[2].content).toContain('aucune séance le dimanche');
     // La sortie fautive n'est pas renvoyée : elle coûterait le double de contexte.
     expect(retryMessages.some((message: { content: string }) => message.content.includes('"sessions"'))).toBe(false);
-    expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
+    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
   });
 
   it("renvoie au modèle une allure hors de portée de l'athlète, corridor à l'appui", async () => {
@@ -899,7 +866,7 @@ describe('generatePlan', () => {
       .mockResolvedValueOnce({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] })
       .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
 
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
 
     // Le corridor est dérivé de l'allure récente du snapshot (5:24/km).
     expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
@@ -911,7 +878,7 @@ describe('generatePlan', () => {
     dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, recentAvgPaceSecPerKm: null });
     chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] });
 
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
   });
 
@@ -920,7 +887,7 @@ describe('generatePlan', () => {
       .mockRejectedValueOnce(OFF_SCHEMA)
       .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
 
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
 
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
     const retryMessages = chatCompletionJson.mock.calls[1][0].messages;
@@ -929,7 +896,7 @@ describe('generatePlan', () => {
     // Le chemin désigne l'étape à reprendre : sans lui, le modèle regénère à
     // l'aveugle une sortie de plusieurs centaines d'étapes.
     expect(retryMessages[2].content).toContain('weeks.0.sessions.1.steps.1.steps.0');
-    expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
+    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
   });
 
   it('reprend jusqu’à deux fois avant de renoncer', async () => {
@@ -938,7 +905,7 @@ describe('generatePlan', () => {
       .mockRejectedValueOnce(OFF_SCHEMA)
       .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
 
-    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
     expect(chatCompletionJson).toHaveBeenCalledTimes(3);
   });
 
@@ -947,7 +914,7 @@ describe('generatePlan', () => {
 
     await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
     expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
   it("ne redemande rien quand c'est l'API qui est en défaut", async () => {
@@ -964,7 +931,7 @@ describe('generatePlan', () => {
 
     await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
     expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
   it('propage une indisponibilité du coach sans rien lire ni écrire', async () => {
@@ -1211,9 +1178,7 @@ describe('updatePlanFromInstruction', () => {
   it("échoue proprement quand aucun plan n'est actif", async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(null);
 
-    await expect(updatePlanFromInstruction('allège')).rejects.toThrow(
-      /Aucun plan actif ne correspond/,
-    );
+    await expect(updatePlanFromInstruction('allège')).rejects.toThrow(PlanNotFoundError);
     expect(chatCompletionJson).not.toHaveBeenCalled();
   });
 

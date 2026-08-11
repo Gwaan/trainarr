@@ -1,17 +1,12 @@
-import { CalendarRange, Flag } from "lucide-react";
-
-import { MarkdownLite } from "@/components/markdown-lite";
 import { Panel } from "@/components/panel";
 import type { PlanDto, PlanSessionDto } from "@/data/plans";
 import type { AiUnavailableReason } from "@/lib/ai/errors";
 
-import { formatDuration } from "../../_lib/format";
-import { LEVEL_LABELS } from "../_lib/form-options";
-import { formatCivilDay, formatIsoDay } from "../_lib/format-plan";
-import { formatPlanProgress, groupPlanWeeks, planEndsOn } from "../_lib/plan-weeks";
+import { formatPlanProgress, groupPlanWeeks } from "../_lib/plan-weeks";
 
 import { PlanAdjustForm } from "./plan-adjust-form";
 import { PlanArchiveForm } from "./plan-archive-form";
+import { PlanOverview } from "./plan-overview";
 import { PlanWeekCard } from "./plan-week-card";
 
 /**
@@ -29,35 +24,6 @@ const SUSPENDED_NOTE: Record<AiUnavailableReason, string> = {
     "Ajustement suspendu : l'API IA ne répond pas. Il se réactivera de lui-même dès qu'elle sera de nouveau en ligne.",
 };
 
-/** Étiquette du type d'objectif, avec l'échéance quand il y en a une. */
-function GoalBadge({ plan }: { plan: PlanDto }) {
-  const isRace = plan.goalType === "race" && plan.raceDate !== null;
-  const Icon = isRace ? Flag : CalendarRange;
-
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-[6px] border border-border bg-surface-2 px-2 py-1 text-[0.72rem] text-fg-muted">
-      <Icon aria-hidden="true" strokeWidth={1.8} className="size-3.5 text-fg-faint" />
-      {isRace && plan.raceDate !== null ? (
-        <>
-          Course le <span className="num text-fg">{formatCivilDay(plan.raceDate)}</span>
-        </>
-      ) : (
-        "Objectif libre"
-      )}
-    </span>
-  );
-}
-
-/** Une contrainte du plan : label discret, valeur chiffrée en mono. */
-function Setting({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-button bg-surface-2 px-3 py-2">
-      <p className="eyebrow">{label}</p>
-      <p className="num mt-1.5 text-[0.95rem] font-semibold text-fg">{value}</p>
-    </div>
-  );
-}
-
 export type PlanViewProps = {
   plan: PlanDto;
   sessions: PlanSessionDto[];
@@ -69,7 +35,6 @@ export type PlanViewProps = {
 
 export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewProps) {
   const weeks = groupPlanWeeks(plan, sessions, today);
-  const endsOn = planEndsOn(plan);
 
   return (
     <>
@@ -79,44 +44,7 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
         // question qu'on se pose en ouvrant la page.
         meta={<span className="num">{formatPlanProgress(weeks)}</span>}
       >
-        <div className="flex flex-wrap items-center gap-2">
-          <GoalBadge plan={plan} />
-          <span className="num text-[0.72rem] text-fg-faint">
-            {formatCivilDay(plan.startsOn)} → {formatCivilDay(endsOn)}
-          </span>
-          {/* Les plans antérieurs au champ n'ont pas de niveau : rien ne s'affiche. */}
-          {plan.level === null ? null : (
-            <span className="text-[0.72rem] text-fg-faint">
-              Niveau : {LEVEL_LABELS[plan.level]}
-            </span>
-          )}
-        </div>
-
-        <p className="mt-3 text-[1.15rem] leading-snug font-semibold text-balance text-fg">
-          {plan.goalText}
-        </p>
-
-        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <Setting label="Séances / semaine" value={String(plan.sessionsPerWeek)} />
-          <Setting label="Sortie longue" value={formatIsoDay(plan.longRunDay)} />
-          {plan.weeklyTimeMinutes === null ? null : (
-            <Setting
-              label="Temps hebdo"
-              value={formatDuration(plan.weeklyTimeMinutes * 60)}
-            />
-          )}
-        </div>
-
-        {/*
-          Le résumé vient du modèle : rien ne l'empêche d'y glisser du markdown,
-          qui s'afficherait sinon avec ses astérisques. Même rendu sûr que le
-          feedback du coach — aucun HTML injecté.
-        */}
-        {plan.summary === null ? null : (
-          <div className="mt-4 border-t border-border pt-4">
-            <MarkdownLite source={plan.summary} className="text-[0.87rem]" />
-          </div>
-        )}
+        <PlanOverview plan={plan} />
       </Panel>
 
       {/* Les semaines forment une section à part entière : elles méritent un

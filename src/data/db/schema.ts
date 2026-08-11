@@ -198,8 +198,23 @@ export const activityStreams = pgTable(
   ],
 );
 
-/** États d'un plan. Un seul `active` par athlète à la fois (index partiel ci-dessous). */
-export const PLAN_STATUSES = ['active', 'archived'] as const;
+/**
+ * États d'un plan.
+ *
+ * - `draft` : la proposition que le coach vient d'écrire, soumise à l'athlète.
+ *   Elle n'existe que pour être lue et tranchée — rien d'autre dans l'appli ne
+ *   la regarde (ni le tableau de bord, ni le rapprochement des imports, ni la
+ *   synchronisation intervals.icu, qui filtrent tous sur `active`) ;
+ * - `active` : le plan que l'athlète suit. Un seul par athlète à la fois, garanti
+ *   par l'index partiel ci-dessous ;
+ * - `archived` : un plan que l'athlète ne suit plus.
+ *
+ * L'index partiel ne porte que sur `active` : les brouillons comme les archives
+ * s'accumulent librement sous le même athlète du point de vue de la base. Le
+ * « au plus un brouillon » est, lui, tenu par le DAL (`src/data/plans.ts`), qui
+ * supprime le précédent avant d'en écrire un nouveau.
+ */
+export const PLAN_STATUSES = ['draft', 'active', 'archived'] as const;
 
 export type PlanStatus = (typeof PLAN_STATUSES)[number];
 
@@ -296,6 +311,18 @@ export const plans = pgTable(
      * insèrent chacune le leur.
      */
     uniqueIndex('plans_active_per_athlete').on(table.athleteId).where(sql`status = 'active'`),
+    /**
+     * Une seule **proposition** en attente par athlète, pour la même raison et
+     * par le même moyen : le DAL efface le brouillon précédent avant d'insérer
+     * le nouveau, mais en `READ COMMITTED` deux générations lancées en même
+     * temps ne voient chacune que le brouillon d'avant — et en laisseraient
+     * deux, dont un que la lecture `LIMIT 1` choisirait au hasard.
+     *
+     * Conséquence assumée : la seconde génération concurrente échoue sur la
+     * contrainte plutôt que d'écrire un doublon silencieux. Le DAL traduit la
+     * violation en erreur métier lisible (`ConcurrentDraftError`).
+     */
+    uniqueIndex('plans_draft_per_athlete').on(table.athleteId).where(sql`status = 'draft'`),
   ],
 );
 

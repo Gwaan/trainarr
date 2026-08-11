@@ -7,12 +7,16 @@ import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 import { AthleteNotFoundError } from './athlete';
 import type { Plan, PlanLevel, PlannedSession } from './db/schema';
 import {
+  ConcurrentDraftError,
   InvalidPlanError,
   PlanNotFoundError,
+  acceptDraftPlan,
   applyPlanUpdate,
   archiveActivePlan,
-  createPlanWithSessions,
+  createDraftPlanWithSessions,
+  discardDraftPlan,
   getActivePlanWithSessions,
+  getDraftPlanWithSessions,
   getPlannedSessionForActivity,
   planEndExclusive,
   toPlanDto,
@@ -36,10 +40,24 @@ const { dbState } = vi.hoisted(() => ({
   dbState: {
     rows: {} as Record<string, unknown[]>,
     returning: {} as Record<string, unknown[]>,
+    /**
+     * Retours successifs d'une même table, quand une transaction en écrit
+     * plusieurs fois (adopter une proposition archive le plan actif *puis*
+     * active le brouillon) : chaque `returning()` consomme le premier lot
+     * restant, et retombe sur `returning[table]` une fois la file vide.
+     */
+    returningQueue: {} as Record<string, unknown[][]>,
+    /**
+     * Erreur que l'insertion dans une table doit lever — c'est ainsi qu'on
+     * éprouve la traduction d'une violation d'unicité en erreur métier.
+     */
+    insertErrors: {} as Record<string, unknown>,
     inserts: [] as Array<{ table: string; values: unknown }>,
     updates: [] as Array<{ table: string; values: unknown; where: SQL }>,
     deletes: [] as Array<{ table: string; where: SQL }>,
     selects: [] as Array<{ table: string; where: SQL }>,
+    /** Clauses d'ordre des lectures : sans elles, un `LIMIT 1` choisit au hasard. */
+    orderBys: [] as Array<{ table: string; clauses: SQL[] }>,
     /** Nombre de transactions ouvertes — une écriture composite doit en ouvrir une. */
     transactions: 0,
   },
@@ -51,7 +69,7 @@ vi.mock('./db/client', async () => {
 
   type SelectChain = PromiseLike<unknown[]> & {
     where: (clause: SQL) => SelectChain;
-    orderBy: () => SelectChain;
+    orderBy: (...clauses: SQL[]) => SelectChain;
     limit: () => SelectChain;
   };
 
@@ -61,7 +79,10 @@ vi.mock('./db/client', async () => {
         dbState.selects.push({ table: name, where: clause });
         return chain;
       },
-      orderBy: () => chain,
+      orderBy: (...clauses) => {
+        dbState.orderBys.push({ table: name, clauses });
+        return chain;
+      },
       limit: () => chain,
       then: (onFulfilled, onRejected) =>
         Promise.resolve(dbState.rows[name] ?? []).then(onFulfilled, onRejected),
@@ -72,8 +93,20 @@ vi.mock('./db/client', async () => {
   type WriteChain = PromiseLike<unknown> & { returning: () => Promise<unknown[]> };
 
   const writeChain = (name: string): WriteChain => ({
-    returning: () => Promise.resolve(dbState.returning[name] ?? []),
+    returning: () => {
+      const queued = dbState.returningQueue[name];
+      if (queued !== undefined && queued.length > 0) {
+        return Promise.resolve(queued.shift() ?? []);
+      }
+      return Promise.resolve(dbState.returning[name] ?? []);
+    },
     then: (onFulfilled, onRejected) => Promise.resolve(undefined).then(onFulfilled, onRejected),
+  });
+
+  /** Une écriture que la base refuse, quelle que soit la façon de l'attendre. */
+  const rejectingChain = (error: unknown): WriteChain => ({
+    returning: () => Promise.reject(error),
+    then: (onFulfilled, onRejected) => Promise.reject(error).then(onFulfilled, onRejected),
   });
 
   const client = {
@@ -82,7 +115,8 @@ vi.mock('./db/client', async () => {
       values: (values: unknown) => {
         const name = getTableName(table);
         dbState.inserts.push({ table: name, values });
-        return writeChain(name);
+        const failure = dbState.insertErrors[name];
+        return failure === undefined ? writeChain(name) : rejectingChain(failure);
       },
     }),
     update: (table: Table) => ({
@@ -96,8 +130,9 @@ vi.mock('./db/client', async () => {
     }),
     delete: (table: Table) => ({
       where: (clause: SQL) => {
-        dbState.deletes.push({ table: getTableName(table), where: clause });
-        return Promise.resolve();
+        const name = getTableName(table);
+        dbState.deletes.push({ table: name, where: clause });
+        return writeChain(name);
       },
     }),
   };
@@ -120,6 +155,24 @@ function renderWhere(clause: SQL | undefined): { sql: string; params: unknown[] 
   if (clause === undefined) throw new Error('Aucune clause `WHERE` enregistrée pour cette requête.');
   const query = dialect.sqlToQuery(clause);
   return { sql: query.sql, params: query.params };
+}
+
+/** Clauses `ORDER BY` d'une lecture, rendues en SQL. */
+function renderOrder(entry: { clauses: SQL[] } | undefined): string {
+  if (entry === undefined) throw new Error('Aucun `ORDER BY` enregistré pour cette requête.');
+  return entry.clauses.map((clause) => dialect.sqlToQuery(clause).sql).join(', ');
+}
+
+/**
+ * Une violation d'unicité telle que le pilote `postgres` la lève, enveloppée
+ * comme drizzle 0.45 le fait (l'erreur d'origine n'est plus qu'une `cause`).
+ */
+function uniqueViolation(constraint: string): Error {
+  const driverError = Object.assign(
+    new Error(`duplicate key value violates unique constraint "${constraint}"`),
+    { code: '23505', constraint_name: constraint },
+  );
+  return new Error("Failed query: insert into 'plans'", { cause: driverError });
 }
 
 /**
@@ -283,10 +336,13 @@ const VALID_INPUT: CreatePlanInput = {
 beforeEach(() => {
   dbState.rows = { athlete: [{ id: 1 }] };
   dbState.returning = {};
+  dbState.returningQueue = {};
+  dbState.insertErrors = {};
   dbState.inserts = [];
   dbState.updates = [];
   dbState.deletes = [];
   dbState.selects = [];
+  dbState.orderBys = [];
   dbState.transactions = 0;
 });
 
@@ -622,42 +678,81 @@ describe('getActivePlanWithSessions', () => {
     await getActivePlanWithSessions();
 
     const where = renderWhere(dbState.selects.find((query) => query.table === 'plans')?.where);
+    // `'active'` est dans le `WHERE`, donc une proposition en attente ne sort
+    // jamais par cette porte — ni sur la page du plan, ni à l'ajustement, ni à
+    // la synchronisation intervals.icu, qui passent tous par ici.
     expect(where.params).toEqual([1, 'active']);
   });
 });
 
-describe('createPlanWithSessions', () => {
+describe('getDraftPlanWithSessions', () => {
+  it('retourne null tant que l’onboarding n’a pas eu lieu', async () => {
+    dbState.rows = { athlete: [] };
+
+    await expect(getDraftPlanWithSessions()).resolves.toBeNull();
+  });
+
+  it('retourne null quand aucune proposition n’attend', async () => {
+    dbState.rows.plans = [];
+
+    await expect(getDraftPlanWithSessions()).resolves.toBeNull();
+  });
+
+  it('ne lit que le brouillon de l’athlète, en DTOs', async () => {
+    dbState.rows.plans = [{ ...PLAN_ROW, status: 'draft' }];
+    dbState.rows.planned_sessions = [SESSION_ROW];
+
+    const result = await getDraftPlanWithSessions();
+
+    const where = renderWhere(dbState.selects.find((query) => query.table === 'plans')?.where);
+    expect(where.params).toEqual([1, 'draft']);
+    expect(Object.keys(result?.plan ?? {}).sort()).toEqual(PLAN_DTO_KEYS);
+    expect(result?.plan.status).toBe('draft');
+    expect(result?.sessions).toHaveLength(1);
+  });
+
+  it('sert le brouillon le plus récent, jamais celui que le hasard désigne', async () => {
+    dbState.rows.plans = [{ ...PLAN_ROW, status: 'draft' }];
+
+    await getDraftPlanWithSessions();
+
+    // Ceinture derrière l'index partiel `plans_draft_per_athlete` : un `LIMIT 1`
+    // sans ordre rendrait n'importe laquelle des lignes si la contrainte venait
+    // à manquer.
+    const order = renderOrder(dbState.orderBys.find((query) => query.table === 'plans'));
+    expect(order).toBe('"plans"."created_at" desc, "plans"."id" desc');
+  });
+});
+
+describe('createDraftPlanWithSessions', () => {
   it('refuse d’écrire tant qu’aucun athlète n’est enregistré', async () => {
     dbState.rows = { athlete: [] };
 
-    await expect(createPlanWithSessions(VALID_INPUT)).rejects.toBeInstanceOf(AthleteNotFoundError);
+    await expect(createDraftPlanWithSessions(VALID_INPUT)).rejects.toBeInstanceOf(
+      AthleteNotFoundError,
+    );
     expect(dbState.inserts).toEqual([]);
   });
 
   it('valide avant toute écriture', async () => {
     await expect(
-      createPlanWithSessions({ ...VALID_INPUT, sessionsPerWeek: 9 }),
+      createDraftPlanWithSessions({ ...VALID_INPUT, sessionsPerWeek: 9 }),
     ).rejects.toBeInstanceOf(InvalidPlanError);
     expect(dbState.transactions).toBe(0);
     expect(dbState.inserts).toEqual([]);
   });
 
-  it('archive le plan actif puis insère le nouveau, dans une transaction', async () => {
+  it('insère le plan en proposition, dans une transaction', async () => {
     dbState.returning.plans = [PLAN_ROW];
 
-    const dto = await createPlanWithSessions(VALID_INPUT);
+    const dto = await createDraftPlanWithSessions(VALID_INPUT);
 
     expect(dbState.transactions).toBe(1);
-
-    const archive = dbState.updates[0];
-    expect(archive?.table).toBe('plans');
-    expect(archive?.values).toMatchObject({ status: 'archived' });
-    expect(renderWhere(archive?.where).params).toEqual([1, 'active']);
 
     expect(dbState.inserts[0]?.table).toBe('plans');
     expect(dbState.inserts[0]?.values).toMatchObject({
       athleteId: 1,
-      status: 'active',
+      status: 'draft',
       goalType: 'race',
       level: 'intermediate',
       raceDate: '2026-11-15',
@@ -667,10 +762,33 @@ describe('createPlanWithSessions', () => {
     expect(Object.keys(dto).sort()).toEqual(PLAN_DTO_KEYS);
   });
 
+  it('ne touche pas au plan actif : ni archivage, ni purge de ses séances', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+
+    await createDraftPlanWithSessions(VALID_INPUT);
+
+    // Le cœur de la règle : le coach propose, il n'impose pas. Tant que
+    // l'athlète n'a pas tranché, le plan qu'elle suit reste intact.
+    expect(dbState.updates).toEqual([]);
+    expect(dbState.deletes.some((row) => row.table === 'planned_sessions')).toBe(false);
+  });
+
+  it('remplace la proposition précédente : au plus un brouillon par athlète', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+
+    await createDraftPlanWithSessions(VALID_INPUT);
+
+    const purge = dbState.deletes.find((row) => row.table === 'plans');
+    // Les seuls plans supprimés sont les brouillons de cet athlète ; leurs
+    // séances partent par cascade (`plan_id … ON DELETE CASCADE`).
+    expect(renderWhere(purge?.where).params).toEqual([1, 'draft']);
+    expect(dbState.deletes).toHaveLength(1);
+  });
+
   it('rattache chaque séance au plan créé et à l’athlète', async () => {
     dbState.returning.plans = [PLAN_ROW];
 
-    await createPlanWithSessions({
+    await createDraftPlanWithSessions({
       ...VALID_INPUT,
       sessions: [SESSION_INPUT, { ...SESSION_INPUT, scheduledOn: '2026-08-15', warmup: '15 min' }],
     });
@@ -711,7 +829,7 @@ describe('createPlanWithSessions', () => {
   it('écrit le déroulé structuré dans la colonne `steps`', async () => {
     dbState.returning.plans = [PLAN_ROW];
 
-    await createPlanWithSessions({
+    await createDraftPlanWithSessions({
       ...VALID_INPUT,
       sessions: [{ ...SESSION_INPUT, steps: SESSION_STEPS }],
     });
@@ -724,7 +842,7 @@ describe('createPlanWithSessions', () => {
     dbState.returning.plans = [PLAN_ROW];
     const step = { ...DISTANCE_ONLY_STEPS[0].steps[0], watts: 320 };
 
-    await createPlanWithSessions({
+    await createDraftPlanWithSessions({
       ...VALID_INPUT,
       // Le déroulé vient du modèle : ce qui n'est pas au contrat n'entre pas en base.
       sessions: [{ ...SESSION_INPUT, steps: [{ repeat: 1, steps: [step] }] }],
@@ -739,7 +857,7 @@ describe('createPlanWithSessions', () => {
   it('dérive volume et durée des étapes quand la séance ne les déclare pas', async () => {
     dbState.returning.plans = [PLAN_ROW];
 
-    await createPlanWithSessions({
+    await createDraftPlanWithSessions({
       ...VALID_INPUT,
       sessions: [
         { ...SESSION_INPUT, steps: DISTANCE_ONLY_STEPS },
@@ -759,7 +877,7 @@ describe('createPlanWithSessions', () => {
   it('laisse un volume déclaré primer sur le total des étapes', async () => {
     dbState.returning.plans = [PLAN_ROW];
 
-    await createPlanWithSessions({
+    await createDraftPlanWithSessions({
       ...VALID_INPUT,
       // « ~2,5 km » annoncé pour 2 km d'étapes : l'arrondi du coach fait foi.
       sessions: [{ ...SESSION_INPUT, steps: DISTANCE_ONLY_STEPS, volumeM: 2_500 }],
@@ -769,27 +887,162 @@ describe('createPlanWithSessions', () => {
     expect(insert?.values).toMatchObject([{ volumeM: 2_500 }]);
   });
 
-  it('emporte les séances à venir non réalisées du plan qu’il archive', async () => {
-    dbState.returning.plans = [PLAN_ROW];
-
-    await createPlanWithSessions(VALID_INPUT);
-
-    expect(dbState.deletes).toHaveLength(1);
-    const where = renderWhere(dbState.deletes[0]?.where);
-    // À partir d'aujourd'hui seulement : les séances passées restent l'histoire
-    // de l'athlète, et une séance déjà rapprochée d'une activité survit.
-    expect(where.params).toEqual([3, '2026-08-10']);
-    expect(where.sql).toContain('"plan_id" in ($1)');
-    expect(where.sql).toContain('"scheduled_on" >= $2');
-    expect(where.sql).toContain('"completed_activity_id" is null');
-  });
-
   it('échoue si l’insertion du plan ne rend aucune ligne, sans écrire de séance', async () => {
     dbState.returning.plans = [];
 
-    await expect(createPlanWithSessions(VALID_INPUT)).rejects.toThrow();
+    await expect(createDraftPlanWithSessions(VALID_INPUT)).rejects.toThrow();
     expect(dbState.inserts.some((row) => row.table === 'planned_sessions')).toBe(false);
-    // Aucun plan archivé : rien à purger non plus.
+  });
+
+  it('traduit la collision de deux générations concurrentes en erreur métier', async () => {
+    // Deux transactions simultanées : celle qui perd ne voit pas le brouillon
+    // que l'autre vient d'insérer, donc son `DELETE` ne l'a pas emporté et
+    // l'index partiel `plans_draft_per_athlete` la rejette. C'est le
+    // comportement voulu — un échec lisible plutôt qu'un doublon silencieux.
+    dbState.insertErrors.plans = uniqueViolation('plans_draft_per_athlete');
+
+    await expect(createDraftPlanWithSessions(VALID_INPUT)).rejects.toBeInstanceOf(
+      ConcurrentDraftError,
+    );
+  });
+
+  it('laisse remonter tel quel un échec qui n’est pas une collision', async () => {
+    // Une panne n'est pas une course : la déguiser en conflit de propositions
+    // ferait recharger la page pour rien.
+    const failure = new Error('deadlock detected');
+    dbState.insertErrors.plans = failure;
+
+    await expect(createDraftPlanWithSessions(VALID_INPUT)).rejects.toBe(failure);
+  });
+});
+
+describe('acceptDraftPlan', () => {
+  /** Le brouillon tel que l'`UPDATE` d'activation le rend. */
+  const ACTIVATED = { ...PLAN_ROW, id: 9, status: 'active' } satisfies Plan;
+
+  it('archive le plan actif, purge ses séances à venir et active le brouillon, en une transaction', async () => {
+    // Deux `returning` successifs sur `plans` : les ids archivés, puis la ligne
+    // activée.
+    dbState.returningQueue.plans = [[{ id: 3 }], [ACTIVATED]];
+
+    const dto = await acceptDraftPlan(9);
+
+    expect(dbState.transactions).toBe(1);
+
+    // 1. L'archivage précède l'activation : l'index partiel
+    //    `plans_active_per_athlete` refuserait deux lignes actives.
+    const archive = dbState.updates[0];
+    expect(archive?.values).toMatchObject({ status: 'archived' });
+    expect(renderWhere(archive?.where).params).toEqual([1, 'active']);
+
+    // 2. Les séances à venir non réalisées de l'ancien plan partent avec lui.
+    const purge = renderWhere(dbState.deletes[0]?.where);
+    expect(purge.params).toEqual([3, '2026-08-10']);
+    expect(purge.sql).toContain('"plan_id" in ($1)');
+    expect(purge.sql).toContain('"scheduled_on" >= $2');
+    expect(purge.sql).toContain('"completed_activity_id" is null');
+
+    // 3. Le brouillon devient le plan de l'athlète.
+    const activation = dbState.updates[1];
+    expect(activation?.values).toMatchObject({ status: 'active' });
+    expect(Object.keys(dto).sort()).toEqual(PLAN_DTO_KEYS);
+    expect(dto.id).toBe(9);
+  });
+
+  it('purge les séances du brouillon antérieures à aujourd’hui', async () => {
+    dbState.returningQueue.plans = [[{ id: 3 }], [ACTIVATED]];
+
+    await acceptDraftPlan(9);
+
+    // Une proposition générée lundi et adoptée mercredi porte des séances déjà
+    // passées, que les activités de ces jours-là ne pourront plus réaliser
+    // (elles ont été rapprochées des séances du plan alors actif) : les laisser
+    // afficherait « Manquée » sur des jours pourtant courus. Le plan adopté
+    // prend la main à partir d'aujourd'hui, pas avant.
+    const draftPurge = renderWhere(dbState.deletes[1]?.where);
+    expect(draftPurge.params).toEqual([9, '2026-08-10']);
+    expect(draftPurge.sql).toContain('"plan_id" = $1');
+    expect(draftPurge.sql).toContain('"scheduled_on" < $2');
+    // Pas de garde sur le rapprochement : un brouillon n'a jamais de séance
+    // réalisée, il n'y a rien à préserver dans ce passé-là.
+    expect(draftPurge.sql).not.toContain('completed_activity_id');
+
+    // Les séances d'aujourd'hui et des jours suivants, elles, ne sont visées par
+    // aucune des deux purges : celle de l'ancien plan ne cite que son id.
+    expect(dbState.deletes).toHaveLength(2);
+    expect(renderWhere(dbState.deletes[0]?.where).params).toEqual([3, '2026-08-10']);
+  });
+
+  it('purge le passé du brouillon seulement une fois qu’il est prouvé sien', async () => {
+    // L'activation ne touche aucune ligne : rien n'a été supprimé au nom d'un
+    // plan qui n'est pas celui de l'athlète (et la transaction annule le reste).
+    dbState.returningQueue.plans = [[], []];
+
+    await expect(acceptDraftPlan(404)).rejects.toBeInstanceOf(PlanNotFoundError);
+    expect(dbState.deletes).toEqual([]);
+  });
+
+  it('n’active qu’un brouillon appartenant à l’athlète (anti-IDOR)', async () => {
+    dbState.returningQueue.plans = [[{ id: 3 }], [ACTIVATED]];
+
+    await acceptDraftPlan(9);
+
+    // Appartenance et état dans le `WHERE` de l'`UPDATE` lui-même : pas de
+    // fenêtre entre le contrôle et l'écriture.
+    expect(renderWhere(dbState.updates[1]?.where).params).toEqual([9, 1, 'draft']);
+  });
+
+  it('ne purge aucune séance d’ancien plan quand il n’y en avait pas', async () => {
+    dbState.returningQueue.plans = [[], [ACTIVATED]];
+
+    await expect(acceptDraftPlan(9)).resolves.toMatchObject({ id: 9 });
+    // Seule reste la purge du passé du brouillon : sans plan archivé, il n'y a
+    // pas de séance à venir à emporter.
+    expect(dbState.deletes).toHaveLength(1);
+    expect(renderWhere(dbState.deletes[0]?.where).params).toEqual([9, '2026-08-10']);
+  });
+
+  it('lève PlanNotFoundError quand l’id ne désigne pas un brouillon', async () => {
+    // L'archivage a eu lieu dans la transaction, mais l'activation ne touche
+    // aucune ligne : le `throw` annule tout, et l'athlète garde son plan.
+    dbState.returningQueue.plans = [[{ id: 3 }], []];
+
+    await expect(acceptDraftPlan(404)).rejects.toBeInstanceOf(PlanNotFoundError);
+  });
+
+  it('lève PlanNotFoundError sans athlète, sans rien écrire', async () => {
+    dbState.rows = { athlete: [] };
+
+    await expect(acceptDraftPlan(9)).rejects.toBeInstanceOf(PlanNotFoundError);
+    expect(dbState.transactions).toBe(0);
+    expect(dbState.updates).toEqual([]);
+  });
+});
+
+describe('discardDraftPlan', () => {
+  it('supprime le brouillon de l’athlète, et lui seul', async () => {
+    dbState.returning.plans = [{ id: 9 }];
+
+    await expect(discardDraftPlan(9)).resolves.toBeUndefined();
+
+    expect(dbState.deletes).toHaveLength(1);
+    expect(dbState.deletes[0]?.table).toBe('plans');
+    // Anti-IDOR : l'id seul ne suffit pas, il faut que ce soit un brouillon de
+    // cet athlète. Les séances suivent par cascade.
+    expect(renderWhere(dbState.deletes[0]?.where).params).toEqual([9, 1, 'draft']);
+    expect(dbState.updates).toEqual([]);
+  });
+
+  it('lève PlanNotFoundError quand aucune ligne n’a été supprimée', async () => {
+    dbState.returning.plans = [];
+
+    await expect(discardDraftPlan(404)).rejects.toBeInstanceOf(PlanNotFoundError);
+  });
+
+  it('lève PlanNotFoundError sans athlète, sans rien supprimer', async () => {
+    dbState.rows = { athlete: [] };
+
+    await expect(discardDraftPlan(9)).rejects.toBeInstanceOf(PlanNotFoundError);
     expect(dbState.deletes).toEqual([]);
   });
 });

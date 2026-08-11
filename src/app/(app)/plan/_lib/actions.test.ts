@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createPlanAction, type PlanFormState } from './actions';
+import { PlanNotFoundError } from '@/data/plans';
+
+import {
+  acceptPlanAction,
+  createPlanAction,
+  rejectPlanAction,
+  type PlanDecisionState,
+  type PlanFormState,
+} from './actions';
 import { earliestPlanStart, latestPlanStart, latestRaceDate } from './plan-window';
 
 vi.mock('server-only', () => ({}));
@@ -15,10 +23,31 @@ const { mocks } = vi.hoisted(() => ({
     generatePlan: vi.fn(),
     updatePlanFromInstruction: vi.fn(),
     revalidatePath: vi.fn(),
+    acceptDraftPlan: vi.fn(),
+    discardDraftPlan: vi.fn(),
+    reconcilePlanSessions: vi.fn(),
+    syncPlanToIntervalsSafely: vi.fn(),
+    /** `after` exige un contexte de requête Next : le doublon exécute tout de suite. */
+    scheduleAfter: vi.fn(),
   },
 }));
 
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
+vi.mock('next/server', () => ({ after: mocks.scheduleAfter }));
+vi.mock('@/lib/intervals/push-plan', () => ({
+  syncPlanToIntervalsSafely: mocks.syncPlanToIntervalsSafely,
+}));
+vi.mock('@/data/plan-reconciliation', () => ({
+  reconcilePlanSessions: mocks.reconcilePlanSessions,
+}));
+
+vi.mock('@/data/plans', async (importOriginal) => ({
+  // Les erreurs typées restent le vrai code : c'est sur elles que l'action
+  // distingue le cas attendu de la panne.
+  ...(await importOriginal<typeof import('@/data/plans')>()),
+  acceptDraftPlan: mocks.acceptDraftPlan,
+  discardDraftPlan: mocks.discardDraftPlan,
+}));
 
 vi.mock('@/lib/ai/plan-service', async (importOriginal) => ({
   // La fenêtre du plan et ses bornes restent le vrai code : la validation de
@@ -58,6 +87,13 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
   mocks.generatePlan.mockResolvedValue(undefined);
+  mocks.acceptDraftPlan.mockResolvedValue({ id: 9 });
+  mocks.discardDraftPlan.mockResolvedValue(undefined);
+  mocks.reconcilePlanSessions.mockResolvedValue(0);
+  mocks.syncPlanToIntervalsSafely.mockResolvedValue(undefined);
+  mocks.scheduleAfter.mockImplementation((task: () => unknown) => {
+    void task();
+  });
 });
 
 afterEach(() => {
@@ -218,6 +254,121 @@ describe('createPlanAction — date de démarrage', () => {
       expect.objectContaining({ goalType: 'free', weeks: 8, startsOn: '2026-09-07' }),
       undefined,
     );
+  });
+});
+
+describe('createPlanAction — proposition', () => {
+  it('ne revalide que la page du plan : le tableau de bord ne voit pas les propositions', async () => {
+    const state = await createPlanAction(IDLE, form());
+
+    expect(state.status).toBe('success');
+    expect(mocks.revalidatePath).toHaveBeenCalledExactlyOnceWith('/plan');
+  });
+});
+
+/** Un `FormData` ne portant que l'identifiant de la proposition. */
+function decisionForm(planId: string): FormData {
+  const data = new FormData();
+  data.set('planId', planId);
+  return data;
+}
+
+const DECISION_IDLE: PlanDecisionState = { status: 'idle' };
+
+describe('acceptPlanAction', () => {
+  it('active la proposition, rapproche ses séances et republie le calendrier', async () => {
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('success');
+    expect(mocks.acceptDraftPlan).toHaveBeenCalledWith(9);
+    // Le rapprochement conditionne ce que la page re-rendue affiche : une
+    // proposition adoptée quelques jours après sa génération porte des séances
+    // déjà courues.
+    expect(mocks.reconcilePlanSessions).toHaveBeenCalledWith(9);
+    // La synchronisation, elle, part hors du fil de la requête.
+    expect(mocks.scheduleAfter).toHaveBeenCalledTimes(1);
+    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('plan 9');
+    // La séance du jour du tableau de bord vient de changer.
+    expect(mocks.revalidatePath).toHaveBeenCalledWith('/plan');
+    expect(mocks.revalidatePath).toHaveBeenCalledWith('/');
+  });
+
+  it.each(['', ' ', '0', '-3', '1.5', '1e3', '0x9', 'neuf', '<script>'])(
+    'refuse un identifiant qui n’en est pas un (%s), sans rien écrire',
+    async (planId) => {
+      // L'action est un endpoint public : ce champ reçoit n'importe quoi.
+      const state = await acceptPlanAction(DECISION_IDLE, decisionForm(planId));
+
+      expect(state.status).toBe('error');
+      expect(mocks.acceptDraftPlan).not.toHaveBeenCalled();
+      expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it('signale une proposition disparue sans rien revalider', async () => {
+    mocks.acceptDraftPlan.mockRejectedValue(new PlanNotFoundError());
+
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state).toEqual({ status: 'error', message: expect.stringContaining('recharge') });
+    expect(mocks.reconcilePlanSessions).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it('rend un message générique sur panne, sans laisser fuir la trace', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.acceptDraftPlan.mockRejectedValue(new Error('deadlock detected'));
+
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('error');
+    expect(state.message).not.toContain('deadlock');
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it('adopte quand même le plan si le rapprochement échoue', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.reconcilePlanSessions.mockRejectedValue(new Error('deadlock detected'));
+
+    // Le plan est actif en base : un rapprochement raté se journalise, il
+    // n'annule rien — et la synchronisation part quand même.
+    const state = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('success');
+    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalled();
+  });
+});
+
+describe('rejectPlanAction', () => {
+  it('écarte la proposition et ne revalide que la page du plan', async () => {
+    const state = await rejectPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state.status).toBe('success');
+    expect(mocks.discardDraftPlan).toHaveBeenCalledWith(9);
+    // Rien d'autre ne bouge : ni rapprochement, ni calendrier, ni tableau de
+    // bord — la proposition n'y a jamais figuré.
+    expect(mocks.reconcilePlanSessions).not.toHaveBeenCalled();
+    expect(mocks.syncPlanToIntervalsSafely).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).toHaveBeenCalledExactlyOnceWith('/plan');
+  });
+
+  it.each(['', '0', 'neuf'])(
+    'refuse un identifiant qui n’en est pas un (%s), sans rien supprimer',
+    async (planId) => {
+      const state = await rejectPlanAction(DECISION_IDLE, decisionForm(planId));
+
+      expect(state.status).toBe('error');
+      expect(mocks.discardDraftPlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it('signale une proposition déjà disparue', async () => {
+    mocks.discardDraftPlan.mockRejectedValue(new PlanNotFoundError());
+
+    const state = await rejectPlanAction(DECISION_IDLE, decisionForm('9'));
+
+    expect(state).toEqual({ status: 'error', message: expect.stringContaining('recharge') });
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
 });
 

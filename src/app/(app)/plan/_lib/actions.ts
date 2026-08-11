@@ -18,7 +18,10 @@ import { z } from 'zod';
 
 import { AthleteNotFoundError, isCivilDate, todayCivilDate } from '@/data/athlete';
 import {
+  acceptDraftPlan,
   archiveActivePlan,
+  ConcurrentDraftError,
+  discardDraftPlan,
   InvalidPlanError,
   PlanNotFoundError,
   type PlanInputField,
@@ -27,6 +30,7 @@ import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from '@/lib
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
+  afterActivePlanChanged,
   generatePlan,
   updatePlanFromInstruction,
   type PlanRequest,
@@ -77,6 +81,12 @@ export type PlanArchiveState = {
   message?: string;
 };
 
+/** État des deux issues d'une proposition : adoptée, ou refusée. */
+export type PlanDecisionState = {
+  status: 'idle' | 'success' | 'error';
+  message?: string;
+};
+
 /*
  * Messages — un seul endroit pour la traduction des erreurs typées.
  */
@@ -90,6 +100,10 @@ const SUSPENDED = {
 
 const INVALID_OUTPUT = "Le coach n'a pas réussi à produire un plan valide, réessaie.";
 const NO_ACTIVE_PLAN = "Aucun plan actif : recharge la page.";
+const NO_DRAFT = "Cette proposition n'existe plus : recharge la page.";
+/** Deux générations lancées en même temps : la base n'en garde qu'une (`plans_draft_per_athlete`). */
+const DRAFT_CONFLICT =
+  "Une proposition vient d'être écrite par une autre génération : recharge la page pour la voir.";
 const NO_PROFILE = "Crée d'abord ton profil : le plan s'appuie sur tes données d'athlète.";
 const CORRECT_FIELDS = 'Corrige les champs signalés.';
 
@@ -111,8 +125,8 @@ function textField(formData: FormData, name: string): string {
 }
 
 /**
- * Identifiant de suivi de la progression, tiré par le formulaire
- * (`crypto.randomUUID()`) et transmis en champ caché.
+ * Identifiant de suivi de la progression, tiré par le navigateur et posé dans le
+ * `FormData` au moment de la soumission (cf. `useGenerationProgress`).
  *
  * Facultatif par construction : un id absent ou mal formé ne fait **pas** échouer
  * une génération de plusieurs minutes pour un confort d'affichage. Le service
@@ -316,6 +330,7 @@ function failureMessage(error: unknown, context: string, fallback: string): stri
   if (error instanceof AiInvalidOutputError) return INVALID_OUTPUT;
   if (error instanceof PlanNotFoundError) return NO_ACTIVE_PLAN;
   if (error instanceof AthleteNotFoundError) return NO_PROFILE;
+  if (error instanceof ConcurrentDraftError) return DRAFT_CONFLICT;
   if (error instanceof AiResponseError) {
     console.error(`[plan] réponse inexploitable du coach (${context}) :`, error);
     return "L'API du coach a répondu de travers. Réessaie dans un instant.";
@@ -326,7 +341,9 @@ function failureMessage(error: unknown, context: string, fallback: string): stri
 }
 
 /**
- * Génère un plan complet avec le coach et l'active (le précédent est archivé).
+ * Génère un plan complet avec le coach et le soumet à l'athlète : le plan est
+ * écrit en **proposition**, rien du plan en cours ne bouge. C'est
+ * {@link acceptPlanAction} qui l'active.
  *
  * Compatible `useActionState` : `(état précédent, formData) => nouvel état`.
  * L'appel peut durer plusieurs minutes sur un modèle local — c'est le
@@ -393,10 +410,89 @@ export async function createPlanAction(
     };
   }
 
+  // Seule la page du plan change : une proposition ne pilote rien tant qu'elle
+  // n'est pas adoptée, le tableau de bord affiche donc toujours la séance du
+  // plan en cours.
+  revalidatePath('/plan');
+  return { status: 'success', message: 'Ta proposition de plan est prête.' };
+}
+
+/**
+ * Identifiant de la proposition, tel que le formulaire le renvoie.
+ *
+ * Un `FormData` ne porte que des chaînes : le champ est validé comme un entier
+ * positif écrit en base 10, jamais coercé — `z.coerce.number()` accepterait
+ * `' '`, `'1e3'` ou `'0x1f'`. La vraie garde reste le DAL, qui exige que l'id
+ * désigne un brouillon **de cet athlète** (anti-IDOR) ; ceci n'écarte que ce qui
+ * n'est même pas un id.
+ */
+const planIdSchema = z
+  .string()
+  .trim()
+  .regex(/^[1-9]\d{0,8}$/, 'Proposition introuvable.')
+  .transform(Number);
+
+/**
+ * Adopte la proposition du coach : elle devient le plan actif, et le plan
+ * précédent est archivé avec ses séances à venir non réalisées.
+ *
+ * L'id vient du client comme tout le reste : c'est le DAL qui vérifie qu'il
+ * désigne bien un brouillon de l'athlète, dans la transaction qui l'active.
+ */
+export async function acceptPlanAction(
+  _previous: PlanDecisionState,
+  formData: FormData,
+): Promise<PlanDecisionState> {
+  // TODO(auth) : cf. `createPlanAction`.
+
+  const parsed = planIdSchema.safeParse(textField(formData, 'planId'));
+  if (!parsed.success) return { status: 'error', message: NO_DRAFT };
+
+  let planId: number;
+  try {
+    planId = (await acceptDraftPlan(parsed.data)).id;
+  } catch (error) {
+    if (error instanceof PlanNotFoundError) return { status: 'error', message: NO_DRAFT };
+
+    console.error('[plan] adoption de la proposition impossible :', error);
+    return { status: 'error', message: "Le plan n'a pas pu être adopté. Réessaie." };
+  }
+
+  // La politique d'un plan devenu actif vit dans le service, pas ici : une
+  // adoption produit exactement les mêmes effets qu'un ajustement.
+  await afterActivePlanChanged(planId);
+
   revalidatePath('/plan');
   // Le tableau de bord affiche la séance du jour : elle vient de changer.
   revalidatePath('/');
-  return { status: 'success', message: 'Ton plan est prêt.' };
+  return { status: 'success', message: 'Plan adopté.' };
+}
+
+/**
+ * Refuse la proposition : elle disparaît, et rien d'autre ne change — ni le plan
+ * en cours, ni le calendrier intervals.icu, qui ne l'ont jamais connue.
+ */
+export async function rejectPlanAction(
+  _previous: PlanDecisionState,
+  formData: FormData,
+): Promise<PlanDecisionState> {
+  // TODO(auth) : cf. `createPlanAction`.
+
+  const parsed = planIdSchema.safeParse(textField(formData, 'planId'));
+  if (!parsed.success) return { status: 'error', message: NO_DRAFT };
+
+  try {
+    await discardDraftPlan(parsed.data);
+  } catch (error) {
+    if (error instanceof PlanNotFoundError) return { status: 'error', message: NO_DRAFT };
+
+    console.error('[plan] refus de la proposition impossible :', error);
+    return { status: 'error', message: "La proposition n'a pas pu être écartée. Réessaie." };
+  }
+
+  // Le tableau de bord n'a jamais vu cette proposition : rien à y revalider.
+  revalidatePath('/plan');
+  return { status: 'success', message: 'Proposition écartée.' };
 }
 
 const instructionSchema = z

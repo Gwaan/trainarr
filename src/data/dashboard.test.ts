@@ -589,7 +589,8 @@ describe('getDashboardSummary — séance du jour', () => {
 
     const where = renderWhere(queryState.whereClauses.planned_sessions);
     // Le cœur du filtre : soit la séance n'appartient à aucun plan, soit son plan
-    // est encore actif — un plan archivé ne pilote plus rien.
+    // est encore actif — ni un plan archivé, ni une proposition en attente de
+    // décision ne pilotent quoi que ce soit.
     expect(where.sql).toContain('"plan_id" is null or "plans"."status" = $3');
     expect(where.params).toEqual([1, '2026-08-10', 'active']);
   });

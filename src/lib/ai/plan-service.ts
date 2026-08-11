@@ -55,7 +55,7 @@ import {
   PLAN_LIMITS,
   PlanNotFoundError,
   applyPlanUpdate,
-  createPlanWithSessions,
+  createDraftPlanWithSessions,
   getActivePlanWithSessions,
   type PlanDto,
   type PlanSessionDto,
@@ -858,13 +858,19 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
 }
 
 /**
- * Les deux effets de bord qui suivent toute écriture de plan : rapprocher les
+ * Les deux effets de bord d'un plan **que l'athlète suit** : rapprocher les
  * séances des activités déjà en base, et republier le calendrier intervals.icu.
  *
- * Pourquoi le rapprochement : une séance (re)générée sur un jour déjà couru doit
- * s'afficher « réalisée », pas « manquée ». Les sorties du passé, elles, sont en
- * base depuis longtemps — personne ne les réimportera, donc rien d'autre ne
- * posera ce lien.
+ * Deux points d'appel, une seule politique — d'où l'export : l'ajustement du
+ * plan actif (ici même) et l'adoption d'une proposition (Server Action de la
+ * page « Plan »). Une génération, elle, n'y passe pas : elle n'écrit qu'une
+ * proposition, que rien ne pilote tant qu'elle n'est pas adoptée.
+ *
+ * Pourquoi le rapprochement : une séance (re)générée — ou adoptée quelques jours
+ * après avoir été proposée — sur un jour déjà couru doit s'afficher
+ * « réalisée », pas « manquée ». Les sorties du passé, elles, sont en base
+ * depuis longtemps — personne ne les réimportera, donc rien d'autre ne posera ce
+ * lien.
  *
  * Aucun des deux ne remonte : le plan est écrit et valide. Un rapprochement raté
  * se rattrape au prochain import ou au prochain ajustement, une synchronisation
@@ -881,7 +887,7 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
  *   fois trente secondes de délai de garde — autant de spinner pour un plan déjà
  *   écrit en base.
  */
-async function afterPlanWritten(planId: number): Promise<void> {
+export async function afterActivePlanChanged(planId: number): Promise<void> {
   try {
     await reconcilePlanSessions(planId);
   } catch (error) {
@@ -889,12 +895,17 @@ async function afterPlanWritten(planId: number): Promise<void> {
   }
 
   // Le catch vit dans le module de synchronisation : les trois points de
-  // branchement (création, ajustement, archivage) partagent la même garde.
+  // branchement (adoption, ajustement, archivage) partagent la même garde.
   after(() => syncPlanToIntervalsSafely(`plan ${planId}`));
 }
 
 /**
- * Écrit un plan d'entraînement complet et l'active (le précédent est archivé).
+ * Écrit un plan d'entraînement complet **en proposition** (`draft`).
+ *
+ * Le coach propose, il n'impose pas : rien du plan en cours ne bouge ici, et
+ * aucun effet de bord n'est déclenché. C'est l'athlète qui tranche depuis la
+ * page du plan — adopter la proposition l'active et archive le plan précédent
+ * ({@link acceptDraftPlan}), la refuser l'efface sans laisser de trace.
  *
  * @param progressId identifiant de suivi (UUID) généré par le formulaire, ou
  * `undefined`. Fourni, il fait streamer la génération et alimente le registre de
@@ -948,7 +959,7 @@ async function writeGeneratedPlan(
     estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
   });
 
-  const plan = await createPlanWithSessions({
+  return createDraftPlanWithSessions({
     goalType: request.goalType,
     level: request.level,
     goalText: request.goalText,
@@ -963,9 +974,6 @@ async function writeGeneratedPlan(
     summary: output.summary,
     sessions: mapPlanWeeksToSessions(output.weeks, window.anchor),
   });
-
-  await afterPlanWritten(plan.id);
-  return plan;
 }
 
 /*
@@ -1122,7 +1130,7 @@ async function writeUpdatedPlan(
     sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
     settings: settingsPatch(active.plan, output),
   });
-  await afterPlanWritten(active.plan.id);
+  await afterActivePlanChanged(active.plan.id);
 
   const refreshed = await getActivePlanWithSessions();
   if (refreshed === null) throw new PlanNotFoundError();
