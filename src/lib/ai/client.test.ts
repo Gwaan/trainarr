@@ -8,6 +8,7 @@ import { resetEnvCache } from '@/config/env';
 
 import {
   AI_REQUEST_TIMEOUT_MS,
+  AI_STREAM_IDLE_TIMEOUT_MS,
   aiEndpointUrl,
   chatCompletion,
   chatCompletionJson,
@@ -40,6 +41,34 @@ function completion(content: unknown): Response {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+/**
+ * Réponse SSE telle que la streame une API compatible OpenAI.
+ *
+ * Les morceaux sont enfilés **tels quels** : c'est ce qui permet d'éprouver une
+ * ligne coupée en deux par la frontière d'un chunk réseau, cas parfaitement
+ * banal sur un flux réel. `stall` laisse le flux ouvert sans jamais le fermer —
+ * le serveur muet du test de délai d'inactivité.
+ */
+function sseResponse(parts: string[], options: { stall?: boolean } = {}): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const part of parts) controller.enqueue(encoder.encode(part));
+      if (options.stall !== true) controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+/** Un événement de flux portant un fragment de contenu. */
+function deltaEvent(content: string): string {
+  return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}\n\n`;
 }
 
 function bodyOf(call: Call): Record<string, unknown> {
@@ -226,6 +255,240 @@ describe('chatCompletion', () => {
   });
 });
 
+describe('chatCompletion — streaming', () => {
+  /** Le flux nominal : rôle, trois fragments, sentinelle de fin. */
+  const NOMINAL = [
+    `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`,
+    deltaEvent('Bonne '),
+    deltaEvent('semaine : '),
+    deltaEvent('42 km.'),
+    'data: [DONE]\n\n',
+  ];
+
+  it('demande le flux et rend exactement le même contenu', async () => {
+    const { calls } = stubFetch(sseResponse(NOMINAL));
+
+    const answer = await chatCompletion({ messages: MESSAGES, onProgress: () => {} });
+
+    expect(answer).toBe('Bonne semaine : 42 km.');
+    expect(bodyOf(calls[0]).stream).toBe(true);
+  });
+
+  it('signale le nombre de caractères accumulés, chunk après chunk', async () => {
+    stubFetch(sseResponse(NOMINAL));
+    const received: number[] = [];
+
+    await chatCompletion({ messages: MESSAGES, onProgress: (chars) => received.push(chars) });
+
+    // Cumulatif, jamais par delta : c'est ce que le pourcentage attend.
+    expect(received).toEqual(['Bonne '.length, 'Bonne semaine : '.length, 'Bonne semaine : 42 km.'.length]);
+  });
+
+  it("recolle une ligne coupée entre deux chunks réseau", async () => {
+    const event = deltaEvent('Bonne semaine.');
+    stubFetch(sseResponse([event.slice(0, 20), event.slice(20), 'data: [DONE]\n\n']));
+
+    await expect(
+      chatCompletion({ messages: MESSAGES, onProgress: () => {} }),
+    ).resolves.toBe('Bonne semaine.');
+  });
+
+  it('ignore les lignes qui ne portent pas de données (ping, séparateurs)', async () => {
+    stubFetch(
+      sseResponse([': ping\n\n', deltaEvent('ok'), '\n', 'event: message\n', 'data: [DONE]\n\n']),
+    );
+
+    await expect(chatCompletion({ messages: MESSAGES, onProgress: () => {} })).resolves.toBe('ok');
+  });
+
+  it("s'arrête à [DONE] et ignore ce qui suivrait", async () => {
+    stubFetch(sseResponse([deltaEvent('ok'), 'data: [DONE]\n\n', deltaEvent(' et la suite')]));
+
+    await expect(chatCompletion({ messages: MESSAGES, onProgress: () => {} })).resolves.toBe('ok');
+  });
+
+  it('garde le dernier événement quand le flux se ferme sans sentinelle', async () => {
+    // Ni `[DONE]`, ni saut de ligne final : le fragment dort dans le tampon de
+    // recollage. Perdu, il produirait un JSON tronqué inexplicable.
+    stubFetch(sseResponse([deltaEvent('Bonne '), `data: ${JSON.stringify({
+      choices: [{ delta: { content: 'semaine.' } }],
+    })}`]));
+
+    await expect(chatCompletion({ messages: MESSAGES, onProgress: () => {} })).resolves.toBe(
+      'Bonne semaine.',
+    );
+  });
+
+  it("ne lit pas le flux quand le statut n'est pas 2xx, et libère la connexion", async () => {
+    const { calls } = stubFetch(new Response('boom', { status: 503 }));
+    const onProgress = vi.fn();
+
+    const error = await chatCompletion({ messages: MESSAGES, onProgress }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AiResponseError);
+    expect((error as AiResponseError).status).toBe(503);
+    expect(onProgress).not.toHaveBeenCalled();
+    // Corps d'erreur jamais lu : sans abandon, la requête resterait ouverte.
+    expect(calls[0].init?.signal?.aborted).toBe(true);
+  });
+
+  it('lève AiResponseError en portant le message d\'un événement d\'erreur du flux', async () => {
+    // llama-server publie ainsi une panne survenue après les en-têtes (contexte
+    // dépassé, par exemple) : statut 200, puis un événement d'erreur.
+    stubFetch(
+      sseResponse([
+        deltaEvent('Semaine 1'),
+        `data: ${JSON.stringify({
+          error: { code: 500, message: 'the request exceeds the available context size', type: 'server_error' },
+        })}\n\n`,
+      ]),
+    );
+
+    const error = await chatCompletion({ messages: MESSAGES, onProgress: () => {} }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AiResponseError);
+    expect((error as AiResponseError).message).toContain(
+      'the request exceeds the available context size',
+    );
+  });
+
+  it("ne prend pas un `error: null` de chunk sain pour une panne", async () => {
+    stubFetch(
+      sseResponse([
+        `data: ${JSON.stringify({ error: null, choices: [{ delta: { content: 'ok' } }] })}\n\n`,
+        'data: [DONE]\n\n',
+      ]),
+    );
+
+    await expect(chatCompletion({ messages: MESSAGES, onProgress: () => {} })).resolves.toBe('ok');
+  });
+
+  it('lève AiResponseError sur un chunk hors protocole', async () => {
+    stubFetch(sseResponse(['data: {ceci n\'est pas du json}\n\n', 'data: [DONE]\n\n']));
+
+    await expect(
+      chatCompletion({ messages: MESSAGES, onProgress: () => {} }),
+    ).rejects.toBeInstanceOf(AiResponseError);
+  });
+
+  it('lève AiResponseError quand le flux se termine sans rien avoir dit', async () => {
+    stubFetch(sseResponse(['data: [DONE]\n\n']));
+
+    await expect(
+      chatCompletion({ messages: MESSAGES, onProgress: () => {} }),
+    ).rejects.toBeInstanceOf(AiResponseError);
+  });
+
+  it('abandonne un flux qui se tait plus longtemps que le délai d\'inactivité', async () => {
+    vi.useFakeTimers();
+    try {
+      // Un premier fragment, puis plus rien : le délai de garde global (5 min)
+      // laisserait attendre quatre minutes de plus pour rien.
+      stubFetch(sseResponse([deltaEvent('Bonne ')], { stall: true }));
+
+      const pending = chatCompletion({ messages: MESSAGES, onProgress: () => {} }).catch(
+        (caught: unknown) => caught,
+      );
+      await vi.advanceTimersByTimeAsync(AI_STREAM_IDLE_TIMEOUT_MS + 1);
+      const error = await pending;
+
+      expect(error).toBeInstanceOf(AiUnavailableError);
+      expect((error as AiUnavailableError).reason).toBe('unreachable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** Un flux laissé ouvert, dont le test décide quand et quoi émettre. */
+  function openStream(): { calls: Call[]; push: (part: string) => void; close: () => void } {
+    const encoder = new TextEncoder();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const { calls } = stubFetch(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            stream = controller;
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+
+    return {
+      calls,
+      push: (part) => stream.enqueue(encoder.encode(part)),
+      close: () => stream.close(),
+    };
+  }
+
+  it('laisse courir un flux vivant au-delà du délai de garde global', async () => {
+    vi.useFakeTimers();
+    try {
+      // Un flux qui n'a pas fini de parler ne doit pas être coupé sur la seule
+      // durée : c'est le cas nominal d'un plan de douze semaines écrit par un
+      // petit modèle local. Passé le premier chunk, seul le silence entre deux
+      // chunks fait foi.
+      const { calls, push, close } = openStream();
+
+      const pending = chatCompletion({
+        messages: MESSAGES,
+        timeoutMs: 1_000,
+        onProgress: () => {},
+      });
+
+      push(deltaEvent('Bonne '));
+      for (const fragment of ['semaine : ', '42 km.']) {
+        // Chaque silence reste sous le délai d'inactivité, mais leur somme
+        // dépasse très largement le délai de garde demandé.
+        await vi.advanceTimersByTimeAsync(AI_STREAM_IDLE_TIMEOUT_MS / 2);
+        push(deltaEvent(fragment));
+      }
+      push('data: [DONE]\n\n');
+      close();
+
+      await expect(pending).resolves.toBe('Bonne semaine : 42 km.');
+      expect(calls[0].init?.signal?.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("laisse au pré-remplissage du prompt tout le délai de garde global", async () => {
+    vi.useFakeTimers();
+    try {
+      // Avant le premier chunk, le serveur charge le prompt dans son contexte
+      // sans rien pouvoir émettre : sur CPU, ce silence-là dépasse la minute
+      // d'inactivité. Le mesurer ainsi tuerait une génération parfaitement
+      // saine, que le régime non streamé laisserait courir cinq minutes.
+      const { calls, push, close } = openStream();
+
+      const pending = chatCompletion({ messages: MESSAGES, onProgress: () => {} });
+
+      await vi.advanceTimersByTimeAsync(AI_STREAM_IDLE_TIMEOUT_MS + 1);
+      push(deltaEvent('Bonne semaine.'));
+      push('data: [DONE]\n\n');
+      close();
+
+      await expect(pending).resolves.toBe('Bonne semaine.');
+      expect(calls[0].init?.signal?.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ne streame pas sans callback — le mode par défaut est inchangé', async () => {
+    const { calls } = stubFetch(completion('ok'));
+
+    await chatCompletion({ messages: MESSAGES });
+
+    expect(bodyOf(calls[0])).not.toHaveProperty('stream');
+  });
+});
+
 describe('chatCompletionJson', () => {
   const sessionSchema = z.object({
     distanceKm: z.number().positive(),
@@ -309,6 +572,25 @@ describe('chatCompletionJson', () => {
     expect(error).toBeInstanceOf(AiInvalidOutputError);
     const { issues } = error as AiInvalidOutputError;
     expect(issues.map((issue) => issue.path.join('.'))).toEqual(['distanceKm', 'intensity']);
+  });
+
+  it('valide un JSON reçu au fil de l\'eau exactement comme un JSON reçu d\'un coup', async () => {
+    const json = '{"distanceKm": 12.5, "intensity": "seuil"}';
+    stubFetch(
+      sseResponse([deltaEvent(json.slice(0, 15)), deltaEvent(json.slice(15)), 'data: [DONE]\n\n']),
+    );
+    const received: number[] = [];
+
+    await expect(
+      chatCompletionJson({
+        messages: MESSAGES,
+        schemaName: 'seance',
+        jsonSchema,
+        schema: sessionSchema,
+        onProgress: (chars) => received.push(chars),
+      }),
+    ).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
+    expect(received).toEqual([15, json.length]);
   });
 
   it('propage les erreurs de transport sans les requalifier', async () => {

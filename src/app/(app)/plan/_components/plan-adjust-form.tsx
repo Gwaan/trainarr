@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { updatePlanAction, type PlanUpdateState } from "../_lib/actions";
+import { GenerationProgressBar, useGenerationProgress } from "./generation-progress";
 
 /**
  * Ajustement du plan par instruction en langage naturel.
@@ -39,14 +40,21 @@ export function PlanAdjustForm() {
     if (state.status === "success") setInstruction("");
   }
 
+  const { submitWithProgress, progress } = useGenerationProgress(isPending, formAction);
+
   const fieldId = `${uid}-instruction`;
   const error = state.fieldErrors?.instruction;
   const hasFeedback = isPending || state.status === "error";
 
+  // Suivi de la progression par l'action enveloppante — cf. `plan-form.tsx`.
   return (
-    <form action={formAction} noValidate className="flex flex-col gap-3">
+    <form action={submitWithProgress} noValidate className="flex flex-col gap-3">
       <div aria-live="polite" className={hasFeedback ? undefined : "sr-only"}>
-        {isPending ? <Banner tone="neutral" title={PENDING_MESSAGE} /> : null}
+        {isPending ? (
+          <Banner tone="neutral" title={PENDING_MESSAGE}>
+            {progress === null ? null : <GenerationProgressBar progress={progress} />}
+          </Banner>
+        ) : null}
         {!isPending && state.status === "error" ? (
           <Banner
             tone="negative"

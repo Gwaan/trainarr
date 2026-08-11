@@ -110,6 +110,22 @@ function textField(formData: FormData, name: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * Identifiant de suivi de la progression, tiré par le formulaire
+ * (`crypto.randomUUID()`) et transmis en champ caché.
+ *
+ * Facultatif par construction : un id absent ou mal formé ne fait **pas** échouer
+ * une génération de plusieurs minutes pour un confort d'affichage. Le service
+ * s'en passe alors — pas de streaming, pas de barre, la bannière d'attente
+ * seule.
+ */
+const progressIdSchema = z.uuid();
+
+function progressIdOf(formData: FormData): string | undefined {
+  const parsed = progressIdSchema.safeParse(textField(formData, 'progressId'));
+  return parsed.success ? parsed.data : undefined;
+}
+
 /** Choix d'une liste déroulante : un entier borné, transmis sous forme de chaîne. */
 function boundedInteger(bounds: { min: number; max: number }, message: string) {
   return z
@@ -361,7 +377,7 @@ export async function createPlanAction(
   };
 
   try {
-    await generatePlan(request);
+    await generatePlan(request, progressIdOf(formData));
   } catch (error) {
     if (error instanceof InvalidPlanError) {
       const field = FIELD_OF_PLAN_INPUT[error.field];
@@ -412,7 +428,7 @@ export async function updatePlanAction(
   }
 
   try {
-    await updatePlanFromInstruction(parsed.data);
+    await updatePlanFromInstruction(parsed.data, progressIdOf(formData));
   } catch (error) {
     if (error instanceof InvalidPlanError) {
       return { status: 'error', message: error.message };

@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 
 import { createPlanAction, type PlanFormState } from "../_lib/actions";
 import { formatCivilDay } from "../_lib/format-plan";
+import { GenerationProgressBar, useGenerationProgress } from "./generation-progress";
 import {
   DEFAULT_LEVEL,
   DEFAULT_LONG_RUN_DAY,
@@ -254,18 +255,30 @@ export function PlanForm({
   const uid = useId();
   const fieldId = (name: string) => `${uid}-${name}`;
 
+  const { submitWithProgress, progress } = useGenerationProgress(isPending, formAction);
+
   const errors = state.fieldErrors;
   const hasFeedback = isPending || state.status === "error";
 
+  // L'action passe par le hook de progression : il ajoute au `FormData` un
+  // identifiant de suivi neuf, tiré par le navigateur, qui ne désigne que
+  // l'avancement de cette génération-là (cf. la route `/api/plan-progress`).
   return (
-    <form action={formAction} noValidate className="flex flex-col gap-4 sm:gap-5">
+    <form action={submitWithProgress} noValidate className="flex flex-col gap-4 sm:gap-5">
       {/*
         Région live permanente : elle doit exister avant la mise à jour pour que
         le retour d'action soit annoncé. Sans message, `sr-only` la sort du flux,
         donc de l'espacement de la colonne.
       */}
       <div aria-live="polite" className={hasFeedback ? undefined : "sr-only"}>
-        {isPending ? <Banner tone="neutral" title={PENDING_MESSAGE} /> : null}
+        {isPending ? (
+          <Banner tone="neutral" title={PENDING_MESSAGE}>
+            {/* Avant la première mesure, la bannière seule : annoncer « 0 % »
+                sur une génération qui n'a pas encore écrit un mot ne dirait rien
+                de plus que le message. */}
+            {progress === null ? null : <GenerationProgressBar progress={progress} />}
+          </Banner>
+        ) : null}
         {!isPending && state.status === "error" ? (
           <Banner tone="negative" title={state.message ?? GENERIC_FAILURE} />
         ) : null}

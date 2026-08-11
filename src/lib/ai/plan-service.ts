@@ -67,6 +67,7 @@ import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import { requireAi } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
 import { AiInvalidOutputError, type AiOutputIssue } from './errors';
+import { clearPlanProgress, setPlanProgress } from './progress';
 import {
   formatCivilDate,
   formatDistanceKm,
@@ -158,6 +159,79 @@ const PLAN_TEMPERATURE = 0.3;
  * fréquent d'un petit modèle qui corrige une faute en en introduisant une autre.
  */
 const MAX_ATTEMPTS = 3;
+
+/*
+ * Progression affichée.
+ *
+ * Une génération dure des minutes : l'athlète doit voir avancer quelque chose de
+ * **réel**, pas une rotative. La seule mesure disponible à cet instant est le
+ * nombre de caractères déjà écrits par le modèle (cf. `onProgress` de
+ * `client.ts`) ; il ne devient un pourcentage qu'à condition de savoir combien
+ * de caractères la sortie complète en compte. D'où l'estimation ci-dessous.
+ */
+
+/**
+ * Poids moyen d'une séance dans la sortie JSON, en caractères.
+ *
+ * Mesuré, pas deviné : la fixture de `plan-service.test.ts` (« calibrage de
+ * l'estimation ») sérialise des semaines conformes à `COACH_RULES` en JSON
+ * compact — le format que produit une génération contrainte par grammaire — et
+ * le test vérifie que l'estimation reste dans ±25 % de leur taille réelle.
+ * Refaire la mesure si le schéma de sortie change.
+ *
+ * Ce qu'elle donne, séance par séance :
+ *
+ * - séance de qualité, `steps` **obligatoire** (échauffement, blocs répétés avec
+ *   récupération, retour au calme, allures aux deux bornes) : **476 à 481** ;
+ * - footing ou sortie longue sans `steps`, avec distance, durée et allure
+ *   cible : **120 à 123**.
+ *
+ * La méthodologie plafonne les séances de qualité à 2 par semaine, sur 3 à 5
+ * séances : le poids par séance dépend donc du nombre de séances, ce qu'une
+ * constante unique ne peut pas rendre. Semaines complètes mesurées, enveloppe
+ * comprise, ramenées à la séance :
+ *
+ *     3 séances (1 qualité) → 742 / 3 ≈ 247
+ *     4 séances (2 qualité) → 1219 / 4 ≈ 305
+ *     5 séances (2 qualité) → 1341 / 5 ≈ 268
+ *
+ * D'où **280**, au milieu de cet intervalle — l'écart résiduel va de −8 % à
+ * +13 % sur les configurations mesurées, et c'est assumé : l'objectif est une
+ * barre plausible, pas une prédiction.
+ *
+ * Sous-estimer fait plafonner la barre à 99 % avant la fin, surestimer la fait
+ * terminer trop bas : les deux se voient, aucun des deux ne ment (le plafond à
+ * 99 % garantit qu'on n'annonce jamais « terminé » avant de l'être). Un modèle
+ * qui indenterait sa sortie produirait sensiblement plus de caractères et
+ * tomberait dans le premier cas.
+ */
+const CHARS_PER_SESSION = 280;
+
+/**
+ * Ce que la sortie coûte en dehors des séances : le résumé (3 à 5 phrases, 449
+ * caractères mesurés sur le résumé de la fixture) et l'enveloppe JSON (25).
+ * Arrondi au demi-millier supérieur, la marge étant négligeable devant le poids
+ * des séances.
+ */
+const CHARS_OVERHEAD = 500;
+
+/**
+ * Taille attendue de la sortie du modèle, en caractères — l'échelle du
+ * pourcentage affiché. Exportée pour être éprouvée : une estimation fausse
+ * d'un ordre de grandeur donnerait une barre absurde.
+ */
+export function estimatePlanChars(weeks: number, sessionsPerWeek: number): number {
+  return weeks * sessionsPerWeek * CHARS_PER_SESSION + CHARS_OVERHEAD;
+}
+
+/**
+ * Le pourcentage affiché, **plafonné à 99** : tant que la validation Zod et les
+ * règles métier n'ont pas parlé, la génération n'est pas terminée — et une barre
+ * à 100 % qui dure encore une minute est pire que pas de barre du tout.
+ */
+export function planProgressPercent(receivedChars: number, estimatedChars: number): number {
+  return Math.min(99, Math.round((100 * receivedChars) / estimatedChars));
+}
 
 /**
  * Premier jour du programme : celui que l'athlète a choisi, sinon **aujourd'hui**.
@@ -648,6 +722,13 @@ type GenerationOptions<T> = {
    * `validatePlanBusinessRules`). Vient du snapshot, des deux côtés.
    */
   referencePaceSecPerKm: number | null;
+  /**
+   * Identifiant de suivi fourni par le client, ou `undefined` : la génération se
+   * déroule alors sans streaming ni progression, exactement comme avant.
+   */
+  progressId?: string;
+  /** Taille attendue de la sortie ({@link estimatePlanChars}) — l'échelle du pourcentage. */
+  estimatedChars: number;
 };
 
 /**
@@ -702,7 +783,16 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
   const messages = [...options.messages];
   let violations: string[] = [];
 
+  const { progressId } = options;
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    // Chaque tentative repart de zéro : une reprise réécrit le plan complet,
+    // donc le pourcentage recommence — et le front dit « tentative 2/3 » plutôt
+    // que de laisser une barre reculer sans explication.
+    if (progressId !== undefined) {
+      setPlanProgress(progressId, { percent: 0, attempt, maxAttempts: MAX_ATTEMPTS });
+    }
+
     let output: T;
     try {
       output = await chatCompletionJson<T>({
@@ -711,6 +801,17 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
         jsonSchema: options.jsonSchema,
         schema: options.schema,
         temperature: PLAN_TEMPERATURE,
+        // Sa seule présence bascule l'appel en streaming (cf. `client.ts`).
+        onProgress:
+          progressId === undefined
+            ? undefined
+            : (receivedChars) => {
+                setPlanProgress(progressId, {
+                  percent: planProgressPercent(receivedChars, options.estimatedChars),
+                  attempt,
+                  maxAttempts: MAX_ATTEMPTS,
+                });
+              },
       });
     } catch (error) {
       if (!(error instanceof AiInvalidOutputError)) throw error;
@@ -795,17 +896,39 @@ async function afterPlanWritten(planId: number): Promise<void> {
 /**
  * Écrit un plan d'entraînement complet et l'active (le précédent est archivé).
  *
+ * @param progressId identifiant de suivi (UUID) généré par le formulaire, ou
+ * `undefined`. Fourni, il fait streamer la génération et alimente le registre de
+ * progression que lit `GET /api/plan-progress` ; il est effacé quoi qu'il
+ * arrive, une entrée oubliée décrirait indéfiniment une génération finie.
+ *
  * @throws {AiUnavailableError} si le coach n'est pas joignable.
  * @throws {InvalidPlanError} si la demande ne définit pas une fenêtre valide.
  * @throws {AiInvalidOutputError} si le plan produit reste hors des contraintes
  * après une reprise.
  */
-export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
+export async function generatePlan(request: PlanRequest, progressId?: string): Promise<PlanDto> {
   await requireAi();
 
   const window = planWindow(request, todayCivilDate());
   const snapshot = await getTrainingSnapshot();
 
+  try {
+    return await writeGeneratedPlan(request, window, snapshot, progressId);
+  } finally {
+    // L'écriture en base est incluse dans le suivi : sans cela, la dernière
+    // interrogation du formulaire tomberait sur `null` alors que l'attente dure
+    // encore, et la barre disparaîtrait juste avant la fin.
+    if (progressId !== undefined) clearPlanProgress(progressId);
+  }
+}
+
+/** Le corps de {@link generatePlan}, isolé pour que l'effacement du suivi tienne en un `finally`. */
+async function writeGeneratedPlan(
+  request: PlanRequest,
+  window: PlanWindow,
+  snapshot: TrainingSnapshotDto,
+  progressId: string | undefined,
+): Promise<PlanDto> {
   const output = await generateWithBusinessRules({
     messages: buildPlanMessages(request, window, snapshot),
     schemaName: 'training_plan',
@@ -821,6 +944,8 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
       firstWeekFromDay: window.firstWeekFromDay,
     }),
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    progressId,
+    estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
   });
 
   const plan = await createPlanWithSessions({
@@ -928,13 +1053,31 @@ function settingsPatch(plan: PlanDto, output: PlanUpdateOutput): PlanSettingsPat
  * protégées par le DAL ({@link applyPlanUpdate}) — quoi que dise le modèle, il
  * ne réécrit pas le passé.
  *
+ * @param progressId identifiant de suivi (UUID) généré par le formulaire — même
+ * rôle et même cycle de vie qu'à la génération (cf. {@link generatePlan}).
+ *
  * @throws {AiUnavailableError} si le coach n'est pas joignable.
  * @throws {PlanNotFoundError} s'il n'y a pas de plan actif.
  * @throws {InvalidPlanError} si le plan est terminé, ou si les séances produites
  * sortent de sa fenêtre.
  * @throws {AiInvalidOutputError} si la sortie reste hors contraintes après reprise.
  */
-export async function updatePlanFromInstruction(instruction: string): Promise<PlanDto> {
+export async function updatePlanFromInstruction(
+  instruction: string,
+  progressId?: string,
+): Promise<PlanDto> {
+  try {
+    return await writeUpdatedPlan(instruction, progressId);
+  } finally {
+    if (progressId !== undefined) clearPlanProgress(progressId);
+  }
+}
+
+/** Le corps de {@link updatePlanFromInstruction} — cf. {@link writeGeneratedPlan}. */
+async function writeUpdatedPlan(
+  instruction: string,
+  progressId: string | undefined,
+): Promise<PlanDto> {
   await requireAi();
 
   const active = await getActivePlanWithSessions();
@@ -965,6 +1108,11 @@ export async function updatePlanFromInstruction(instruction: string): Promise<Pl
       firstWeekFromDay: window.firstWeekFromDay,
     }),
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    progressId,
+    // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,
+    // elle, se cale sur ceux d'aujourd'hui — c'est une estimation, pas un
+    // contrat.
+    estimatedChars: estimatePlanChars(window.weeks, active.plan.sessionsPerWeek),
   });
 
   // Séances et réglages en une seule transaction : un plan ne doit jamais

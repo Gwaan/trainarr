@@ -74,6 +74,7 @@ describe('createPlanAction — date de course', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ goalType: 'race', raceDate: LATEST_RACE }),
+      undefined,
     );
   });
 
@@ -101,6 +102,7 @@ describe('createPlanAction — niveau', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ level: 'advanced' }),
+      undefined,
     );
   });
 
@@ -125,6 +127,7 @@ describe('createPlanAction — date de démarrage', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ startsOn: undefined }),
+      undefined,
     );
   });
 
@@ -134,6 +137,7 @@ describe('createPlanAction — date de démarrage', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ startsOn: TODAY }),
+      undefined,
     );
   });
 
@@ -145,6 +149,7 @@ describe('createPlanAction — date de démarrage', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ startsOn: '2026-08-13' }),
+      undefined,
     );
   });
 
@@ -154,7 +159,10 @@ describe('createPlanAction — date de démarrage', () => {
     const state = await createPlanAction(IDLE, form({ startsOn, raceDate: '2026-11-15' }));
 
     expect(state.status).toBe('success');
-    expect(mocks.generatePlan).toHaveBeenCalledWith(expect.objectContaining({ startsOn }));
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ startsOn }),
+      undefined,
+    );
   });
 
   it('refuse un démarrage passé, sur le champ, sans appeler le coach', async () => {
@@ -208,6 +216,31 @@ describe('createPlanAction — date de démarrage', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ goalType: 'free', weeks: 8, startsOn: '2026-09-07' }),
+      undefined,
     );
   });
+});
+
+describe('createPlanAction — suivi de la progression', () => {
+  const PROGRESS_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+  it("transmet l'identifiant de suivi au service", async () => {
+    const state = await createPlanAction(IDLE, form({ progressId: PROGRESS_ID }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(expect.objectContaining({}), PROGRESS_ID);
+  });
+
+  it.each(['', 'pas-un-uuid', '<script>'])(
+    'ignore un identifiant mal formé (%s) sans refuser la génération',
+    async (progressId) => {
+      // Un endpoint public reçoit n'importe quoi dans ce champ. Il ne porte
+      // qu'un confort d'affichage : le refuser coûterait une génération de
+      // plusieurs minutes pour rien.
+      const state = await createPlanAction(IDLE, form({ progressId }));
+
+      expect(state.status).toBe('success');
+      expect(mocks.generatePlan).toHaveBeenCalledWith(expect.objectContaining({}), undefined);
+    },
+  );
 });

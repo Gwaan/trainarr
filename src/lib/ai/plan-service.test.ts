@@ -12,12 +12,16 @@ import {
   buildPlanUpdateMessages,
   buildSchemaIssuesMessage,
   buildViolationsMessage,
+  estimatePlanChars,
   generatePlan,
+  planProgressPercent,
   planWindow,
   remainingPlanWindow,
   updatePlanFromInstruction,
   type PlanRequest,
 } from './plan-service';
+// Le registre n'est pas mocké : ce qu'on éprouve, c'est ce que la route lira.
+import { getPlanProgress, type PlanProgress } from './progress';
 
 // Les modules serveur commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
@@ -1218,5 +1222,260 @@ describe('updatePlanFromInstruction', () => {
 
     await expect(updatePlanFromInstruction('allège')).rejects.toThrow(AiUnavailableError);
     expect(dal.getActivePlanWithSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe("estimatePlanChars — calibrage de l'estimation", () => {
+  /*
+   * La fixture qui étalonne `CHARS_PER_SESSION`.
+   *
+   * Ces séances ne servent aucune règle métier : elles ne sont là que pour être
+   * **pesées**. Elles suivent `COACH_RULES` au pied de la lettre — `steps`
+   * obligatoire sur une séance de qualité (échauffement, blocs répétés portant
+   * leur récupération, retour au calme), allures aux deux bornes, distance et
+   * durée déclarées au niveau de la séance — parce que c'est cette sortie-là que
+   * le modèle écrit, et donc celle dont le pourcentage mesure l'avancement.
+   */
+
+  /** Séance de qualité au seuil : 3 blocs, dont un répété 3 fois. */
+  const THRESHOLD = {
+    day: 2,
+    kind: 'Seuil',
+    title: '3 × 10 min au seuil',
+    targetPaceSecPerKm: 255,
+    distanceKm: 13,
+    durationMin: 68,
+    steps: [
+      { steps: [{ role: 'warmup', durationS: 900, paceMinSecPerKm: 330, paceMaxSecPerKm: 345 }] },
+      {
+        repeat: 3,
+        steps: [
+          { role: 'run', durationS: 600, paceMinSecPerKm: 250, paceMaxSecPerKm: 260 },
+          { role: 'recover', durationS: 120, paceMinSecPerKm: 390, paceMaxSecPerKm: 420 },
+        ],
+      },
+      { steps: [{ role: 'cooldown', durationS: 600, paceMinSecPerKm: 345, paceMaxSecPerKm: 360 }] },
+    ],
+  };
+
+  /** Séance de VMA : même forme, 5 répétitions plus courtes. */
+  const INTERVALS = {
+    day: 4,
+    kind: 'VMA',
+    title: '5 × 3 min à VMA',
+    targetPaceSecPerKm: 240,
+    distanceKm: 12,
+    durationMin: 60,
+    steps: [
+      { steps: [{ role: 'warmup', durationS: 1200, paceMinSecPerKm: 330, paceMaxSecPerKm: 345 }] },
+      {
+        repeat: 5,
+        steps: [
+          { role: 'run', durationS: 180, paceMinSecPerKm: 225, paceMaxSecPerKm: 235 },
+          { role: 'recover', durationS: 180, paceMinSecPerKm: 400, paceMaxSecPerKm: 430 },
+        ],
+      },
+      { steps: [{ role: 'cooldown', durationS: 600, paceMinSecPerKm: 345, paceMaxSecPerKm: 360 }] },
+    ],
+  };
+
+  const EASY = {
+    day: 3,
+    kind: 'Endurance fondamentale',
+    title: 'Footing 10 km',
+    targetPaceSecPerKm: 335,
+    distanceKm: 10,
+    durationMin: 56,
+  };
+
+  const SECOND_EASY = {
+    day: 5,
+    kind: 'Endurance fondamentale',
+    title: 'Footing 8 km',
+    targetPaceSecPerKm: 335,
+    distanceKm: 8,
+    durationMin: 45,
+  };
+
+  const LONG_RUN = {
+    day: 7,
+    kind: 'Sortie longue',
+    title: '18 km en endurance',
+    targetPaceSecPerKm: 340,
+    distanceKm: 18,
+    durationMin: 102,
+  };
+
+  /** Un résumé de 4 phrases, au milieu des 3 à 5 que la méthodologie demande. */
+  const SUMMARY =
+    'Bloc de 12 semaines vers le semi-marathon : quatre séances par semaine, une ' +
+    'séance de seuil et une séance de VMA en alternance, la sortie longue le ' +
+    'dimanche. Le volume monte progressivement de 38 à 58 km, avec une semaine ' +
+    'allégée toutes les trois semaines. Les allures sont calées sur ton allure ' +
+    'moyenne récente, pas sur un modèle générique. Point de vigilance : ta charge ' +
+    'récente est basse, la première semaine reste volontairement conservatrice.';
+
+  /** Ce que le modèle écrit vraiment : le plan sérialisé en JSON compact. */
+  function serializedPlanChars(sessions: unknown[], weeks: number): number {
+    return JSON.stringify({
+      summary: SUMMARY,
+      weeks: Array.from({ length: weeks }, () => ({ sessions })),
+    }).length;
+  }
+
+  // Au plus 2 séances de qualité par semaine, quel que soit le nombre de
+  // séances : c'est ce plafond méthodologique qui fait varier le poids moyen
+  // d'une séance d'une configuration à l'autre.
+  const WEEKS = [
+    { label: '3 séances, 1 qualité', sessions: [THRESHOLD, EASY, LONG_RUN] },
+    { label: '4 séances, 2 qualité', sessions: [THRESHOLD, INTERVALS, EASY, LONG_RUN] },
+    { label: '5 séances, 2 qualité', sessions: [THRESHOLD, INTERVALS, EASY, SECOND_EASY, LONG_RUN] },
+  ];
+
+  it.each(WEEKS)('tient à un quart près de la sortie réelle — $label', ({ sessions }) => {
+    // La borne qui compte vraiment. En dessous, la barre saturerait à 99 % bien
+    // avant la fin ; au-dessus, elle terminerait loin du compte. ±25 % est le
+    // pire écart que le calibrage laisse passer, et il reste invisible à l'œil
+    // sur une barre.
+    const real = serializedPlanChars(sessions, 12);
+    const estimated = estimatePlanChars(12, sessions.length);
+
+    expect(estimated / real).toBeGreaterThan(0.75);
+    expect(estimated / real).toBeLessThan(1.25);
+  });
+
+  it('croît avec les semaines et avec les séances', () => {
+    expect(estimatePlanChars(8, 4)).toBeGreaterThan(estimatePlanChars(4, 4));
+    expect(estimatePlanChars(8, 5)).toBeGreaterThan(estimatePlanChars(8, 4));
+  });
+
+  it("compte chaque séance dans l'ordre de grandeur d'une séance écrite", () => {
+    // La marge d'une séance de plus reste bornée par les deux extrêmes mesurés :
+    // un footing sans déroulé, et une séance de qualité avec le sien.
+    const marginal = estimatePlanChars(1, 4) - estimatePlanChars(1, 3);
+
+    expect(marginal).toBeGreaterThanOrEqual(JSON.stringify(EASY).length);
+    expect(marginal).toBeLessThanOrEqual(JSON.stringify(THRESHOLD).length);
+  });
+
+  it('reste positif sur le plus petit plan possible', () => {
+    expect(estimatePlanChars(1, 1)).toBeGreaterThan(0);
+  });
+});
+
+describe('planProgressPercent', () => {
+  it('rend la part reçue de la sortie attendue', () => {
+    expect(planProgressPercent(0, 1_000)).toBe(0);
+    expect(planProgressPercent(425, 1_000)).toBe(43);
+  });
+
+  it("ne dépasse jamais 99 % — la génération n'est finie qu'une fois validée", () => {
+    expect(planProgressPercent(1_000, 1_000)).toBe(99);
+    expect(planProgressPercent(9_000, 1_000)).toBe(99);
+  });
+});
+
+describe('progression de la génération', () => {
+  const PROGRESS_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+  /** Ce que `chatCompletionJson` reçoit, réduit à ce que ces tests consomment. */
+  type JsonCall = { onProgress?: (receivedChars: number) => void };
+
+  /**
+   * Le plan attendu par `REQUEST` : deux semaines de trois séances. Son
+   * estimation sert d'échelle aux pourcentages ci-dessous.
+   */
+  const ESTIMATED = estimatePlanChars(2, 3);
+
+  it('alimente le registre au fil du flux, puis efface son entrée', async () => {
+    const seen: (PlanProgress | null)[] = [];
+    chatCompletionJson.mockImplementation(async (options: JsonCall) => {
+      seen.push(getPlanProgress(PROGRESS_ID));
+      options.onProgress?.(Math.round(ESTIMATED / 4));
+      seen.push(getPlanProgress(PROGRESS_ID));
+      options.onProgress?.(Math.round(ESTIMATED / 2));
+      seen.push(getPlanProgress(PROGRESS_ID));
+      return { summary: 'Deux semaines de reprise.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] };
+    });
+
+    await generatePlan(REQUEST, PROGRESS_ID);
+
+    // Une entrée existe dès avant le premier chunk : la barre apparaît sans
+    // attendre que le modèle ait écrit quoi que ce soit.
+    expect(seen.map((progress) => progress?.percent)).toEqual([0, 25, 50]);
+    expect(seen[2]).toMatchObject({ attempt: 1, maxAttempts: 3 });
+    // Effacée en `finally` : plus rien à lire une fois le plan écrit.
+    expect(getPlanProgress(PROGRESS_ID)).toBeNull();
+  });
+
+  it('remet le pourcentage à zéro et compte la tentative à chaque reprise', async () => {
+    const attempts: (PlanProgress | null)[] = [];
+    chatCompletionJson
+      .mockImplementationOnce(async (options: JsonCall) => {
+        attempts.push(getPlanProgress(PROGRESS_ID));
+        options.onProgress?.(ESTIMATED);
+        return { summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] };
+      })
+      .mockImplementationOnce(async (options: JsonCall) => {
+        // La reprise réécrit le plan complet : laisser la barre à 99 % pendant
+        // toute la seconde génération serait un mensonge.
+        attempts.push(getPlanProgress(PROGRESS_ID));
+        options.onProgress?.(Math.round(ESTIMATED / 10));
+        attempts.push(getPlanProgress(PROGRESS_ID));
+        return { summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] };
+      });
+
+    await generatePlan(REQUEST, PROGRESS_ID);
+
+    expect(attempts[0]).toMatchObject({ percent: 0, attempt: 1, maxAttempts: 3 });
+    expect(attempts[1]).toMatchObject({ percent: 0, attempt: 2, maxAttempts: 3 });
+    expect(attempts[2]).toMatchObject({ percent: 10, attempt: 2 });
+  });
+
+  it("efface l'entrée même quand la génération échoue", async () => {
+    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
+
+    await expect(generatePlan(REQUEST, PROGRESS_ID)).rejects.toThrow(AiInvalidOutputError);
+
+    expect(getPlanProgress(PROGRESS_ID)).toBeNull();
+  });
+
+  it('suit aussi un ajustement de plan', async () => {
+    // Le plan actif du bloc « updatePlanFromInstruction » : deux semaines, dont
+    // la première est déjà entamée (reprise à partir de demain).
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
+      sessions: [],
+    });
+    let during: PlanProgress | null = null;
+    chatCompletionJson.mockImplementation(async (options: JsonCall) => {
+      options.onProgress?.(1_000);
+      during = getPlanProgress(PROGRESS_ID);
+      return {
+        summary: 'Ajusté.',
+        weeks: [
+          { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+          CONFORMING_WEEK,
+        ],
+      };
+    });
+
+    await updatePlanFromInstruction('allège la semaine prochaine', PROGRESS_ID);
+
+    expect(during).toMatchObject({ attempt: 1, maxAttempts: 3 });
+    expect(getPlanProgress(PROGRESS_ID)).toBeNull();
+  });
+
+  it('ne streame pas et ne suit rien sans identifiant', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    // Sans callback, `client.ts` reste en mode non-streamé : rien ne change pour
+    // les appelants qui n'affichent pas de progression.
+    expect(chatCompletionJson.mock.calls[0][0].onProgress).toBeUndefined();
   });
 });
