@@ -39,6 +39,12 @@ describe('planEndsOn', () => {
     expect(planEndsOn({ startsOn: '2026-08-17', weeks: 4 })).toBe('2026-09-13');
     expect(planEndsOn({ startsOn: '2026-08-17', weeks: 1 })).toBe('2026-08-23');
   });
+
+  it('compte depuis le lundi de la semaine de départ', () => {
+    // Plan démarré le jeudi 20 août : sa première semaine est celle du 17, donc
+    // ses 4 semaines s'achèvent le même dimanche qu'un départ le 17.
+    expect(planEndsOn({ startsOn: '2026-08-20', weeks: 4 })).toBe('2026-09-13');
+  });
 });
 
 describe('planSessionState', () => {
@@ -157,6 +163,53 @@ describe('groupPlanWeeks', () => {
     const weeks = groupPlanWeeks(plan, [], '2026-08-10');
 
     expect(weeks.map((week) => week.expanded)).toEqual([true, false, false]);
+  });
+
+  describe('première semaine entamée', () => {
+    // Plan démarré le jeudi 20 août : la semaine 1 est celle du lundi 17, mais
+    // elle ne commence pour l'athlète que le 20.
+    const midweek = { startsOn: '2026-08-20', weeks: 3 };
+
+    it('cale la grille sur les semaines ISO et n’affiche que les jours couverts', () => {
+      const weeks = groupPlanWeeks(midweek, [], '2026-08-21');
+
+      expect(weeks.map((week) => week.startsOn)).toEqual([
+        '2026-08-20',
+        '2026-08-24',
+        '2026-08-31',
+      ]);
+      expect(weeks.map((week) => week.endsOn)).toEqual([
+        '2026-08-23',
+        '2026-08-30',
+        '2026-09-06',
+      ]);
+      expect(weeks[0].label).toBe('20–23 août');
+    });
+
+    it('range les séances de la semaine entamée dans la première semaine', () => {
+      const weeks = groupPlanWeeks(
+        midweek,
+        [
+          session(1, '2026-08-20', { volumeM: 8_000 }),
+          session(2, '2026-08-23', { volumeM: 16_000 }),
+          session(3, '2026-08-25'),
+        ],
+        '2026-08-21',
+      );
+
+      expect(weeks.map((week) => week.sessions.map((item) => item.id))).toEqual([
+        [1, 2],
+        [3],
+        [],
+      ]);
+      expect(weeks[0].totalVolumeM).toBe(24_000);
+    });
+
+    it('n’annonce pas la semaine en cours avant le jour du départ', () => {
+      // Mardi 18 : la semaine ISO est bien en cours, le plan non.
+      expect(groupPlanWeeks(midweek, [], '2026-08-18')[0].status).toBe('upcoming');
+      expect(groupPlanWeeks(midweek, [], '2026-08-20')[0].status).toBe('current');
+    });
   });
 
   it('ouvre la dernière semaine quand le plan est terminé', () => {

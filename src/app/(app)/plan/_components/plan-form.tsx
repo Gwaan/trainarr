@@ -223,12 +223,12 @@ export type PlanFormProps = {
   /** Date civile la plus lointaine qu'une course puisse porter (même source). */
   maxRaceDate: string;
   /**
-   * Premier lundi où le programme peut démarrer — à la fois la borne basse du
-   * champ et sa valeur par défaut, celle que le service appliquera si l'athlète
-   * ne choisit rien.
+   * Premier jour où le programme peut démarrer, c'est-à-dire aujourd'hui — à la
+   * fois la borne basse du champ, sa valeur pré-remplie, et le défaut que le
+   * service appliquera si l'athlète efface le champ.
    */
   defaultStartDate: string;
-  /** Dernier lundi proposé au démarrage (même source). */
+  /** Dernier jour proposé au démarrage (même source). */
   maxStartDate: string;
 };
 
@@ -243,7 +243,9 @@ export function PlanForm({
   const [level, setLevel] = useState<Level>(DEFAULT_LEVEL);
   const [goalText, setGoalText] = useState("");
   const [raceDate, setRaceDate] = useState("");
-  const [startsOn, setStartsOn] = useState("");
+  // Pré-rempli à aujourd'hui : c'est le départ que l'athlète veut par défaut,
+  // et le champ vide vaut de toute façon la même chose côté action.
+  const [startsOn, setStartsOn] = useState(defaultStartDate);
   const [weeks, setWeeks] = useState(String(DEFAULT_WEEKS));
   const [sessionsPerWeek, setSessionsPerWeek] = useState(String(DEFAULT_SESSIONS_PER_WEEK));
   const [weeklyTimeHours, setWeeklyTimeHours] = useState("");
@@ -363,9 +365,8 @@ export function PlanForm({
           <Field
             id={fieldId("startsOn")}
             label="Début du programme"
-            hint={`Sans réponse, le plan démarre le prochain lundi (${formatCivilDay(defaultStartDate)}). Un programme démarre toujours un lundi : les semaines se comparent entre elles.`}
+            hint={`Aujourd'hui (${formatCivilDay(defaultStartDate)}) ou plus tard — le plan démarre ce jour-là. Un départ en milieu de semaine ouvre une première semaine entamée.`}
             error={errors?.startsOn}
-            optional
           >
             <Input
               id={fieldId("startsOn")}
@@ -373,11 +374,6 @@ export function PlanForm({
               type="date"
               min={defaultStartDate}
               max={maxStartDate}
-              // Pas de sept jours depuis `min` (un lundi) : indication au
-              // sélecteur, sans garantie — `noValidate` désactive la contrainte
-              // et tous les moteurs ne grisent pas les jours hors pas. Un autre
-              // jour saisi est refusé par l'action, sur ce champ.
-              step={7}
               aria-invalid={errors?.startsOn ? true : undefined}
               aria-describedby={describedBy(
                 `${fieldId("startsOn")}-hint`,

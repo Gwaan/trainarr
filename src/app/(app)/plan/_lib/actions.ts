@@ -24,7 +24,6 @@ import {
   type PlanInputField,
 } from '@/data/plans';
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
-import { isoDayIndex } from '@/lib/dates/civil';
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
@@ -164,7 +163,7 @@ const planFormSchema = z
     // Ces deux-là s'excluent : seul celui qu'impose `goalType` est vérifié.
     raceDate: z.string().trim(),
     weeks: z.string().trim(),
-    /** Facultatif : vide = le prochain lundi (le défaut du service). */
+    /** Facultatif : vide = aujourd'hui (le défaut du service). */
     startsOn: z.string().trim(),
     sessionsPerWeek: boundedInteger(
       BOUNDS.sessionsPerWeek,
@@ -193,9 +192,7 @@ const planFormSchema = z
         ctx.addIssue({
           code: 'custom',
           path: ['startsOn'],
-          // Une date passée et un mercredi tombent dans le même refus : dans les
-          // deux cas, le premier démarrage possible est le prochain lundi.
-          message: 'Le programme démarre au plus tôt le prochain lundi.',
+          message: "Le programme démarre aujourd'hui au plus tôt.",
         });
       } else if (form.startsOn > latestPlanStart(today)) {
         validStart = false;
@@ -204,16 +201,9 @@ const planFormSchema = z
           path: ['startsOn'],
           message: `Démarrage trop lointain : ${MAX_PLAN_START_LEAD_WEEKS} semaines à l'avance au plus, tes données auront changé d'ici là.`,
         });
-      } else if (isoDayIndex(form.startsOn) !== 0) {
-        validStart = false;
-        ctx.addIssue({
-          code: 'custom',
-          path: ['startsOn'],
-          // Cf. `planStart` dans le service : le jour d'une séance est un jour
-          // ISO compté depuis le départ du plan.
-          message: 'Un programme démarre un lundi : choisis un lundi.',
-        });
       }
+      // Aucune contrainte sur le jour de la semaine : un départ en milieu de
+      // semaine ouvre une première semaine entamée (cf. `planWindow`).
     }
 
     if (form.goalType === 'race') {
@@ -363,7 +353,7 @@ export async function createPlanAction(
     goalText: form.goalText,
     raceDate: form.goalType === 'race' ? form.raceDate : undefined,
     weeks: form.goalType === 'free' ? Number(form.weeks) : undefined,
-    // Vide : le service repart de son défaut, le prochain lundi.
+    // Vide : le service repart de son défaut, aujourd'hui.
     startsOn: form.startsOn === '' ? undefined : form.startsOn,
     sessionsPerWeek: form.sessionsPerWeek,
     weeklyTimeMinutes: form.weeklyTimeHours ?? undefined,

@@ -61,7 +61,7 @@ import {
   type PlanSessionDto,
   type PlanSettingsPatch,
 } from '@/data/plans';
-import { civilDaysBetween, isoDayIndex, shiftCivilDate } from '@/lib/dates/civil';
+import { civilDaysBetween, isoDayIndex, isoWeekStart, shiftCivilDate } from '@/lib/dates/civil';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
 import { requireAi } from './availability';
@@ -104,18 +104,37 @@ export type PlanRequest = {
   /** Jour ISO de la sortie longue : 1 = lundi … 7 = dimanche. */
   longRunDay: number;
   /**
-   * Premier jour du programme, choisi par l'athlète. Absent : le prochain lundi
-   * ({@link nextPlanStart}). Un lundi dans les deux cas — cf. {@link planStart}.
+   * Premier jour du programme, choisi par l'athlète — n'importe quel jour à
+   * partir d'aujourd'hui. Absent : aujourd'hui (cf. {@link planStart}).
    */
   startsOn?: string;
 };
 
-/** La fenêtre calendaire que le plan couvrira. */
-export type PlanWindow = { startsOn: string; weeks: number };
+/**
+ * La fenêtre calendaire que le plan couvrira.
+ *
+ * Deux dates, et elles ne coïncident que sur un départ un lundi : `startsOn` est
+ * le jour réel du départ (celui que le DAL stocke, avant lequel aucune séance
+ * n'existe), `anchor` est le lundi de sa semaine — la grille sur laquelle les
+ * jours ISO produits par le modèle se posent, et celle qui compte les semaines.
+ */
+export type PlanWindow = {
+  /** Premier jour du programme, tel que l'athlète l'a choisi. */
+  startsOn: string;
+  /** Lundi de la semaine de `startsOn`, base du mapping des jours ISO. */
+  anchor: string;
+  /** Semaines ISO couvertes depuis l'ancre, la première (parfois entamée) comprise. */
+  weeks: number;
+  /** Jour ISO à partir duquel la première semaine porte des séances : 1 = lundi. */
+  firstWeekFromDay: number;
+};
 
 /**
  * Sous ce nombre de semaines, un plan de course ne se périodise pas : il ne
  * reste plus de place pour un développement suivi d'un affûtage.
+ *
+ * Ce sont des semaines d'entraînement, pas des cases du calendrier : une semaine
+ * du départ trop entamée n'en est pas une (cf. {@link firstWeekCountsAsPlanWeek}).
  */
 export const MIN_RACE_PLAN_WEEKS = 3;
 
@@ -141,37 +160,20 @@ const PLAN_TEMPERATURE = 0.3;
 const MAX_ATTEMPTS = 3;
 
 /**
- * Premier jour du plan **par défaut** : le prochain lundi, ou aujourd'hui si
- * l'on est déjà lundi. L'athlète peut lui préférer un lundi plus lointain
- * (`PlanRequest.startsOn`), jamais un autre jour de la semaine.
+ * Premier jour du programme : celui que l'athlète a choisi, sinon **aujourd'hui**.
  *
- * Deux raisons de partir un lundi plutôt que demain : le volume hebdomadaire ne
- * se compare qu'entre semaines pleines, et l'alignement sur la semaine ISO fait
- * coïncider les semaines du plan avec celles des statistiques déjà affichées.
- * Un plan demandé un mardi commence donc dans six jours — la semaine en cours
- * est déjà entamée, la remplir a posteriori n'aurait pas de sens.
- */
-export function nextPlanStart(today: string): string {
-  const index = isoDayIndex(today);
-  return index === 0 ? today : shiftCivilDate(today, 7 - index);
-}
-
-/**
- * Premier jour du programme : celui que l'athlète a choisi, sinon le prochain
- * lundi.
+ * N'importe quel jour convient, et c'est le point de la première semaine
+ * partielle : le `day` d'une séance produite par le modèle reste un jour ISO
+ * (1 = lundi) posé sur `PlanWindow.anchor`, le lundi de la semaine du départ.
+ * Un départ un jeudi ne décale donc rien — il retire simplement du lundi au
+ * mercredi de la première semaine, que le prompt et
+ * {@link validatePlanBusinessRules} traitent comme une semaine entamée.
  *
- * Un plan démarre **toujours un lundi**, et ce n'est pas une préférence de
- * présentation : le `day` d'une séance produite par le modèle est un jour ISO
- * (1 = lundi), et `mapPlanWeeksToSessions` le pose à `startsOn + (day − 1)`.
- * Partir un mercredi placerait la sortie longue « du dimanche » un mardi, sans
- * que rien ne le signale — un plan faux et muet sur son défaut.
- *
- * @throws {InvalidPlanError} date inexploitable, passée, ou qui n'est pas un
- * lundi.
+ * @throws {InvalidPlanError} date inexploitable ou passée.
  */
 function planStart(request: PlanRequest, today: string): string {
   const { startsOn } = request;
-  if (startsOn === undefined) return nextPlanStart(today);
+  if (startsOn === undefined) return today;
 
   if (!isCivilDate(startsOn)) {
     throw new InvalidPlanError('startsOn', 'Début du programme : format AAAA-MM-JJ attendu.');
@@ -179,19 +181,49 @@ function planStart(request: PlanRequest, today: string): string {
   if (startsOn < today) {
     throw new InvalidPlanError('startsOn', "Le programme ne peut pas démarrer dans le passé.");
   }
-  if (isoDayIndex(startsOn) !== 0) {
-    throw new InvalidPlanError('startsOn', 'Le programme démarre un lundi : choisis un lundi.');
-  }
   return startsOn;
+}
+
+/**
+ * En deçà de ce nombre de jours restants dans la semaine du départ, la première
+ * semaine ne compte **pas** comme une semaine d'entraînement du plan.
+ *
+ * Arbitrage : un plan de 8 semaines démarré un samedi laisse deux jours dans la
+ * semaine en cours. Les compter pour une semaine d'entraînement en volerait une
+ * vraie — l'athlète recevrait 7 semaines pleines là où elle en a demandé 8. À
+ * partir de quatre jours (un départ du lundi au jeudi), la semaine entamée porte
+ * assez de séances pour valoir une semaine du plan, sortie longue du week-end
+ * comprise. Pour une course, la durée reste déduite des dates — mais le même
+ * seuil décide si cette semaine-là compte dans le minimum
+ * ({@link MIN_RACE_PLAN_WEEKS}) : sans lui, un départ un dimanche ferait passer
+ * huit jours de préparation pour trois semaines de plan.
+ */
+const MIN_FIRST_WEEK_DAYS = 4;
+
+/**
+ * La semaine du départ vaut-elle une semaine d'entraînement ?
+ *
+ * Vrai dès qu'il y reste au moins {@link MIN_FIRST_WEEK_DAYS} jours, jour du
+ * départ compris — soit un départ du lundi au jeudi. Exporté parce que le
+ * formulaire en dépend : `_lib/plan-window.ts` borne son champ « date de
+ * course » sur cette même réponse, et deux arithmétiques divergentes
+ * proposeraient une date que ce service refuserait ensuite.
+ */
+export function firstWeekCountsAsPlanWeek(startsOn: string): boolean {
+  return 7 - isoDayIndex(startsOn) >= MIN_FIRST_WEEK_DAYS;
 }
 
 /**
  * Fenêtre du plan, à partir de l'objectif.
  *
- * Pour une course, la durée se **déduit** de la date : le nombre de semaines
- * entamées entre le départ du plan et le jour de la course, celui-ci compris —
- * sans le `+ 1`, une course tombant un lundi sortirait de la fenêtre du plan
- * censé y mener.
+ * Tout se compte depuis l'**ancre** — le lundi de la semaine du départ — pour que
+ * les semaines du plan coïncident avec les semaines ISO des statistiques déjà
+ * affichées. Un départ en milieu de semaine produit donc une première semaine
+ * entamée, qui ne porte des séances qu'à partir du jour du départ.
+ *
+ * Pour une course, la durée se **déduit** des dates : le nombre de semaines ISO
+ * de l'ancre au jour de la course, celui-ci compris — sans le `+ 1`, une course
+ * tombant un lundi sortirait de la fenêtre du plan censé y mener.
  *
  * @throws {InvalidPlanError} date de démarrage inexploitable ({@link planStart}),
  * date de course absente/invalide, course trop proche
@@ -200,6 +232,9 @@ function planStart(request: PlanRequest, today: string): string {
  */
 export function planWindow(request: PlanRequest, today: string): PlanWindow {
   const startsOn = planStart(request, today);
+  const anchor = isoWeekStart(startsOn);
+  const firstWeekFromDay = isoDayIndex(startsOn) + 1;
+  const base = { startsOn, anchor, firstWeekFromDay };
 
   if (request.goalType === 'race') {
     const { raceDate } = request;
@@ -207,11 +242,17 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
       throw new InvalidPlanError('raceDate', 'Un objectif « course » exige la date de la course.');
     }
 
-    const weeks = Math.ceil((civilDaysBetween(startsOn, raceDate) + 1) / 7);
-    if (weeks < MIN_RACE_PLAN_WEEKS) {
+    const weeks = Math.ceil((civilDaysBetween(anchor, raceDate) + 1) / 7);
+    // La fenêtre garde la semaine entamée (les séances s'y posent), mais le
+    // minimum ne la compte que si elle porte de l'entraînement : sinon un départ
+    // le dimanche pour une course le lundi suivant ferait un « plan de trois
+    // semaines » de huit jours.
+    const effectiveWeeks = weeks - (firstWeekCountsAsPlanWeek(startsOn) ? 0 : 1);
+    if (effectiveWeeks < MIN_RACE_PLAN_WEEKS) {
+      const days = Math.max(civilDaysBetween(startsOn, raceDate), 0);
       throw new InvalidPlanError(
         'raceDate',
-        `La course est dans moins de ${MIN_RACE_PLAN_WEEKS} semaines : c'est trop court pour périodiser un plan.`,
+        `Le programme ne laisse que ${days} jour${days > 1 ? 's' : ''} avant la course : c'est trop court pour la périodiser (${MIN_RACE_PLAN_WEEKS} semaines au minimum).`,
       );
     }
     // Rabattre silencieusement sur le maximum rendrait un plan qui s'arrête des
@@ -223,15 +264,19 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
         `Course trop lointaine : elle est dans ${weeks} semaines, un plan en couvre ${MAX_PLAN_WEEKS} au plus.`,
       );
     }
-    return { startsOn, weeks };
+    return { ...base, weeks };
   }
 
   const { weeks } = request;
   if (weeks === undefined || !Number.isInteger(weeks) || weeks < PLAN_LIMITS.weeks.min) {
     throw new InvalidPlanError('weeks', 'Un objectif libre exige une durée en semaines.');
   }
+
+  // Une semaine entamée trop courte s'ajoute aux semaines demandées plutôt que
+  // d'en consommer une (cf. MIN_FIRST_WEEK_DAYS).
+  const total = firstWeekCountsAsPlanWeek(startsOn) ? weeks : weeks + 1;
   // Plafonnée à ce que le modèle peut réellement produire d'un seul tenant.
-  return { startsOn, weeks: Math.min(weeks, MAX_PLAN_WEEKS) };
+  return { ...base, weeks: Math.min(total, MAX_PLAN_WEEKS) };
 }
 
 /*
@@ -365,13 +410,39 @@ function formatConstraints(request: {
   return parts.join(' · ');
 }
 
+/**
+ * Ce que le modèle doit savoir d'une **première semaine entamée** : les jours
+ * déjà passés n'accueillent rien, la semaine compte donc moins de séances, et sa
+ * sortie longue n'a plus d'objet si son jour est derrière nous.
+ *
+ * Même énoncé qu'à l'ajustement ({@link formatUpcomingPlan}, « déjà entamée »),
+ * pour la même raison : c'est la seule chose qui empêche le modèle de remplir un
+ * lundi hors du plan — et {@link validatePlanBusinessRules} le lui repasserait
+ * alors en violation, au prix d'une génération entière.
+ */
+function firstWeekLines(request: PlanRequest, window: PlanWindow): string[] {
+  if (window.firstWeekFromDay === 1) {
+    return [`Chaque semaine compte exactement ${request.sessionsPerWeek} séances.`];
+  }
+
+  return [
+    `weeks[0] est déjà entamée : elle ne porte de séances qu'à partir du ${formatIsoDay(window.firstWeekFromDay)} (day ≥ ${window.firstWeekFromDay}), et en compte ${request.sessionsPerWeek} au plus.`,
+    request.longRunDay < window.firstWeekFromDay
+      ? `Elle n'a pas de sortie longue : le ${formatIsoDay(request.longRunDay)} de cette semaine-là est passé.`
+      : `Sa sortie longue reste le ${formatIsoDay(request.longRunDay)}.`,
+    `Les semaines suivantes comptent exactement ${request.sessionsPerWeek} séances.`,
+  ];
+}
+
 /** Les messages d'une génération de plan. */
 export function buildPlanMessages(
   request: PlanRequest,
   window: PlanWindow,
   snapshot: TrainingSnapshotDto,
 ): ChatMessage[] {
-  const endsOn = shiftCivilDate(window.startsOn, window.weeks * 7 - 1);
+  // Depuis l'ancre : c'est elle qui porte la grille des semaines, `startsOn`
+  // pouvant tomber en milieu de première semaine.
+  const endsOn = shiftCivilDate(window.anchor, window.weeks * 7 - 1);
 
   const lines = [
     request.goalType === 'race' && request.raceDate !== undefined
@@ -384,7 +455,8 @@ export function buildPlanMessages(
     `État de l'athlète au ${snapshot.today} :`,
     formatTrainingSnapshot(snapshot),
     '',
-    `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.startsOn)}. Chaque semaine compte exactement ${request.sessionsPerWeek} séances.`,
+    `Rends les ${window.weeks} semaines dans l'ordre chronologique : weeks[0] est la semaine du ${formatCivilDate(window.anchor)}.`,
+    ...firstWeekLines(request, window),
   ];
 
   return [
@@ -744,6 +816,9 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
       weeks: window.weeks,
       sessionsPerWeek: request.sessionsPerWeek,
       longRunDay: request.longRunDay,
+      // > 1 sur un départ en milieu de semaine : la première semaine est jugée
+      // comme une semaine entamée, exactement comme à l'ajustement.
+      firstWeekFromDay: window.firstWeekFromDay,
     }),
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
   });
@@ -753,13 +828,15 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
     level: request.level,
     goalText: request.goalText,
     raceDate: request.goalType === 'race' ? (request.raceDate ?? null) : null,
+    // Le jour **réel** du départ est ce que le plan stocke ; la grille des jours
+    // ISO, elle, se pose sur l'ancre.
     startsOn: window.startsOn,
     weeks: window.weeks,
     sessionsPerWeek: request.sessionsPerWeek,
     weeklyTimeMinutes: request.weeklyTimeMinutes ?? null,
     longRunDay: request.longRunDay,
     summary: output.summary,
-    sessions: mapPlanWeeksToSessions(output.weeks, window.startsOn),
+    sessions: mapPlanWeeksToSessions(output.weeks, window.anchor),
   });
 
   await afterPlanWritten(plan.id);
@@ -782,9 +859,9 @@ export type RemainingPlanWindow = {
 
 /**
  * Découpe la partie du plan postérieure à `fromDate`, sur **la grille de semaines
- * du plan** (des blocs de 7 jours à partir de `startsOn`, qui est un lundi pour
- * tout plan généré par le coach — les semaines coïncident donc avec les semaines
- * ISO).
+ * du plan** : des blocs de 7 jours à partir de l'ancre, le lundi de la semaine de
+ * `startsOn` — les semaines du plan sont des semaines ISO, y compris quand le
+ * plan démarre en milieu de semaine.
  *
  * @throws {InvalidPlanError} si le plan est terminé : il n'y a plus rien à
  * régénérer, et une instruction ne ressuscite pas un plan échu.
@@ -793,12 +870,18 @@ export function remainingPlanWindow(
   plan: { startsOn: string; weeks: number },
   fromDate: string,
 ): RemainingPlanWindow {
-  const offset = civilDaysBetween(plan.startsOn, fromDate);
-  // Plan qui n'a pas encore commencé : tout est à venir, rien n'est entamé.
-  if (offset <= 0) {
-    return { firstWeekStart: plan.startsOn, weeks: plan.weeks, firstWeekFromDay: 1 };
+  const anchor = isoWeekStart(plan.startsOn);
+  // Plan qui n'a pas encore commencé : tout est à venir. Sa première semaine
+  // reste celle du départ, entamée si le départ n'est pas un lundi.
+  if (fromDate <= plan.startsOn) {
+    return {
+      firstWeekStart: anchor,
+      weeks: plan.weeks,
+      firstWeekFromDay: isoDayIndex(plan.startsOn) + 1,
+    };
   }
 
+  const offset = civilDaysBetween(anchor, fromDate);
   const weekIndex = Math.floor(offset / 7);
   const weeks = plan.weeks - weekIndex;
   if (weeks <= 0) {
@@ -809,7 +892,7 @@ export function remainingPlanWindow(
   }
 
   return {
-    firstWeekStart: shiftCivilDate(plan.startsOn, weekIndex * 7),
+    firstWeekStart: shiftCivilDate(anchor, weekIndex * 7),
     weeks,
     firstWeekFromDay: offset - weekIndex * 7 + 1,
   };

@@ -37,6 +37,11 @@ describe('formatCivilRange', () => {
     expect(formatCivilRange('2026-08-31', '2026-09-06')).toBe('31 août – 6 sept.');
   });
 
+  it('rend une date seule quand les deux bornes coïncident', () => {
+    // Première semaine entamée un dimanche : elle ne couvre que ce jour-là.
+    expect(formatCivilRange('2026-08-16', '2026-08-16')).toBe('16 août');
+  });
+
   it("porte les millésimes quand l'intervalle franchit une année", () => {
     expect(formatCivilRange('2026-12-28', '2027-01-03')).toBe(
       '28 déc. 2026 – 3 janv. 2027',

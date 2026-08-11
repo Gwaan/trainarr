@@ -295,6 +295,13 @@ describe('planEndExclusive', () => {
     expect(planEndExclusive('2026-08-10', 8)).toBe('2026-10-05');
     expect(planEndExclusive('2026-08-10', 1)).toBe('2026-08-17');
   });
+
+  it('compte les semaines depuis le lundi de la semaine de départ', () => {
+    // Plan démarré le jeudi 13 août : ses 8 semaines s'achèvent le dimanche de
+    // la 8e semaine ISO, pas trois jours plus tard.
+    expect(planEndExclusive('2026-08-13', 8)).toBe('2026-10-05');
+    expect(planEndExclusive('2026-08-16', 1)).toBe('2026-08-17');
+  });
 });
 
 describe('validatePlanInput', () => {
@@ -437,6 +444,43 @@ describe('validatePlanInput', () => {
     });
 
     expect(values.sessions).toHaveLength(2);
+  });
+
+  describe('plan démarré en milieu de semaine', () => {
+    // Départ le jeudi 13 août, 8 semaines : fenêtre [2026-08-13, 2026-10-05[.
+    const MIDWEEK: CreatePlanInput = { ...VALID_INPUT, startsOn: '2026-08-13' };
+
+    it('refuse une séance placée avant le jour de départ', () => {
+      // Le mercredi 12 appartient à la grille des semaines (l'ancre est le lundi
+      // 10) mais pas au plan : rien n'y est planifiable.
+      expect(() =>
+        validatePlanInput({
+          ...MIDWEEK,
+          sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-08-12' }],
+        }),
+      ).toThrow(InvalidPlanError);
+    });
+
+    it('accepte le jour de départ et le dernier dimanche couvert', () => {
+      const values = validatePlanInput({
+        ...MIDWEEK,
+        sessions: [
+          { ...SESSION_INPUT, scheduledOn: '2026-08-13' },
+          { ...SESSION_INPUT, scheduledOn: '2026-10-04' },
+        ],
+      });
+
+      expect(values.sessions).toHaveLength(2);
+    });
+
+    it('refuse le lendemain de la dernière semaine, jour de départ ou non', () => {
+      expect(() =>
+        validatePlanInput({
+          ...MIDWEEK,
+          sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-10-05' }],
+        }),
+      ).toThrow(InvalidPlanError);
+    });
   });
 
   it('refuse une séance sans type ni intitulé', () => {

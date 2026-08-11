@@ -428,23 +428,27 @@ function trimmedOrNull(value: string | undefined): string | null {
 /**
  * Traduit les semaines produites par le modèle en séances datées.
  *
- * @param startsOn premier jour du plan, **toujours un lundi** (c'est l'appelant
- * qui le garantit, cf. `nextPlanStart`). Le jour ISO de la séance se mappe donc
- * sans ambiguïté : `day = 1` tombe sur `startsOn`, `day = 7` six jours plus tard.
+ * @param anchor lundi de la première semaine du plan, **toujours un lundi**
+ * (c'est l'appelant qui le garantit : `PlanWindow.anchor` à la création,
+ * `RemainingPlanWindow.firstWeekStart` à l'ajustement). Le jour ISO de la séance
+ * se mappe donc sans ambiguïté : `day = 1` tombe sur l'ancre, `day = 7` six jours
+ * plus tard. Sur une première semaine entamée, l'ancre précède le départ réel du
+ * plan — c'est `PlanExpectations.firstWeekFromDay` qui interdit alors au modèle
+ * d'y placer une séance.
  *
  * Les unités changent de camp au passage : le modèle parle en kilomètres et en
  * minutes (ce qu'un coureur lit), la base stocke des mètres et des secondes.
  */
 export function mapPlanWeeksToSessions(
   weeks: readonly PlanWeekOutput[],
-  startsOn: string,
+  anchor: string,
 ): NewPlanSessionInput[] {
   const sessions: NewPlanSessionInput[] = [];
 
   weeks.forEach((week, weekIndex) => {
     for (const session of week.sessions) {
       sessions.push({
-        scheduledOn: shiftCivilDate(startsOn, weekIndex * 7 + (session.day - 1)),
+        scheduledOn: shiftCivilDate(anchor, weekIndex * 7 + (session.day - 1)),
         kind: session.kind.trim(),
         title: session.title.trim(),
         warmup: trimmedOrNull(session.warmup),
@@ -477,10 +481,11 @@ export type PlanExpectations = {
   /**
    * Jour ISO à partir duquel la **première** semaine est encore ouverte.
    *
-   * Vaut 1 (semaine entière) à la création. À la modification, la première
-   * semaine restante est presque toujours entamée : on régénère à partir de
-   * demain, les jours déjà passés portent des séances réalisées qu'on ne
-   * réécrit pas. Cette semaine-là compte donc *au plus* `sessionsPerWeek`
+   * Vaut 1 quand la première semaine est entière. Elle ne l'est pas dans deux
+   * cas : à la modification, on régénère à partir de demain et les jours déjà
+   * passés portent des séances réalisées qu'on ne réécrit pas ; à la création,
+   * un programme démarré en milieu de semaine laisse les jours qui précèdent
+   * hors du plan. Cette semaine-là compte donc *au plus* `sessionsPerWeek`
    * séances — en exiger le compte plein reviendrait à rattraper en trois jours
    * ce qui était étalé sur sept.
    */

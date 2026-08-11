@@ -70,8 +70,14 @@ export function formatCivilDay(civilDate: string): string {
  * Intervalle de dates, aussi court que possible : `18–24 août` dans un même
  * mois, `28 août – 3 sept.` sinon, avec les millésimes quand l'intervalle
  * franchit une année (une semaine de plan peut chevaucher le 31 décembre).
+ *
+ * Un intervalle d'un seul jour se rend comme une date seule : une première
+ * semaine entamée le dimanche ne couvre que ce dimanche-là, et « 16–16 août »
+ * annoncerait une étendue qu'elle n'a pas.
  */
 export function formatCivilRange(from: string, to: string): string {
+  if (from === to) return formatCivilDay(from);
+
   const start = asDate(from);
   const end = asDate(to);
 

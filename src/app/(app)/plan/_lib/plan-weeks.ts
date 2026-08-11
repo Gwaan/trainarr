@@ -3,13 +3,15 @@
  * pures, testées.
  *
  * La grille des semaines est celle du plan : des blocs de sept jours à partir de
- * `startsOn` (un lundi pour tout plan généré par le coach), et non les semaines
- * ISO recalculées depuis chaque séance. Les deux coïncident aujourd'hui, mais
- * c'est la fenêtre du plan qui fait foi — c'est elle que le DAL valide.
+ * l'**ancre**, le lundi de la semaine de `startsOn`. Ce sont donc des semaines
+ * ISO, comme celles des statistiques — et c'est la même grille que le DAL valide
+ * (`planEndExclusive`). Un plan démarré en milieu de semaine ouvre une première
+ * semaine entamée : elle est affichée à partir du jour du départ, pas du lundi
+ * qui la précède et sur lequel le plan ne pose rien.
  */
 
 import type { PlanSessionDto } from "@/data/plans";
-import { shiftCivilDate } from "@/lib/dates/civil";
+import { isoWeekStart, shiftCivilDate } from "@/lib/dates/civil";
 
 import { formatDistance } from "../../_lib/format";
 
@@ -26,7 +28,11 @@ export type PlanSessionState = "completed" | "today" | "missed" | "upcoming";
 export type PlanWeekView = {
   /** Rang dans le plan, à partir de 1 — ce que l'en-tête affiche. */
   number: number;
-  /** Dates civiles `YYYY-MM-DD` du lundi et du dimanche de la semaine. */
+  /**
+   * Dates civiles `YYYY-MM-DD` du premier et du dernier jour couverts. Le lundi
+   * et le dimanche de la semaine ISO, sauf pour une première semaine entamée :
+   * elle commence au jour de départ du plan.
+   */
   startsOn: string;
   endsOn: string;
   /** Intervalle formaté, ex. `18–24 août`. */
@@ -45,9 +51,12 @@ export type PlanWeekView = {
   expanded: boolean;
 };
 
-/** Dernier jour couvert par le plan (inclus). */
+/**
+ * Dernier jour couvert par le plan (inclus) : le dimanche de sa dernière semaine,
+ * compté depuis l'ancre — comme `planEndExclusive` côté DAL.
+ */
 export function planEndsOn(plan: { startsOn: string; weeks: number }): string {
-  return shiftCivilDate(plan.startsOn, plan.weeks * 7 - 1);
+  return shiftCivilDate(isoWeekStart(plan.startsOn), plan.weeks * 7 - 1);
 }
 
 export function planSessionState(
@@ -72,10 +81,14 @@ export function groupPlanWeeks(
   today: string,
 ): PlanWeekView[] {
   const weeks: PlanWeekView[] = [];
+  const gridStart = isoWeekStart(plan.startsOn);
 
   for (let index = 0; index < plan.weeks; index += 1) {
-    const startsOn = shiftCivilDate(plan.startsOn, index * 7);
-    const endsOn = shiftCivilDate(startsOn, 6);
+    const weekStart = shiftCivilDate(gridStart, index * 7);
+    const endsOn = shiftCivilDate(weekStart, 6);
+    // Première semaine entamée : les jours qui précèdent le départ ne font pas
+    // partie du plan — les afficher annoncerait une semaine qui n'a pas eu lieu.
+    const startsOn = index === 0 && plan.startsOn > weekStart ? plan.startsOn : weekStart;
 
     const weekSessions = sessions.filter(
       (session) => session.scheduledOn >= startsOn && session.scheduledOn <= endsOn,

@@ -19,30 +19,30 @@ vi.mock('server-only', () => ({}));
  * proposant une date aussitôt refusée.
  */
 
-/** Aujourd'hui : mardi 11 août 2026 — le plan démarrerait le lundi 17. */
+/** Aujourd'hui : mardi 11 août 2026 — le plan peut démarrer ce jour-là. */
 const TODAY = '2026-08-11';
 
 describe('earliestPlanStart', () => {
-  it('propose le prochain lundi', () => {
-    expect(earliestPlanStart(TODAY)).toBe('2026-08-17');
+  it("propose aujourd'hui, quel que soit le jour de la semaine", () => {
+    expect(earliestPlanStart(TODAY)).toBe(TODAY);
+    // Et le service accepte bien ce démarrage-là : rien à attendre.
+    expect(planWindow({ ...FREE, startsOn: TODAY }, TODAY).startsOn).toBe(TODAY);
+    // Un lundi ne change rien à la règle.
+    expect(earliestPlanStart('2026-08-17')).toBe('2026-08-17');
   });
 
-  it('propose le jour même quand on est déjà lundi', () => {
-    expect(earliestPlanStart('2026-08-17')).toBe('2026-08-17');
-    // Et le service accepte bien ce démarrage-là : rien à attendre.
-    expect(planWindow({ ...FREE, startsOn: '2026-08-17' }, '2026-08-17').startsOn).toBe(
-      '2026-08-17',
+  it('refuse la veille — le service ne démarre pas dans le passé', () => {
+    expect(() => planWindow({ ...FREE, startsOn: '2026-08-10' }, TODAY)).toThrowError(
+      /dans le passé/,
     );
   });
 });
 
 describe('latestPlanStart', () => {
-  it('propose huit lundis, pas un de plus', () => {
+  it('propose huit semaines à l’avance, pas un jour de plus', () => {
     const latest = latestPlanStart(TODAY);
 
-    // Sept semaines après le lundi 17 août, soit huit lundis proposés — et
-    // moins de huit semaines après aujourd'hui.
-    expect(latest).toBe('2026-10-05');
+    expect(latest).toBe('2026-10-06');
     expect(MAX_PLAN_START_LEAD_WEEKS).toBe(8);
     // Le service accepte ce démarrage : la borne du champ ne ment pas.
     expect(planWindow({ ...FREE, startsOn: latest }, TODAY).startsOn).toBe(latest);
@@ -54,12 +54,15 @@ describe('earliestRaceDate', () => {
     const startsOn = earliestPlanStart(TODAY);
     const earliest = earliestRaceDate(startsOn);
 
-    expect(earliest).toBe('2026-08-31');
+    // Départ le mardi 11 : la grille s'ancre au lundi 10, et trois semaines
+    // depuis cette ancre s'achèvent le dimanche 30 — le lundi 24 est donc la
+    // première course qui laisse trois semaines entamées ou pleines.
+    expect(earliest).toBe('2026-08-24');
     expect(planWindow({ ...RACE, raceDate: earliest }, TODAY).weeks).toBe(MIN_RACE_PLAN_WEEKS);
   });
 
   it('refuse la veille de cette date — la borne du champ ne ment pas', () => {
-    expect(() => planWindow({ ...RACE, raceDate: '2026-08-30' }, TODAY)).toThrowError(
+    expect(() => planWindow({ ...RACE, raceDate: '2026-08-23' }, TODAY)).toThrowError(
       /trop court/,
     );
   });
@@ -73,20 +76,54 @@ describe('earliestRaceDate', () => {
       MIN_RACE_PLAN_WEEKS,
     );
   });
+
+  it("repousse d'une semaine quand la semaine du départ ne compte pas", () => {
+    // Dimanche 16 août : la semaine entamée n'a qu'un jour, elle ne prépare
+    // rien. Le lundi 24 afficherait « trois semaines » pour huit jours de
+    // préparation — le champ ne le propose pas, et le service le refuse.
+    const startsOn = '2026-08-16';
+    const earliest = earliestRaceDate(startsOn);
+
+    expect(earliest).toBe('2026-08-31');
+    expect(planWindow({ ...RACE, raceDate: earliest, startsOn }, TODAY).weeks).toBe(
+      MIN_RACE_PLAN_WEEKS + 1,
+    );
+    expect(() =>
+      planWindow({ ...RACE, raceDate: '2026-08-24', startsOn }, TODAY),
+    ).toThrowError(/trop court/);
+    expect(() =>
+      planWindow({ ...RACE, raceDate: '2026-08-30', startsOn }, TODAY),
+    ).toThrowError(/trop court/);
+  });
+
+  it('suit aussi un démarrage en milieu de semaine, sur son ancre', () => {
+    const startsOn = '2026-09-03';
+    const earliest = earliestRaceDate(startsOn);
+
+    // Jeudi 3 septembre : ancre au lundi 31 août, donc course au plus tôt le
+    // lundi 14 septembre.
+    expect(earliest).toBe('2026-09-14');
+    expect(planWindow({ ...RACE, raceDate: earliest, startsOn }, TODAY).weeks).toBe(
+      MIN_RACE_PLAN_WEEKS,
+    );
+    expect(() =>
+      planWindow({ ...RACE, raceDate: '2026-09-13', startsOn }, TODAY),
+    ).toThrowError(/trop court/);
+  });
 });
 
 describe('latestRaceDate', () => {
   it('laisse exactement la place du plan le plus long', () => {
-    // Plan démarré le lundi 17 août 2026 : sa 52e semaine s'achève le dimanche
-    // 15 août 2027.
+    // Plan démarré le mardi 11 août 2026, ancré au lundi 10 : sa 52e semaine
+    // s'achève le dimanche 8 août 2027.
     const latest = latestRaceDate(earliestPlanStart(TODAY));
 
-    expect(latest).toBe('2027-08-15');
+    expect(latest).toBe('2027-08-08');
     expect(planWindow({ ...RACE, raceDate: latest }, TODAY).weeks).toBe(MAX_PLAN_WEEKS);
   });
 
   it('refuse le lendemain de cette date — le service la rejetterait aussi', () => {
-    expect(() => planWindow({ ...RACE, raceDate: '2027-08-16' }, TODAY)).toThrowError(
+    expect(() => planWindow({ ...RACE, raceDate: '2027-08-09' }, TODAY)).toThrowError(
       /trop lointaine/,
     );
   });

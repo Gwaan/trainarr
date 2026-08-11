@@ -30,7 +30,7 @@ vi.mock('@/lib/ai/plan-service', async (importOriginal) => ({
 
 const IDLE: PlanFormState = { status: 'idle' };
 
-/** Aujourd'hui : mardi 11 août 2026 — le plan démarrerait le lundi 17. */
+/** Aujourd'hui : mardi 11 août 2026 — le plan peut démarrer ce jour-là. */
 const TODAY = '2026-08-11';
 
 const VALID_FIELDS: Record<string, string> = {
@@ -128,7 +128,27 @@ describe('createPlanAction — date de démarrage', () => {
     );
   });
 
-  it('transmet le lundi choisi', async () => {
+  it("accepte de démarrer aujourd'hui", async () => {
+    const state = await createPlanAction(IDLE, form({ startsOn: TODAY }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ startsOn: TODAY }),
+    );
+  });
+
+  it('accepte un départ en milieu de semaine', async () => {
+    // Jeudi 13 août : le plan ouvre une première semaine entamée, plus aucune
+    // raison d'attendre lundi.
+    const state = await createPlanAction(IDLE, form({ startsOn: '2026-08-13' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ startsOn: '2026-08-13' }),
+    );
+  });
+
+  it('transmet le jour choisi le plus lointain', async () => {
     const startsOn = latestPlanStart(TODAY);
     // La course est repoussée d'autant : les deux dates doivent rester cohérentes.
     const state = await createPlanAction(IDLE, form({ startsOn, raceDate: '2026-11-15' }));
@@ -141,21 +161,18 @@ describe('createPlanAction — date de démarrage', () => {
     const state = await createPlanAction(IDLE, form({ startsOn: '2026-08-10' }));
 
     expect(state.status).toBe('error');
-    expect(state.fieldErrors?.startsOn).toContain('au plus tôt le prochain lundi');
+    expect(state.fieldErrors?.startsOn).toContain("aujourd'hui au plus tôt");
     expect(mocks.generatePlan).not.toHaveBeenCalled();
   });
 
   it('refuse un démarrage au-delà de huit semaines', async () => {
-    const state = await createPlanAction(IDLE, form({ startsOn: '2026-10-12' }));
+    // Le dernier jour accepté est le 6 octobre : le lendemain est déjà de trop,
+    // et neuf semaines à l'avance a fortiori.
+    for (const startsOn of ['2026-10-07', '2026-10-13']) {
+      const state = await createPlanAction(IDLE, form({ startsOn, raceDate: '2026-12-13' }));
 
-    expect(state.fieldErrors?.startsOn).toContain('Démarrage trop lointain');
-    expect(mocks.generatePlan).not.toHaveBeenCalled();
-  });
-
-  it("refuse un jour qui n'est pas un lundi", async () => {
-    const state = await createPlanAction(IDLE, form({ startsOn: '2026-08-19' }));
-
-    expect(state.fieldErrors?.startsOn).toContain('démarre un lundi');
+      expect(state.fieldErrors?.startsOn).toContain('Démarrage trop lointain');
+    }
     expect(mocks.generatePlan).not.toHaveBeenCalled();
   });
 
@@ -174,7 +191,9 @@ describe('createPlanAction — date de démarrage', () => {
   });
 
   it("signale l'incohérence sur la course tant qu'aucun démarrage n'est choisi", async () => {
-    const state = await createPlanAction(IDLE, form({ raceDate: '2026-08-30' }));
+    // Départ implicite aujourd'hui (ancré au lundi 10) : une course le 23 août
+    // ne laisse que deux semaines.
+    const state = await createPlanAction(IDLE, form({ raceDate: '2026-08-23' }));
 
     expect(state.fieldErrors?.raceDate).toContain('au moins 3 semaines');
     expect(mocks.generatePlan).not.toHaveBeenCalled();

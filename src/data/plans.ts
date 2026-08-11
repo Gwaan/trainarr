@@ -2,7 +2,7 @@ import 'server-only';
 
 import { and, asc, eq, gte, inArray, isNull } from 'drizzle-orm';
 
-import { shiftCivilDate } from '@/lib/dates/civil';
+import { isoWeekStart, shiftCivilDate } from '@/lib/dates/civil';
 import {
   planSessionStepsSchema,
   sessionStepsTotals,
@@ -287,11 +287,19 @@ function requireIntegerInRange(
 }
 
 /**
- * Premier jour **non** couvert par le plan : la fenêtre des séances est
- * `[startsOn, planEndExclusive)`, soit `weeks × 7` jours pleins.
+ * Premier jour **non** couvert par le plan.
+ *
+ * Compté depuis l'**ancre** — le lundi de la semaine de `startsOn` — et non
+ * depuis `startsOn` lui-même : les `weeks` d'un plan sont des semaines ISO, et un
+ * programme démarré un jeudi n'ouvre qu'une première semaine entamée. Compter
+ * `weeks × 7` jours à partir du jeudi étirerait la fenêtre de trois jours au-delà
+ * du dernier dimanche du plan.
+ *
+ * La fenêtre des séances reste `[startsOn, planEndExclusive)` : rien avant le
+ * jour du départ, rien après le dimanche de la dernière semaine.
  */
 export function planEndExclusive(startsOn: string, weeks: number): string {
-  return shiftCivilDate(startsOn, weeks * 7);
+  return shiftCivilDate(isoWeekStart(startsOn), weeks * 7);
 }
 
 /**
@@ -323,6 +331,10 @@ function parseSessionSteps(session: NewPlanSessionInput): PlanSessionSteps | nul
 /**
  * Vérifie que chaque séance tombe dans la fenêtre du plan et porte ses textes
  * obligatoires.
+ *
+ * Le plancher est le jour de départ **réel** : sur un plan démarré en milieu de
+ * semaine, les jours du lundi de l'ancre à la veille du départ appartiennent à la
+ * grille des semaines mais pas au plan, et aucune séance ne peut s'y poser.
  *
  * @param notBefore date civile plancher supplémentaire — le `fromDate` d'une
  * régénération, qui interdit de réécrire une journée déjà passée.

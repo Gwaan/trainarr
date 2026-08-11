@@ -13,7 +13,6 @@ import {
   buildSchemaIssuesMessage,
   buildViolationsMessage,
   generatePlan,
-  nextPlanStart,
   planWindow,
   remainingPlanWindow,
   updatePlanFromInstruction,
@@ -157,6 +156,17 @@ const CONFORMING_WEEK = {
 };
 
 /**
+ * Une **première semaine entamée** conforme : rien avant le jeudi, et la sortie
+ * longue toujours le dimanche.
+ */
+const PARTIAL_FIRST_WEEK = {
+  sessions: [
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
+    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+  ],
+};
+
+/**
  * La même semaine, dont le footing du mardi porte une allure délirante :
  * 10:00/km pour une athlète qui court en 5:24/km (SNAPSHOT).
  */
@@ -189,7 +199,8 @@ function loggedText(): string {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  // Un mardi : le prochain lundi est le 17 août 2026.
+  // Un mardi : un plan sans date de départ commence donc ce jour-là, sur la
+  // semaine du lundi 10 août 2026.
   vi.setSystemTime(new Date('2026-08-11T09:00:00.000Z'));
   vi.clearAllMocks();
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -210,33 +221,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('nextPlanStart', () => {
-  it('démarre le lundi suivant', () => {
-    expect(nextPlanStart('2026-08-11')).toBe('2026-08-17');
-    expect(nextPlanStart('2026-08-16')).toBe('2026-08-17');
-  });
-
-  it('démarre le jour même quand on est déjà lundi', () => {
-    expect(nextPlanStart('2026-08-17')).toBe('2026-08-17');
-  });
-});
+/** Un départ un lundi : la fenêtre d'avant la première semaine partielle. */
+const MONDAY = { startsOn: '2026-08-17' } as const;
 
 describe('planWindow', () => {
   it("déduit la durée de la date de course, jour de course compris", () => {
     // Du lundi 17 août au dimanche 13 septembre : 4 semaines pleines.
-    expect(planWindow({ ...REQUEST, goalType: 'race', raceDate: '2026-09-13' }, '2026-08-11')).toEqual(
-      { startsOn: '2026-08-17', weeks: 4 },
-    );
+    expect(
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-09-13' }, '2026-08-11'),
+    ).toEqual({ startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 });
     // Course un lundi : la semaine qui la porte compte quand même.
-    expect(planWindow({ ...REQUEST, goalType: 'race', raceDate: '2026-09-14' }, '2026-08-11')).toEqual(
-      { startsOn: '2026-08-17', weeks: 5 },
-    );
+    expect(
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-09-14' }, '2026-08-11'),
+    ).toEqual({ startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 5, firstWeekFromDay: 1 });
   });
 
   it('refuse une course trop proche pour être périodisée', () => {
+    // Du lundi 17 au dimanche 30 : deux semaines, et le message dit les jours
+    // réellement disponibles plutôt qu'un compte de cases du calendrier.
     expect(() =>
-      planWindow({ ...REQUEST, goalType: 'race', raceDate: '2026-08-30' }, '2026-08-11'),
-    ).toThrow(new RegExp(`moins de ${MIN_RACE_PLAN_WEEKS} semaines`));
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-08-30' }, '2026-08-11'),
+    ).toThrow(new RegExp(`13 jours avant la course.*${MIN_RACE_PLAN_WEEKS} semaines au minimum`));
   });
 
   it('refuse une course trop lointaine pour tenir dans un plan', () => {
@@ -244,20 +249,21 @@ describe('planWindow', () => {
     // 2027. Un jour de plus et la fenêtre déborde — la tronquer produirait un
     // plan qui s'arrête avant la course qu'il prépare.
     expect(
-      planWindow({ ...REQUEST, goalType: 'race', raceDate: '2027-08-15' }, '2026-08-11').weeks,
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2027-08-15' }, '2026-08-11')
+        .weeks,
     ).toBe(MAX_PLAN_WEEKS);
 
     expect(() =>
-      planWindow({ ...REQUEST, goalType: 'race', raceDate: '2027-08-16' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2027-08-16' }, '2026-08-11'),
     ).toThrow(new RegExp(`Course trop lointaine.*${MAX_PLAN_WEEKS} au plus`));
   });
 
   it('refuse un objectif course sans date exploitable', () => {
-    expect(() => planWindow({ ...REQUEST, goalType: 'race' }, '2026-08-11')).toThrow(
+    expect(() => planWindow({ ...REQUEST, ...MONDAY, goalType: 'race' }, '2026-08-11')).toThrow(
       /date de la course/,
     );
     expect(() =>
-      planWindow({ ...REQUEST, goalType: 'race', raceDate: '2026-02-31' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-02-31' }, '2026-08-11'),
     ).toThrow(/date de la course/);
   });
 
@@ -271,19 +277,23 @@ describe('planWindow', () => {
     it('démarre le lundi demandé, objectif libre', () => {
       expect(planWindow({ ...REQUEST, startsOn: '2026-08-31' }, '2026-08-11')).toEqual({
         startsOn: '2026-08-31',
+        anchor: '2026-08-31',
         weeks: 2,
+        firstWeekFromDay: 1,
       });
     });
 
     it('recompte les semaines d’une course depuis ce lundi-là', () => {
       const race = { ...REQUEST, goalType: 'race', raceDate: '2026-09-27' } as const;
 
-      // Départ par défaut (lundi 17 août) : 6 semaines jusqu'à la course.
-      expect(planWindow(race, '2026-08-11').weeks).toBe(6);
+      // Départ le lundi 17 août : 6 semaines jusqu'à la course.
+      expect(planWindow({ ...race, ...MONDAY }, '2026-08-11').weeks).toBe(6);
       // Départ repoussé de deux semaines : le plan raccourcit d'autant.
       expect(planWindow({ ...race, startsOn: '2026-08-31' }, '2026-08-11')).toEqual({
         startsOn: '2026-08-31',
+        anchor: '2026-08-31',
         weeks: 4,
+        firstWeekFromDay: 1,
       });
     });
 
@@ -296,10 +306,17 @@ describe('planWindow', () => {
       ).toThrow(/trop court/);
     });
 
-    it('garde le prochain lundi quand rien n’est demandé', () => {
-      expect(planWindow(REQUEST, '2026-08-11').startsOn).toBe('2026-08-17');
+    it('démarre aujourd’hui quand rien n’est demandé', () => {
+      // Un mardi : le plan commence le jour même, sa première semaine est donc
+      // entamée et la grille reste ancrée sur le lundi 10.
+      expect(planWindow(REQUEST, '2026-08-11')).toEqual({
+        startsOn: '2026-08-11',
+        anchor: '2026-08-10',
+        weeks: 2,
+        firstWeekFromDay: 2,
+      });
       expect(planWindow({ ...REQUEST, startsOn: undefined }, '2026-08-11').startsOn).toBe(
-        '2026-08-17',
+        '2026-08-11',
       );
     });
 
@@ -309,16 +326,80 @@ describe('planWindow', () => {
       );
     });
 
-    it("refuse un jour qui n'est pas un lundi — le jour des séances est un jour ISO", () => {
-      expect(() => planWindow({ ...REQUEST, startsOn: '2026-08-19' }, '2026-08-11')).toThrow(
-        /démarre un lundi/,
-      );
-    });
-
     it('refuse une date inexploitable', () => {
       expect(() => planWindow({ ...REQUEST, startsOn: '2026-02-31' }, '2026-08-11')).toThrow(
         /AAAA-MM-JJ/,
       );
+    });
+  });
+
+  describe('départ en milieu de semaine', () => {
+    it('ancre la grille sur le lundi de la semaine du départ', () => {
+      // Jeudi 13 août : la première semaine est celle du lundi 10, mais le plan
+      // ne commence que le 13.
+      expect(planWindow({ ...REQUEST, weeks: 8, startsOn: '2026-08-13' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-13',
+        anchor: '2026-08-10',
+        weeks: 8,
+        firstWeekFromDay: 4,
+      });
+    });
+
+    it('ajoute la semaine entamée aux semaines demandées quand elle est trop courte', () => {
+      // Samedi : deux jours restants, ils ne valent pas une semaine
+      // d'entraînement — les 8 semaines demandées restent entières.
+      expect(planWindow({ ...REQUEST, weeks: 8, startsOn: '2026-08-15' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-15',
+        anchor: '2026-08-10',
+        weeks: 9,
+        firstWeekFromDay: 6,
+      });
+      // Dimanche : un seul jour, même arbitrage.
+      expect(planWindow({ ...REQUEST, weeks: 8, startsOn: '2026-08-16' }, '2026-08-11').weeks).toBe(9);
+      // Jeudi : quatre jours, sortie longue du week-end comprise — la semaine
+      // entamée compte parmi les huit.
+      expect(planWindow({ ...REQUEST, weeks: 8, startsOn: '2026-08-13' }, '2026-08-11').weeks).toBe(8);
+    });
+
+    it('exclut une semaine entamée trop courte du minimum d’un plan course', () => {
+      const race = { ...REQUEST, goalType: 'race' } as const;
+
+      // Dimanche 16 août, course le lundi 24 : trois semaines ISO depuis l'ancre,
+      // mais huit jours de préparation — la semaine entamée d'un jour ne prépare
+      // pas une course, et le message le dit.
+      expect(() => planWindow({ ...race, raceDate: '2026-08-24', startsOn: '2026-08-16' }, '2026-08-11')).toThrow(
+        /ne laisse que 8 jours avant la course/,
+      );
+      // Une semaine de plus et la préparation tient : quatre semaines ISO, dont
+      // trois qui comptent.
+      expect(
+        planWindow({ ...race, raceDate: '2026-08-31', startsOn: '2026-08-16' }, '2026-08-11').weeks,
+      ).toBe(MIN_RACE_PLAN_WEEKS + 1);
+      // Jeudi 13 août, même course : quatre jours dans la semaine entamée, elle
+      // compte — le seuil ne bouge pas pour un départ du lundi au jeudi.
+      expect(
+        planWindow({ ...race, raceDate: '2026-08-24', startsOn: '2026-08-13' }, '2026-08-11').weeks,
+      ).toBe(MIN_RACE_PLAN_WEEKS);
+    });
+
+    it('compte les semaines d’une course depuis l’ancre, semaine entamée comprise', () => {
+      const race = { ...REQUEST, goalType: 'race', raceDate: '2026-09-13' } as const;
+
+      // Jeudi 13 août → dimanche 13 septembre : 5 semaines ISO depuis le lundi 10.
+      expect(planWindow({ ...race, startsOn: '2026-08-13' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-13',
+        anchor: '2026-08-10',
+        weeks: 5,
+        firstWeekFromDay: 4,
+      });
+      // Départ le dimanche : même ancre, donc même compte — la semaine entamée
+      // d'un seul jour reste la première du plan.
+      expect(planWindow({ ...race, startsOn: '2026-08-16' }, '2026-08-11')).toEqual({
+        startsOn: '2026-08-16',
+        anchor: '2026-08-10',
+        weeks: 5,
+        firstWeekFromDay: 7,
+      });
     });
   });
 });
@@ -341,6 +422,31 @@ describe('remainingPlanWindow', () => {
     });
   });
 
+  it('découpe un plan démarré en milieu de semaine sur sa grille ISO', () => {
+    // Plan démarré le jeudi 13 août : sa première semaine est celle du lundi 10.
+    // Reprise le lundi 17 : c'est déjà la deuxième semaine du plan.
+    expect(remainingPlanWindow({ startsOn: '2026-08-13', weeks: 5 }, '2026-08-17')).toEqual({
+      firstWeekStart: '2026-08-17',
+      weeks: 4,
+      firstWeekFromDay: 1,
+    });
+    // Reprise le samedi 15 : toujours la première semaine, entamée depuis samedi.
+    expect(remainingPlanWindow({ startsOn: '2026-08-13', weeks: 5 }, '2026-08-15')).toEqual({
+      firstWeekStart: '2026-08-10',
+      weeks: 5,
+      firstWeekFromDay: 6,
+    });
+  });
+
+  it('rend la semaine entamée du départ quand le plan ne commence pas encore', () => {
+    // Reprise avant le départ : rien n'est à replanifier avant le jeudi 13.
+    expect(remainingPlanWindow({ startsOn: '2026-08-13', weeks: 5 }, '2026-08-12')).toEqual({
+      firstWeekStart: '2026-08-10',
+      weeks: 5,
+      firstWeekFromDay: 4,
+    });
+  });
+
   it('refuse de régénérer un plan arrivé à son terme', () => {
     expect(() => remainingPlanWindow({ startsOn: '2026-08-03', weeks: 1 }, '2026-08-12')).toThrow(
       /arrivé à son terme/,
@@ -351,7 +457,7 @@ describe('remainingPlanWindow', () => {
 describe('buildPlanMessages', () => {
   const messages = buildPlanMessages(
     { ...REQUEST, goalType: 'race', goalText: '10 km sous 50 min', raceDate: '2026-09-13', weeklyTimeMinutes: 300 },
-    { startsOn: '2026-08-17', weeks: 4 },
+    { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
     SNAPSHOT,
   );
 
@@ -443,6 +549,39 @@ describe('buildPlanMessages', () => {
     expect(user).toContain("5 h 00 d'entraînement par semaine au plus");
   });
 
+  it('annonce une première semaine entamée, son premier jour et son plafond', () => {
+    // Départ le jeudi 13 août : la grille reste ancrée au lundi 10, et les
+    // trois premiers jours du plan n'existent pas.
+    const user = buildPlanMessages(
+      REQUEST,
+      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
+      SNAPSHOT,
+    )[1].content;
+
+    expect(user).toContain('2 semaines, du jeudi 13 août 2026 au dimanche 23 août 2026');
+    expect(user).toContain('weeks[0] est la semaine du lundi 10 août 2026.');
+    expect(user).toContain(
+      "weeks[0] est déjà entamée : elle ne porte de séances qu'à partir du jeudi (day ≥ 4), et en compte 3 au plus.",
+    );
+    expect(user).toContain('Sa sortie longue reste le dimanche.');
+    expect(user).toContain('Les semaines suivantes comptent exactement 3 séances.');
+  });
+
+  it('dispense la semaine entamée de sa sortie longue quand ce jour est passé', () => {
+    const user = buildPlanMessages(
+      { ...REQUEST, longRunDay: 2 },
+      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
+      SNAPSHOT,
+    )[1].content;
+
+    expect(user).toContain("Elle n'a pas de sortie longue : le mardi de cette semaine-là est passé.");
+  });
+
+  it('ne dit rien d’une semaine entamée quand le plan démarre un lundi', () => {
+    expect(messages[1].content).toContain('Chaque semaine compte exactement 3 séances.');
+    expect(messages[1].content).not.toContain('déjà entamée');
+  });
+
   it("dit le niveau à la demande et n'envoie que la section correspondante", () => {
     const system = messages[0].content;
 
@@ -458,7 +597,7 @@ describe('buildPlanMessages', () => {
   it('bride la qualité et la progression de volume pour un débutant', () => {
     const system = buildPlanMessages(
       { ...REQUEST, level: 'beginner' },
-      { startsOn: '2026-08-17', weeks: 4 },
+      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
       SNAPSHOT,
     );
 
@@ -472,7 +611,7 @@ describe('buildPlanMessages', () => {
   it('ouvre les blocs longs et la troisième séance de qualité au confirmé', () => {
     const system = buildPlanMessages(
       { ...REQUEST, level: 'advanced' },
-      { startsOn: '2026-08-17', weeks: 4 },
+      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
       SNAPSHOT,
     );
 
@@ -633,13 +772,52 @@ describe('generatePlan', () => {
 
     const input = dal.createPlanWithSessions.mock.calls[0][0];
     expect(input.level).toBe('intermediate');
-    expect(input.startsOn).toBe('2026-08-17');
+    // Sans date demandée, le plan démarre aujourd'hui (mardi 11 août) et sa
+    // grille de jours ISO s'ancre sur le lundi 10.
+    expect(input.startsOn).toBe('2026-08-11');
     expect(input.weeks).toBe(2);
     expect(input.raceDate).toBeNull();
     expect(input.summary).toBe('Deux semaines de reprise.');
     expect(input.sessions).toHaveLength(6);
-    expect(input.sessions[0]).toMatchObject({ scheduledOn: '2026-08-18', volumeM: 8_000 });
-    expect(input.sessions[5].scheduledOn).toBe('2026-08-30');
+    expect(input.sessions[0]).toMatchObject({ scheduledOn: '2026-08-11', volumeM: 8_000 });
+    expect(input.sessions[5].scheduledOn).toBe('2026-08-23');
+  });
+
+  it('démarre le jour demandé et date les séances depuis le lundi de sa semaine', async () => {
+    // Départ le jeudi 13 août : la première semaine ne porte que le jeudi et le
+    // dimanche, la seconde est pleine.
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Reprise en cours de semaine.',
+      weeks: [PARTIAL_FIRST_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan({ ...REQUEST, startsOn: '2026-08-13' });
+
+    const input = dal.createPlanWithSessions.mock.calls[0][0];
+    // Le plan stocke le jour réel du départ, pas l'ancre.
+    expect(input.startsOn).toBe('2026-08-13');
+    expect(input.weeks).toBe(2);
+    expect(
+      input.sessions.map((session: { scheduledOn: string }) => session.scheduledOn),
+    ).toEqual(['2026-08-13', '2026-08-16', '2026-08-18', '2026-08-20', '2026-08-23']);
+  });
+
+  it('refuse une séance placée avant le départ sur une première semaine entamée', async () => {
+    // Le modèle remplit la semaine entamée comme une semaine pleine : le mardi
+    // et le jeudi sont derrière nous, ils lui sont renvoyés en violation.
+    chatCompletionJson.mockResolvedValue({
+      summary: 'x',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await expect(generatePlan({ ...REQUEST, startsOn: '2026-08-15' })).rejects.toThrow(
+      AiInvalidOutputError,
+    );
+
+    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
+      'aucune séance avant samedi',
+    );
+    expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
   });
 
   it('rapproche le plan écrit des activités déjà en base', async () => {
