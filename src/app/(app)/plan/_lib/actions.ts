@@ -13,6 +13,7 @@
  */
 
 import { revalidatePath } from 'next/cache';
+import { after } from 'next/server';
 import { z } from 'zod';
 
 import { AthleteNotFoundError, isCivilDate, todayCivilDate } from '@/data/athlete';
@@ -29,6 +30,7 @@ import {
   updatePlanFromInstruction,
   type PlanRequest,
 } from '@/lib/ai/plan-service';
+import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
 import { ARCHIVE_CONFIRMATION } from './form-options';
 import { latestRaceDate } from './plan-window';
@@ -383,6 +385,14 @@ export async function archivePlanAction(
   }
 
   if (!archived) return { status: 'error', message: NO_ACTIVE_PLAN };
+
+  // Le calendrier intervals.icu porte encore les séances à venir du plan
+  // archivé : les y laisser ferait sonner des séances que plus aucun plan ne
+  // pilote. Best-effort — l'archivage, lui, est fait, donc la synchronisation
+  // part après la réponse (`after`) : l'API injoignable, l'attendre ici tiendrait
+  // l'utilisatrice sur un spinner le temps des délais de garde, pour un résultat
+  // qui ne change rien à ce qu'elle va voir.
+  after(() => syncPlanToIntervalsSafely('archivage du plan'));
 
   revalidatePath('/plan');
   revalidatePath('/');

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { MAX_FIT_FILE_BYTES } from '@/lib/fit/limits';
 
 import {
+  deleteCalendarEvents,
   downloadFitFile,
   formatIntervalsDate,
   IntervalsAbortError,
@@ -10,8 +11,11 @@ import {
   IntervalsAuthError,
   IntervalsRateLimitError,
   listRecentActivities,
+  listWorkoutEvents,
   parseRetryAfterSeconds,
+  upsertWorkoutEvents,
   type FetchLike,
+  type IntervalsWorkoutEvent,
 } from './client';
 
 const API_KEY = 'cle-api-de-test-a-ne-jamais-journaliser';
@@ -390,6 +394,243 @@ describe('downloadFitFile', () => {
     await downloadFitFile({ apiKey: API_KEY, activityId: 'i910', fetchImpl });
 
     expect(calls[0].init?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+/** Le corps JSON réellement envoyé — c'est le contrat que l'API lit. */
+function bodyOf(call: Call): unknown {
+  const { body } = call.init ?? {};
+  return typeof body === 'string' ? JSON.parse(body) : undefined;
+}
+
+const WORKOUT: IntervalsWorkoutEvent = {
+  uid: 'trainarr-p3-2026-08-18-0',
+  startDate: '2026-08-18',
+  type: 'Run',
+  name: 'VMA courte · piste — 6 × 800 m',
+  description: 'Échauffement : 15 min\nSéance : 6 × 800 m',
+  timeTargetS: 3_600,
+  distanceTargetM: 12_000,
+  target: 'PACE',
+};
+
+describe('listWorkoutEvents', () => {
+  it("interroge les events WORKOUT de la fenêtre demandée", async () => {
+    const { fetchImpl, calls } = stubFetch(json([]));
+
+    await listWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      oldest: '2026-08-11',
+      newest: '2026-09-30',
+      fetchImpl,
+    });
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/athlete/i123456/events');
+    expect(url.searchParams.get('oldest')).toBe('2026-08-11');
+    expect(url.searchParams.get('newest')).toBe('2026-09-30');
+    expect(url.searchParams.get('category')).toBe('WORKOUT');
+    expect(calls[0].init?.method).toBe('GET');
+    expect(decodeBasic(authorizationOf(calls[0]))).toBe(`API_KEY:${API_KEY}`);
+  });
+
+  it('ne retient que les champs utiles, uid absent compris', async () => {
+    const { fetchImpl } = stubFetch(
+      json([
+        {
+          id: 4321,
+          uid: 'trainarr-p3-2026-08-18-0',
+          category: 'WORKOUT',
+          start_date_local: '2026-08-18T00:00:00',
+          name: 'VMA courte',
+          icu_training_load: 60,
+        },
+        { id: 4322, category: 'WORKOUT' },
+      ]),
+    );
+
+    const events = await listWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      oldest: '2026-08-11',
+      newest: '2026-09-30',
+      fetchImpl,
+    });
+
+    expect(events).toEqual([
+      {
+        id: 4321,
+        uid: 'trainarr-p3-2026-08-18-0',
+        category: 'WORKOUT',
+        startDateLocal: '2026-08-18T00:00:00',
+        name: 'VMA courte',
+      },
+      { id: 4322, uid: null, category: 'WORKOUT', startDateLocal: null, name: null },
+    ]);
+  });
+
+  it('lève une erreur typée sur une réponse de forme inattendue', async () => {
+    const { fetchImpl } = stubFetch(json({ events: [] }));
+
+    await expect(
+      listWorkoutEvents({
+        athleteId: ATHLETE_ID,
+        apiKey: API_KEY,
+        oldest: '2026-08-11',
+        newest: '2026-09-30',
+        fetchImpl,
+      }),
+    ).rejects.toBeInstanceOf(IntervalsApiError);
+  });
+
+  it('traduit un 401 en IntervalsAuthError', async () => {
+    const { fetchImpl } = stubFetch(new Response('nope', { status: 401 }));
+
+    await expect(
+      listWorkoutEvents({
+        athleteId: ATHLETE_ID,
+        apiKey: API_KEY,
+        oldest: '2026-08-11',
+        newest: '2026-09-30',
+        fetchImpl,
+      }),
+    ).rejects.toBeInstanceOf(IntervalsAuthError);
+  });
+});
+
+describe('upsertWorkoutEvents', () => {
+  it('poste les events en bulk avec upsertOnUid', async () => {
+    const { fetchImpl, calls } = stubFetch(json([{ id: 4321, uid: WORKOUT.uid }]));
+
+    await upsertWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      events: [WORKOUT],
+      fetchImpl,
+    });
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/athlete/i123456/events/bulk');
+    expect(url.searchParams.get('upsertOnUid')).toBe('true');
+    expect(calls[0].init?.method).toBe('POST');
+    expect(new Headers(calls[0].init?.headers).get('content-type')).toBe('application/json');
+  });
+
+  it("envoie les champs de l'API, et n'invente pas les cibles absentes", async () => {
+    const { fetchImpl, calls } = stubFetch(json([]));
+
+    await upsertWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      events: [
+        WORKOUT,
+        { uid: 'trainarr-p3-2026-08-20-0', startDate: '2026-08-20', type: 'Run', name: 'Footing', description: 'Séance : 45 min' },
+      ],
+      fetchImpl,
+    });
+
+    expect(bodyOf(calls[0])).toEqual([
+      {
+        uid: 'trainarr-p3-2026-08-18-0',
+        category: 'WORKOUT',
+        start_date_local: '2026-08-18T00:00:00',
+        type: 'Run',
+        name: 'VMA courte · piste — 6 × 800 m',
+        description: 'Échauffement : 15 min\nSéance : 6 × 800 m',
+        time_target: 3_600,
+        distance_target: 12_000,
+        target: 'PACE',
+      },
+      {
+        uid: 'trainarr-p3-2026-08-20-0',
+        category: 'WORKOUT',
+        start_date_local: '2026-08-20T00:00:00',
+        type: 'Run',
+        name: 'Footing',
+        description: 'Séance : 45 min',
+      },
+    ]);
+  });
+
+  it("rend les events tels que l'API les a enregistrés", async () => {
+    const { fetchImpl } = stubFetch(
+      json([{ id: 4321, uid: WORKOUT.uid, category: 'WORKOUT', start_date_local: '2026-08-18T00:00:00' }]),
+    );
+
+    const written = await upsertWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      events: [WORKOUT],
+      fetchImpl,
+    });
+
+    expect(written).toEqual([
+      {
+        id: 4321,
+        uid: WORKOUT.uid,
+        category: 'WORKOUT',
+        startDateLocal: '2026-08-18T00:00:00',
+        name: null,
+      },
+    ]);
+  });
+
+  it('lève une IntervalsApiError sur une erreur serveur', async () => {
+    const { fetchImpl } = stubFetch(new Response('boom', { status: 500 }));
+
+    const error = await upsertWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      events: [WORKOUT],
+      fetchImpl,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(IntervalsApiError);
+    expect((error as IntervalsApiError).status).toBe(500);
+    expect((error as Error).message).not.toContain(API_KEY);
+  });
+});
+
+describe('deleteCalendarEvents', () => {
+  it('supprime par id, en PUT sur bulk-delete', async () => {
+    const { fetchImpl, calls } = stubFetch(new Response(null, { status: 200 }));
+
+    await deleteCalendarEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      ids: [4321, 4322],
+      fetchImpl,
+    });
+
+    expect(new URL(calls[0].url).pathname).toBe('/api/v1/athlete/i123456/events/bulk-delete');
+    expect(calls[0].init?.method).toBe('PUT');
+    // Jamais `external_id` : il est réservé aux applications OAuth.
+    expect(bodyOf(calls[0])).toEqual([{ id: 4321 }, { id: 4322 }]);
+  });
+
+  it('propage un 429 comme IntervalsRateLimitError', async () => {
+    const { fetchImpl } = stubFetch(
+      new Response(null, { status: 429, headers: { 'retry-after': '30' } }),
+    );
+
+    const error = await deleteCalendarEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      ids: [4321],
+      fetchImpl,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(IntervalsRateLimitError);
+    expect((error as IntervalsRateLimitError).retryAfterS).toBe(30);
+  });
+
+  it('lève une IntervalsApiError sur une erreur serveur', async () => {
+    const { fetchImpl } = stubFetch(new Response('boom', { status: 500 }));
+
+    await expect(
+      deleteCalendarEvents({ athleteId: ATHLETE_ID, apiKey: API_KEY, ids: [1], fetchImpl }),
+    ).rejects.toBeInstanceOf(IntervalsApiError);
   });
 });
 

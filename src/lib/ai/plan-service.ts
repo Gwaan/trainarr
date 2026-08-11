@@ -27,6 +27,7 @@ import 'server-only';
  * facture pour rien.
  */
 
+import { after } from 'next/server';
 import type { z } from 'zod';
 
 import { isCivilDate, todayCivilDate } from '@/data/athlete';
@@ -44,6 +45,7 @@ import {
   type PlanSettingsPatch,
 } from '@/data/plans';
 import { civilDaysBetween, isoDayIndex, shiftCivilDate } from '@/lib/dates/civil';
+import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
 import { requireAi } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
@@ -376,23 +378,39 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
 }
 
 /**
- * Rapproche les séances du plan des activités déjà en base.
+ * Les deux effets de bord qui suivent toute écriture de plan : rapprocher les
+ * séances des activités déjà en base, et republier le calendrier intervals.icu.
  *
- * Pourquoi après chaque écriture : une séance (re)générée sur un jour déjà couru
- * doit s'afficher « réalisée », pas « manquée ». Les sorties du passé, elles,
- * sont en base depuis longtemps — personne ne les réimportera, donc rien d'autre
- * ne posera ce lien.
+ * Pourquoi le rapprochement : une séance (re)générée sur un jour déjà couru doit
+ * s'afficher « réalisée », pas « manquée ». Les sorties du passé, elles, sont en
+ * base depuis longtemps — personne ne les réimportera, donc rien d'autre ne
+ * posera ce lien.
  *
- * L'échec ne remonte pas : le plan est écrit et valide, et un rapprochement raté
- * se rattrape au prochain import ou au prochain ajustement. Il est journalisé —
- * faire échouer une génération de plusieurs minutes pour cela serait pire.
+ * Aucun des deux ne remonte : le plan est écrit et valide. Un rapprochement raté
+ * se rattrape au prochain import ou au prochain ajustement, une synchronisation
+ * ratée à la prochaine écriture. Les deux sont journalisés — faire échouer une
+ * génération de plusieurs minutes pour cela serait pire.
+ *
+ * Les deux ne sont pas attendus de la même façon, et c'est délibéré :
+ *
+ * - le **rapprochement** reste dans le fil de la requête, parce que son résultat
+ *   conditionne ce que la page re-rendue affiche (« réalisée » plutôt que
+ *   « manquée ») ;
+ * - la **synchronisation** part en {@link after} : elle n'a aucune influence sur
+ *   la réponse, et intervals.icu injoignable au niveau TCP coûte jusqu'à trois
+ *   fois trente secondes de délai de garde — autant de spinner pour un plan déjà
+ *   écrit en base.
  */
-async function reconcileWrittenPlan(planId: number): Promise<void> {
+async function afterPlanWritten(planId: number): Promise<void> {
   try {
     await reconcilePlanSessions(planId);
   } catch (error) {
     console.error(`[plan] rapprochement des séances du plan ${planId} impossible :`, error);
   }
+
+  // Le catch vit dans le module de synchronisation : les trois points de
+  // branchement (création, ajustement, archivage) partagent la même garde.
+  after(() => syncPlanToIntervalsSafely(`plan ${planId}`));
 }
 
 /**
@@ -435,7 +453,7 @@ export async function generatePlan(request: PlanRequest): Promise<PlanDto> {
     sessions: mapPlanWeeksToSessions(output.weeks, window.startsOn),
   });
 
-  await reconcileWrittenPlan(plan.id);
+  await afterPlanWritten(plan.id);
   return plan;
 }
 
@@ -557,7 +575,7 @@ export async function updatePlanFromInstruction(instruction: string): Promise<Pl
     sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
     settings: settingsPatch(active.plan, output),
   });
-  await reconcileWrittenPlan(active.plan.id);
+  await afterPlanWritten(active.plan.id);
 
   const refreshed = await getActivePlanWithSessions();
   if (refreshed === null) throw new PlanNotFoundError();

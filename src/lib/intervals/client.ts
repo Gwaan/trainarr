@@ -1,6 +1,7 @@
 /**
  * Client HTTP intervals.icu : lister les activités récentes, récupérer le
- * fichier d'activité original.
+ * fichier d'activité original, et tenir à jour le calendrier des séances
+ * planifiées.
  *
  * ## Ce que dit la documentation officielle
  *
@@ -45,6 +46,20 @@
  *   STRAVA, UPLOAD, MANUAL, GARMIN_CONNECT, OAUTH_CLIENT, …). Les autres sont
  *   ignorés ici. La spec précise « An empty stub object is returned for Strava
  *   activities ».
+ * - **Calendrier** (spec relue le 2026-08-11) — trois endpoints, utilisés par
+ *   la synchronisation du plan (`push-plan.ts`) :
+ *   - `GET /api/v1/athlete/{id}/events?oldest=…&newest=…&category=WORKOUT` :
+ *     les events de la fenêtre, chacun portant `id`, `uid`, `category`,
+ *     `start_date_local` et `name`. Les bornes sont des dates **locales** de
+ *     l'athlète, comme pour les activités.
+ *   - `POST /api/v1/athlete/{id}/events/bulk?upsertOnUid=true` : un tableau
+ *     d'events. Avec `upsertOnUid`, un event portant un `uid` déjà présent est
+ *     **mis à jour** au lieu d'être dupliqué — c'est ce qui rend le push
+ *     idempotent. La réponse est la liste des events créés ou mis à jour.
+ *   - `PUT /api/v1/athlete/{id}/events/bulk-delete` : un tableau de `{ id }`.
+ *     La suppression par `external_id` existe mais est **réservée aux
+ *     applications OAuth** : avec une clé API, on ne supprime que par `id`,
+ *     donc uniquement des events qu'un GET vient de nous rendre.
  *
  * ## Points ambigus, tranchés au plus prudent
  *
@@ -196,8 +211,18 @@ function isAbortLike(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
+/** Ce qui change d'un appel à l'autre, au-delà de l'URL. */
+type RequestOptions = {
+  /** Défaut : `GET`. */
+  method?: 'GET' | 'POST' | 'PUT';
+  /** Corps de la requête, sérialisé en JSON. Absent = pas de corps. */
+  body?: unknown;
+  /** Annulation de l'appel en vol. Combiné au délai de garde. */
+  signal?: AbortSignal;
+};
+
 /**
- * Un GET authentifié, avec les deux échecs qui appellent une réaction
+ * Un appel authentifié, avec les deux échecs qui appellent une réaction
  * particulière déjà traduits en erreurs typées. Le reste (404, 5xx) revient à
  * l'appelant, qui seul sait ce qu'un code donné signifie pour son endpoint.
  *
@@ -205,20 +230,29 @@ function isAbortLike(error: unknown): boolean {
  * de {@link REQUEST_TIMEOUT_MS} : aucun appel ne peut rester suspendu, et un
  * arrêt demandé coupe sans attendre l'échéance.
  */
-async function authorizedGet(
+async function authorizedRequest(
   url: string,
   apiKey: string,
   fetchImpl: FetchLike,
   context: string,
-  signal?: AbortSignal,
+  options: RequestOptions = {},
 ): Promise<Response> {
+  const { signal } = options;
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const combined = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+
+  const headers: Record<string, string> = {
+    authorization: authorizationHeader(apiKey),
+    accept: '*/*',
+  };
+  if (options.body !== undefined) headers['content-type'] = 'application/json';
 
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      headers: { authorization: authorizationHeader(apiKey), accept: '*/*' },
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: combined,
     });
   } catch (cause) {
@@ -237,6 +271,39 @@ async function authorizedGet(
     throw new IntervalsRateLimitError(parseRetryAfterSeconds(response.headers.get('retry-after')));
   }
   return response;
+}
+
+/**
+ * Corps JSON d'une réponse, validé.
+ *
+ * Les champs inconnus sont écartés par le schéma. En revanche une réponse dont
+ * la **forme** est inattendue lève : mieux vaut un appel en échec, visible dans
+ * les journaux, qu'une liste silencieusement amputée.
+ */
+async function parseJsonBody<T>(
+  response: Response,
+  context: string,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (cause) {
+    throw new IntervalsApiError(`${context} : réponse JSON illisible.`, response.status, { cause });
+  }
+
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) {
+    const fields = parsed.error.issues
+      .map((issue) => issue.path.join('.') || '(racine)')
+      .join(', ');
+    throw new IntervalsApiError(
+      `${context} : réponse inattendue (champs en défaut : ${fields}).`,
+      response.status,
+    );
+  }
+
+  return parsed.data;
 }
 
 /*
@@ -301,13 +368,7 @@ export type ListRecentActivitiesParams = {
   signal?: AbortSignal;
 };
 
-/**
- * Activités de l'athlète depuis `oldest`, les plus récentes d'abord.
- *
- * Les champs inconnus sont écartés par le schéma. En revanche une réponse dont
- * la **forme** est inattendue lève : mieux vaut un cycle en échec, visible dans
- * les journaux, qu'une liste silencieusement amputée.
- */
+/** Activités de l'athlète depuis `oldest`, les plus récentes d'abord. */
 export async function listRecentActivities(
   params: ListRecentActivitiesParams,
 ): Promise<IntervalsActivity[]> {
@@ -318,37 +379,21 @@ export async function listRecentActivities(
   url.searchParams.set('oldest', formatIntervalsDate(params.oldest, params.timeZone));
 
   const context = 'liste des activités intervals.icu';
-  const response = await authorizedGet(
+  const response = await authorizedRequest(
     url.toString(),
     params.apiKey,
     params.fetchImpl ?? globalThis.fetch,
     context,
-    params.signal,
+    { signal: params.signal },
   );
 
   if (!response.ok) {
     throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
   }
 
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch (cause) {
-    throw new IntervalsApiError(`${context} : réponse JSON illisible.`, response.status, { cause });
-  }
+  const activities = await parseJsonBody(response, context, activityListSchema);
 
-  const parsed = activityListSchema.safeParse(payload);
-  if (!parsed.success) {
-    const fields = parsed.error.issues
-      .map((issue) => issue.path.join('.') || '(racine)')
-      .join(', ');
-    throw new IntervalsApiError(
-      `${context} : réponse inattendue (champs en défaut : ${fields}).`,
-      response.status,
-    );
-  }
-
-  return parsed.data.map((activity) => ({
+  return activities.map((activity) => ({
     id: activity.id,
     startDateLocal: activity.start_date_local ?? null,
     type: activity.type ?? null,
@@ -440,12 +485,12 @@ export async function downloadFitFile(params: DownloadFitFileParams): Promise<Bu
   );
 
   const context = `fichier de l'activité ${params.activityId}`;
-  const response = await authorizedGet(
+  const response = await authorizedRequest(
     url.toString(),
     params.apiKey,
     params.fetchImpl ?? globalThis.fetch,
     context,
-    params.signal,
+    { signal: params.signal },
   );
 
   if (response.status === 404) return null;
@@ -462,4 +507,225 @@ export async function downloadFitFile(params: DownloadFitFileParams): Promise<Bu
   }
 
   return readBoundedBody(response, context, params.signal);
+}
+
+/*
+ * Calendrier : les séances planifiées que Trainarr pousse chez intervals.icu.
+ */
+
+/**
+ * Identifiant d'un event du calendrier.
+ *
+ * La spec le donne numérique ; une chaîne est acceptée sans conversion, parce
+ * que cet identifiant ne sert qu'à repartir tel quel dans le corps du
+ * `bulk-delete`. Le normaliser n'apporterait rien et pourrait le corrompre.
+ */
+export type IntervalsEventId = number | string;
+
+/** Les seuls champs d'un event dont la synchronisation du plan a besoin. */
+const eventListSchema = z.array(
+  z.object({
+    id: z.union([z.number(), z.string()]),
+    uid: z.string().nullish(),
+    category: z.string().nullish(),
+    start_date_local: z.string().nullish(),
+    name: z.string().nullish(),
+  }),
+);
+
+export type IntervalsEvent = {
+  id: IntervalsEventId;
+  /**
+   * Identifiant applicatif posé par le créateur de l'event. `null` pour un
+   * event créé à la main dans intervals.icu — c'est à ce signe qu'on reconnaît
+   * ce que Trainarr n'a pas écrit, et donc ne doit pas toucher.
+   */
+  uid: string | null;
+  category: string | null;
+  /** Date locale de l'athlète, sans fuseau (format intervals.icu). */
+  startDateLocal: string | null;
+  name: string | null;
+};
+
+/** Un event de l'API vers son DTO — même forme pour la liste et pour le push. */
+function toIntervalsEvent(event: z.infer<typeof eventListSchema>[number]): IntervalsEvent {
+  return {
+    id: event.id,
+    uid: event.uid ?? null,
+    category: event.category ?? null,
+    startDateLocal: event.start_date_local ?? null,
+    name: event.name ?? null,
+  };
+}
+
+/**
+ * Une séance planifiée, telle que Trainarr la publie au calendrier.
+ *
+ * Les facultatifs le sont **au sens strict** : un champ absent n'est pas envoyé
+ * du tout, jamais rempli d'une valeur par défaut — un plan qui ne donne pas de
+ * durée n'en invente pas une.
+ */
+export type IntervalsWorkoutEvent = {
+  /** Clé d'idempotence : c'est sur elle que porte `upsertOnUid`. */
+  uid: string;
+  /** Date civile `YYYY-MM-DD` de la séance. */
+  startDate: string;
+  /** Type de séance intervals.icu (`Run`, `Ride`, …). */
+  type: string;
+  name: string;
+  description: string;
+  /** Durée prévue, en secondes. */
+  timeTargetS?: number;
+  /** Distance prévue, en mètres. */
+  distanceTargetM?: number;
+  /** Nature de la cible de la séance. */
+  target?: 'PACE';
+};
+
+/** Un event WORKOUT au format attendu par l'API. */
+function toEventPayload(event: IntervalsWorkoutEvent): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    uid: event.uid,
+    category: 'WORKOUT',
+    // L'API attend un instant local ; une séance planifiée n'a pas d'heure de
+    // départ, elle occupe la journée.
+    start_date_local: `${event.startDate}T00:00:00`,
+    type: event.type,
+    name: event.name,
+    description: event.description,
+  };
+
+  if (event.timeTargetS !== undefined) payload.time_target = event.timeTargetS;
+  if (event.distanceTargetM !== undefined) payload.distance_target = event.distanceTargetM;
+  if (event.target !== undefined) payload.target = event.target;
+
+  return payload;
+}
+
+/** Ce dont tout appel au calendrier a besoin. */
+type CalendarParams = {
+  /** Identifiant d'athlète intervals.icu (`i123456`, ou `0` pour le porteur de la clé). */
+  athleteId: string;
+  apiKey: string;
+  baseUrl?: string;
+  fetchImpl?: FetchLike;
+  signal?: AbortSignal;
+};
+
+function athleteUrl(params: CalendarParams, path: string): URL {
+  return new URL(
+    `/api/v1/athlete/${encodeURIComponent(params.athleteId)}${path}`,
+    params.baseUrl ?? INTERVALS_BASE_URL,
+  );
+}
+
+export type ListWorkoutEventsParams = CalendarParams & {
+  /** Bornes **civiles** `YYYY-MM-DD`, incluses, en heure locale de l'athlète. */
+  oldest: string;
+  newest: string;
+};
+
+/**
+ * Les events de catégorie `WORKOUT` de la fenêtre demandée.
+ *
+ * Filtrer sur la catégorie côté API plutôt qu'ici : une note ou une course
+ * cible n'a rien à faire dans un diff de séances planifiées, et la rapatrier
+ * pour l'écarter ensuite ne ferait que grossir la réponse.
+ */
+export async function listWorkoutEvents(
+  params: ListWorkoutEventsParams,
+): Promise<IntervalsEvent[]> {
+  const url = athleteUrl(params, '/events');
+  url.searchParams.set('oldest', params.oldest);
+  url.searchParams.set('newest', params.newest);
+  url.searchParams.set('category', 'WORKOUT');
+
+  const context = 'liste des séances planifiées intervals.icu';
+  const response = await authorizedRequest(
+    url.toString(),
+    params.apiKey,
+    params.fetchImpl ?? globalThis.fetch,
+    context,
+    { signal: params.signal },
+  );
+
+  if (!response.ok) {
+    throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
+  }
+
+  const events = await parseJsonBody(response, context, eventListSchema);
+  return events.map(toIntervalsEvent);
+}
+
+export type UpsertWorkoutEventsParams = CalendarParams & {
+  events: readonly IntervalsWorkoutEvent[];
+};
+
+/**
+ * Publie (ou met à jour) des séances au calendrier, en un seul appel.
+ *
+ * `upsertOnUid=true` fait toute l'idempotence de la synchronisation : un event
+ * portant un `uid` déjà présent est **modifié**, pas dupliqué. Republier le même
+ * plan deux fois de suite ne laisse donc qu'une séance par jour.
+ *
+ * Rend les events tels que l'API les a enregistrés — c'est ce qu'elle
+ * **confirme** avoir écrit, la seule mesure honnête de ce que le push a fait.
+ */
+export async function upsertWorkoutEvents(
+  params: UpsertWorkoutEventsParams,
+): Promise<IntervalsEvent[]> {
+  const url = athleteUrl(params, '/events/bulk');
+  url.searchParams.set('upsertOnUid', 'true');
+
+  const context = 'publication des séances planifiées intervals.icu';
+  const response = await authorizedRequest(
+    url.toString(),
+    params.apiKey,
+    params.fetchImpl ?? globalThis.fetch,
+    context,
+    { method: 'POST', body: params.events.map(toEventPayload), signal: params.signal },
+  );
+
+  if (!response.ok) {
+    throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
+  }
+
+  const events = await parseJsonBody(response, context, eventListSchema);
+  return events.map(toIntervalsEvent);
+}
+
+export type DeleteCalendarEventsParams = CalendarParams & {
+  /** Identifiants rendus par {@link listWorkoutEvents}, et eux seuls. */
+  ids: readonly IntervalsEventId[];
+};
+
+/**
+ * Supprime des events du calendrier, par identifiant.
+ *
+ * **Uniquement par `id`** : la suppression par `external_id` est réservée aux
+ * applications OAuth, et Trainarr s'authentifie par clé API. Les identifiants
+ * viennent donc toujours d'un GET préalable — on ne supprime que ce qu'on vient
+ * de lire, et dont on a vérifié le `uid`.
+ *
+ * La réponse n'est pas lue : le code HTTP dit tout ce dont l'appelant a besoin.
+ */
+export async function deleteCalendarEvents(params: DeleteCalendarEventsParams): Promise<void> {
+  const url = athleteUrl(params, '/events/bulk-delete');
+
+  const context = 'suppression de séances planifiées intervals.icu';
+  const response = await authorizedRequest(
+    url.toString(),
+    params.apiKey,
+    params.fetchImpl ?? globalThis.fetch,
+    context,
+    {
+      method: 'PUT',
+      body: params.ids.map((id) => ({ id })),
+      signal: params.signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
+  }
 }

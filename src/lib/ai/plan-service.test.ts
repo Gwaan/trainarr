@@ -33,7 +33,20 @@ const { dal } = vi.hoisted(() => ({
   },
 }));
 
+const { syncPlanToIntervalsSafely } = vi.hoisted(() => ({
+  syncPlanToIntervalsSafely: vi.fn(),
+}));
+
+/**
+ * `after` exige un contexte de requête Next : hors serveur, le vrai lève. Le
+ * doublon exécute la tâche immédiatement — ce que les tests éprouvent, c'est le
+ * branchement et le fait qu'il passe par `after`, pas le moment de l'exécution.
+ */
+const { scheduleAfter } = vi.hoisted(() => ({ scheduleAfter: vi.fn() }));
+
 vi.mock('./client', () => ({ chatCompletionJson }));
+vi.mock('next/server', () => ({ after: scheduleAfter }));
+vi.mock('@/lib/intervals/push-plan', () => ({ syncPlanToIntervalsSafely }));
 vi.mock('./availability', () => ({ requireAi }));
 vi.mock('@/data/coach-context', () => ({ getTrainingSnapshot: dal.getTrainingSnapshot }));
 vi.mock('@/data/plan-reconciliation', () => ({
@@ -127,6 +140,10 @@ beforeEach(() => {
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
   dal.applyPlanUpdate.mockResolvedValue(undefined);
   dal.reconcilePlanSessions.mockResolvedValue(0);
+  syncPlanToIntervalsSafely.mockResolvedValue(undefined);
+  scheduleAfter.mockImplementation((task: () => unknown) => {
+    void task();
+  });
 });
 
 afterEach(() => {
@@ -329,6 +346,32 @@ describe('generatePlan', () => {
     expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(PLAN.id);
   });
 
+  it('publie le plan écrit au calendrier intervals.icu, hors du fil de la requête', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${PLAN.id}`);
+    // Par `after` : une API injoignable ne doit pas ajouter ses délais de garde
+    // au temps d'attente de l'utilisatrice.
+    expect(scheduleAfter).toHaveBeenCalledTimes(1);
+  });
+
+  it("n'attend pas la synchronisation du calendrier pour rendre le plan", async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+    // La tâche différée n'est pas exécutée : le plan doit sortir quand même.
+    scheduleAfter.mockImplementation(() => {});
+
+    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+    expect(syncPlanToIntervalsSafely).not.toHaveBeenCalled();
+  });
+
   it('rend quand même le plan quand le rapprochement échoue', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     chatCompletionJson.mockResolvedValue({
@@ -341,6 +384,9 @@ describe('generatePlan', () => {
     // journalise.
     await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
     expect(logged).toHaveBeenCalled();
+    // Et le calendrier est quand même synchronisé : les deux effets de bord sont
+    // indépendants.
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalled();
   });
 
   it('reprend une fois en renvoyant les violations, puis écrit le plan corrigé', async () => {
@@ -435,6 +481,20 @@ describe('updatePlanFromInstruction', () => {
     await updatePlanFromInstruction('rien de spécial');
 
     expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(ACTIVE.plan.id);
+  });
+
+  it('republie le plan ajusté au calendrier intervals.icu', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
+    });
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE.plan.id}`);
+    // Différée elle aussi : un ajustement rend la main dès que la base est écrite.
+    expect(scheduleAfter).toHaveBeenCalledTimes(1);
   });
 
   it("ajuste quand même le plan si le rapprochement échoue", async () => {
