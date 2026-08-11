@@ -4,6 +4,11 @@ import { and, asc, desc, eq, gte, inArray, isNull, lt } from 'drizzle-orm';
 
 import { isoWeekStart, shiftCivilDate } from '@/lib/dates/civil';
 import {
+  InvalidRacePerformanceError,
+  REFERENCE_DISTANCES,
+  vdotFromRace,
+} from '@/lib/metrics/vdot';
+import {
   planSessionStepsSchema,
   sessionStepsTotals,
   type PlanSessionSteps,
@@ -15,6 +20,7 @@ import { isUniqueViolation } from './db/errors';
 import {
   PLAN_GOAL_TYPES,
   PLAN_LEVELS,
+  PLAN_REFERENCE_DISTANCES,
   plannedSessions,
   plans,
   type NewPlan,
@@ -22,6 +28,7 @@ import {
   type Plan,
   type PlanGoalType,
   type PlanLevel,
+  type PlanReferenceDistance,
   type PlanStatus,
   type PlannedSession,
 } from './db/schema';
@@ -77,6 +84,13 @@ export type PlanDto = {
   weeklyTimeMinutes: number | null;
   /** Jour de la sortie longue au format ISO : 1 = lundi … 7 = dimanche. */
   longRunDay: number;
+  /**
+   * Chrono de course déclaré à la création : distance et temps (en secondes),
+   * les deux ensemble ou les deux `null`. C'est l'ancre des allures du plan —
+   * l'UI l'affiche pour que l'athlète sache sur quoi son plan est calé.
+   */
+  referenceDistance: PlanReferenceDistance | null;
+  referenceTimeS: number | null;
   summary: string | null;
   /** Instant de création, sérialisé en ISO-8601 (le DTO traverse la frontière client). */
   createdAt: string;
@@ -145,6 +159,9 @@ export type CreatePlanInput = {
   sessionsPerWeek: number;
   weeklyTimeMinutes?: number | null;
   longRunDay: number;
+  /** Chrono de référence : les deux champs ensemble, ou aucun des deux. */
+  referenceDistance?: PlanReferenceDistance | null;
+  referenceTimeS?: number | null;
   summary?: string | null;
   sessions: NewPlanSessionInput[];
 };
@@ -160,6 +177,8 @@ export type ValidatedPlanInput = {
   sessionsPerWeek: number;
   weeklyTimeMinutes: number | null;
   longRunDay: number;
+  referenceDistance: PlanReferenceDistance | null;
+  referenceTimeS: number | null;
   summary: string | null;
   sessions: NewPlanSessionInput[];
 };
@@ -193,6 +212,12 @@ export const PLAN_LIMITS = {
   longRunDay: { min: 1, max: 7 },
   /** Une semaine ne contient que 10 080 minutes — au-delà, c'est une saisie erronée. */
   weeklyTimeMinutes: { min: 1, max: 10_080 },
+  /**
+   * Chrono de référence, en secondes : de 4 min (un 1 500 m rapide, sous la
+   * borne du modèle VDOT de toute façon) à 10 h (un marathon marché). C'est un
+   * garde-fou de saisie ; la plausibilité, elle, est tranchée par `vdotFromRace`.
+   */
+  referenceTimeS: { min: 240, max: 36_000 },
 } as const;
 
 /** Champ d'un plan mis en cause par {@link InvalidPlanError}. */
@@ -206,6 +231,8 @@ export type PlanInputField =
   | 'sessionsPerWeek'
   | 'weeklyTimeMinutes'
   | 'longRunDay'
+  | 'referenceDistance'
+  | 'referenceTimeS'
   | 'sessions';
 
 /*
@@ -276,6 +303,8 @@ export function toPlanDto(row: Plan): PlanDto {
     sessionsPerWeek: row.sessionsPerWeek,
     weeklyTimeMinutes: row.weeklyTimeMinutes,
     longRunDay: row.longRunDay,
+    referenceDistance: row.referenceDistance,
+    referenceTimeS: row.referenceTimeS,
     summary: row.summary,
     createdAt: row.createdAt.toISOString(),
   };
@@ -399,6 +428,71 @@ export function validatePlanSessions(
   }
 }
 
+/** Le chrono de référence, normalisé — les deux champs, ou aucun des deux. */
+type ValidatedReferenceRace = {
+  referenceDistance: PlanReferenceDistance | null;
+  referenceTimeS: number | null;
+};
+
+/**
+ * Vérifie le chrono de référence : la paire est complète ou absente, le temps
+ * tient dans des bornes de saisie, et le couple décrit **une course**.
+ *
+ * Cette dernière vérification est déléguée à `vdotFromRace` plutôt que réécrite :
+ * c'est la même fonction qui calculera la table d'allures, donc un chrono accepté
+ * ici produira toujours une table. Un `InvalidRacePerformanceError` devient une
+ * erreur de champ lisible — la formulation est celle du formulaire, puisque c'est
+ * là qu'elle s'affiche.
+ *
+ * @throws {InvalidPlanError}
+ */
+export function validateReferenceRace(input: {
+  referenceDistance?: PlanReferenceDistance | null;
+  referenceTimeS?: number | null;
+}): ValidatedReferenceRace {
+  const referenceDistance = input.referenceDistance ?? null;
+  const referenceTimeS = input.referenceTimeS ?? null;
+
+  if (referenceDistance === null && referenceTimeS === null) {
+    return { referenceDistance: null, referenceTimeS: null };
+  }
+  if (referenceDistance === null) {
+    throw new InvalidPlanError(
+      'referenceDistance',
+      'Chrono de référence : indique aussi la distance courue.',
+    );
+  }
+  if (!PLAN_REFERENCE_DISTANCES.includes(referenceDistance)) {
+    throw new InvalidPlanError('referenceDistance', 'Distance de référence inattendue.');
+  }
+  if (referenceTimeS === null) {
+    throw new InvalidPlanError(
+      'referenceTimeS',
+      'Chrono de référence : indique aussi le temps réalisé.',
+    );
+  }
+  requireIntegerInRange(
+    referenceTimeS,
+    'referenceTimeS',
+    PLAN_LIMITS.referenceTimeS,
+    'Chrono de référence (secondes)',
+  );
+
+  try {
+    vdotFromRace(REFERENCE_DISTANCES[referenceDistance], referenceTimeS);
+  } catch (error) {
+    if (error instanceof InvalidRacePerformanceError) {
+      throw new InvalidPlanError(
+        'referenceTimeS',
+        'Ce chrono ne ressemble pas à une course — vérifie la saisie.',
+      );
+    }
+    throw error;
+  }
+
+  return { referenceDistance, referenceTimeS };
+}
+
 /**
  * Vérifie les invariants du plan et retourne l'entrée normalisée (facultatifs en
  * `null`, textes détourés).
@@ -463,6 +557,8 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
     );
   }
 
+  const referenceRace = validateReferenceRace(input);
+
   if (input.sessions.length === 0) {
     throw new InvalidPlanError('sessions', 'Un plan sans aucune séance ne planifie rien.');
   }
@@ -478,6 +574,8 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
     sessionsPerWeek: input.sessionsPerWeek,
     weeklyTimeMinutes,
     longRunDay: input.longRunDay,
+    referenceDistance: referenceRace.referenceDistance,
+    referenceTimeS: referenceRace.referenceTimeS,
     summary: input.summary ?? null,
     sessions: input.sessions,
   };
@@ -856,6 +954,8 @@ function draftPlanTransaction(athleteId: number, values: ValidatedPlanInput): Pr
         sessionsPerWeek: values.sessionsPerWeek,
         weeklyTimeMinutes: values.weeklyTimeMinutes,
         longRunDay: values.longRunDay,
+        referenceDistance: values.referenceDistance,
+        referenceTimeS: values.referenceTimeS,
         summary: values.summary,
       })
       .returning();

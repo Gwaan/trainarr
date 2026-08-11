@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
+import type { TrainingPaces } from '@/lib/metrics/vdot';
 import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import {
   PLAN_OUTPUT_BOUNDS,
+  isMarathonGoal,
   mapPlanWeeksToSessions,
   planJsonSchema,
   planOutputSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
+  taperWeekCount,
   validatePlanBusinessRules,
+  type PlanExpectations,
   type PlanWeekOutput,
 } from './plan-schema';
 
@@ -316,7 +320,7 @@ describe('mapPlanWeeksToSessions', () => {
   });
 });
 
-const EXPECTED = { weeks: 2, sessionsPerWeek: 3, longRunDay: 7 };
+const EXPECTED: PlanExpectations = { scope: 'creation', weeks: 2, sessionsPerWeek: 3, longRunDay: 7 };
 
 describe('validatePlanBusinessRules', () => {
   it('ne relève rien sur un plan conforme', () => {
@@ -370,7 +374,7 @@ describe('validatePlanBusinessRules', () => {
   });
 
   it('ne relève rien quand une autre séance égale la sortie longue sans la dépasser', () => {
-    const weeks = [week([3, 5, 7], [10, 8, 10]), week([2, 4, 7], [8, 10, 18])];
+    const weeks = [week([3, 5, 7], [10, 8, 10]), week([2, 4, 7], [8, 8, 14])];
 
     expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
   });
@@ -412,7 +416,12 @@ describe('validatePlanBusinessRules', () => {
       week([2, 4, 7], [8, 10, 18]),
     ];
 
-    expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
+    // Le classement des séances est abandonné, faute d'unité commune ; il reste
+    // la distance manquante, sans laquelle aucun volume hebdomadaire n'existe.
+    expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([
+      'Volumes hebdomadaires invérifiables : chaque séance déclare sa distance `distanceKm`, ' +
+        'footings et récupérations compris — il en manque semaine 1.',
+    ]);
   });
 
   describe('déroulé des séances', () => {
@@ -566,7 +575,7 @@ describe('validatePlanBusinessRules', () => {
       const violations = validatePlanBusinessRules(
         [weekWith({ steps: stepsAtPace(600) }), conforming],
         EXPECTED,
-        REFERENCE,
+        { referencePaceSecPerKm: REFERENCE },
       );
 
       expect(violations).toEqual([
@@ -581,7 +590,7 @@ describe('validatePlanBusinessRules', () => {
       const violations = validatePlanBusinessRules(
         [weekWith({ kind: 'Endurance fondamentale', targetPaceSecPerKm: 200 }), conforming],
         EXPECTED,
-        REFERENCE,
+        { referencePaceSecPerKm: REFERENCE },
       );
 
       expect(violations).toEqual([
@@ -596,19 +605,19 @@ describe('validatePlanBusinessRules', () => {
         conforming,
       ];
 
-      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE)).toEqual([]);
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: REFERENCE })).toEqual([]);
     });
 
     it('inclut les bornes exactes du corridor', () => {
       const onBounds = [weekWith({ steps: stepsAtPace(220, 460) }), conforming];
-      expect(validatePlanBusinessRules(onBounds, EXPECTED, REFERENCE)).toEqual([]);
+      expect(validatePlanBusinessRules(onBounds, EXPECTED, { referencePaceSecPerKm: REFERENCE })).toEqual([]);
 
       // Une seconde au-delà, de chaque côté.
       expect(
-        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(219) }), conforming], EXPECTED, REFERENCE),
+        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(219) }), conforming], EXPECTED, { referencePaceSecPerKm: REFERENCE }),
       ).toHaveLength(1);
       expect(
-        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(461) }), conforming], EXPECTED, REFERENCE),
+        validatePlanBusinessRules([weekWith({ steps: stepsAtPace(461) }), conforming], EXPECTED, { referencePaceSecPerKm: REFERENCE }),
       ).toHaveLength(1);
     });
 
@@ -618,7 +627,7 @@ describe('validatePlanBusinessRules', () => {
         conforming,
       ];
 
-      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE)).toHaveLength(1);
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: REFERENCE })).toHaveLength(1);
     });
 
     it('juge les allures même quand la semaine perd sa sortie longue', () => {
@@ -635,7 +644,7 @@ describe('validatePlanBusinessRules', () => {
         conforming,
       ];
 
-      expect(validatePlanBusinessRules(weeks, EXPECTED, REFERENCE).join(' ')).toContain(
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: REFERENCE }).join(' ')).toContain(
         'hors de la fourchette plausible',
       );
     });
@@ -646,7 +655,7 @@ describe('validatePlanBusinessRules', () => {
         conforming,
       ];
 
-      expect(validatePlanBusinessRules(weeks, EXPECTED, null)).toEqual([]);
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: null })).toEqual([]);
       // Référence omise : le contrôle n'existe pas non plus.
       expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
     });
@@ -690,5 +699,613 @@ describe('validatePlanBusinessRules', () => {
         'Semaine 2 : 2 séances au lieu des 3 demandées.',
       ]);
     });
+  });
+});
+
+/**
+ * La table d'allures d'un 10 km en 48:30 (VDOT ≈ 44,8), écrite en dur : les
+ * valeurs viennent de `lib/metrics/vdot`, mais les figer ici garde le message de
+ * violation lisible dans le test — c'est lui que le modèle recevra.
+ *
+ * Corridor attendu : [répétitions − 10 s, endurance + 60 s] = [3:45/km – 7:10/km].
+ */
+const PACES: TrainingPaces = {
+  vdot: 44.8,
+  easy: { minSecPerKm: 335, maxSecPerKm: 370 },
+  marathon: { minSecPerKm: 295, maxSecPerKm: 320 },
+  threshold: { minSecPerKm: 280, maxSecPerKm: 292 },
+  interval: { minSecPerKm: 252, maxSecPerKm: 265 },
+  repetition: { minSecPerKm: 235, maxSecPerKm: 245 },
+};
+
+/**
+ * Le corridor **calculé** : quand l'athlète a donné un chrono, les allures ne se
+ * dérivent plus d'une moyenne d'entraînement, elles sortent de la table. Le
+ * corridor se resserre d'autant, et le message cite la table pour que le modèle
+ * sache où rentrer.
+ */
+describe('validatePlanBusinessRules — corridor VDOT', () => {
+  const conforming = week([2, 4, 7], [8, 10, 18]);
+
+  function weekWith(tested: Partial<PlanWeekOutput['sessions'][number]>): PlanWeekOutput {
+    return {
+      sessions: [
+        session(2, { distanceKm: 8 }),
+        session(4, { kind: 'Seuil', title: '4 × 8 min', distanceKm: 10, ...tested }),
+        session(7, { kind: 'Sortie longue', title: '16 km', distanceKm: 16 }),
+      ],
+    };
+  }
+
+  function stepsAtPace(fast: number, slow = fast): PlanSessionSteps {
+    return [
+      { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+      {
+        repeat: 4,
+        steps: [
+          step('run', { durationS: 480, paceMinSecPerKm: fast, paceMaxSecPerKm: slow }),
+          step('recover', { durationS: 120 }),
+        ],
+      },
+      { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+    ];
+  }
+
+  it('accepte les allures de la table, du seuil à la récupération trottée', () => {
+    const weeks = [
+      weekWith({ targetPaceSecPerKm: 285, steps: stepsAtPace(280, 292) }),
+      conforming,
+    ];
+
+    expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toEqual([]);
+  });
+
+  it('relève une allure plus rapide que les répétitions, table à l’appui', () => {
+    const violations = validatePlanBusinessRules(
+      [weekWith({ steps: stepsAtPace(220) }), conforming],
+      EXPECTED,
+      { paces: PACES },
+    );
+
+    expect(violations).toEqual([
+      'Semaine 1, séance du jeudi (Seuil) : allure 3:40/km hors de la fourchette plausible ' +
+        "[3:45/km – 7:10/km] de ta table d'allures calculée (E 5:35–6:10/km, T 4:40–4:52/km, " +
+        'I 4:12–4:25/km, R 3:55–4:05/km), récupérations comprises.',
+    ]);
+  });
+
+  it('inclut les bornes exactes du corridor calculé', () => {
+    const onBounds = [weekWith({ steps: stepsAtPace(225, 430) }), conforming];
+    expect(validatePlanBusinessRules(onBounds, EXPECTED, { paces: PACES })).toEqual([]);
+
+    // Une seconde au-delà, de chaque côté.
+    expect(
+      validatePlanBusinessRules([weekWith({ steps: stepsAtPace(224) }), conforming], EXPECTED, {
+        paces: PACES,
+      }),
+    ).toHaveLength(1);
+    expect(
+      validatePlanBusinessRules([weekWith({ steps: stepsAtPace(431) }), conforming], EXPECTED, {
+        paces: PACES,
+      }),
+    ).toHaveLength(1);
+  });
+
+  it('prime sur l’allure récente quand les deux sont connues', () => {
+    // 7:30/km : dans le corridor large dérivé de 5:30/km, hors de la table.
+    const weeks = [
+      weekWith({ kind: 'Endurance fondamentale', targetPaceSecPerKm: 450 }),
+      conforming,
+    ];
+
+    expect(
+      validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: 330, paces: PACES }),
+    ).toHaveLength(1);
+    expect(
+      validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: 330 }),
+    ).toEqual([]);
+  });
+
+  /**
+   * Le prompt imposé dit « récupérations plus lentes que E.max, ou sans cible »,
+   * sans borne. Le corridor doit dire la même chose, sans quoi une consigne du
+   * prompt produit une violation — et une génération de plusieurs minutes est
+   * relancée pour un trot parfaitement légitime.
+   */
+  describe('récupérations', () => {
+    /** Un déroulé de qualité dont la seule variable est l'allure de la récupération. */
+    function stepsRecoveringAt(pace: number): PlanSessionSteps {
+      return [
+        { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+        {
+          repeat: 4,
+          steps: [
+            step('run', { durationS: 480, paceMinSecPerKm: 280, paceMaxSecPerKm: 292 }),
+            step('recover', { durationS: 120, paceMinSecPerKm: pace, paceMaxSecPerKm: pace }),
+          ],
+        },
+        { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+      ];
+    }
+
+    it('accepte une récupération bien plus lente que l’endurance', () => {
+      // 8:15/km : au-delà de la borne lente (7:10/km), et c'est exactement ce que
+      // le prompt autorise — jusqu'à la portion marchée d'un débutant.
+      const weeks = [weekWith({ steps: stepsRecoveringAt(495) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toEqual([]);
+    });
+
+    it('refuse malgré tout une récupération plus rapide que les répétitions', () => {
+      // La dispense ne vaut que du côté lent : une « récupération » à 3:20/km
+      // n'en est pas une.
+      const weeks = [weekWith({ steps: stepsRecoveringAt(200) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
+    });
+
+    it('refuse toujours une étape d’effort trop lente', () => {
+      const weeks = [weekWith({ steps: stepsAtPace(495) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
+    });
+
+    it('dispense aussi la récupération du corridor de repli', () => {
+      // Sans table, le corridor dérivé de 5:30/km s'arrête à 7:40/km : la
+      // récupération n'y est pas plus bornée.
+      const weeks = [weekWith({ steps: stepsRecoveringAt(600) }), conforming];
+
+      expect(
+        validatePlanBusinessRules(weeks, EXPECTED, { referencePaceSecPerKm: 330 }),
+      ).toEqual([]);
+    });
+  });
+
+  /**
+   * Les lignes droites du prompt débutant (« 6 à 8 × 30 s à 1 min vite ») se
+   * courent plus vite que des répétitions calibrées sur 200 à 400 m. Les refuser
+   * reviendrait à refuser une séance que le prompt vient de prescrire.
+   */
+  describe('accélérations courtes', () => {
+    /** Une séance de qualité dont le bloc d'effort porte la mesure et l'allure données. */
+    function stepsSprinting(measure: Partial<PlanStep>, pace: number): PlanSessionSteps {
+      return [
+        { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+        {
+          repeat: 6,
+          steps: [
+            step('run', { ...measure, paceMinSecPerKm: pace, paceMaxSecPerKm: pace }),
+            step('recover', { durationS: 90 }),
+          ],
+        },
+        { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+      ];
+    }
+
+    it('accepte une ligne droite de 45 s plus rapide que les répétitions', () => {
+      const weeks = [weekWith({ steps: stepsSprinting({ durationS: 45 }, 200) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toEqual([]);
+    });
+
+    it('accepte de même une accélération mesurée en mètres', () => {
+      const weeks = [weekWith({ steps: stepsSprinting({ distanceM: 150 }, 200) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toEqual([]);
+    });
+
+    it('refuse la même allure sur un effort qui n’est plus court', () => {
+      // 90 s : au-delà de l'accélération, une allure plus rapide que R est une
+      // erreur de plan.
+      const weeks = [weekWith({ steps: stepsSprinting({ durationS: 90 }, 200) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
+    });
+
+    it('garde la borne lente sur une étape courte', () => {
+      // La dispense ne joue que du côté rapide : 10:00/km sur 45 s reste une
+      // aberration.
+      const weeks = [weekWith({ steps: stepsSprinting({ durationS: 45 }, 600) }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
+    });
+  });
+});
+
+/**
+ * La progression du volume — la moitié « entraîneur » de la validation.
+ *
+ * Ce que ces tests protègent : le plan qui a motivé la règle, douze semaines au
+ * même volume avec des séances interchangeables, ne doit plus pouvoir passer.
+ */
+describe('validatePlanBusinessRules — progression du volume', () => {
+  /** Une semaine de trois séances, sortie longue le dimanche (la plus longue). */
+  function volumeWeek(easy: number, quality: number, longRun: number): PlanWeekOutput {
+    return week([2, 4, 7], [easy, quality, longRun]);
+  }
+
+  /** Semaines de 30, 32, 34… km, toutes conformes aux règles autres que celle éprouvée. */
+  const W = {
+    30: volumeWeek(10, 10, 10),
+    31: volumeWeek(10, 10, 11),
+    32: volumeWeek(10, 10, 12),
+    33: volumeWeek(11, 10, 12),
+    34: volumeWeek(11, 11, 12),
+    36: volumeWeek(12, 11, 13),
+    38: volumeWeek(13, 12, 13),
+    27: volumeWeek(9, 9, 9),
+    28: volumeWeek(9, 9, 10),
+    29: volumeWeek(9, 9, 11),
+    25: volumeWeek(8, 8, 9),
+    22: volumeWeek(7, 7, 8),
+    21: volumeWeek(7, 7, 7),
+    26: volumeWeek(8, 8, 10),
+    19: volumeWeek(6, 6, 7),
+  } as const;
+
+  /** Les attentes d'un objectif libre de `weeks` semaines. */
+  function free(weeks: number): PlanExpectations {
+    return { scope: 'creation', weeks, sessionsPerWeek: 3, longRunDay: 7 };
+  }
+
+  /** Les mêmes, pour une course (donc avec affûtage). */
+  function race(weeks: number, isMarathon = false): PlanExpectations {
+    return { ...free(weeks), race: { isMarathon } };
+  }
+
+  /** Une course, jugée sur la **fenêtre restante** d'un plan déjà écrit. */
+  function adjustment(weeks: number, isMarathon = false): PlanExpectations {
+    return { ...race(weeks, isMarathon), scope: 'adjustment' };
+  }
+
+  describe('hausse hebdomadaire', () => {
+    it('accepte une hausse de 12 % pile', () => {
+      // 25 → 28 km : exactement le plafond, et le plafond est admis.
+      expect(validatePlanBusinessRules([W[25], W[28]], free(2))).toEqual([]);
+    });
+
+    it('relève la première hausse qui le dépasse, chiffres à l’appui', () => {
+      expect(validatePlanBusinessRules([W[25], W[29]], free(2))).toEqual([
+        'Semaine 2 : 29,0 km après 25,0 km, soit 16,0 % de hausse. Le volume ne monte jamais de ' +
+          "plus de 12,0 % d'une semaine à l'autre — 28,0 km au plus ici.",
+      ]);
+    });
+
+    it('annonce un plafond que la règle accepte, à l’unité affichée', () => {
+      // 29,8 × 1,12 = 33,376 : « 33,4 km au plus » serait refusé par la règle qui
+      // l'annonce. Le plafond s'arrondit donc au dixième inférieur.
+      const start = volumeWeek(9.9, 9.9, 10);
+
+      expect(validatePlanBusinessRules([start, W[34]], free(2))).toEqual([
+        'Semaine 2 : 34,0 km après 29,8 km, soit 14,1 % de hausse. Le volume ne monte jamais de ' +
+          "plus de 12,0 % d'une semaine à l'autre — 33,3 km au plus ici.",
+      ]);
+
+      // Et le chiffre annoncé satisfait bien la règle.
+      expect(validatePlanBusinessRules([start, volumeWeek(11, 11, 11.3)], free(2))).toEqual([]);
+    });
+
+    it('laisse toujours redescendre le volume', () => {
+      expect(validatePlanBusinessRules([W[34], W[25]], free(2))).toEqual([]);
+    });
+
+    it('ne compare rien à une première semaine entamée, amputée par construction', () => {
+      // 22 → 34 km, soit +55 % : la première semaine ne portait que trois jours.
+      const started = week([5, 7], [10, 12]);
+
+      expect(
+        validatePlanBusinessRules([started, W[34]], { ...free(2), firstWeekFromDay: 5 }),
+      ).toEqual([]);
+    });
+  });
+
+  describe('semaine allégée', () => {
+    it('ne relève rien quand une semaine sur quatre redescend', () => {
+      expect(
+        validatePlanBusinessRules([W[30], W[32], W[34], W[27], W[29], W[31]], free(6)),
+      ).toEqual([]);
+    });
+
+    it('relève quatre semaines de suite sans respiration, une seule fois', () => {
+      const violations = validatePlanBusinessRules(
+        [W[27], W[29], W[31], W[33], W[36], W[38]],
+        free(6),
+      );
+
+      expect(violations).toEqual([
+        'Semaines 1 à 4 : quatre semaines de suite sans semaine allégée. ' +
+          "L'une d'elles doit redescendre à 85,0 % ou moins du volume de la semaine précédente.",
+      ]);
+    });
+
+    it('accepte une baisse à 85 % pile', () => {
+      // 40 → 34 km : exactement 85 %, la semaine compte pour allégée.
+      const weeks = [W[30], W[32], volumeWeek(13, 13, 14), W[34], W[36], W[38]];
+
+      expect(validatePlanBusinessRules(weeks, free(6)).join(' ')).not.toContain('sans semaine allégée');
+    });
+
+    it('ne s’applique pas sous six semaines', () => {
+      expect(validatePlanBusinessRules([W[27], W[29], W[31], W[33], W[34]], free(5))).toEqual([]);
+    });
+
+    it('ne s’applique pas quand l’affûtage ne laisse que quatre semaines de développement', () => {
+      // 6 semaines dont 2 d'affûtage : exiger une semaine allégée dans les
+      // quatre restantes gaspillerait le quart du bloc, l'affûtage suit déjà.
+      expect(
+        validatePlanBusinessRules([W[27], W[29], W[31], W[33], W[29], W[21]], race(6)),
+      ).toEqual([]);
+    });
+  });
+
+  describe('anti-plat', () => {
+    it('relève un plan qui ne monte jamais', () => {
+      expect(validatePlanBusinessRules([W[30], W[30], W[30], W[30], W[30]], free(5))).toEqual([
+        'Plan trop plat : la semaine la plus chargée hors affûtage (30,0 km) doit dépasser ' +
+          "d'au moins 10,0 % la première semaine pleine (30,0 km), soit 33,0 km au minimum.",
+      ]);
+    });
+
+    it('accepte un pic à 110 % pile de la première semaine pleine', () => {
+      expect(validatePlanBusinessRules([W[30], W[31], W[32], W[33], W[30]], free(5))).toEqual([]);
+    });
+
+    it('ne s’applique pas à un plan de quatre semaines', () => {
+      expect(validatePlanBusinessRules([W[30], W[30], W[30], W[30]], free(4))).toEqual([]);
+    });
+
+    it('annonce un plancher que la règle accepte, à l’unité affichée', () => {
+      // 30,4 × 1,1 = 33,44 : « 33,4 km au minimum » serait refusé par la règle
+      // qui l'annonce. Le plancher s'arrondit donc au dixième supérieur.
+      const flat = volumeWeek(10, 10, 10.4);
+
+      expect(validatePlanBusinessRules([flat, flat, flat, flat, flat], free(5))).toEqual([
+        'Plan trop plat : la semaine la plus chargée hors affûtage (30,4 km) doit dépasser ' +
+          "d'au moins 10,0 % la première semaine pleine (30,4 km), soit 33,5 km au minimum.",
+      ]);
+
+      // Et le chiffre annoncé satisfait bien la règle.
+      const weeks = [flat, W[31], W[32], volumeWeek(11, 11, 11.5), W[30]];
+      expect(validatePlanBusinessRules(weeks, free(5))).toEqual([]);
+    });
+
+    it('mesure le pic hors affûtage, et part de la première semaine pleine', () => {
+      // Le pic se lit sur les semaines de développement, et la semaine 1
+      // entamée — 22 km en trois jours — ne sert pas de repère.
+      const weeks = [week([5, 7], [10, 12]), W[30], W[31], W[32], W[33], W[27], W[21]];
+
+      expect(
+        validatePlanBusinessRules(weeks, { ...race(7), firstWeekFromDay: 5 }),
+      ).toEqual([]);
+    });
+
+    /**
+     * Six semaines de course, dont deux d'affûtage : quatre semaines de
+     * développement, le minimum pour que l'anti-plat laisse un choix. Le même
+     * plan est jugé à la création et sur une fenêtre restante — seule la portée
+     * change.
+     */
+    const fourBuildWeeks = [W[30], W[30], W[30], W[30], W[29], W[19]];
+
+    it('ne juge pas la platitude d’une fenêtre restante d’ajustement', () => {
+      // Le cas reproduit : un marathon ajusté à quelques semaines de la course.
+      // Exiger un pic supérieur à sa première semaine reviendrait à demander de
+      // monter le volume en plein affûtage.
+      expect(validatePlanBusinessRules(fourBuildWeeks, adjustment(6, true))).toEqual([]);
+    });
+
+    it('la juge sur le même plan à la création', () => {
+      expect(validatePlanBusinessRules(fourBuildWeeks, race(6))).toEqual([
+        'Plan trop plat : la semaine la plus chargée hors affûtage (30,0 km) doit dépasser ' +
+          "d'au moins 10,0 % la première semaine pleine (30,0 km), soit 33,0 km au minimum.",
+      ]);
+    });
+
+    it('laisse les autres règles de volume actives à l’ajustement', () => {
+      // Une hausse de 16 % reste une hausse de 16 %, fenêtre restante ou pas.
+      const weeks = [W[25], W[29], W[31], W[33], W[29], W[19]];
+
+      expect(validatePlanBusinessRules(weeks, adjustment(6))).toEqual([
+        'Semaine 2 : 29,0 km après 25,0 km, soit 16,0 % de hausse. Le volume ne monte jamais de ' +
+          "plus de 12,0 % d'une semaine à l'autre — 28,0 km au plus ici.",
+      ]);
+    });
+
+    it('ne s’applique pas à trois semaines de développement', () => {
+      // Cinq semaines dont deux d'affûtage : deux transitions seulement pour
+      // porter la montée, soit un pic enfermé entre 110 % (anti-plat) et 125 %
+      // (deux hausses de 12 %) de la première semaine. La bande ne s'ouvre
+      // vraiment qu'à quatre semaines de développement.
+      expect(validatePlanBusinessRules([W[30], W[30], W[30], W[29], W[19]], race(5))).toEqual([]);
+    });
+  });
+
+  describe('affûtage', () => {
+    it('ne relève rien sur un affûtage strictement décroissant', () => {
+      expect(
+        validatePlanBusinessRules([W[30], W[32], W[34], W[36], W[30], W[22]], race(6)),
+      ).toEqual([]);
+    });
+
+    it('relève une semaine d’affûtage qui ne descend pas', () => {
+      const violations = validatePlanBusinessRules(
+        [W[30], W[32], W[34], W[36], W[38], W[22]],
+        race(6),
+      );
+
+      expect(violations).toContain(
+        'Semaine 5 (affûtage) : 38,0 km, autant ou plus que la semaine 4 (36,0 km) — ' +
+          "pendant l'affûtage, le volume baisse strictement chaque semaine.",
+      );
+    });
+
+    it('relève une semaine de course trop chargée par rapport au pic', () => {
+      const violations = validatePlanBusinessRules(
+        [W[30], W[32], W[34], W[36], W[30], W[26]],
+        race(6),
+      );
+
+      expect(violations).toEqual([
+        'Semaine 6 (semaine de course) : 26,0 km, soit 72,2 % du pic (36,0 km) — elle reste sous ' +
+          '65,0 % du pic, 23,4 km au plus.',
+      ]);
+    });
+
+    it('donne trois semaines d’affûtage à un marathon, deux au reste', () => {
+      // Semaine 6 monte encore : c'est une faute pour un marathon (elle est déjà
+      // dans l'affûtage), pas pour un semi.
+      const weeks = [W[27], W[29], W[31], W[33], W[36], W[38], W[30], W[22]];
+
+      expect(validatePlanBusinessRules(weeks, race(8, true)).join(' ')).toContain(
+        'Semaine 6 (affûtage)',
+      );
+      expect(validatePlanBusinessRules(weeks, race(8)).join(' ')).not.toContain('affûtage');
+    });
+
+    it('n’exige aucun affûtage d’un objectif libre', () => {
+      expect(
+        validatePlanBusinessRules([W[30], W[32], W[34], W[36], W[38]], free(5)),
+      ).toEqual([]);
+    });
+  });
+
+  describe('poids de la sortie longue', () => {
+    it('relève une sortie longue trop courte pour sa semaine', () => {
+      // 5 km sur 41 : la « sortie longue » n'en est pas une.
+      const weeks = [week([2, 4, 7], [18, 18, 5])];
+
+      expect(validatePlanBusinessRules(weeks, free(1))).toContain(
+        'Semaine 1 : la sortie longue fait 5,0 km pour 41,0 km dans la semaine (12,2 %) — elle doit ' +
+          'peser entre 20,0 % et 53,3 % du volume hebdomadaire.',
+      );
+    });
+
+    it('tolère une sortie longue de 47 % sur une semaine de trois séances', () => {
+      // Trois séances équilibrées en donnent déjà 33 % : plafonner à 40 % ferait
+      // constater une faute que l'arithmétique impose.
+      expect(validatePlanBusinessRules([week([2, 4, 7], [8, 10, 16])], free(1))).toEqual([]);
+    });
+
+    it('applique bien 40 % dès quatre séances', () => {
+      const weeks = [{ sessions: [
+        session(2, { distanceKm: 8 }),
+        session(3, { distanceKm: 8 }),
+        session(5, { distanceKm: 8 }),
+        session(7, { distanceKm: 18 }),
+      ] }];
+
+      expect(
+        validatePlanBusinessRules(weeks, { scope: 'creation', weeks: 1, sessionsPerWeek: 4, longRunDay: 7 }),
+      ).toContain(
+        'Semaine 1 : la sortie longue fait 18,0 km pour 42,0 km dans la semaine (42,9 %) — elle ' +
+          'doit peser entre 20,0 % et 40,0 % du volume hebdomadaire.',
+      );
+    });
+
+    it('ne juge ni la semaine entamée ni les semaines d’affûtage', () => {
+      // Semaine 1 amputée et semaine de course : leur sortie longue ne pèse plus
+      // rien, et c'est normal.
+      const weeks = [
+        { sessions: [session(7, { distanceKm: 5 })] },
+        W[30],
+        W[32],
+        { sessions: [session(2, { distanceKm: 8 }), session(4, { distanceKm: 8 }), session(7, { distanceKm: 4 })] },
+      ];
+
+      expect(
+        validatePlanBusinessRules(weeks, { ...race(4), firstWeekFromDay: 5 }).join(' '),
+      ).not.toContain('la sortie longue fait');
+    });
+  });
+
+  describe('distances déclarées', () => {
+    it('exige la distance de chaque séance, en une seule ligne pour tout le plan', () => {
+      const weeks = [
+        {
+          sessions: [
+            session(2, { durationMin: 45 }),
+            session(4, { distanceKm: 10 }),
+            session(7, { distanceKm: 12 }),
+          ],
+        },
+        W[30],
+        {
+          sessions: [
+            session(2, { durationMin: 45 }),
+            session(4, { durationMin: 50 }),
+            session(7, { durationMin: 90 }),
+          ],
+        },
+      ];
+
+      expect(validatePlanBusinessRules(weeks, free(3)).filter((violation) =>
+        violation.startsWith('Volumes hebdomadaires'),
+      )).toEqual([
+        'Volumes hebdomadaires invérifiables : chaque séance déclare sa distance `distanceKm`, ' +
+          'footings et récupérations compris — il en manque semaine 1, semaine 3.',
+      ]);
+    });
+
+    it('ne relève aucune progression fantôme autour d’une semaine sans volume', () => {
+      const blind: PlanWeekOutput = {
+        sessions: [
+          session(2, { durationMin: 45 }),
+          session(4, { durationMin: 50 }),
+          session(7, { durationMin: 90 }),
+        ],
+      };
+      const weeks = [W[30], blind, W[34]];
+      const violations = validatePlanBusinessRules(weeks, free(3));
+
+      // Une seule ligne : la distance manquante. Ni hausse, ni baisse déduite
+      // d'une somme partielle.
+      expect(violations).toHaveLength(1);
+    });
+  });
+});
+
+describe('taperWeekCount', () => {
+  it('ne compte aucune semaine d’affûtage sans course', () => {
+    expect(taperWeekCount(12, null)).toBe(0);
+    expect(taperWeekCount(12, undefined)).toBe(0);
+  });
+
+  it('donne deux semaines par défaut, trois à un marathon assez long', () => {
+    expect(taperWeekCount(12, { isMarathon: false })).toBe(2);
+    expect(taperWeekCount(12, { isMarathon: true })).toBe(3);
+    // Sous huit semaines, un marathon n'a pas la place d'affûter trois semaines.
+    expect(taperWeekCount(7, { isMarathon: true })).toBe(2);
+    expect(taperWeekCount(8, { isMarathon: true })).toBe(3);
+  });
+
+  it('ne dépasse jamais la longueur du plan', () => {
+    expect(taperWeekCount(1, { isMarathon: false })).toBe(1);
+  });
+});
+
+describe('isMarathonGoal', () => {
+  it('reconnaît un marathon, accents et casse compris', () => {
+    expect(isMarathonGoal('Marathon de Paris')).toBe(true);
+    expect(isMarathonGoal('mon premier marathon')).toBe(true);
+  });
+
+  it('ne prend pas un semi pour un marathon', () => {
+    for (const goal of [
+      'Semi-marathon de Nantes',
+      'semi marathon',
+      'Demi-marathon',
+      'half marathon',
+      // Graphies des pages d'inscription : le « 1/2 », et le trait d'union
+      // insécable que produisent les traitements de texte.
+      '1/2 marathon de Nantes',
+      '1/2marathon',
+      'semi‑marathon de Nantes',
+    ]) {
+      expect(isMarathonGoal(goal)).toBe(false);
+    }
+  });
+
+  it('reste faux sur tout le reste', () => {
+    expect(isMarathonGoal('10 km sous 50 min')).toBe(false);
   });
 });

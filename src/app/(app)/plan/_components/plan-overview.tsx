@@ -4,7 +4,11 @@ import { MarkdownLite } from "@/components/markdown-lite";
 import type { PlanDto } from "@/data/plans";
 
 import { formatDuration } from "../../_lib/format";
-import { LEVEL_LABELS } from "../_lib/form-options";
+import {
+  LEVEL_LABELS,
+  REFERENCE_DISTANCE_LABELS,
+  formatRaceTimeSeconds,
+} from "../_lib/form-options";
 import { formatCivilDay, formatIsoDay } from "../_lib/format-plan";
 import { planEndsOn } from "../_lib/plan-weeks";
 
@@ -72,6 +76,18 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
         <Setting label="Sortie longue" value={formatIsoDay(plan.longRunDay)} />
         {plan.weeklyTimeMinutes === null ? null : (
           <Setting label="Temps hebdo" value={formatDuration(plan.weeklyTimeMinutes * 60)} />
+        )}
+        {/*
+          Le chrono qui a calculé les allures du plan. Rien ne s'affiche sans lui
+          — ni sur les plans antérieurs au champ, ni quand l'athlète l'a laissé
+          vide : c'est précisément l'information « tes allures sont calées sur
+          ceci », et l'inventer serait mentir.
+        */}
+        {plan.referenceDistance === null || plan.referenceTimeS === null ? null : (
+          <Setting
+            label="Chrono de référence"
+            value={`${REFERENCE_DISTANCE_LABELS[plan.referenceDistance]} · ${formatRaceTimeSeconds(plan.referenceTimeS)}`}
+          />
         )}
       </div>
 

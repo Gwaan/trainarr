@@ -8,8 +8,10 @@ import {
   GOAL_TYPE_CHOICES,
   LEVEL_CHOICES,
   LONG_RUN_DAY_CHOICES,
+  REFERENCE_DISTANCE_CHOICES,
   SESSIONS_PER_WEEK_CHOICES,
   WEEK_CHOICES,
+  asReferenceDistance,
 } from "../_lib/form-options";
 import { planRecapEntries } from "../_lib/plan-recap";
 import type { PlanFormValues, PlanStep } from "../_lib/plan-steps";
@@ -34,6 +36,9 @@ const HINTS = {
   weeklyTimeHours:
     "Le temps que tu peux consacrer à courir sur une semaine. Sans réponse, le coach reste prudent.",
   longRunDay: "Le jour où tu peux courir le plus longtemps.",
+  referenceDistance: "La distance sur laquelle tu as un temps récent et sérieux.",
+  referenceTime:
+    "C'est la donnée la plus fiable pour calibrer tes allures. Sans chrono, le coach restera prudent.",
 } as const;
 
 /** Bornes calendaires que les champs date proposent (cf. `_lib/plan-window.ts`). */
@@ -71,6 +76,8 @@ export function PlanStepFields(props: PlanStepFieldsProps) {
       return <GoalFields {...props} />;
     case "profile":
       return <ProfileFields {...props} />;
+    case "race":
+      return <RaceFields {...props} />;
     case "constraints":
       return <ConstraintsFields {...props} />;
     case "summary":
@@ -184,6 +191,88 @@ function ProfileFields({ values, onChange, errors, fieldId }: PlanStepFieldsProp
         errorId={`${fieldId("level")}-error`}
         columns="sm:grid-cols-3"
       />
+    </div>
+  );
+}
+
+/**
+ * Le chrono de référence : une distance et un temps.
+ *
+ * Facultatif, et pourtant l'étape la plus utile du formulaire — c'est ce couple
+ * qui **calcule** la table d'allures du plan (VDOT) au lieu de la laisser deviner
+ * au coach. D'où la phrase d'aide, qui dit ce que coûte de passer son chemin.
+ *
+ * Le temps est un champ texte à masque libre plutôt qu'un `type="time"` : le
+ * sélecteur natif est pensé pour une heure de la journée, pas pour un chrono, et
+ * il n'affiche pas les secondes sur tous les navigateurs.
+ */
+function RaceFields({ values, onChange, errors, fieldId }: PlanStepFieldsProps) {
+  const placeholder =
+    REFERENCE_DISTANCE_CHOICES.find((choice) => choice.value === values.referenceDistance)
+      ?.placeholder ?? "50:00";
+
+  return (
+    <div className="flex flex-col gap-5">
+      <Field
+        id={fieldId("referenceDistance")}
+        label="Distance"
+        hint={HINTS.referenceDistance}
+        error={errors?.referenceDistance}
+      >
+        <Select
+          id={fieldId("referenceDistance")}
+          name="referenceDistance"
+          aria-invalid={errors?.referenceDistance ? true : undefined}
+          aria-describedby={describedBy(
+            `${fieldId("referenceDistance")}-hint`,
+            Boolean(errors?.referenceDistance) && `${fieldId("referenceDistance")}-error`,
+          )}
+          value={values.referenceDistance}
+          onChange={(event) => {
+            const distance = asReferenceDistance(event.target.value);
+            if (distance !== null) onChange("referenceDistance", distance);
+          }}
+          className="w-full sm:w-48"
+        >
+          {REFERENCE_DISTANCE_CHOICES.map((choice) => (
+            <option key={choice.value} value={choice.value}>
+              {choice.label}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <Field
+        id={fieldId("referenceTime")}
+        label="Ton temps"
+        hint={HINTS.referenceTime}
+        error={errors?.referenceTime}
+        optional
+      >
+        <Input
+          id={fieldId("referenceTime")}
+          name="referenceTime"
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          placeholder={placeholder}
+          aria-invalid={errors?.referenceTime ? true : undefined}
+          aria-describedby={describedBy(
+            `${fieldId("referenceTime")}-format`,
+            `${fieldId("referenceTime")}-hint`,
+            Boolean(errors?.referenceTime) && `${fieldId("referenceTime")}-error`,
+          )}
+          value={values.referenceTime}
+          onChange={(event) => onChange("referenceTime", event.target.value)}
+          className="num w-32"
+        />
+        <p
+          id={`${fieldId("referenceTime")}-format`}
+          className="mt-1.5 text-[0.76rem] leading-snug text-fg-faint"
+        >
+          Format <span className="num">mm:ss</span> ou <span className="num">hh:mm:ss</span>.
+        </p>
+      </Field>
     </div>
   );
 }

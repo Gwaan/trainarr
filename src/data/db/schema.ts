@@ -13,6 +13,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
+import type { ReferenceDistance } from '@/lib/metrics/vdot';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 /**
@@ -246,6 +247,26 @@ export const PLAN_LEVELS = ['beginner', 'intermediate', 'advanced'] as const;
 export type PlanLevel = (typeof PLAN_LEVELS)[number];
 
 /**
+ * Distances sur lesquelles l'athlète peut déclarer un chrono de référence.
+ *
+ * Ce sont exactement les ancres de `lib/metrics/vdot` (`REFERENCE_DISTANCES`) :
+ * le couple (distance, temps) sert à calculer un VDOT (Daniels & Gilbert, 1979),
+ * donc la table d'allures E/M/T/I/R que le coach reçoit comme prescription.
+ *
+ * La liste est recopiée plutôt qu'importée — la base ne dépend pas du module de
+ * calcul — mais `satisfies` interdit qu'elle en diverge : une ancre ajoutée là-bas
+ * et oubliée ici ne compilerait plus.
+ */
+export const PLAN_REFERENCE_DISTANCES = [
+  '5k',
+  '10k',
+  'half',
+  'marathon',
+] as const satisfies readonly ReferenceDistance[];
+
+export type PlanReferenceDistance = (typeof PLAN_REFERENCE_DISTANCES)[number];
+
+/**
  * Un plan d'entraînement, tel que le coach IA le construit à partir des
  * contraintes de l'athlète.
  *
@@ -294,6 +315,18 @@ export const plans = pgTable(
     weeklyTimeMinutes: integer('weekly_time_minutes'),
     /** Jour de la sortie longue, au format ISO-8601 : 1 = lundi … 7 = dimanche. */
     longRunDay: integer('long_run_day').notNull(),
+    /**
+     * Chrono de course récent déclaré à la création : la distance courue et le
+     * temps réalisé, en secondes.
+     *
+     * **Les deux vont ensemble** — les deux `NULL`, ou les deux renseignées
+     * (invariant porté par le DAL) : une distance sans temps ne calcule rien, un
+     * temps sans distance non plus. C'est de ce couple que se déduit le VDOT,
+     * donc la table d'allures imposée au coach ; sans lui, le plan retombe sur
+     * l'allure d'entraînement récente, bien moins fiable.
+     */
+    referenceDistance: text('reference_distance', { enum: PLAN_REFERENCE_DISTANCES }),
+    referenceTimeS: integer('reference_time_s'),
     /** Approche du plan rédigée par le coach (markdown). `NULL` tant qu'il n'a rien écrit. */
     summary: text('summary'),
     createdAt: createdAt(),

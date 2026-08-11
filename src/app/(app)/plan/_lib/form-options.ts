@@ -5,6 +5,8 @@
  * listes.
  */
 
+import type { ReferenceDistance } from "@/lib/metrics/vdot";
+
 import { ISO_DAY_LABELS } from "./format-plan";
 
 /**
@@ -28,6 +30,8 @@ export const PLAN_FORM_FIELDS = [
   "goalText",
   "raceDate",
   "weeks",
+  "referenceDistance",
+  "referenceTime",
   "startsOn",
   "sessionsPerWeek",
   "weeklyTimeHours",
@@ -85,6 +89,75 @@ export const LEVEL_CHOICES: readonly { value: Level; label: string; hint: string
 
 /** Le cas le plus courant, et le moins risqué des trois à se voir appliquer. */
 export const DEFAULT_LEVEL: Level = "intermediate";
+
+/*
+ * Chrono de référence.
+ *
+ * C'est la donnée la plus utile du formulaire : elle **calcule** la table
+ * d'allures du plan (VDOT, méthode Daniels) au lieu de la laisser deviner au
+ * coach. Facultative, mais un plan sans chrono reste délibérément prudent.
+ */
+
+/** Libellé français d'une distance de référence — le formulaire et l'en-tête du plan le partagent. */
+export const REFERENCE_DISTANCE_LABELS: Record<ReferenceDistance, string> = {
+  "5k": "5 km",
+  "10k": "10 km",
+  half: "Semi",
+  marathon: "Marathon",
+};
+
+/**
+ * Distances proposées, avec le format de saisie que chacune appelle : `mm:ss`
+ * jusqu'au 10 km, `hh:mm:ss` au-delà. Le champ accepte les deux quoi qu'il
+ * arrive — l'exemple ne fait qu'orienter.
+ */
+export const REFERENCE_DISTANCE_CHOICES: readonly {
+  value: ReferenceDistance;
+  label: string;
+  placeholder: string;
+}[] = [
+  { value: "5k", label: REFERENCE_DISTANCE_LABELS["5k"], placeholder: "24:30" },
+  { value: "10k", label: REFERENCE_DISTANCE_LABELS["10k"], placeholder: "50:00" },
+  { value: "half", label: REFERENCE_DISTANCE_LABELS.half, placeholder: "1:52:00" },
+  { value: "marathon", label: REFERENCE_DISTANCE_LABELS.marathon, placeholder: "3:55:00" },
+];
+
+/** Le 10 km : assez court pour rester dans le domaine de fiabilité du VDOT, assez couru pour être disponible. */
+export const DEFAULT_REFERENCE_DISTANCE: ReferenceDistance = "10k";
+
+/**
+ * `mm:ss` ou `hh:mm:ss` — le masque du champ chrono.
+ *
+ * Les minutes et les secondes restent sous 60 : « 90:00 » pour un semi est une
+ * saisie ambiguë (90 minutes ? 90 secondes ?), mieux vaut la refuser tout de
+ * suite que d'en deviner une.
+ */
+const RACE_TIME_SHAPE = /^(?:(\d{1,2}):)?([0-5]?\d):([0-5]\d)$/;
+
+/** Le chrono saisi, en secondes, ou `null` si ce n'en est pas un. */
+export function parseRaceTimeSeconds(input: string): number | null {
+  const match = RACE_TIME_SHAPE.exec(input.trim());
+  if (match === null) return null;
+
+  const [, hours, minutes, seconds] = match;
+  const hoursPart = hours === undefined ? 0 : Number(hours) * 3_600;
+  return hoursPart + Number(minutes) * 60 + Number(seconds);
+}
+
+/** Le chemin inverse : `2_910` → `48:30`, `6_720` → `1:52:00`. */
+export function formatRaceTimeSeconds(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  const rest = String(total % 60).padStart(2, "0");
+
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
+}
+
+/** La distance de référence correspondant à cette chaîne, `null` si elle n'en désigne aucune. */
+export function asReferenceDistance(value: string): ReferenceDistance | null {
+  return REFERENCE_DISTANCE_CHOICES.find((choice) => choice.value === value)?.value ?? null;
+}
 
 /** Durées d'un objectif libre. Au-delà de 16 semaines, un bloc perd son sens. */
 export const WEEK_CHOICES = [4, 6, 8, 10, 12, 16] as const;

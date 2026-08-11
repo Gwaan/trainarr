@@ -34,8 +34,8 @@ import { PlanStepFields, type PlanDateBounds } from "./plan-form-steps";
  *
  * Le formulaire posait sa dizaine de questions d'un bloc : Gwen a demandé
  * qu'elles arrivent une étape à la fois. La liste des étapes vit dans
- * `_lib/plan-steps.ts` — rien ici ne numérote une étape en dur, en insérer une
- * (le chrono de référence, prévu) ne touche pas ce fichier.
+ * `_lib/plan-steps.ts` — rien ici ne numérote une étape en dur, et l'insertion
+ * de l'étape « Ton chrono » n'a touché que la liste et la phrase d'accueil.
  *
  * Quatre points tiennent tout l'écran :
  *
@@ -255,7 +255,8 @@ export function PlanCreateDialog(bounds: PlanCreateDialogProps) {
             <div className="min-w-0">
               <DialogTitle>Créer mon plan</DialogTitle>
               <DialogDescription>
-                Quatre étapes : ton objectif, ton profil, tes contraintes, puis la relecture.
+                Cinq étapes : ton objectif, ton profil, ton chrono, tes contraintes, puis la
+                relecture.
               </DialogDescription>
             </div>
             <Button

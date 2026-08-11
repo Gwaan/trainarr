@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import { AthleteNotFoundError } from './athlete';
-import type { Plan, PlanLevel, PlannedSession } from './db/schema';
+import type { Plan, PlanLevel, PlanReferenceDistance, PlannedSession } from './db/schema';
 import {
   ConcurrentDraftError,
   InvalidPlanError,
@@ -199,6 +199,8 @@ const PLAN_ROW: Plan = {
   sessionsPerWeek: 4,
   weeklyTimeMinutes: 300,
   longRunDay: 7,
+  referenceDistance: '10k',
+  referenceTimeS: 2_910,
   summary: 'Bloc de 8 semaines, une séance de seuil par semaine.',
   createdAt: new Date('2026-08-09T10:00:00.000Z'),
   updatedAt: new Date('2026-08-09T10:00:00.000Z'),
@@ -289,6 +291,8 @@ const PLAN_DTO_KEYS = [
   'level',
   'longRunDay',
   'raceDate',
+  'referenceDistance',
+  'referenceTimeS',
   'sessionsPerWeek',
   'startsOn',
   'status',
@@ -322,6 +326,8 @@ const SESSION_INPUT: NewPlanSessionInput = {
 const VALID_INPUT: CreatePlanInput = {
   goalType: 'race',
   level: 'intermediate',
+  referenceDistance: '10k',
+  referenceTimeS: 2_910,
   goalText: '10 km sous 50 min le 15 novembre',
   raceDate: '2026-11-15',
   startsOn: '2026-08-10',
@@ -462,6 +468,73 @@ describe('validatePlanInput', () => {
     expect(() => validatePlanInput({ ...VALID_INPUT, weeklyTimeMinutes: 10_081 })).toThrow(
       InvalidPlanError,
     );
+  });
+
+  describe('chrono de référence', () => {
+    /** Le champ fautif d'une entrée refusée — c'est lui qui ramène l'erreur au bon champ du formulaire. */
+    function fieldOf(input: CreatePlanInput): string {
+      try {
+        validatePlanInput(input);
+        expect.unreachable('cette entrée devait être refusée');
+      } catch (error) {
+        expect(error).toBeInstanceOf(InvalidPlanError);
+        return (error as InvalidPlanError).field;
+      }
+      return '';
+    }
+
+    it('accepte un plan sans chrono : les deux colonnes restent nulles', () => {
+      const values = validatePlanInput({
+        ...VALID_INPUT,
+        referenceDistance: undefined,
+        referenceTimeS: undefined,
+      });
+
+      expect(values.referenceDistance).toBeNull();
+      expect(values.referenceTimeS).toBeNull();
+    });
+
+    it('recopie un chrono plausible', () => {
+      const values = validatePlanInput({
+        ...VALID_INPUT,
+        referenceDistance: '10k',
+        referenceTimeS: 2_910,
+      });
+
+      expect(values).toMatchObject({ referenceDistance: '10k', referenceTimeS: 2_910 });
+    });
+
+    it('exige les deux champs ensemble, jamais un seul', () => {
+      // Une distance sans temps ne calcule rien, un temps sans distance non plus.
+      expect(fieldOf({ ...VALID_INPUT, referenceDistance: '10k', referenceTimeS: null })).toBe(
+        'referenceTimeS',
+      );
+      expect(fieldOf({ ...VALID_INPUT, referenceDistance: null, referenceTimeS: 2_910 })).toBe(
+        'referenceDistance',
+      );
+    });
+
+    it('refuse une distance inconnue', () => {
+      const wrong = { ...VALID_INPUT, referenceDistance: '3k' as PlanReferenceDistance, referenceTimeS: 900 };
+      expect(fieldOf(wrong)).toBe('referenceDistance');
+    });
+
+    it('refuse un temps hors des bornes de saisie', () => {
+      expect(fieldOf({ ...VALID_INPUT, referenceDistance: '10k', referenceTimeS: 0 })).toBe(
+        'referenceTimeS',
+      );
+      expect(fieldOf({ ...VALID_INPUT, referenceDistance: '10k', referenceTimeS: 36_001 })).toBe(
+        'referenceTimeS',
+      );
+    });
+
+    it('refuse un couple qui ne décrit pas une course', () => {
+      // 5 km en 12 min : trois quarts de minute sous le record du monde.
+      const input = { ...VALID_INPUT, referenceDistance: '5k' as PlanReferenceDistance, referenceTimeS: 720 };
+
+      expect(fieldOf(input)).toBe('referenceTimeS');
+      expect(() => validatePlanInput(input)).toThrow(/ne ressemble pas à une course/);
+    });
   });
 
   it('refuse un plan sans aucune séance', () => {
@@ -615,6 +688,10 @@ describe('toPlanDto', () => {
     expect(toPlanDto({ ...PLAN_ROW, level: 'advanced' }).level).toBe('advanced');
   });
 
+  it('expose le chrono de référence, sur lequel les allures du plan sont calées', () => {
+    expect(toPlanDto(PLAN_ROW)).toMatchObject({ referenceDistance: '10k', referenceTimeS: 2_910 });
+  });
+
   it('préserve les champs absents en `null`', () => {
     const dto = toPlanDto({
       ...PLAN_ROW,
@@ -622,12 +699,16 @@ describe('toPlanDto', () => {
       // Un plan antérieur au champ : le DTO le dit `null`, il n'en invente pas.
       level: null,
       raceDate: null,
+      referenceDistance: null,
+      referenceTimeS: null,
       weeklyTimeMinutes: null,
       summary: null,
     });
 
     expect(dto.raceDate).toBeNull();
     expect(dto.level).toBeNull();
+    expect(dto.referenceDistance).toBeNull();
+    expect(dto.referenceTimeS).toBeNull();
     expect(dto.weeklyTimeMinutes).toBeNull();
     expect(dto.summary).toBeNull();
   });
@@ -757,6 +838,9 @@ describe('createDraftPlanWithSessions', () => {
       level: 'intermediate',
       raceDate: '2026-11-15',
       weeks: 8,
+      // Le chrono part en base avec le plan : c'est lui qui a calculé ses allures.
+      referenceDistance: '10k',
+      referenceTimeS: 2_910,
     });
 
     expect(Object.keys(dto).sort()).toEqual(PLAN_DTO_KEYS);

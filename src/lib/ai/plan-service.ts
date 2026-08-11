@@ -33,7 +33,7 @@ import 'server-only';
  * 32 k de contexte, partagés entre le prompt et la **sortie** — et un plan de
  * douze semaines fait déjà plusieurs milliers de tokens à écrire.
  *
- * Le poste le plus lourd est la méthodologie ({@link COACH_RULES}, ~1 500
+ * Le poste le plus lourd est la méthodologie ({@link COACH_RULE_LINES}, ~1 500
  * tokens), et c'est le seul qui vaut son prix : sans elle, le modèle produit un
  * plan bien formé et sans logique d'entraînement. Tout le reste est compté au
  * plus juste — le contexte de l'athlète tient en ~120 tokens, les consignes de
@@ -48,7 +48,7 @@ import type { z } from 'zod';
 
 import { isCivilDate, todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
-import type { PlanLevel } from '@/data/db/schema';
+import type { PlanGoalType, PlanLevel } from '@/data/db/schema';
 import { reconcilePlanSessions } from '@/data/plan-reconciliation';
 import {
   InvalidPlanError,
@@ -63,6 +63,13 @@ import {
 } from '@/data/plans';
 import { civilDaysBetween, isoDayIndex, isoWeekStart, shiftCivilDate } from '@/lib/dates/civil';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
+import {
+  InvalidRacePerformanceError,
+  REFERENCE_DISTANCES,
+  trainingPacesFromRace,
+  type ReferenceDistance,
+  type TrainingPaces,
+} from '@/lib/metrics/vdot';
 
 import { requireAi } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
@@ -75,10 +82,12 @@ import {
   formatIsoDay,
   formatPace,
   formatPlanSteps,
+  formatTrainingPaces,
   formatTrainingSnapshot,
 } from './format';
 import {
   PLAN_OUTPUT_BOUNDS,
+  isMarathonGoal,
   mapPlanWeeksToSessions,
   planJsonSchema,
   planOutputSchema,
@@ -86,7 +95,9 @@ import {
   planUpdateOutputSchema,
   validatePlanBusinessRules,
   type PlanExpectations,
+  type PlanRaceGoal,
   type PlanUpdateOutput,
+  type PlanValidationContext,
   type PlanWeekOutput,
 } from './plan-schema';
 
@@ -109,7 +120,16 @@ export type PlanRequest = {
    * partir d'aujourd'hui. Absent : aujourd'hui (cf. {@link planStart}).
    */
   startsOn?: string;
+  /**
+   * Chrono de course récent, s'il y en a un : c'est la donnée qui **calcule** la
+   * table d'allures du plan (méthode VDOT), au lieu de la laisser deviner au
+   * modèle depuis une allure d'entraînement moyenne.
+   */
+  referenceRace?: ReferenceRace;
 };
+
+/** Un chrono de course : une distance de référence, un temps. */
+export type ReferenceRace = { distance: ReferenceDistance; timeS: number };
 
 /**
  * La fenêtre calendaire que le plan couvrira.
@@ -174,7 +194,7 @@ const MAX_ATTEMPTS = 3;
  * Poids moyen d'une séance dans la sortie JSON, en caractères.
  *
  * Mesuré, pas deviné : la fixture de `plan-service.test.ts` (« calibrage de
- * l'estimation ») sérialise des semaines conformes à `COACH_RULES` en JSON
+ * l'estimation ») sérialise des semaines conformes à `COACH_RULE_LINES` en JSON
  * compact — le format que produit une génération contrainte par grammaire — et
  * le test vérifie que l'estimation reste dans ±25 % de leur taille réelle.
  * Refaire la mesure si le schéma de sortie change.
@@ -359,6 +379,18 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
  */
 
 /**
+ * La dérivation des récupérations trottées depuis l'allure moyenne — la seule
+ * ligne de la méthodologie que la table d'allures rend **fausse**.
+ *
+ * `imposedPacesSection` dit l'inverse (« plus lentes que E.max, ou sans cible »,
+ * sans borne), et la validation applique cette version-là. Deux consignes
+ * contradictoires dans le même prompt, c'est le modèle qui tranche — donc au
+ * hasard. La ligne est retirée quand la table existe ({@link coachRules}).
+ */
+const RECOVERY_DERIVATION_LINE =
+  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.';
+
+/**
  * La méthodologie du coach, commune à la création et à la modification.
  *
  * C'est le cœur de la qualité des plans produits : un petit modèle sait écrire
@@ -370,14 +402,17 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
  * Dense par nécessité : ~900 tokens partagés avec la sortie sur les 32 k du
  * modèle cible. Chaque ligne doit changer une décision du plan ; les
  * explications physiologiques, elles, n'en changent aucune et n'y sont pas.
+ *
+ * Ligne à ligne, et pas d'un bloc : {@link coachRules} en retire celles que la
+ * table d'allures rend fausses.
  */
-const COACH_RULES = [
+const COACH_RULE_LINES = [
   "Tu es un coach de course à pied francophone. Tu appliques les méthodes établies de l'entraînement en endurance (distribution polarisée de Seiler, typologie des allures de Daniels, périodisation), et tu cales chaque plan sur le niveau réel de l'athlète — jamais sur un modèle générique.",
   '',
   'RÉPARTITION DE LA CHARGE',
   "- Distribution polarisée : environ 80 % du volume hebdomadaire en endurance fondamentale (zones FC 1-2, allure de conversation), 20 % au plus en intensité.",
   "- Au plus 2 séances de qualité par semaine — une seule si le volume récent est faible ou l'athlète en reprise. Jamais deux jours de suite : une séance dure est toujours suivie d'un jour facile ou de repos.",
-  "- Une seule sortie longue par semaine, le jour imposé par l'athlète, et c'est la plus longue séance de sa semaine (environ 25 à 30 % du volume hebdomadaire).",
+  "- Une seule sortie longue par semaine, le jour imposé par l'athlète, et c'est la plus longue séance de sa semaine (20 à 40 % du volume hebdomadaire — le haut de la fourchette quand la semaine ne compte que trois séances).",
   '- Un seul entraînement par jour, `day` valant 1 pour lundi jusqu\'à 7 pour dimanche.',
   '',
   'TYPOLOGIE DES SÉANCES — `kind` est choisi dans ce vocabulaire',
@@ -386,7 +421,11 @@ const COACH_RULES = [
   "- « Seuil » : allure tenable environ 1 h, en continu 20 à 40 min ou en blocs de 8 à 15 min séparés de 1 à 3 min de trot. Développe l'endurance à haute intensité.",
   "- « VMA » : intervalles de 3 à 5 min à environ l'allure 5 km, récupération trottée de durée voisine de l'effort, 4 à 6 répétitions. Développe la puissance aérobie.",
   "- « Répétitions » : 200 à 400 m plus rapides que l'allure 5 km, récupération complète (2 à 3 fois la durée de l'effort). Travaille la vitesse et l'économie de course, pas la filière aérobie — jamais en volume.",
-  '- « Récupération » : footing court très souple, ou repos.',
+  // Sans « ou repos » : une séance est une sortie, et le repos c'est l'absence
+  // de séance. Le laisser poussait le modèle à écrire une journée de repos comme
+  // une séance — donc à lui inventer une distance, la règle de volume exigeant
+  // que toute séance déclare la sienne.
+  '- « Récupération » : footing court très souple.',
   '',
   'DÉROULÉ STRUCTURÉ (`steps`) — obligatoire pour toute séance de qualité',
   "- Une séance de qualité s'écrit : échauffement progressif de 10 à 20 min, puis le corps de séance en blocs répétés, puis un retour au calme de 5 à 10 min.",
@@ -401,25 +440,43 @@ const COACH_RULES = [
   '  · seuil : référence − 30 à 45 s/km ;',
   '  · VMA : référence − 60 à 80 s/km ;',
   '  · répétitions courtes : référence − 80 à 100 s/km ;',
-  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.',
+  RECOVERY_DERIVATION_LINE,
   "- Ces écarts sont des maxima prudents : reste dans le bas de la fourchette si le volume récent est faible, si la charge (TSB) est très négative, ou si l'historique est court.",
   "- La VO2max estimée et les zones FC servent à vérifier la cohérence de ces allures, jamais à en fabriquer une.",
   "- Si l'allure de référence est inconnue, tu ne cibles AUCUNE allure : tu cibles par `hrZone` (endurance et sortie longue Z2, seuil Z4, VMA Z5, récupération Z1) et tu le dis dans le résumé.",
   "- Si l'objectif porte un chiffre (« 10 km sous 50 min » vaut 5:00/km), cette allure objectif est l'ancre des séances de spécificité à l'approche de la course. Confronte-la à l'allure récente : si elle est bien plus rapide que ce que les données soutiennent, le plan reste ancré sur les données et tu le dis honnêtement dans le résumé.",
   "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
   '',
-  'PROGRESSION',
-  "- Le volume hebdomadaire n'augmente jamais de plus de 10 % d'une semaine à l'autre.",
-  '- Une semaine allégée (−20 à −30 % de volume) toutes les 3 à 4 semaines.',
+  'PROGRESSION DU VOLUME — ces chiffres sont vérifiés séance par séance, un plan qui les enfreint est refusé et à réécrire',
+  '- Le volume hebdomadaire est la somme des `distanceKm` de la semaine. TOUTE séance déclare sa distance, footings et récupérations compris : sans elle, la semaine ne se compare à rien.',
+  "- D'une semaine à l'autre, le volume n'augmente jamais de plus de 12 %. Vise 5 à 10 % : la marge est un filet, pas une cible. Une baisse est toujours permise.",
+  '- Jamais quatre semaines de suite sans semaine allégée : sur toute fenêtre de 4 semaines, au moins une redescend à 85 % ou moins du volume de la semaine précédente (plans de 6 semaines et plus).',
+  "- Le plan n'est jamais plat : la semaine la plus chargée hors affûtage dépasse d'au moins 10 % la première semaine pleine (plans de 5 semaines et plus). Douze semaines au même volume ne préparent rien.",
+  "- Affûtage avant une course : les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT chaque semaine, et la semaine de la course ne dépasse pas 65 % du volume de la semaine la plus chargée. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
+  "- La première semaine, quand le plan démarre en cours de semaine, est amputée des jours passés : son volume est plus faible, et ce n'est pas une baisse.",
   "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
-  "- Affûtage avant une course : environ 7 à 10 jours pour un 5 ou 10 km, 10 à 14 jours pour un semi-marathon, 2 à 3 semaines pour un marathon. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
   '',
   'FORMAT',
   "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
   '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
   "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
   "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
-].join('\n');
+];
+
+/**
+ * La méthodologie telle qu'elle part au modèle.
+ *
+ * @param hasImposedPaces la table d'allures existe-t-elle ? Si oui, la section
+ * « ALLURES IMPOSÉES » suivra et fait foi : les lignes de dérivation qu'elle
+ * contredit sont retirées d'ici plutôt que surchargées plus bas — une consigne
+ * absente ne se discute pas, une consigne surchargée si.
+ */
+function coachRules(hasImposedPaces: boolean): string {
+  const lines = hasImposedPaces
+    ? COACH_RULE_LINES.filter((line) => line !== RECOVERY_DERIVATION_LINE)
+    : COACH_RULE_LINES;
+  return lines.join('\n');
+}
 
 /** Le niveau, tel que les prompts le nomment. */
 const LEVEL_LABELS: Record<PlanLevel, string> = {
@@ -430,7 +487,7 @@ const LEVEL_LABELS: Record<PlanLevel, string> = {
 
 /**
  * Ce que le niveau change à la méthodologie — **une seule** de ces sections part
- * au modèle, à la suite de {@link COACH_RULES}.
+ * au modèle, à la suite de {@link COACH_RULE_LINES}.
  *
  * La méthodologie générale reste volontairement générique : elle décrit
  * l'entraînement en endurance, pas un athlète. C'est ici que se prennent les
@@ -467,6 +524,78 @@ const LEVEL_RULES: Record<PlanLevel, string> = {
     "- L'affûtage réduit nettement le volume mais garde une touche d'intensité courte pour rester vif.",
   ].join('\n'),
 };
+
+/*
+ * Allures imposées.
+ */
+
+/**
+ * La table d'allures d'un chrono de référence, ou `null` s'il n'y en a pas.
+ *
+ * Le calcul appartient à `lib/metrics/vdot` ; ici on ne fait que le brancher, et
+ * traduire son refus en erreur de champ — le formulaire et le DAL ont déjà écarté
+ * un chrono implausible, mais le service n'est pas leur seule porte d'entrée.
+ *
+ * @throws {InvalidPlanError} si le chrono ne décrit pas une course.
+ */
+function referenceRacePaces(race: ReferenceRace | undefined): TrainingPaces | null {
+  if (race === undefined) return null;
+
+  try {
+    return trainingPacesFromRace(REFERENCE_DISTANCES[race.distance], race.timeS);
+  } catch (error) {
+    if (error instanceof InvalidRacePerformanceError) {
+      throw new InvalidPlanError(
+        'referenceTimeS',
+        'Ce chrono ne ressemble pas à une course — vérifie la saisie.',
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * L'objectif du plan tel que les règles de volume le lisent : une course (donc
+ * un affûtage à respecter), ou rien.
+ *
+ * La seule chose que la distance de la course y change est la longueur de
+ * l'affûtage, d'où la reconnaissance du seul marathon dans le texte libre de
+ * l'objectif ({@link isMarathonGoal}).
+ */
+function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
+  return goalType === 'race' ? { isMarathon: isMarathonGoal(goalText) } : null;
+}
+
+/**
+ * Le chrono d'un plan déjà écrit, `undefined` s'il n'en porte pas.
+ *
+ * Les deux colonnes sont solidaires en base (invariant du DAL) ; le `undefined`
+ * ne couvre donc que les plans antérieurs au champ, et non un demi-chrono.
+ */
+function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
+  if (plan.referenceDistance === null || plan.referenceTimeS === null) return undefined;
+  return { distance: plan.referenceDistance, timeS: plan.referenceTimeS };
+}
+
+/**
+ * La prescription d'allures, telle qu'elle part au modèle — **en surcharge** de
+ * la section « ALLURES CIBLES » de la méthodologie.
+ *
+ * Le renversement est tout l'objet de la manœuvre : sans chrono, le modèle
+ * *dérive* des allures d'une moyenne d'entraînement, et le résultat constaté en
+ * production allait de l'à-peu-près au délire. Avec un chrono, les cinq créneaux
+ * sont **calculés** (Daniels) et le modèle n'a plus qu'à ranger chaque séance
+ * dans le bon.
+ */
+function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string {
+  return [
+    'ALLURES IMPOSÉES — cette section prime sur « ALLURES CIBLES » ci-dessus',
+    formatTrainingPaces(paces, race),
+    "Tes allures sont CALCULÉES, tu ne les choisis pas : endurance fondamentale et sortie longue dans [E], allure marathon ou allure objectif dans [M], seuil dans [T], VMA dans [I], répétitions courtes dans [R].",
+    `Les récupérations trottées sont plus lentes que ${formatPace(paces.easy.maxSecPerKm)} (borne lente de [E]), ou sans cible.`,
+    "Toute allure prescrite hors de ces plages est refusée : ne dérive plus rien de l'allure moyenne des dernières sorties, elle ne sert plus qu'à vérifier que le volume est tenable.",
+  ].join('\n');
+}
 
 /** Les contraintes déclarées par l'athlète, en une ligne lisible. */
 function formatConstraints(request: {
@@ -508,11 +637,33 @@ function firstWeekLines(request: PlanRequest, window: PlanWindow): string[] {
   ];
 }
 
+/**
+ * Le message système : méthodologie générale, surcharge de niveau, puis — s'il y
+ * a un chrono — la table d'allures qui remplace les règles de dérivation.
+ *
+ * L'ordre porte la priorité : chaque bloc surcharge le précédent, et le dit.
+ */
+function systemPrompt(
+  level: PlanLevel | null,
+  paces: TrainingPaces | null,
+  race: ReferenceRace | undefined,
+  extra: readonly string[] = [],
+): string {
+  const imposed = paces === null || race === undefined ? null : imposedPacesSection(paces, race);
+  return [
+    coachRules(imposed !== null),
+    ...(level === null ? [] : ['', LEVEL_RULES[level]]),
+    ...(imposed === null ? [] : ['', imposed]),
+    ...extra,
+  ].join('\n');
+}
+
 /** Les messages d'une génération de plan. */
 export function buildPlanMessages(
   request: PlanRequest,
   window: PlanWindow,
   snapshot: TrainingSnapshotDto,
+  paces: TrainingPaces | null = null,
 ): ChatMessage[] {
   // Depuis l'ancre : c'est elle qui porte la grille des semaines, `startsOn`
   // pouvant tomber en milieu de première semaine.
@@ -534,8 +685,9 @@ export function buildPlanMessages(
   ];
 
   return [
-    // La méthodologie générale, puis la seule surcharge qui concerne cet athlète.
-    { role: 'system', content: [COACH_RULES, '', LEVEL_RULES[request.level]].join('\n') },
+    // La méthodologie générale, puis les seules surcharges qui concernent cet
+    // athlète : son niveau, et ses allures calculées quand il a donné un chrono.
+    { role: 'system', content: systemPrompt(request.level, paces, request.referenceRace) },
     { role: 'user', content: lines.join('\n') },
   ];
 }
@@ -611,18 +763,18 @@ export function buildPlanUpdateMessages(
   upcoming: readonly PlanSessionDto[],
   window: RemainingPlanWindow,
   instruction: string,
+  paces: TrainingPaces | null = null,
 ): ChatMessage[] {
-  const system = [
-    COACH_RULES,
-    // Le plan garde le niveau de sa création : l'ajustement s'y tient. Un plan
-    // sans niveau (antérieur au champ) reste sur la seule méthodologie générale.
-    ...(plan.level === null ? [] : ['', LEVEL_RULES[plan.level]]),
+  // Le plan garde le niveau **et le chrono** de sa création : l'ajustement s'y
+  // tient. Un plan sans niveau (antérieur au champ) reste sur la seule
+  // méthodologie générale.
+  const system = systemPrompt(plan.level, paces, planReferenceRace(plan), [
     '',
     "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
     "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
     "Si l'instruction change une contrainte durable (nombre de séances, jour de la sortie longue, temps hebdomadaire), reporte-la dans `settings` ; sinon, omets `settings`.",
     "Le résumé décrit le plan modifié dans son ensemble, pas la modification.",
-  ].join('\n');
+  ]);
 
   const user = [
     formatUpcomingPlan(plan, upcoming, window),
@@ -716,12 +868,12 @@ type GenerationOptions<T> = {
    */
   expectationsOf: (output: T) => PlanExpectations;
   /**
-   * Allure d'entraînement récente de l'athlète, en s/km, `null` si inconnue :
-   * l'ancre dont le prompt fait dériver toutes les allures prescrites, et la
-   * seule référence qui permette d'en juger la plausibilité (cf.
-   * `validatePlanBusinessRules`). Vient du snapshot, des deux côtés.
+   * Ce à quoi les allures prescrites sont confrontées : la table calculée depuis
+   * le chrono de l'athlète quand elle existe, son allure d'entraînement récente
+   * sinon (cf. `validatePlanBusinessRules`). Les deux sont fournies des deux
+   * côtés — c'est le corridor qui tranche.
    */
-  referencePaceSecPerKm: number | null;
+  paceContext: PlanValidationContext;
   /**
    * Identifiant de suivi fourni par le client, ou `undefined` : la génération se
    * déroule alors sans streaming ni progression, exactement comme avant.
@@ -837,7 +989,7 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
     violations = validatePlanBusinessRules(
       options.weeksOf(output),
       options.expectationsOf(output),
-      options.referencePaceSecPerKm,
+      options.paceContext,
     );
     if (violations.length === 0) return output;
 
@@ -940,21 +1092,25 @@ async function writeGeneratedPlan(
   snapshot: TrainingSnapshotDto,
   progressId: string | undefined,
 ): Promise<PlanDto> {
+  const paces = referenceRacePaces(request.referenceRace);
+
   const output = await generateWithBusinessRules({
-    messages: buildPlanMessages(request, window, snapshot),
+    messages: buildPlanMessages(request, window, snapshot, paces),
     schemaName: 'training_plan',
     jsonSchema: planJsonSchema,
     schema: planOutputSchema,
     weeksOf: (plan) => plan.weeks,
     expectationsOf: () => ({
+      scope: 'creation',
       weeks: window.weeks,
       sessionsPerWeek: request.sessionsPerWeek,
       longRunDay: request.longRunDay,
       // > 1 sur un départ en milieu de semaine : la première semaine est jugée
       // comme une semaine entamée, exactement comme à l'ajustement.
       firstWeekFromDay: window.firstWeekFromDay,
+      race: raceGoalOf(request.goalType, request.goalText),
     }),
-    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
     progressId,
     estimatedChars: estimatePlanChars(window.weeks, request.sessionsPerWeek),
   });
@@ -964,6 +1120,8 @@ async function writeGeneratedPlan(
     level: request.level,
     goalText: request.goalText,
     raceDate: request.goalType === 'race' ? (request.raceDate ?? null) : null,
+    referenceDistance: request.referenceRace?.distance ?? null,
+    referenceTimeS: request.referenceRace?.timeS ?? null,
     // Le jour **réel** du départ est ce que le plan stocke ; la grille des jours
     // ISO, elle, se pose sur l'ancre.
     startsOn: window.startsOn,
@@ -1102,20 +1260,32 @@ async function writeUpdatedPlan(
   // que celles d'une génération : le snapshot est chargé pour cette seule
   // référence.
   const snapshot = await getTrainingSnapshot();
+  // Le chrono déclaré à la création reste l'ancre : un ajustement ne réécrit pas
+  // les allures que la table impose, il réécrit des séances.
+  const paces = referenceRacePaces(planReferenceRace(active.plan));
 
   const output = await generateWithBusinessRules({
-    messages: buildPlanUpdateMessages(active.plan, upcoming, window, instruction),
+    messages: buildPlanUpdateMessages(active.plan, upcoming, window, instruction, paces),
     schemaName: 'training_plan_update',
     jsonSchema: planUpdateJsonSchema,
     schema: planUpdateOutputSchema,
     weeksOf: (plan) => plan.weeks,
     expectationsOf: (plan) => ({
+      // Fenêtre restante, pas plan complet : la règle anti-plat n'y a pas
+      // d'objet — exiger un pic supérieur à la première semaine restante
+      // réclamerait de monter le volume à quelques semaines de la course.
+      scope: 'adjustment',
       weeks: window.weeks,
       sessionsPerWeek: plan.settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
       longRunDay: plan.settings?.longRunDay ?? active.plan.longRunDay,
       firstWeekFromDay: window.firstWeekFromDay,
+      // La fenêtre restante se termine avec le plan, donc avec la course : ses
+      // dernières semaines sont bien celles de l'affûtage. Un ajustement demandé
+      // à moins de 8 semaines d'un marathon n'en exigera que deux au lieu de
+      // trois — la fenêtre est courte, et c'est le sens conservateur.
+      race: raceGoalOf(active.plan.goalType, active.plan.goalText),
     }),
-    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paceContext: { referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm, paces },
     progressId,
     // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,
     // elle, se cale sur ceux d'aujourd'hui — c'est une estimation, pas un

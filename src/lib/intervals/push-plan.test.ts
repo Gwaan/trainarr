@@ -52,6 +52,8 @@ const PLAN: PlanDto = {
   sessionsPerWeek: 3,
   weeklyTimeMinutes: 300,
   longRunDay: 7,
+  referenceDistance: null,
+  referenceTimeS: null,
   summary: 'Bloc de 6 semaines.',
   createdAt: '2026-08-01T10:00:00.000Z',
 };

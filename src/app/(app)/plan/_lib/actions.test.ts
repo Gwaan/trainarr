@@ -68,6 +68,8 @@ const VALID_FIELDS: Record<string, string> = {
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
   weeks: '',
+  referenceDistance: '10k',
+  referenceTime: '',
   startsOn: '',
   sessionsPerWeek: '3',
   weeklyTimeHours: '',
@@ -252,6 +254,86 @@ describe('createPlanAction — date de démarrage', () => {
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
       expect.objectContaining({ goalType: 'free', weeks: 8, startsOn: '2026-09-07' }),
+      undefined,
+    );
+  });
+});
+
+describe('createPlanAction — chrono de référence', () => {
+  it('transmet le couple distance/temps au service, en secondes', async () => {
+    const state = await createPlanAction(IDLE, form({ referenceTime: '48:30' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceRace: { distance: '10k', timeS: 2_910 } }),
+      undefined,
+    );
+  });
+
+  it('accepte un chrono en hh:mm:ss', async () => {
+    await createPlanAction(
+      IDLE,
+      form({ referenceDistance: 'half', referenceTime: '1:52:00' }),
+    );
+
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceRace: { distance: 'half', timeS: 6_720 } }),
+      undefined,
+    );
+  });
+
+  it('laisse passer un chrono absent : le champ est facultatif', async () => {
+    const state = await createPlanAction(IDLE, form({ referenceTime: '' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceRace: undefined }),
+      undefined,
+    );
+  });
+
+  it.each(['48', '48,30', 'quarante', '48:75', '<script>'])(
+    'refuse un temps qui n’en est pas un (%s), sur son champ',
+    async (referenceTime) => {
+      const state = await createPlanAction(IDLE, form({ referenceTime }));
+
+      expect(state.status).toBe('error');
+      expect(state.fieldErrors?.referenceTime).toContain('mm:ss');
+      expect(mocks.generatePlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuse un chrono implausible, sans attendre la génération', async () => {
+    // 5 km en 12 min : la table d'allures calculée dessus serait une fiction.
+    const state = await createPlanAction(
+      IDLE,
+      form({ referenceDistance: '5k', referenceTime: '12:00' }),
+    );
+
+    expect(state.fieldErrors?.referenceTime).toBe(
+      'Ce chrono ne ressemble pas à une course — vérifie la saisie.',
+    );
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it('refuse une distance inconnue dès qu’un temps est saisi', async () => {
+    // L'action est un endpoint public : la liste déroulante ne protège rien.
+    const state = await createPlanAction(
+      IDLE,
+      form({ referenceDistance: '3k', referenceTime: '12:00' }),
+    );
+
+    expect(state.fieldErrors?.referenceDistance).toBe('Choisis la distance de ton chrono.');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it('ignore une distance inconnue quand aucun temps n’est saisi', async () => {
+    // Sans temps il n'y a pas de chrono : rien à valider, rien à transmettre.
+    const state = await createPlanAction(IDLE, form({ referenceDistance: '', referenceTime: '' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceRace: undefined }),
       undefined,
     );
   });

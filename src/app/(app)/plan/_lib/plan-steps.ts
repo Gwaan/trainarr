@@ -3,9 +3,9 @@
  *
  * Le formulaire pose une dizaine de questions : posées d'un bloc, elles se
  * lisent comme un dossier à remplir. La modale les sert une étape à la fois, et
- * c'est ce module qui tient la liste — déclarative, pour qu'une étape de plus
- * (le chrono de référence, prévu) se glisse dans le tableau sans toucher au
- * reste : rien ici, ni dans la modale, ne numérote les étapes en dur.
+ * c'est ce module qui tient la liste — déclarative, pour qu'une étape de plus se
+ * glisse dans le tableau sans toucher au reste : rien ici, ni dans la modale, ne
+ * numérote les étapes en dur. L'étape « Ton chrono » est arrivée par là.
  *
  * Tout est pur et sans dépendance React : la modale n'a plus qu'à afficher.
  *
@@ -18,14 +18,19 @@
  *   atteindre.
  */
 
+import type { ReferenceDistance } from "@/lib/metrics/vdot";
+
 import type { PlanFormField } from "./actions";
 import {
   DEFAULT_LEVEL,
   DEFAULT_LONG_RUN_DAY,
+  DEFAULT_REFERENCE_DISTANCE,
   DEFAULT_SESSIONS_PER_WEEK,
   DEFAULT_WEEKS,
   GOAL_TYPE_CHOICES,
   LEVEL_CHOICES,
+  asReferenceDistance,
+  parseRaceTimeSeconds,
   type GoalType,
   type Level,
 } from "./form-options";
@@ -42,13 +47,17 @@ export type PlanFormValues = {
   raceDate: string;
   weeks: string;
   level: Level;
+  /** Distance du chrono de référence — toujours renseignée, c'est une liste. */
+  referenceDistance: ReferenceDistance;
+  /** Temps du chrono, `mm:ss` ou `hh:mm:ss`. Vide : pas de chrono déclaré. */
+  referenceTime: string;
   sessionsPerWeek: string;
   longRunDay: string;
   weeklyTimeHours: string;
   startsOn: string;
 };
 
-export type PlanStepId = "goal" | "profile" | "constraints" | "summary";
+export type PlanStepId = "goal" | "profile" | "race" | "constraints" | "summary";
 
 export type PlanStep = {
   id: PlanStepId;
@@ -72,6 +81,12 @@ export const PLAN_STEPS = [
     title: "Ton profil",
     hint: "Où tu en es dans ta pratique : le coach cale la charge dessus.",
     fields: ["level"],
+  },
+  {
+    id: "race",
+    title: "Ton chrono",
+    hint: "Un temps récent sur une distance connue : c'est lui qui calcule tes allures.",
+    fields: ["referenceDistance", "referenceTime"],
   },
   {
     id: "constraints",
@@ -108,6 +123,8 @@ export function initialPlanFormValues(defaultStartDate: string): PlanFormValues 
     raceDate: "",
     weeks: String(DEFAULT_WEEKS),
     level: DEFAULT_LEVEL,
+    referenceDistance: DEFAULT_REFERENCE_DISTANCE,
+    referenceTime: "",
     sessionsPerWeek: String(DEFAULT_SESSIONS_PER_WEEK),
     longRunDay: String(DEFAULT_LONG_RUN_DAY),
     weeklyTimeHours: "",
@@ -136,6 +153,14 @@ function isFieldComplete(field: PlanFormField, values: PlanFormValues): boolean 
       return values.goalType !== "free" || values.weeks.trim() !== "";
     case "level":
       return LEVEL_CHOICES.some((choice) => choice.value === values.level);
+    case "referenceDistance":
+      return asReferenceDistance(values.referenceDistance) !== null;
+    case "referenceTime":
+      // Facultatif, et fortement encouragé : sans chrono le coach reste prudent,
+      // mais un chrono mal écrit ne doit pas partir au serveur.
+      return (
+        values.referenceTime.trim() === "" || parseRaceTimeSeconds(values.referenceTime) !== null
+      );
     case "sessionsPerWeek":
       return values.sessionsPerWeek.trim() !== "";
     case "longRunDay":

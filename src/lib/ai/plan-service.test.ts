@@ -4,6 +4,8 @@ import type { TrainingSnapshotDto } from '@/data/coach-context';
 import { PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
+import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
+
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
 import {
   MAX_PLAN_WEEKS,
@@ -90,6 +92,8 @@ const PLAN: PlanDto = {
   sessionsPerWeek: 3,
   weeklyTimeMinutes: 300,
   longRunDay: 7,
+  referenceDistance: null,
+  referenceTimeS: null,
   summary: 'Bloc de 6 semaines.',
   createdAt: '2026-08-01T10:00:00.000Z',
 };
@@ -140,6 +144,9 @@ const THRESHOLD_STEPS = [
   },
   { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
 ];
+
+/** Un chrono de référence : 10 km en 48:30 → VDOT 41,5 (cf. `lib/metrics/vdot`). */
+const REFERENCE_RACE = { distance: '10k', timeS: 2_910 } as const;
 
 const REQUEST: PlanRequest = {
   goalType: 'free',
@@ -485,9 +492,31 @@ describe('buildPlanMessages', () => {
     expect(system).toContain('« VMA »');
     expect(system).toContain('« Sortie longue »');
     // Progression et affûtage.
-    expect(system).toContain('25 à 30 %');
+    expect(system).toContain('20 à 40 %');
     expect(system).toContain('Affûtage');
-    expect(system).toContain('10 à 14 jours');
+  });
+
+  /**
+   * Le modèle doit réussir du premier coup : la validation est le filet, pas la
+   * consigne. Ces chiffres sont donc exactement ceux que `plan-schema.ts`
+   * vérifie — s'ils divergent, le coach se fait refuser un plan qu'il croyait
+   * conforme, et une génération de plusieurs minutes est perdue.
+   */
+  it('donne les seuils de volume exacts que la validation vérifie', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('PROGRESSION DU VOLUME');
+    expect(system).toContain("n'augmente jamais de plus de 12 %");
+    expect(system).toContain('TOUTE séance déclare sa distance');
+    expect(system).toContain('sur toute fenêtre de 4 semaines, au moins une redescend à 85 %');
+    expect(system).toContain("dépasse d'au moins 10 % la première semaine pleine");
+    expect(system).toContain(
+      'les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT',
+    );
+    expect(system).toContain('ne dépasse pas 65 % du volume de la semaine la plus chargée');
+    // La semaine entamée du départ : sa baisse n'en est pas une, et le modèle
+    // n'a pas à la compenser.
+    expect(system).toContain('amputée des jours passés');
   });
 
   it('impose la structure des séances de qualité et le format des étapes', () => {
@@ -512,6 +541,15 @@ describe('buildPlanMessages', () => {
     expect(system).toContain('VMA : référence − 60 à 80 s/km');
     expect(system).toContain('répétitions courtes : référence − 80 à 100 s/km');
     expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
+  });
+
+  it('ne présente jamais le repos comme une séance', () => {
+    const system = messages[0].content;
+
+    // Une séance est une sortie : « ou repos » poussait le modèle à écrire un
+    // jour de repos comme une séance, donc à lui inventer une distance.
+    expect(system).toContain('« Récupération » : footing court très souple.');
+    expect(system).not.toContain('ou repos');
   });
 
   it('confronte un objectif chiffré aux données, sans s’y soumettre', () => {
@@ -639,6 +677,67 @@ describe('buildPlanMessages', () => {
     expect(user).not.toContain('null');
     // Un prompt de génération reste court : le budget est pour la sortie.
     expect(user.length).toBeLessThan(1_500);
+  });
+});
+
+/**
+ * Le chrono change la nature du prompt : les allures ne sont plus dérivées d'une
+ * moyenne d'entraînement, elles sont **calculées** et imposées. C'est la réponse
+ * aux allures délirantes constatées en production.
+ */
+describe('buildPlanMessages — allures imposées', () => {
+  const paces = trainingPacesFromRace(REFERENCE_DISTANCES[REFERENCE_RACE.distance], REFERENCE_RACE.timeS);
+  const withRace = buildPlanMessages(
+    { ...REQUEST, referenceRace: REFERENCE_RACE },
+    { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
+    SNAPSHOT,
+    paces,
+  );
+
+  it('donne la table calculée, chrono et VDOT à l’appui', () => {
+    const system = withRace[0].content;
+
+    expect(system).toContain('ALLURES IMPOSÉES');
+    expect(system).toContain('Chrono de référence : 10 km en 48:30 → VDOT 41,5.');
+    expect(system).toContain('- E (endurance fondamentale, sortie longue) : 5:56–6:32/km');
+    expect(system).toContain('- M (allure marathon, allure objectif) : 5:08–5:37/km');
+    expect(system).toContain('- T (seuil) : 4:57–5:11/km');
+    expect(system).toContain('- I (VMA) : 4:28–4:39/km');
+    expect(system).toContain('- R (répétitions courtes) : 4:08–4:17/km');
+  });
+
+  it('prescrit au lieu de suggérer, et range chaque type de séance dans son créneau', () => {
+    const system = withRace[0].content;
+
+    expect(system).toContain('Tes allures sont CALCULÉES, tu ne les choisis pas');
+    expect(system).toContain('sortie longue dans [E]');
+    expect(system).toContain('seuil dans [T]');
+    expect(system).toContain('VMA dans [I]');
+    expect(system).toContain('répétitions courtes dans [R]');
+    // Les récupérations sont la seule allure qui a le droit de sortir de la table.
+    expect(system).toContain('Les récupérations trottées sont plus lentes que 6:32/km');
+    // Et la section prime explicitement sur les règles de dérivation.
+    expect(system).toContain('cette section prime sur « ALLURES CIBLES »');
+  });
+
+  it('retire la dérivation des récupérations, que la table contredit', () => {
+    // Deux consignes contradictoires dans le même prompt (« + 60 à 120 s/km »
+    // borné d'un côté, « plus lentes que E.max » sans borne de l'autre), c'est le
+    // modèle qui tranche — donc au hasard. La ligne dépassée n'est pas envoyée.
+    expect(withRace[0].content).not.toContain('récupération trottée : référence + 60 à 120 s/km');
+    // Le reste de la section de dérivation, lui, reste en place.
+    expect(withRace[0].content).toContain('seuil : référence − 30 à 45 s/km');
+  });
+
+  it('ne dit rien de tel sans chrono : les règles de dérivation restent le repli', () => {
+    const system = buildPlanMessages(
+      REQUEST,
+      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
+      SNAPSHOT,
+    )[0].content;
+
+    expect(system).not.toContain('ALLURES IMPOSÉES');
+    expect(system).toContain('seuil : référence − 30 à 45 s/km');
   });
 });
 
@@ -947,6 +1046,119 @@ describe('generatePlan', () => {
       /durée en semaines/,
     );
     expect(chatCompletionJson).not.toHaveBeenCalled();
+  });
+});
+
+describe('generatePlan — chrono de référence', () => {
+  it('écrit le chrono avec le plan, et impose sa table au modèle', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
+
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
+      'Chrono de référence : 10 km en 48:30 → VDOT 41,5.',
+    );
+    // Le chrono part en base avec le plan : c'est lui qui rejugera les allures
+    // au prochain ajustement, et que l'écran du plan affiche.
+    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
+    expect(input.referenceDistance).toBe('10k');
+    expect(input.referenceTimeS).toBe(2_910);
+  });
+
+  it('laisse les deux colonnes nulles quand aucun chrono n’est donné', async () => {
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
+    expect(input.referenceDistance).toBeNull();
+    expect(input.referenceTimeS).toBeNull();
+  });
+
+  it('refuse un chrono implausible avant d’appeler le modèle', async () => {
+    // 5 km en 12 min : plus rapide que le record du monde. La table d'allures
+    // calculée dessus serait aberrante — mieux vaut le dire tout de suite.
+    await expect(
+      generatePlan({ ...REQUEST, referenceRace: { distance: '5k', timeS: 720 } }),
+    ).rejects.toThrow(/ne ressemble pas à une course/);
+
+    expect(chatCompletionJson).not.toHaveBeenCalled();
+    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+  });
+
+  it('juge les allures sur la table plutôt que sur l’allure moyenne', async () => {
+    // Une VMA prescrite à 3:30/km, soit 38 s/km plus vite que les répétitions
+    // de la table : le corridor calculé la refuse, et le message rappelle la
+    // table plutôt que l'allure moyenne des dernières sorties.
+    const fastWeek = {
+      sessions: [
+        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
+        { day: 4, kind: 'VMA', title: '5 × 3 min', distanceKm: 10, targetPaceSecPerKm: 210, steps: THRESHOLD_STEPS },
+        { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
+      ],
+    };
+    chatCompletionJson
+      .mockResolvedValueOnce({ summary: 'x', weeks: [fastWeek, CONFORMING_WEEK] })
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+
+    await expect(generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE })).resolves.toBe(DRAFT);
+
+    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
+      "allure 3:30/km hors de la fourchette plausible [3:58/km – 7:32/km] de ta table d'allures calculée",
+    );
+  });
+});
+
+describe('updatePlanFromInstruction — chrono de référence', () => {
+  it('reprend le chrono du plan : un ajustement ne réinvente pas les allures', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: {
+        ...PLAN,
+        startsOn: '2026-08-10',
+        weeks: 2,
+        referenceDistance: '10k',
+        referenceTimeS: 2_910,
+      },
+      sessions: [],
+    });
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [
+        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+        CONFORMING_WEEK,
+      ],
+    });
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain('ALLURES IMPOSÉES');
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
+      '- T (seuil) : 4:57–5:11/km',
+    );
+  });
+
+  it('s’en passe sur un plan qui n’en porte pas', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
+      sessions: [],
+    });
+    chatCompletionJson.mockResolvedValue({
+      summary: 'ok',
+      weeks: [
+        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
+        CONFORMING_WEEK,
+      ],
+    });
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).not.toContain('ALLURES IMPOSÉES');
   });
 });
 

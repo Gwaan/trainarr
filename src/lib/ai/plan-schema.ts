@@ -28,9 +28,10 @@ import { z } from 'zod';
 
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
+import type { TrainingPaces } from '@/lib/metrics/vdot';
 import { PLAN_STEP_BOUNDS, PLAN_STEP_ROLES, planSessionStepsSchema } from '@/lib/plan-steps/schema';
 
-import { formatIsoDay, formatPace } from './format';
+import { formatIsoDay, formatNumber, formatPace, formatPaceRange } from './format';
 
 /**
  * Bornes de la sortie du modèle.
@@ -472,8 +473,36 @@ export function mapPlanWeeksToSessions(
  * Règles métier.
  */
 
+/**
+ * L'objectif d'un plan qui mène à une **course**, pour ce que ça change aux
+ * règles de volume : l'affûtage.
+ *
+ * Seule la distance « marathon » a besoin d'être distinguée — c'est la seule qui
+ * réclame trois semaines d'affûtage (Pfitzinger & Douglas, *Advanced Marathoning*
+ * ; Daniels donne 2 à 3 semaines), les autres se contentent de deux.
+ */
+export type PlanRaceGoal = { isMarathon: boolean };
+
 /** Ce que le plan **doit** respecter, au-delà de sa forme. */
 export type PlanExpectations = {
+  /**
+   * Ce que la fenêtre jugée représente — et donc ce qu'il est légitime d'exiger
+   * de sa progression.
+   *
+   * `'creation'` : le plan entier, du premier au dernier jour. Il doit monter.
+   *
+   * `'adjustment'` : les seules semaines **restantes** d'un plan déjà écrit. Y
+   * exiger un pic supérieur à sa première semaine reviendrait à réclamer une
+   * montée de volume à cinq semaines d'un marathon, c'est-à-dire l'inverse de ce
+   * que le plan complet prévoit. La règle anti-plat est donc désactivée ici ; les
+   * autres règles de volume (hausse, semaine allégée, affûtage, sortie longue)
+   * gardent tout leur sens sur un tronçon.
+   *
+   * Champ explicite, et pas une déduction depuis `race` ou `firstWeekFromDay` :
+   * une création peut elle aussi porter une course et démarrer en milieu de
+   * semaine, rien dans les autres champs ne distingue les deux cas.
+   */
+  scope: 'creation' | 'adjustment';
   weeks: number;
   sessionsPerWeek: number;
   /** Jour ISO de la sortie longue : 1 = lundi … 7 = dimanche. */
@@ -490,6 +519,13 @@ export type PlanExpectations = {
    * ce qui était étalé sur sept.
    */
   firstWeekFromDay?: number;
+  /**
+   * L'objectif du plan, quand c'est une course : les dernières semaines sont
+   * alors des semaines d'affûtage, jugées à l'envers des autres (le volume doit
+   * y **descendre**). `null` ou absent pour un objectif libre — sans échéance, il
+   * n'y a rien à affûter.
+   */
+  race?: PlanRaceGoal | null;
 };
 
 /**
@@ -538,16 +574,37 @@ const INTENSITY_KIND_ROOTS = [
 const COMBINING_MARKS = /[\u0300-\u036f]/gu;
 
 /** Minuscules sans accents : `Côtes`, `cotes` et `COTES` se reconnaissent pareil. */
-function normalizeKind(kind: string): string {
-  return kind
+function normalizeText(text: string): string {
+  return text
     .normalize('NFD')
     .replace(COMBINING_MARKS, '')
     .toLowerCase();
 }
 
 function isIntensitySession(session: PlanSessionOutput): boolean {
-  const kind = normalizeKind(session.kind);
+  const kind = normalizeText(session.kind);
   return INTENSITY_KIND_ROOTS.some((root) => kind.includes(root));
+}
+
+/**
+ * Les façons d'écrire un semi-marathon, qui contiennent toutes « marathon ».
+ *
+ * `1/2` en fait partie (« 1/2 marathon de Nantes » est une graphie courante des
+ * pages d'inscription), et le séparateur admet le trait d'union insécable
+ * (U+2011) que produisent les traitements de texte — « semi‑marathon » s'écrit
+ * ainsi sans que rien ne le distingue à l'œil.
+ */
+const HALF_MARATHON_NAMES = /(semi|demi|half|1\/2)[\s‑-]*marathon/g;
+
+/**
+ * L'objectif décrit-il un **marathon** ?
+ *
+ * Utilisé pour la seule durée de l'affûtage (3 semaines au lieu de 2). Le texte
+ * de l'objectif est libre : on écarte d'abord les graphies du semi-marathon, qui
+ * contiennent toutes le mot « marathon » et vaudraient un affûtage de trop.
+ */
+export function isMarathonGoal(goalText: string): boolean {
+  return normalizeText(goalText).replace(HALF_MARATHON_NAMES, '').includes('marathon');
 }
 
 /**
@@ -616,34 +673,124 @@ function sessionStepViolations(session: PlanSessionOutput, label: string): strin
  */
 const PACE_CORRIDOR_MARGINS = { faster: 110, slower: 130 } as const;
 
-/** Les allures admissibles pour une athlète, en s/km. */
-type PaceCorridor = { reference: number; min: number; max: number };
+/**
+ * Marges du corridor quand la **table VDOT** existe, en s/km.
+ *
+ * Elles s'appliquent aux deux extrémités de la table elle-même : rien ne doit
+ * être plus rapide que les répétitions (10 s/km de marge, l'arrondi d'un coach
+ * qui écrit 3:45 pour 3:52), rien de plus lent que l'endurance — la minute de
+ * battement du côté lent couvre les allures d'effort écrites un peu large. Les
+ * récupérations, elles, n'ont pas de borne lente du tout ({@link
+ * PrescribedPace}) : le prompt les autorise explicitement au-delà de E.max.
+ *
+ * Bien plus serré que le corridor dérivé de l'allure moyenne, et c'est tout
+ * l'intérêt : la table *est* la prescription, le modèle n'a plus à la deviner.
+ */
+const VDOT_CORRIDOR_MARGINS = { faster: 10, slower: 60 } as const;
 
-/** Le corridor dérivé de l'allure de référence, ou `null` quand elle est inconnue. */
-function paceCorridor(referencePaceSecPerKm: number | null): PaceCorridor | null {
-  if (referencePaceSecPerKm === null) return null;
+/** Les allures admissibles pour une athlète, en s/km, et d'où elles sortent. */
+type PaceCorridor = {
+  min: number;
+  max: number;
+  /** Fin de phrase du message de violation : ce qui fonde le corridor. */
+  source: string;
+};
+
+/**
+ * Le corridor de plausibilité, du plus fiable au moins fiable :
+ *
+ * 1. la table d'allures calculée depuis un chrono de course — elle prescrit ;
+ * 2. à défaut, l'allure d'entraînement récente, dont le prompt fait dériver les
+ *    autres — elle n'encadre qu'une aberration ;
+ * 3. à défaut encore, `null` : le plan cible par zones cardiaques, il n'existe
+ *    plus rien à quoi comparer une allure.
+ */
+function paceCorridor(context: PlanValidationContext): PaceCorridor | null {
+  const paces = context.paces ?? null;
+  if (paces !== null) {
+    return {
+      min: paces.repetition.minSecPerKm - VDOT_CORRIDOR_MARGINS.faster,
+      max: paces.easy.maxSecPerKm + VDOT_CORRIDOR_MARGINS.slower,
+      source:
+        `de ta table d'allures calculée (E ${formatPaceRange(paces.easy)}, ` +
+        `T ${formatPaceRange(paces.threshold)}, I ${formatPaceRange(paces.interval)}, ` +
+        `R ${formatPaceRange(paces.repetition)}), récupérations comprises`,
+    };
+  }
+
+  const reference = context.referencePaceSecPerKm ?? null;
+  if (reference === null) return null;
   return {
-    reference: referencePaceSecPerKm,
-    min: referencePaceSecPerKm - PACE_CORRIDOR_MARGINS.faster,
-    max: referencePaceSecPerKm + PACE_CORRIDOR_MARGINS.slower,
+    min: reference - PACE_CORRIDOR_MARGINS.faster,
+    max: reference + PACE_CORRIDOR_MARGINS.slower,
+    source: `dérivée de l'allure récente de l'athlète (${formatPace(reference)})`,
   };
+}
+
+/**
+ * Ce qui, dans une étape, dispense de la borne **rapide** du corridor.
+ *
+ * Une ligne droite (« 30 s à 1 min vite », « 6 × 100 m en accélération ») se
+ * court naturellement plus vite que les répétitions calibrées sur 200 à 400 m :
+ * le prompt débutant en prescrit, et les refuser ferait relancer la génération
+ * pour une séance parfaitement écrite. Au-delà de ces durées, une allure plus
+ * rapide que R n'est plus une accélération mais une erreur.
+ */
+const SHORT_STEP_BOUNDS = { durationS: 60, distanceM: 200 } as const;
+
+/**
+ * Une allure prescrite par la séance, avec ce qui décide des bornes qui s'y
+ * appliquent.
+ *
+ * Deux dispenses, chacune adossée à ce que le prompt autorise :
+ *
+ * - une **récupération** est « plus lente que E.max, ou sans cible » — sans
+ *   borne lente : un trot à 8:15/km ou une portion marchée est une consigne
+ *   valide, pas une aberration. La borne rapide, elle, s'applique toujours (une
+ *   récupération à allure VMA n'est pas une récupération) ;
+ * - une **étape courte** ({@link SHORT_STEP_BOUNDS}) est dispensée de la borne
+ *   rapide, jamais de la lente.
+ */
+type PrescribedPace = {
+  secPerKm: number;
+  isRecovery: boolean;
+  isShort: boolean;
+};
+
+function isShortStep(step: { distanceM: number | null; durationS: number | null }): boolean {
+  return (
+    (step.durationS !== null && step.durationS <= SHORT_STEP_BOUNDS.durationS) ||
+    (step.distanceM !== null && step.distanceM <= SHORT_STEP_BOUNDS.distanceM)
+  );
 }
 
 /**
  * Toutes les allures que la séance prescrit : sa cible globale d'abord, puis les
  * bornes de chaque étape dans l'ordre du déroulé.
+ *
+ * La cible de séance ne porte aucune dispense : elle vaut pour la séance
+ * entière, où qu'aille son déroulé.
  */
-function sessionPrescribedPaces(session: PlanSessionOutput): number[] {
-  const paces: number[] = [];
-  if (session.targetPaceSecPerKm !== undefined) paces.push(session.targetPaceSecPerKm);
+function sessionPrescribedPaces(session: PlanSessionOutput): PrescribedPace[] {
+  const paces: PrescribedPace[] = [];
+  if (session.targetPaceSecPerKm !== undefined) {
+    paces.push({ secPerKm: session.targetPaceSecPerKm, isRecovery: false, isShort: false });
+  }
 
   for (const block of session.steps ?? []) {
     for (const step of block.steps) {
-      if (step.paceMinSecPerKm !== null) paces.push(step.paceMinSecPerKm);
-      if (step.paceMaxSecPerKm !== null) paces.push(step.paceMaxSecPerKm);
+      const flags = { isRecovery: step.role === 'recover', isShort: isShortStep(step) };
+      if (step.paceMinSecPerKm !== null) paces.push({ secPerKm: step.paceMinSecPerKm, ...flags });
+      if (step.paceMaxSecPerKm !== null) paces.push({ secPerKm: step.paceMaxSecPerKm, ...flags });
     }
   }
   return paces;
+}
+
+/** L'allure sort-elle du corridor, dispenses appliquées ? */
+function isOutsideCorridor(pace: PrescribedPace, corridor: PaceCorridor): boolean {
+  if (!pace.isShort && pace.secPerKm < corridor.min) return true;
+  return !pace.isRecovery && pace.secPerKm > corridor.max;
 }
 
 /**
@@ -660,17 +807,351 @@ function sessionPaceViolation(
   label: string,
   corridor: PaceCorridor,
 ): string | null {
-  const outlier = sessionPrescribedPaces(session).find(
-    (pace) => pace < corridor.min || pace > corridor.max,
-  );
+  const outlier = sessionPrescribedPaces(session).find((pace) => isOutsideCorridor(pace, corridor));
   if (outlier === undefined) return null;
 
   return (
-    `${label}, séance du ${formatIsoDay(session.day)} (${session.kind}) : allure ${formatPace(outlier)} ` +
+    `${label}, séance du ${formatIsoDay(session.day)} (${session.kind}) : allure ${formatPace(outlier.secPerKm)} ` +
     `hors de la fourchette plausible [${formatPace(corridor.min)} – ${formatPace(corridor.max)}] ` +
-    `dérivée de l'allure récente de l'athlète (${formatPace(corridor.reference)}).`
+    `${corridor.source}.`
   );
 }
+
+/*
+ * Progression du volume.
+ *
+ * C'est la moitié « entraîneur » de la validation : un plan peut placer ses
+ * séances parfaitement et rester un mauvais plan — douze semaines au même
+ * volume, ou une hausse de 30 % la semaine avant la course. Le prompt donne ces
+ * mêmes chiffres (`COACH_RULES`, section PROGRESSION DU VOLUME) ; ce qui suit est
+ * le filet, pas la consigne.
+ *
+ * Sources des seuils encodés :
+ *  - **hausse hebdomadaire** : la « règle des 10 % », doctrine commune (Daniels,
+ *    *Daniels' Running Formula* ; Pfitzinger & Douglas, *Advanced Marathoning*).
+ *    Le filet tolère 12 % — une consigne à 10 % refusée à 10,4 % ferait relancer
+ *    des générations de plusieurs minutes pour un arrondi ;
+ *  - **semaine allégée** (« cutback week ») toutes les 3 à 4 semaines, −15 à
+ *    −30 % : même littérature, et Lydiard avant elle ;
+ *  - **affûtage** : 2 semaines pour un 5-10 km ou un semi, 3 pour un marathon
+ *    (Pfitzinger), volume nettement réduit, intensité maintenue ;
+ *  - **sortie longue** : 20 à 30 % du volume hebdomadaire chez Daniels — la borne
+ *    haute est ouverte ici, cf. {@link longRunMaxShare}.
+ *
+ * Toutes ces règles ne s'appliquent qu'à la **fenêtre de développement** : ni la
+ * première semaine entamée (son volume est amputé de plusieurs jours, le comparer
+ * n'a pas de sens), ni les semaines d'affûtage (qui doivent précisément faire
+ * l'inverse).
+ */
+
+export const VOLUME_RULES = {
+  /** Hausse maximale d'une semaine à la suivante. */
+  maxWeeklyGrowth: 1.12,
+  /** Une semaine « allégée » descend au moins à cette part de la précédente. */
+  cutbackRatio: 0.85,
+  /** Aucune fenêtre de tant de semaines consécutives ne reste sans semaine allégée. */
+  cutbackWindowWeeks: 4,
+  /** En deçà, un plan est trop court pour qu'une semaine allégée ait du sens. */
+  minWeeksForCutback: 6,
+  /**
+   * … et il faut aussi assez de semaines de développement : sur quatre semaines
+   * de développement suivies d'un affûtage, exiger une semaine allégée
+   * reviendrait à en gaspiller le quart pour une récupération que l'affûtage
+   * apporte déjà.
+   */
+  minBuildWeeksForCutback: 5,
+  /** En deçà, un plan n'a pas la place de monter : la règle anti-plat ne s'applique pas. */
+  minWeeksForPeak: 5,
+  /**
+   * … et il faut assez de semaines de développement pour que l'anti-plat laisse
+   * un choix.
+   *
+   * L'arithmétique : avec `n` semaines de développement pleines, il y a `n − 1`
+   * transitions, chacune plafonnée à ×1,12. Le pic atteignable vaut donc au plus
+   * `1,12^(n−1)` fois la première semaine pleine, quand l'anti-plat en réclame
+   * 1,10 :
+   *
+   *     n = 2 → pic ∈ [1,10 ; 1,12]   — 2 % de bande, une seule semaine à placer
+   *     n = 3 → pic ∈ [1,10 ; 1,25]
+   *     n = 4 → pic ∈ [1,10 ; 1,40]   — trois transitions pour répartir la montée
+   *
+   * À deux semaines de développement, le modèle doit viser une valeur unique au
+   * pour cent près : il échoue, on régénère, et rien de tout cela n'est un
+   * mauvais plan. À partir de quatre, la contrainte se répartit et la bande est
+   * assez large pour qu'un entraîneur y respire.
+   */
+  minBuildWeeksForPeak: 4,
+  /** Le pic doit dépasser la première semaine pleine d'au moins 10 %. */
+  minPeakRatio: 1.1,
+  /** La semaine de la course reste sous cette part du pic. */
+  raceWeekMaxRatio: 0.65,
+  /** Part du volume hebdomadaire que porte la sortie longue. */
+  longRunShare: { min: 0.2, max: 0.4 },
+} as const;
+
+/** Un marathon n'ouvre sa troisième semaine d'affûtage que si le plan est assez long. */
+const MARATHON_TAPER_MIN_PLAN_WEEKS = 8;
+
+/**
+ * Nombre de semaines d'affûtage attendues en fin de plan, 0 sans course.
+ *
+ * Exporté pour être éprouvé : c'est ce compte qui décide quelles semaines sont
+ * jugées à l'endroit (le volume monte) et lesquelles le sont à l'envers.
+ */
+export function taperWeekCount(weeks: number, race: PlanRaceGoal | null | undefined): number {
+  if (race === null || race === undefined) return 0;
+  const taper = race.isMarathon && weeks >= MARATHON_TAPER_MIN_PLAN_WEEKS ? 3 : 2;
+  return Math.min(taper, weeks);
+}
+
+/**
+ * Volume d'une semaine, en km — `null` dès qu'une séance ne déclare pas sa
+ * distance : une somme partielle ferait constater des baisses qui n'existent pas.
+ */
+function weekVolumeKm(week: PlanWeekOutput): number | null {
+  let total = 0;
+  for (const session of week.sessions) {
+    if (session.distanceKm === undefined) return null;
+    total += session.distanceKm;
+  }
+  return total;
+}
+
+/**
+ * Part maximale du volume hebdomadaire que la sortie longue peut porter.
+ *
+ * 40 % en règle générale — mais la borne est arithmétiquement hostile aux petites
+ * semaines : sur trois séances, des sorties parfaitement équilibrées en donnent
+ * déjà 33 %, et la sortie longue étant *par définition* la plus longue, elle
+ * dépasse 40 % sans qu'aucune faute n'ait été commise. Le plafond s'ouvre donc à
+ * `1,6 / nombre de séances` — une sortie longue valant 1,6 fois la séance
+ * moyenne, ce qui reste un plan sain. Sur 4 séances et plus, c'est bien 40 % qui
+ * s'applique.
+ */
+const LONG_RUN_SESSION_FACTOR = 1.6;
+
+function longRunMaxShare(sessionCount: number): number {
+  return Math.max(VOLUME_RULES.longRunShare.max, LONG_RUN_SESSION_FACTOR / sessionCount);
+}
+
+/** `36,4 km`, avec la virgule décimale de l'UI française. */
+function km(value: number): string {
+  return `${formatNumber(value, 1)} km`;
+}
+
+/**
+ * Un **plancher** annoncé au modèle, arrondi au dixième **supérieur**.
+ *
+ * L'arrondi au plus proche est ici une faute : « soit 33,4 km au minimum » pour
+ * un plancher réel de 33,44 énonce une valeur que la règle qui l'annonce refuse.
+ * Le modèle applique le chiffre à la lettre, échoue, on régénère — trois fois,
+ * constaté. Le chiffre affiché doit satisfaire la règle.
+ */
+function kmAtLeast(value: number): string {
+  return km(Math.ceil(value * 10) / 10);
+}
+
+/** Un **plafond** annoncé au modèle, arrondi au dixième **inférieur** — cf. {@link kmAtLeast}. */
+function kmAtMost(value: number): string {
+  return km(Math.floor(value * 10) / 10);
+}
+
+/**
+ * `20,0 %`.
+ *
+ * Une décimale, pour la même raison que {@link kmAtLeast} : à l'entier près, une
+ * hausse de 12,4 % s'affiche « 12 % » dans la phrase même qui interdit de
+ * dépasser 12 %, et la consigne se contredit sous les yeux du modèle.
+ */
+function percent(share: number): string {
+  return `${formatNumber(share * 100, 1)} %`;
+}
+
+/**
+ * Ce qui, dans la progression des volumes hebdomadaires, ne tient pas debout.
+ *
+ * Une ligne au plus par semaine et par règle ; les fenêtres glissantes, elles,
+ * ne rendent que leur premier manquement — quatre fenêtres qui se chevauchent
+ * décrivent la même faute, et les lister mangerait le message de reprise.
+ */
+function volumeViolations(
+  weeks: readonly PlanWeekOutput[],
+  expected: PlanExpectations,
+): string[] {
+  const violations: string[] = [];
+  const volumes = weeks.map(weekVolumeKm);
+
+  const undeclared = volumes
+    .map((volume, index) => (volume === null ? index + 1 : null))
+    .filter((week): week is number => week !== null);
+  if (undeclared.length > 0) {
+    // Une seule ligne pour tout le plan : c'est une convention d'écriture, pas
+    // une faute par semaine.
+    violations.push(
+      `Volumes hebdomadaires invérifiables : chaque séance déclare sa distance \`distanceKm\`, ` +
+        `footings et récupérations compris — il en manque semaine ${undeclared.join(', semaine ')}.`,
+    );
+  }
+
+  // Première semaine pleine : une semaine entamée porte moins de jours, donc
+  // moins de kilomètres. La juger, ou juger la suivante par rapport à elle,
+  // relèverait une hausse qui n'est que le retour à une semaine entière.
+  const firstFull = (expected.firstWeekFromDay ?? 1) > 1 ? 1 : 0;
+  const taper = taperWeekCount(weeks.length, expected.race);
+  const lastBuild = weeks.length - taper - 1;
+  const buildWeeks = lastBuild - firstFull + 1;
+
+  /** Volume de la semaine `index` si elle est jugeable, `null` sinon. */
+  const buildVolume = (index: number): number | null =>
+    index >= firstFull && index <= lastBuild ? volumes[index] : null;
+
+  // 1. Hausse hebdomadaire.
+  for (let index = firstFull + 1; index <= lastBuild; index += 1) {
+    const current = buildVolume(index);
+    const previous = buildVolume(index - 1);
+    if (current === null || previous === null) continue;
+
+    const ceiling = previous * VOLUME_RULES.maxWeeklyGrowth;
+    if (current > ceiling) {
+      violations.push(
+        `Semaine ${index + 1} : ${km(current)} après ${km(previous)}, soit ${percent(current / previous - 1)} ` +
+          `de hausse. Le volume ne monte jamais de plus de ${percent(VOLUME_RULES.maxWeeklyGrowth - 1)} ` +
+          `d'une semaine à l'autre — ${kmAtMost(ceiling)} au plus ici.`,
+      );
+    }
+  }
+
+  // 2. Semaine allégée : jamais quatre semaines de suite sans respiration.
+  if (
+    weeks.length >= VOLUME_RULES.minWeeksForCutback &&
+    buildWeeks >= VOLUME_RULES.minBuildWeeksForCutback
+  ) {
+    const window = VOLUME_RULES.cutbackWindowWeeks;
+    for (let start = firstFull; start + window - 1 <= lastBuild; start += 1) {
+      let eased = false;
+      for (let index = Math.max(start, firstFull + 1); index <= start + window - 1; index += 1) {
+        const current = buildVolume(index);
+        const previous = buildVolume(index - 1);
+        // Un volume manquant ne fabrique pas une violation : elle est déjà dite.
+        if (current === null || previous === null) eased = true;
+        else if (current <= previous * VOLUME_RULES.cutbackRatio) eased = true;
+      }
+      if (!eased) {
+        violations.push(
+          `Semaines ${start + 1} à ${start + window} : quatre semaines de suite sans semaine allégée. ` +
+            `L'une d'elles doit redescendre à ${percent(VOLUME_RULES.cutbackRatio)} ou moins du volume de la semaine précédente.`,
+        );
+        break;
+      }
+    }
+  }
+
+  // 3. Anti-plat : un plan qui ne monte pas n'entraîne pas.
+  //
+  // Réservé à la création : à l'ajustement, la fenêtre jugée n'est que la fin
+  // d'un plan déjà écrit, où le volume redescend légitimement (cf.
+  // `PlanExpectations.scope`).
+  const peak = peakBuildVolume(volumes, firstFull, lastBuild);
+  const firstFullVolume = buildVolume(firstFull);
+  if (
+    expected.scope === 'creation' &&
+    weeks.length >= VOLUME_RULES.minWeeksForPeak &&
+    buildWeeks >= VOLUME_RULES.minBuildWeeksForPeak &&
+    peak !== null &&
+    firstFullVolume !== null
+  ) {
+    const floor = firstFullVolume * VOLUME_RULES.minPeakRatio;
+    if (peak < floor) {
+      violations.push(
+        `Plan trop plat : la semaine la plus chargée hors affûtage (${km(peak)}) doit dépasser ` +
+          `d'au moins ${percent(VOLUME_RULES.minPeakRatio - 1)} la première semaine pleine (${km(firstFullVolume)}), ` +
+          `soit ${kmAtLeast(floor)} au minimum.`,
+      );
+    }
+  }
+
+  // 4. Affûtage : les dernières semaines descendent, celle de la course le plus.
+  for (let index = weeks.length - taper; index < weeks.length; index += 1) {
+    const current = volumes[index];
+    const previous = index - 1 >= firstFull ? volumes[index - 1] : null;
+    if (current === null || previous === null) continue;
+
+    if (current >= previous) {
+      violations.push(
+        `Semaine ${index + 1} (affûtage) : ${km(current)}, autant ou plus que la semaine ${index} ` +
+          `(${km(previous)}) — pendant l'affûtage, le volume baisse strictement chaque semaine.`,
+      );
+    }
+  }
+
+  const raceWeekVolume = taper > 0 ? volumes[weeks.length - 1] : null;
+  if (raceWeekVolume !== null && peak !== null) {
+    const ceiling = peak * VOLUME_RULES.raceWeekMaxRatio;
+    if (raceWeekVolume > ceiling) {
+      violations.push(
+        `Semaine ${weeks.length} (semaine de course) : ${km(raceWeekVolume)}, soit ${percent(raceWeekVolume / peak)} ` +
+          `du pic (${km(peak)}) — elle reste sous ${percent(VOLUME_RULES.raceWeekMaxRatio)} du pic, ${kmAtMost(ceiling)} au plus.`,
+      );
+    }
+  }
+
+  // 5. Poids de la sortie longue dans sa semaine.
+  for (let index = firstFull; index <= lastBuild; index += 1) {
+    const total = volumes[index];
+    if (total === null || total === 0) continue;
+
+    const longRun = weeks[index].sessions.find((session) => session.day === expected.longRunDay);
+    // Sortie longue absente : la règle de placement l'a déjà dit.
+    if (longRun?.distanceKm === undefined) continue;
+
+    const share = longRun.distanceKm / total;
+    const maxShare = longRunMaxShare(weeks[index].sessions.length);
+    if (share < VOLUME_RULES.longRunShare.min || share > maxShare) {
+      violations.push(
+        `Semaine ${index + 1} : la sortie longue fait ${km(longRun.distanceKm)} pour ${km(total)} dans la semaine ` +
+          `(${percent(share)}) — elle doit peser entre ${percent(VOLUME_RULES.longRunShare.min)} et ${percent(maxShare)} du volume hebdomadaire.`,
+      );
+    }
+  }
+
+  return violations;
+}
+
+/** Le plus gros volume de la fenêtre de développement, `null` si elle est vide. */
+function peakBuildVolume(
+  volumes: readonly (number | null)[],
+  firstFull: number,
+  lastBuild: number,
+): number | null {
+  let peak: number | null = null;
+  for (let index = firstFull; index <= lastBuild; index += 1) {
+    const volume = volumes[index];
+    if (volume === null || volume === undefined) continue;
+    if (peak === null || volume > peak) peak = volume;
+  }
+  return peak;
+}
+
+/**
+ * Ce à quoi les allures prescrites sont confrontées.
+ *
+ * Les deux sources sont exclusives dans les faits — quand la table existe, c'est
+ * elle qui prescrit — mais l'appelant fournit ce qu'il a : le service passe les
+ * deux, le corridor choisit ({@link paceCorridor}).
+ */
+export type PlanValidationContext = {
+  /**
+   * Allure d'entraînement récente de l'athlète, en s/km. Le **repli** : sans
+   * chrono, c'est d'elle que le prompt fait dériver les allures, et la seule
+   * chose à laquelle les comparer.
+   */
+  referencePaceSecPerKm?: number | null;
+  /**
+   * Table d'allures calculée depuis le chrono de référence. Quand elle est là,
+   * elle remplace tout : le prompt l'impose, la validation la fait respecter.
+   */
+  paces?: TrainingPaces | null;
+};
 
 /**
  * Ce qui, dans le plan proposé, contredit ce qui a été demandé.
@@ -679,18 +1160,17 @@ function sessionPaceViolation(
  * qu'il se corrige (cf. le retry de `plan-service.ts`) : elles sont écrites pour
  * être lues par lui, pas par un développeur. Liste vide = plan conforme.
  *
- * @param referencePaceSecPerKm allure d'entraînement récente de l'athlète, celle
- * dont le prompt fait dériver toutes les autres. Fournie, elle ouvre le corridor
- * de plausibilité ({@link PACE_CORRIDOR_MARGINS}) ; absente ou `null`, aucune
- * allure n'est jugée — le prompt impose alors de cibler par zones cardiaques,
- * et il n'existe plus rien à quoi comparer.
+ * @param context ce à quoi les allures sont confrontées ({@link
+ * PlanValidationContext}) : la table VDOT si l'athlète a donné un chrono, son
+ * allure récente sinon. Vide, aucune allure n'est jugée — le prompt impose alors
+ * de cibler par zones cardiaques, et il n'existe plus rien à quoi comparer.
  */
 export function validatePlanBusinessRules(
   weeks: readonly PlanWeekOutput[],
   expected: PlanExpectations,
-  referencePaceSecPerKm: number | null = null,
+  context: PlanValidationContext = {},
 ): string[] {
-  const corridor = paceCorridor(referencePaceSecPerKm);
+  const corridor = paceCorridor(context);
   const violations: string[] = [];
   const firstWeekFromDay = expected.firstWeekFromDay ?? 1;
   const longRunDayName = formatIsoDay(expected.longRunDay);
@@ -772,6 +1252,10 @@ export function validatePlanBusinessRules(
       );
     }
   });
+
+  // En dernier, et à part : ces règles-là se lisent sur le plan entier, pas sur
+  // une semaine isolée.
+  violations.push(...volumeViolations(weeks, expected));
 
   return violations;
 }

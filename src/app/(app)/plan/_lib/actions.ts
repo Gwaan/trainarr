@@ -36,8 +36,20 @@ import {
   type PlanRequest,
 } from '@/lib/ai/plan-service';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
+import {
+  InvalidRacePerformanceError,
+  REFERENCE_DISTANCES,
+  vdotFromRace,
+  type ReferenceDistance,
+} from '@/lib/metrics/vdot';
 
-import { ARCHIVE_CONFIRMATION, PLAN_FORM_FIELDS, type PlanFormField } from './form-options';
+import {
+  ARCHIVE_CONFIRMATION,
+  PLAN_FORM_FIELDS,
+  asReferenceDistance,
+  parseRaceTimeSeconds,
+  type PlanFormField,
+} from './form-options';
 import {
   MAX_PLAN_START_LEAD_WEEKS,
   earliestPlanStart,
@@ -169,6 +181,64 @@ const weeklyTimeHoursField = z
   )
   .transform((hours) => (hours === null ? null : Math.round(hours * 60)));
 
+/** Le chrono lu du formulaire : soit un couple exploitable, soit rien, soit la faute à signaler. */
+type ReferenceRaceRead = {
+  race: { distance: ReferenceDistance; timeS: number } | null;
+  error?: { field: 'referenceDistance' | 'referenceTime'; message: string };
+};
+
+/**
+ * Lit le chrono de référence : forme du temps, distance connue, et **cohérence
+ * physiologique** du couple.
+ *
+ * Ce dernier point passe par `vdotFromRace`, la fonction même qui calculera la
+ * table d'allures : ce qui est accepté ici produira donc toujours une table. Un
+ * 5 km en 12 minutes n'est pas une performance, c'est une faute de frappe — et la
+ * refuser avant la génération épargne plusieurs minutes d'attente.
+ *
+ * Le champ est **facultatif** : temps vide = pas de chrono, et la distance seule
+ * (que la liste déroulante porte toujours) ne déclare rien.
+ */
+function readReferenceRace(distance: string, time: string): ReferenceRaceRead {
+  if (time.trim() === '') return { race: null };
+
+  const timeS = parseRaceTimeSeconds(time);
+  if (timeS === null) {
+    return {
+      race: null,
+      error: {
+        field: 'referenceTime',
+        message: 'Chrono : écris-le en mm:ss ou hh:mm:ss (par exemple 48:30).',
+      },
+    };
+  }
+
+  const reference = asReferenceDistance(distance);
+  if (reference === null) {
+    return {
+      race: null,
+      error: { field: 'referenceDistance', message: 'Choisis la distance de ton chrono.' },
+    };
+  }
+
+  try {
+    vdotFromRace(REFERENCE_DISTANCES[reference], timeS);
+  } catch (error) {
+    if (error instanceof InvalidRacePerformanceError) {
+      return {
+        race: null,
+        error: {
+          field: 'referenceTime',
+          message: 'Ce chrono ne ressemble pas à une course — vérifie la saisie.',
+        },
+      };
+    }
+    throw error;
+  }
+
+  return { race: { distance: reference, timeS } };
+}
+
 const planFormSchema = z
   .object({
     goalType: z.enum(['race', 'free'], { error: "Choisis un type d'objectif." }),
@@ -189,6 +259,9 @@ const planFormSchema = z
     // Ces deux-là s'excluent : seul celui qu'impose `goalType` est vérifié.
     raceDate: z.string().trim(),
     weeks: z.string().trim(),
+    /** Chrono de référence : facultatif, mais c'est lui qui calcule les allures. */
+    referenceDistance: z.string().trim(),
+    referenceTime: z.string().trim(),
     /** Facultatif : vide = aujourd'hui (le défaut du service). */
     startsOn: z.string().trim(),
     sessionsPerWeek: boundedInteger(
@@ -200,6 +273,15 @@ const planFormSchema = z
   })
   .superRefine((form, ctx) => {
     const today = todayCivilDate();
+
+    const reference = readReferenceRace(form.referenceDistance, form.referenceTime);
+    if (reference.error !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [reference.error.field],
+        message: reference.error.message,
+      });
+    }
     // Date de démarrage : facultative, mais si elle est là c'est elle qui ancre
     // la fenêtre du plan — donc les bornes de la course en dépendent.
     const startsOn = form.startsOn === '' ? earliestPlanStart(today) : form.startsOn;
@@ -301,6 +383,8 @@ const FIELD_OF_PLAN_INPUT: Partial<Record<PlanInputField, PlanFormField>> = {
   sessionsPerWeek: 'sessionsPerWeek',
   weeklyTimeMinutes: 'weeklyTimeHours',
   longRunDay: 'longRunDay',
+  referenceDistance: 'referenceDistance',
+  referenceTimeS: 'referenceTime',
 };
 
 /**
@@ -346,6 +430,8 @@ export async function createPlanAction(
     goalText: textField(formData, 'goalText'),
     raceDate: textField(formData, 'raceDate'),
     weeks: textField(formData, 'weeks'),
+    referenceDistance: textField(formData, 'referenceDistance'),
+    referenceTime: textField(formData, 'referenceTime'),
     startsOn: textField(formData, 'startsOn'),
     sessionsPerWeek: textField(formData, 'sessionsPerWeek'),
     weeklyTimeHours: textField(formData, 'weeklyTimeHours'),
@@ -374,6 +460,9 @@ export async function createPlanAction(
     sessionsPerWeek: form.sessionsPerWeek,
     weeklyTimeMinutes: form.weeklyTimeHours ?? undefined,
     longRunDay: form.longRunDay,
+    // Relu après validation : `superRefine` a déjà refusé tout ce qui n'est pas
+    // un chrono, il ne reste ici qu'un couple exploitable ou aucun chrono.
+    referenceRace: readReferenceRace(form.referenceDistance, form.referenceTime).race ?? undefined,
   };
 
   try {

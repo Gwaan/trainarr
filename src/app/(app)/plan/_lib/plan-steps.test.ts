@@ -38,6 +38,7 @@ describe("PLAN_STEPS", () => {
     expect(PLAN_STEPS.map((candidate) => candidate.id)).toEqual([
       "goal",
       "profile",
+      "race",
       "constraints",
       "summary",
     ]);
@@ -87,6 +88,24 @@ describe("incompleteStepFields", () => {
     expect(isStepComplete(step("constraints"), values())).toBe(true);
   });
 
+  it("laisse passer le chrono absent : il est encouragé, jamais exigé", () => {
+    expect(isStepComplete(step("race"), values({ referenceTime: "" }))).toBe(true);
+  });
+
+  it("accepte un chrono en mm:ss comme en hh:mm:ss", () => {
+    expect(isStepComplete(step("race"), values({ referenceTime: "48:30" }))).toBe(true);
+    expect(isStepComplete(step("race"), values({ referenceTime: "1:52:00" }))).toBe(true);
+    expect(isStepComplete(step("race"), values({ referenceTime: " 3:55:12 " }))).toBe(true);
+  });
+
+  it("bloque un chrono qui n'a pas la forme d'un temps", () => {
+    for (const referenceTime of ["48", "48,30", "quarante", "1:2:3:4", "48:75"]) {
+      expect(incompleteStepFields(step("race"), values({ referenceTime }))).toEqual([
+        "referenceTime",
+      ]);
+    }
+  });
+
   it("accepte un temps hebdomadaire vide, ou écrit avec une virgule", () => {
     expect(isStepComplete(step("constraints"), values({ weeklyTimeHours: "" }))).toBe(true);
     expect(isStepComplete(step("constraints"), values({ weeklyTimeHours: "4,5" }))).toBe(true);
@@ -115,6 +134,7 @@ describe("stepIndexOfField", () => {
   it("ramène chaque champ à l'étape qui le pose", () => {
     expect(stepIndexOfField("raceDate")).toBe(PLAN_STEPS.indexOf(step("goal")));
     expect(stepIndexOfField("level")).toBe(PLAN_STEPS.indexOf(step("profile")));
+    expect(stepIndexOfField("referenceTime")).toBe(PLAN_STEPS.indexOf(step("race")));
     expect(stepIndexOfField("longRunDay")).toBe(PLAN_STEPS.indexOf(step("constraints")));
   });
 });
@@ -151,5 +171,6 @@ describe("hasPlanFormInput", () => {
     expect(hasPlanFormInput({ ...initial, goalText: "S" }, initial)).toBe(true);
     expect(hasPlanFormInput({ ...initial, level: "advanced" }, initial)).toBe(true);
     expect(hasPlanFormInput({ ...initial, startsOn: "2026-09-01" }, initial)).toBe(true);
+    expect(hasPlanFormInput({ ...initial, referenceTime: "48:30" }, initial)).toBe(true);
   });
 });

@@ -13,6 +13,9 @@ import { formatCivilDay, formatIsoDay } from "./format-plan";
 import {
   GOAL_TYPE_CHOICES,
   LEVEL_LABELS,
+  REFERENCE_DISTANCE_LABELS,
+  formatRaceTimeSeconds,
+  parseRaceTimeSeconds,
   type GoalType,
 } from "./form-options";
 import type { PlanFormValues } from "./plan-steps";
@@ -27,6 +30,19 @@ export type PlanRecapEntry = {
 /** Libellé français d'un type d'objectif. Le repli ne sert jamais : les deux types sont listés. */
 function goalTypeLabel(goalType: GoalType): string {
   return GOAL_TYPE_CHOICES.find((choice) => choice.value === goalType)?.label ?? "Objectif";
+}
+
+/**
+ * Le chrono relu **normalisé** : `1:5:30` saisi se relit `1:05:30`.
+ *
+ * Le récapitulatif est la dernière relecture avant plusieurs minutes d'attente —
+ * il doit montrer le chrono tel que le service va le comprendre, pas la frappe.
+ * Une saisie que le masque refuse reste telle quelle : la corriger n'est pas le
+ * rôle de cette ligne, et l'afficher brute donne une chance de voir l'erreur.
+ */
+function raceTimeOrRaw(input: string): string {
+  const seconds = parseRaceTimeSeconds(input);
+  return seconds === null ? input : formatRaceTimeSeconds(seconds);
 }
 
 /** Une date civile bien formée s'écrit en clair, une saisie douteuse reste telle quelle. */
@@ -60,8 +76,20 @@ export function planRecapEntries(values: PlanFormValues): readonly PlanRecapEntr
     entries.push({ label: "Durée du plan", value: `${values.weeks} semaines`, numeric: true });
   }
 
+  const referenceTime = values.referenceTime.trim();
+
   entries.push(
     { label: "Ton niveau", value: LEVEL_LABELS[values.level], numeric: false },
+    {
+      label: "Chrono de référence",
+      // Sans chrono, la ligne dit ce que ça coûte plutôt que « — » : c'est la
+      // dernière occasion de revenir en arrière pour le renseigner.
+      value:
+        referenceTime === ""
+          ? "Aucun — le coach restera prudent"
+          : `${REFERENCE_DISTANCE_LABELS[values.referenceDistance]} en ${raceTimeOrRaw(referenceTime)}`,
+      numeric: referenceTime !== "",
+    },
     { label: "Séances par semaine", value: `${values.sessionsPerWeek} séances`, numeric: true },
     { label: "Sortie longue", value: longRunDayLabel(values.longRunDay), numeric: false },
     {
