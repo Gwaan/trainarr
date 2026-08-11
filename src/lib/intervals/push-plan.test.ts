@@ -6,10 +6,10 @@ import type { PlanDto, PlanSessionDto } from '@/data/plans';
 import type { IntervalsEvent } from './client';
 import {
   SYNC_HORIZON_DAYS,
-  TRAINARR_UID_PREFIX,
+  TRAINARR_EXTERNAL_ID_PREFIX,
   buildWorkoutEvents,
-  diffCalendarEvents,
-  planSessionUid,
+  planCalendarReplacement,
+  planSessionExternalId,
   syncPlanToIntervals,
   syncPlanToIntervalsSafely,
   syncWindow,
@@ -21,7 +21,7 @@ vi.mock('server-only', () => ({}));
 const { api } = vi.hoisted(() => ({
   api: {
     listWorkoutEvents: vi.fn(),
-    upsertWorkoutEvents: vi.fn(),
+    createWorkoutEvents: vi.fn(),
     deleteCalendarEvents: vi.fn(),
   },
 }));
@@ -75,7 +75,7 @@ function session(overrides: Partial<PlanSessionDto> & { scheduledOn: string }): 
 
 function event(overrides: Partial<IntervalsEvent> & { id: number }): IntervalsEvent {
   return {
-    uid: null,
+    externalId: null,
     category: 'WORKOUT',
     startDateLocal: null,
     name: null,
@@ -95,17 +95,21 @@ beforeEach(() => {
   resetEnvCache();
 
   api.listWorkoutEvents.mockResolvedValue([]);
-  api.upsertWorkoutEvents.mockImplementation(
-    async ({ events }: { events: readonly { uid: string }[] }) =>
+  api.createWorkoutEvents.mockImplementation(
+    async ({ events }: { events: readonly { externalId: string }[] }) =>
       events.map((workout, index) => ({
         id: 1_000 + index,
-        uid: workout.uid,
+        externalId: workout.externalId,
         category: 'WORKOUT',
         startDateLocal: null,
         name: null,
       })),
   );
-  api.deleteCalendarEvents.mockResolvedValue(undefined);
+  // L'API rend le nombre d'events réellement supprimés ; par défaut elle
+  // supprime tout ce qu'on lui a demandé.
+  api.deleteCalendarEvents.mockImplementation(
+    async ({ ids }: { ids: readonly unknown[] }) => ids.length,
+  );
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
 });
 
@@ -116,20 +120,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('planSessionUid', () => {
+describe('planSessionExternalId', () => {
   it('porte le préfixe Trainarr, le plan et le jour', () => {
-    expect(planSessionUid(3, '2026-08-18', 0)).toBe('trainarr-p3-2026-08-18-0');
-    expect(planSessionUid(3, '2026-08-18', 0).startsWith(TRAINARR_UID_PREFIX)).toBe(true);
+    expect(planSessionExternalId(3, '2026-08-18', 0)).toBe('trainarr-p3-2026-08-18-0');
+    expect(
+      planSessionExternalId(3, '2026-08-18', 0).startsWith(TRAINARR_EXTERNAL_ID_PREFIX),
+    ).toBe(true);
   });
 
   it('reste stable pour une séance inchangée, quel que soit son id en base', () => {
     // Un ajustement du coach réinsère les séances : leurs id changent, pas leur
-    // jour. C'est ce qui permet la mise à jour sur place plutôt qu'un
-    // supprimer/recréer à chaque instruction.
+    // jour. Le marqueur d'un mardi inchangé reste donc le même d'une
+    // synchronisation à l'autre.
     const before = buildWorkoutEvents(3, [session({ id: 11, scheduledOn: '2026-08-18' })]);
     const after = buildWorkoutEvents(3, [session({ id: 87, scheduledOn: '2026-08-18' })]);
 
-    expect(after[0].uid).toBe(before[0].uid);
+    expect(after[0].externalId).toBe(before[0].externalId);
   });
 });
 
@@ -269,7 +275,7 @@ describe('buildWorkoutEvents', () => {
       session({ id: 3, scheduledOn: '2026-08-19' }),
     ]);
 
-    expect(events.map((workout) => workout.uid)).toEqual([
+    expect(events.map((workout) => workout.externalId)).toEqual([
       'trainarr-p3-2026-08-18-0',
       'trainarr-p3-2026-08-18-1',
       'trainarr-p3-2026-08-19-0',
@@ -288,75 +294,79 @@ describe('syncWindow', () => {
   });
 });
 
-describe('diffCalendarEvents', () => {
+describe('planCalendarReplacement', () => {
   const desired = buildWorkoutEvents(3, [
     session({ scheduledOn: '2026-08-18' }),
     session({ scheduledOn: '2026-08-20' }),
   ]);
 
   it('publie toutes les séances voulues quand le calendrier est vide', () => {
-    const diff = diffCalendarEvents(desired, []);
+    const replacement = planCalendarReplacement(desired, []);
 
-    expect(diff.toUpsert).toEqual(desired);
-    expect(diff.toDeleteIds).toEqual([]);
+    expect(replacement.toCreate).toEqual(desired);
+    expect(replacement.toDeleteIds).toEqual([]);
   });
 
-  it("republie une séance déjà présente au lieu de la supprimer (mise à jour par uid)", () => {
-    const diff = diffCalendarEvents(desired, [
-      event({ id: 4321, uid: 'trainarr-p3-2026-08-18-0' }),
+  it("supprime puis recrée même une séance inchangée", () => {
+    // Le remplacement est complet : rien n'est laissé en place au motif que la
+    // séance n'a pas bougé. C'est ce qui rend les doublons impossibles, l'API ne
+    // sachant pas mettre un event à jour sur une clé à nous.
+    const replacement = planCalendarReplacement(desired, [
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
     ]);
 
-    expect(diff.toDeleteIds).toEqual([]);
-    expect(diff.toUpsert.map((workout) => workout.uid)).toContain('trainarr-p3-2026-08-18-0');
+    expect(replacement.toDeleteIds).toEqual([4321]);
+    expect(replacement.toCreate.map((workout) => workout.externalId)).toContain(
+      'trainarr-p3-2026-08-18-0',
+    );
   });
 
-  it('supprime les events Trainarr orphelins, par id', () => {
-    const diff = diffCalendarEvents(desired, [
-      event({ id: 4321, uid: 'trainarr-p3-2026-08-18-0' }),
+  it('supprime tous les events Trainarr de la fenêtre, par id', () => {
+    const replacement = planCalendarReplacement(desired, [
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
       // Séance déplacée : son ancien jour n'est plus voulu.
-      event({ id: 4322, uid: 'trainarr-p3-2026-08-19-0' }),
+      event({ id: 4322, externalId: 'trainarr-p3-2026-08-19-0' }),
       // Plan précédent, archivé.
-      event({ id: 4323, uid: 'trainarr-p2-2026-08-25-0' }),
+      event({ id: 4323, externalId: 'trainarr-p2-2026-08-25-0' }),
     ]);
 
-    expect(diff.toDeleteIds).toEqual([4322, 4323]);
+    expect(replacement.toDeleteIds).toEqual([4321, 4322, 4323]);
   });
 
-  it("ne garde qu'un exemplaire d'un uid désiré présent en double", () => {
-    // Si l'API laissait un jour passer deux events de même uid, les garder tous
-    // les deux rendrait la resynchronisation non convergente : le doublon
-    // survivrait à chaque ajustement.
-    const diff = diffCalendarEvents(desired, [
-      event({ id: 4321, uid: 'trainarr-p3-2026-08-18-0' }),
-      event({ id: 4324, uid: 'trainarr-p3-2026-08-18-0' }),
+  it('purge les deux exemplaires si le même marqueur apparaît en double', () => {
+    const replacement = planCalendarReplacement(desired, [
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+      event({ id: 4324, externalId: 'trainarr-p3-2026-08-18-0' }),
     ]);
 
-    expect(diff.toDeleteIds).toEqual([4324]);
-    expect(diff.toUpsert).toEqual(desired);
+    expect(replacement.toDeleteIds).toEqual([4321, 4324]);
+    expect(replacement.toCreate).toEqual(desired);
   });
 
   it("ne touche jamais un event que Trainarr n'a pas créé", () => {
-    const diff = diffCalendarEvents(desired, [
-      event({ id: 5001, uid: null }),
-      event({ id: 5002, uid: 'garmin-abcdef' }),
-      event({ id: 5003, uid: 'TRAINARR-p3-2026-08-30-0' }),
+    const replacement = planCalendarReplacement(desired, [
+      // Séance saisie à la main, ou event d'une version antérieure de Trainarr
+      // (le marqueur partait alors dans `uid`, que l'API écrase).
+      event({ id: 5001, externalId: null }),
+      event({ id: 5002, externalId: 'garmin-abcdef' }),
+      event({ id: 5003, externalId: 'TRAINARR-p3-2026-08-30-0' }),
     ]);
 
-    expect(diff.toDeleteIds).toEqual([]);
+    expect(replacement.toDeleteIds).toEqual([]);
   });
 
   it('supprime tout le futur Trainarr quand plus aucune séance n\'est voulue', () => {
-    const diff = diffCalendarEvents(
+    const replacement = planCalendarReplacement(
       [],
       [
-        event({ id: 4321, uid: 'trainarr-p3-2026-08-18-0' }),
-        event({ id: 4322, uid: 'trainarr-p3-2026-08-20-0' }),
-        event({ id: 5002, uid: 'course-du-club' }),
+        event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+        event({ id: 4322, externalId: 'trainarr-p3-2026-08-20-0' }),
+        event({ id: 5002, externalId: 'course-du-club' }),
       ],
     );
 
-    expect(diff.toUpsert).toEqual([]);
-    expect(diff.toDeleteIds).toEqual([4321, 4322]);
+    expect(replacement.toCreate).toEqual([]);
+    expect(replacement.toDeleteIds).toEqual([4321, 4322]);
   });
 });
 
@@ -394,24 +404,29 @@ describe('syncPlanToIntervals', () => {
 
     const report = await syncPlanToIntervals();
 
-    const pushed = api.upsertWorkoutEvents.mock.calls[0][0].events as { uid: string }[];
-    expect(pushed.map((workout) => workout.uid)).toEqual([
+    const pushed = api.createWorkoutEvents.mock.calls[0][0].events as { externalId: string }[];
+    expect(pushed.map((workout) => workout.externalId)).toEqual([
       'trainarr-p3-2026-08-11-0',
       'trainarr-p3-2026-08-16-0',
     ]);
     expect(report).toEqual({ status: 'synced', pushed: 2, deleted: 0 });
   });
 
-  it('supprime les orphelins avant de publier', async () => {
+  it('republie tout, puis purge tous ses anciens events — dans cet ordre', async () => {
     const order: string[] = [];
-    api.deleteCalendarEvents.mockImplementation(async () => {
+    api.deleteCalendarEvents.mockImplementation(async ({ ids }: { ids: readonly unknown[] }) => {
       order.push('delete');
+      return ids.length;
     });
-    api.upsertWorkoutEvents.mockImplementation(async () => {
-      order.push('upsert');
+    api.createWorkoutEvents.mockImplementation(async () => {
+      order.push('create');
       return [];
     });
-    api.listWorkoutEvents.mockResolvedValue([event({ id: 4322, uid: 'trainarr-p3-2026-08-19-0' })]);
+    api.listWorkoutEvents.mockResolvedValue([
+      // La séance du 18 est inchangée : elle est quand même recréée puis purgée.
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+      event({ id: 4322, externalId: 'trainarr-p3-2026-08-19-0' }),
+    ]);
     dal.getActivePlanWithSessions.mockResolvedValue({
       plan: PLAN,
       sessions: [session({ scheduledOn: '2026-08-18' })],
@@ -420,23 +435,129 @@ describe('syncPlanToIntervals', () => {
     await syncPlanToIntervals();
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(
-      expect.objectContaining({ ids: [4322] }),
+      expect.objectContaining({ ids: [4321, 4322] }),
     );
-    expect(order).toEqual(['delete', 'upsert']);
+    const created = api.createWorkoutEvents.mock.calls[0][0].events as { externalId: string }[];
+    expect(created.map((workout) => workout.externalId)).toEqual(['trainarr-p3-2026-08-18-0']);
+    // L'ordre est la garantie : une création ratée laisse l'ancien calendrier
+    // en place plutôt qu'un calendrier vide.
+    expect(order).toEqual(['create', 'delete']);
+  });
+
+  it("ne supprime que les ids vus au listing, jamais ceux qu'elle vient de créer", async () => {
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+    // Les events créés reçoivent des ids serveur frais — ici 9001 — qui ne
+    // figuraient pas au listing.
+    api.createWorkoutEvents.mockResolvedValue([
+      event({ id: 9001, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' })],
+    });
+
+    await syncPlanToIntervals();
+
+    expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
+  });
+
+  it("n'émet aucune suppression quand la publication échoue", async () => {
+    // Le mode de panne à ne jamais laisser revenir : l'ancien calendrier reste
+    // intact, périmé mais complet, plutôt que vidé sans rien pour le remplacer.
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+    api.createWorkoutEvents.mockRejectedValue(new Error('HTTP 502'));
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' })],
+    });
+
+    await expect(syncPlanToIntervals()).rejects.toThrow('HTTP 502');
+    expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
+  });
+
+  it('signale une suppression ratée, une fois les séances publiées', async () => {
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+    api.deleteCalendarEvents.mockRejectedValue(new Error('HTTP 500'));
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' })],
+    });
+
+    await expect(syncPlanToIntervals()).rejects.toThrow('HTTP 500');
+    // Les séances voulues sont bien au calendrier : il reste des doublons, pas
+    // un trou. Et l'échec ne se perd pas.
+    expect(api.createWorkoutEvents).toHaveBeenCalled();
+  });
+
+  it('purge les doublons laissés par une suppression ratée', async () => {
+    // La synchronisation suivante : deux exemplaires du même marqueur, deux ids,
+    // deux suppressions. C'est ce qui rend la convergence indépendante des
+    // échecs qui précèdent.
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+      event({ id: 9001, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' })],
+    });
+
+    const report = await syncPlanToIntervals();
+
+    expect(api.deleteCalendarEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ ids: [4321, 9001] }),
+    );
+    expect(report).toEqual({ status: 'synced', pushed: 1, deleted: 2 });
+  });
+
+  it("rapporte le compte de suppressions rendu par l'API, pas celui qu'on espérait", async () => {
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+      event({ id: 4322, externalId: 'trainarr-p3-2026-08-19-0' }),
+    ]);
+    // Un event déjà disparu côté intervals.icu : l'API n'en supprime qu'un.
+    api.deleteCalendarEvents.mockResolvedValue(1);
+    dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
+
+    const report = await syncPlanToIntervals();
+
+    expect(report).toEqual({ status: 'synced', pushed: 0, deleted: 1 });
+  });
+
+  it("laisse intacts les events dont l'external_id n'est pas le nôtre", async () => {
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 5001, externalId: null }),
+      event({ id: 5002, externalId: 'garmin-abcdef' }),
+    ]);
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' })],
+    });
+
+    const report = await syncPlanToIntervals();
+
+    expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
+    expect(report).toEqual({ status: 'synced', pushed: 1, deleted: 0 });
   });
 
   it("efface les séances à venir quand plus aucun plan n'est actif", async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(null);
     api.listWorkoutEvents.mockResolvedValue([
-      event({ id: 4321, uid: 'trainarr-p3-2026-08-18-0' }),
-      event({ id: 5002, uid: null }),
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+      event({ id: 5002, externalId: null }),
     ]);
 
     const report = await syncPlanToIntervals();
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
     // Rien à publier : pas d'appel inutile.
-    expect(api.upsertWorkoutEvents).not.toHaveBeenCalled();
+    expect(api.createWorkoutEvents).not.toHaveBeenCalled();
     expect(report).toEqual({ status: 'synced', pushed: 0, deleted: 1 });
   });
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { MAX_FIT_FILE_BYTES } from '@/lib/fit/limits';
 
 import {
+  createWorkoutEvents,
   deleteCalendarEvents,
   downloadFitFile,
   formatIntervalsDate,
@@ -13,7 +14,6 @@ import {
   listRecentActivities,
   listWorkoutEvents,
   parseRetryAfterSeconds,
-  upsertWorkoutEvents,
   type FetchLike,
   type IntervalsWorkoutEvent,
 } from './client';
@@ -404,7 +404,7 @@ function bodyOf(call: Call): unknown {
 }
 
 const WORKOUT: IntervalsWorkoutEvent = {
-  uid: 'trainarr-p3-2026-08-18-0',
+  externalId: 'trainarr-p3-2026-08-18-0',
   startDate: '2026-08-18',
   type: 'Run',
   name: 'VMA courte · piste — 6 × 800 m',
@@ -435,12 +435,15 @@ describe('listWorkoutEvents', () => {
     expect(decodeBasic(authorizationOf(calls[0]))).toBe(`API_KEY:${API_KEY}`);
   });
 
-  it('ne retient que les champs utiles, uid absent compris', async () => {
+  it("ne retient que les champs utiles, et lit le marqueur dans external_id", async () => {
+    // Le `uid` rendu par l'API est celui que le serveur a généré, pas celui
+    // qu'on a posté : il est ignoré, seul `external_id` dit l'origine.
     const { fetchImpl } = stubFetch(
       json([
         {
           id: 4321,
-          uid: 'trainarr-p3-2026-08-18-0',
+          uid: 'bc3b5987-7e0d-4a2f-9c1e-0f5b2a7d31aa',
+          external_id: 'trainarr-p3-2026-08-18-0',
           category: 'WORKOUT',
           start_date_local: '2026-08-18T00:00:00',
           name: 'VMA courte',
@@ -461,12 +464,12 @@ describe('listWorkoutEvents', () => {
     expect(events).toEqual([
       {
         id: 4321,
-        uid: 'trainarr-p3-2026-08-18-0',
+        externalId: 'trainarr-p3-2026-08-18-0',
         category: 'WORKOUT',
         startDateLocal: '2026-08-18T00:00:00',
         name: 'VMA courte',
       },
-      { id: 4322, uid: null, category: 'WORKOUT', startDateLocal: null, name: null },
+      { id: 4322, externalId: null, category: 'WORKOUT', startDateLocal: null, name: null },
     ]);
   });
 
@@ -499,11 +502,11 @@ describe('listWorkoutEvents', () => {
   });
 });
 
-describe('upsertWorkoutEvents', () => {
-  it('poste les events en bulk avec upsertOnUid', async () => {
-    const { fetchImpl, calls } = stubFetch(json([{ id: 4321, uid: WORKOUT.uid }]));
+describe('createWorkoutEvents', () => {
+  it('poste les events en bulk, sans upsertOnUid', async () => {
+    const { fetchImpl, calls } = stubFetch(json([{ id: 4321, external_id: WORKOUT.externalId }]));
 
-    await upsertWorkoutEvents({
+    await createWorkoutEvents({
       athleteId: ATHLETE_ID,
       apiKey: API_KEY,
       events: [WORKOUT],
@@ -512,7 +515,8 @@ describe('upsertWorkoutEvents', () => {
 
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe('/api/v1/athlete/i123456/events/bulk');
-    expect(url.searchParams.get('upsertOnUid')).toBe('true');
+    // L'upsert portait sur un `uid` que le serveur réécrit : il ne matchait rien.
+    expect(url.searchParams.get('upsertOnUid')).toBeNull();
     expect(calls[0].init?.method).toBe('POST');
     expect(new Headers(calls[0].init?.headers).get('content-type')).toBe('application/json');
   });
@@ -520,19 +524,25 @@ describe('upsertWorkoutEvents', () => {
   it("envoie les champs de l'API, et n'invente pas les cibles absentes", async () => {
     const { fetchImpl, calls } = stubFetch(json([]));
 
-    await upsertWorkoutEvents({
+    await createWorkoutEvents({
       athleteId: ATHLETE_ID,
       apiKey: API_KEY,
       events: [
         WORKOUT,
-        { uid: 'trainarr-p3-2026-08-20-0', startDate: '2026-08-20', type: 'Run', name: 'Footing', description: 'Séance : 45 min' },
+        {
+          externalId: 'trainarr-p3-2026-08-20-0',
+          startDate: '2026-08-20',
+          type: 'Run',
+          name: 'Footing',
+          description: 'Séance : 45 min',
+        },
       ],
       fetchImpl,
     });
 
     expect(bodyOf(calls[0])).toEqual([
       {
-        uid: 'trainarr-p3-2026-08-18-0',
+        external_id: 'trainarr-p3-2026-08-18-0',
         category: 'WORKOUT',
         start_date_local: '2026-08-18T00:00:00',
         type: 'Run',
@@ -543,7 +553,7 @@ describe('upsertWorkoutEvents', () => {
         target: 'PACE',
       },
       {
-        uid: 'trainarr-p3-2026-08-20-0',
+        external_id: 'trainarr-p3-2026-08-20-0',
         category: 'WORKOUT',
         start_date_local: '2026-08-20T00:00:00',
         type: 'Run',
@@ -553,12 +563,34 @@ describe('upsertWorkoutEvents', () => {
     ]);
   });
 
+  it("n'envoie aucun uid : l'API l'ignore et poserait le sien", async () => {
+    const { fetchImpl, calls } = stubFetch(json([]));
+
+    await createWorkoutEvents({
+      athleteId: ATHLETE_ID,
+      apiKey: API_KEY,
+      events: [WORKOUT],
+      fetchImpl,
+    });
+
+    const [payload] = bodyOf(calls[0]) as Record<string, unknown>[];
+    expect(payload).not.toHaveProperty('uid');
+  });
+
   it("rend les events tels que l'API les a enregistrés", async () => {
     const { fetchImpl } = stubFetch(
-      json([{ id: 4321, uid: WORKOUT.uid, category: 'WORKOUT', start_date_local: '2026-08-18T00:00:00' }]),
+      json([
+        {
+          id: 4321,
+          uid: 'bc3b5987-7e0d-4a2f-9c1e-0f5b2a7d31aa',
+          external_id: WORKOUT.externalId,
+          category: 'WORKOUT',
+          start_date_local: '2026-08-18T00:00:00',
+        },
+      ]),
     );
 
-    const written = await upsertWorkoutEvents({
+    const written = await createWorkoutEvents({
       athleteId: ATHLETE_ID,
       apiKey: API_KEY,
       events: [WORKOUT],
@@ -568,7 +600,7 @@ describe('upsertWorkoutEvents', () => {
     expect(written).toEqual([
       {
         id: 4321,
-        uid: WORKOUT.uid,
+        externalId: WORKOUT.externalId,
         category: 'WORKOUT',
         startDateLocal: '2026-08-18T00:00:00',
         name: null,
@@ -579,7 +611,7 @@ describe('upsertWorkoutEvents', () => {
   it('lève une IntervalsApiError sur une erreur serveur', async () => {
     const { fetchImpl } = stubFetch(new Response('boom', { status: 500 }));
 
-    const error = await upsertWorkoutEvents({
+    const error = await createWorkoutEvents({
       athleteId: ATHLETE_ID,
       apiKey: API_KEY,
       events: [WORKOUT],
@@ -607,6 +639,44 @@ describe('deleteCalendarEvents', () => {
     expect(calls[0].init?.method).toBe('PUT');
     // Jamais `external_id` : il est réservé aux applications OAuth.
     expect(bodyOf(calls[0])).toEqual([{ id: 4321 }, { id: 4322 }]);
+  });
+
+  it("rend le compte que l'API déclare avoir supprimé", async () => {
+    // `eventsDeleted` est ce que le service répond réellement (vérifié) : c'est
+    // un chiffre mesuré, pas le nombre d'ids qu'on a envoyés.
+    const { fetchImpl } = stubFetch(json({ eventsDeleted: 1 }));
+
+    await expect(
+      deleteCalendarEvents({
+        athleteId: ATHLETE_ID,
+        apiKey: API_KEY,
+        ids: [4321, 4322],
+        fetchImpl,
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it('retombe sur le nombre d\'ids envoyés quand le compte-rendu manque', async () => {
+    // Une suppression réussie ne doit jamais échouer sur la forme de sa réponse.
+    for (const response of [
+      json({}),
+      json({ eventsDeleted: null }),
+      json({ eventsDeleted: 'deux' }),
+      json(['inattendu']),
+      new Response('pas du JSON', { status: 200 }),
+      new Response(null, { status: 200 }),
+    ]) {
+      const { fetchImpl } = stubFetch(response);
+
+      await expect(
+        deleteCalendarEvents({
+          athleteId: ATHLETE_ID,
+          apiKey: API_KEY,
+          ids: [4321, 4322],
+          fetchImpl,
+        }),
+      ).resolves.toBe(2);
+    }
   });
 
   it('propage un 429 comme IntervalsRateLimitError', async () => {

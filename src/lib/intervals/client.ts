@@ -46,20 +46,27 @@
  *   STRAVA, UPLOAD, MANUAL, GARMIN_CONNECT, OAUTH_CLIENT, …). Les autres sont
  *   ignorés ici. La spec précise « An empty stub object is returned for Strava
  *   activities ».
- * - **Calendrier** (spec relue le 2026-08-11) — trois endpoints, utilisés par
- *   la synchronisation du plan (`push-plan.ts`) :
+ * - **Calendrier** (spec relue le 2026-08-11, comportement vérifié contre l'API
+ *   réelle le même jour) — trois endpoints, utilisés par la synchronisation du
+ *   plan (`push-plan.ts`) :
  *   - `GET /api/v1/athlete/{id}/events?oldest=…&newest=…&category=WORKOUT` :
- *     les events de la fenêtre, chacun portant `id`, `uid`, `category`,
+ *     les events de la fenêtre, chacun portant `id`, `external_id`, `category`,
  *     `start_date_local` et `name`. Les bornes sont des dates **locales** de
  *     l'athlète, comme pour les activités.
- *   - `POST /api/v1/athlete/{id}/events/bulk?upsertOnUid=true` : un tableau
- *     d'events. Avec `upsertOnUid`, un event portant un `uid` déjà présent est
- *     **mis à jour** au lieu d'être dupliqué — c'est ce qui rend le push
- *     idempotent. La réponse est la liste des events créés ou mis à jour.
+ *   - `POST /api/v1/athlete/{id}/events/bulk` : un tableau d'events. Le marqueur
+ *     applicatif est **`external_id`, jamais `uid`** : vérifié contre l'API, un
+ *     `uid` fourni par le client est **ignoré** et remplacé par un UUID serveur
+ *     (envoyé `uid: "trainarr-…"`, l'event créé porte `uid: "bc3b5987-…"`),
+ *     alors qu'un `external_id` posté ressort tel quel au GET du listing.
+ *     `upsertOnUid` n'est donc pas transmis : il ne peut matcher aucun `uid` à
+ *     nous, l'idempotence vient d'ailleurs (cf. `push-plan.ts`). La réponse est
+ *     la liste des events créés.
  *   - `PUT /api/v1/athlete/{id}/events/bulk-delete` : un tableau de `{ id }`.
- *     La suppression par `external_id` existe mais est **réservée aux
- *     applications OAuth** : avec une clé API, on ne supprime que par `id`,
- *     donc uniquement des events qu'un GET vient de nous rendre.
+ *     La réponse porte le compte réellement supprimé (vérifié : 200
+ *     `{"eventsDeleted":1}`), lu au plus tolérant — cf.
+ *     {@link deleteCalendarEvents}. La suppression par `external_id` existe mais
+ *     est **réservée aux applications OAuth** : avec une clé API, on ne supprime
+ *     que par `id`, donc uniquement des events qu'un GET vient de nous rendre.
  *
  * ## Points ambigus, tranchés au plus prudent
  *
@@ -526,7 +533,7 @@ export type IntervalsEventId = number | string;
 const eventListSchema = z.array(
   z.object({
     id: z.union([z.number(), z.string()]),
-    uid: z.string().nullish(),
+    external_id: z.string().nullish(),
     category: z.string().nullish(),
     start_date_local: z.string().nullish(),
     name: z.string().nullish(),
@@ -536,11 +543,14 @@ const eventListSchema = z.array(
 export type IntervalsEvent = {
   id: IntervalsEventId;
   /**
-   * Identifiant applicatif posé par le créateur de l'event. `null` pour un
-   * event créé à la main dans intervals.icu — c'est à ce signe qu'on reconnaît
-   * ce que Trainarr n'a pas écrit, et donc ne doit pas toucher.
+   * Marqueur applicatif posé par le créateur de l'event. `null` pour un event
+   * créé à la main dans intervals.icu — c'est à ce signe qu'on reconnaît ce que
+   * Trainarr n'a pas écrit, et donc ne doit pas toucher.
+   *
+   * C'est bien `external_id`, et pas `uid` : ce dernier est réécrit par le
+   * serveur (cf. l'en-tête du module), il ne dit rien de l'origine de l'event.
    */
-  uid: string | null;
+  externalId: string | null;
   category: string | null;
   /** Date locale de l'athlète, sans fuseau (format intervals.icu). */
   startDateLocal: string | null;
@@ -551,7 +561,7 @@ export type IntervalsEvent = {
 function toIntervalsEvent(event: z.infer<typeof eventListSchema>[number]): IntervalsEvent {
   return {
     id: event.id,
-    uid: event.uid ?? null,
+    externalId: event.external_id ?? null,
     category: event.category ?? null,
     startDateLocal: event.start_date_local ?? null,
     name: event.name ?? null,
@@ -566,8 +576,12 @@ function toIntervalsEvent(event: z.infer<typeof eventListSchema>[number]): Inter
  * durée n'en invente pas une.
  */
 export type IntervalsWorkoutEvent = {
-  /** Clé d'idempotence : c'est sur elle que porte `upsertOnUid`. */
-  uid: string;
+  /**
+   * Marqueur de propriété : c'est lui qui, relu au listing, désigne un event
+   * comme écrit par Trainarr. Envoyé dans `external_id` — un `uid` posté serait
+   * silencieusement remplacé par un UUID serveur.
+   */
+  externalId: string;
   /** Date civile `YYYY-MM-DD` de la séance. */
   startDate: string;
   /** Type de séance intervals.icu (`Run`, `Ride`, …). */
@@ -585,7 +599,9 @@ export type IntervalsWorkoutEvent = {
 /** Un event WORKOUT au format attendu par l'API. */
 function toEventPayload(event: IntervalsWorkoutEvent): Record<string, unknown> {
   const payload: Record<string, unknown> = {
-    uid: event.uid,
+    // Pas de `uid` : l'API l'ignore et génère le sien. Seul `external_id` est
+    // conservé tel quel, et donc relisible au listing.
+    external_id: event.externalId,
     category: 'WORKOUT',
     // L'API attend un instant local ; une séance planifiée n'a pas d'heure de
     // départ, elle occupe la journée.
@@ -657,25 +673,25 @@ export async function listWorkoutEvents(
   return events.map(toIntervalsEvent);
 }
 
-export type UpsertWorkoutEventsParams = CalendarParams & {
+export type CreateWorkoutEventsParams = CalendarParams & {
   events: readonly IntervalsWorkoutEvent[];
 };
 
 /**
- * Publie (ou met à jour) des séances au calendrier, en un seul appel.
+ * Crée des séances au calendrier, en un seul appel.
  *
- * `upsertOnUid=true` fait toute l'idempotence de la synchronisation : un event
- * portant un `uid` déjà présent est **modifié**, pas dupliqué. Republier le même
- * plan deux fois de suite ne laisse donc qu'une séance par jour.
+ * **Création franche, jamais un upsert** : `upsertOnUid` n'est pas transmis
+ * parce qu'il ne peut rien matcher — l'API réécrit le `uid` de tout event posté
+ * (cf. l'en-tête du module). L'appelant se charge de purger ses propres events
+ * avant de republier ; c'est de là que vient l'absence de doublons.
  *
  * Rend les events tels que l'API les a enregistrés — c'est ce qu'elle
  * **confirme** avoir écrit, la seule mesure honnête de ce que le push a fait.
  */
-export async function upsertWorkoutEvents(
-  params: UpsertWorkoutEventsParams,
+export async function createWorkoutEvents(
+  params: CreateWorkoutEventsParams,
 ): Promise<IntervalsEvent[]> {
   const url = athleteUrl(params, '/events/bulk');
-  url.searchParams.set('upsertOnUid', 'true');
 
   const context = 'publication des séances planifiées intervals.icu';
   const response = await authorizedRequest(
@@ -700,16 +716,32 @@ export type DeleteCalendarEventsParams = CalendarParams & {
 };
 
 /**
- * Supprime des events du calendrier, par identifiant.
+ * Compte-rendu du `bulk-delete`, tel que l'API le rend.
+ *
+ * Champ **camelCase**, contrairement au reste de l'API : vérifié contre le
+ * service réel (`200 {"eventsDeleted":1}`). Facultatif ici pour que le schéma ne
+ * soit jamais la raison d'un échec — cf. {@link deleteCalendarEvents}.
+ */
+const deleteReportSchema = z.object({ eventsDeleted: z.number().nullish() });
+
+/**
+ * Supprime des events du calendrier, par identifiant. Rend le nombre d'events
+ * effectivement supprimés.
  *
  * **Uniquement par `id`** : la suppression par `external_id` est réservée aux
  * applications OAuth, et Trainarr s'authentifie par clé API. Les identifiants
  * viennent donc toujours d'un GET préalable — on ne supprime que ce qu'on vient
- * de lire, et dont on a vérifié le `uid`.
+ * de lire, et dont on a vérifié l'`external_id`.
  *
- * La réponse n'est pas lue : le code HTTP dit tout ce dont l'appelant a besoin.
+ * **Le corps est lu, mais ne peut pas faire échouer l'appel.** Le 200 a déjà dit
+ * que la suppression a eu lieu ; ce qui suit n'est qu'un compte-rendu. Un corps
+ * vide, illisible ou d'une forme inattendue retombe donc sur le nombre d'ids
+ * envoyés — même prudence que le 404 de `/file` (cf. l'en-tête) : on ne
+ * transforme pas une opération réussie en incident pour une réponse mal formée.
+ * C'est le seul endroit du module où {@link parseJsonBody} ne convient pas,
+ * précisément parce qu'il lève.
  */
-export async function deleteCalendarEvents(params: DeleteCalendarEventsParams): Promise<void> {
+export async function deleteCalendarEvents(params: DeleteCalendarEventsParams): Promise<number> {
   const url = athleteUrl(params, '/events/bulk-delete');
 
   const context = 'suppression de séances planifiées intervals.icu';
@@ -728,4 +760,16 @@ export async function deleteCalendarEvents(params: DeleteCalendarEventsParams): 
   if (!response.ok) {
     throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
   }
+
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    // Corps vide ou non JSON : rien à en tirer, le repli s'en charge.
+    payload = null;
+  }
+
+  const report = deleteReportSchema.safeParse(payload);
+  const reported = report.success ? report.data.eventsDeleted : null;
+  return reported ?? params.ids.length;
 }

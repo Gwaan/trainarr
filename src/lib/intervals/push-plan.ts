@@ -8,20 +8,75 @@ import 'server-only';
  * (génération, ajustement, archivage) doit apparaître — ou disparaître — au
  * calendrier, pour que la montre affiche la séance du jour.
  *
- * ## Une resynchronisation complète, jamais un journal d'opérations
+ * ## Le marqueur est `external_id`, pas `uid` (fait vérifié)
  *
- * {@link syncPlanToIntervals} ne sait pas ce qui vient de changer, et n'a pas
- * besoin de le savoir : elle compare l'état voulu (le plan actif) à l'état
- * distant (les events du calendrier) et rend les deux identiques. Deux
- * conséquences : elle est idempotente (la rejouer ne fait rien de plus), et une
- * synchronisation ratée se rattrape à la suivante sans compensation à écrire.
+ * Une synchronisation ne peut agir que si elle sait reconnaître ses propres
+ * events. Ce rôle revenait au `uid` : c'était un bug, constaté en production et
+ * confirmé contre l'API le 2026-08-11 — **intervals.icu ignore le `uid` envoyé
+ * par le client** et lui substitue un UUID serveur (posté
+ * `uid: "trainarr-p3-…"`, l'event créé porte `uid: "bc3b5987-…"`). Aucun event
+ * ne portait donc jamais notre marque : l'archivage d'un plan ne supprimait
+ * rien, et les séances restaient au calendrier. `external_id`, lui, est
+ * conservé tel quel et ressort intact au listing — c'est la seule clé
+ * applicative utilisable avec une clé API.
+ *
+ * ## Remplacement complet, jamais un upsert
+ *
+ * Chaque synchronisation lit les events WORKOUT de la fenêtre, republie
+ * **l'intégralité** des séances voulues, puis supprime **tous** les events
+ * marqués que ce listing avait vus. Y compris les séances qui n'ont pas changé :
+ * c'est plus d'écritures, mais cela ne repose sur aucune sémantique d'upsert non
+ * documentée. `upsertOnUid` a été retiré : portant sur un `uid` que le serveur
+ * réécrit, il n'aurait jamais pu matcher, et chaque resynchronisation aurait
+ * dupliqué les séances.
+ *
+ * ## Créer d'abord, supprimer ensuite
+ *
+ * L'ordre inverse — purger puis republier — ouvre une fenêtre pendant laquelle
+ * le calendrier est vide. Si la création échoue (délai de garde de 30 s sur près
+ * de cent events, 5xx), il le reste jusqu'à la prochaine écriture de plan, qui
+ * peut n'arriver que des semaines plus tard : l'athlète n'a plus rien à la
+ * montre, et rien ne le lui dit.
+ *
+ * L'ordre retenu — lister, créer, supprimer ce que le listing avait vu — évite
+ * cela sans rien risquer, parce que les identifiants à supprimer sont **figés
+ * avant** la création : les events créés reçoivent des ids serveur frais, par
+ * construction absents de la liste mémorisée. Une suppression ne peut donc
+ * jamais emporter une séance qu'on vient de publier.
+ *
+ * Les deux modes de panne, et leur rattrapage :
+ *
+ * - **La création échoue** → aucune suppression n'a été émise, l'ancien
+ *   calendrier reste intact. Il est périmé, mais complet : la montre affiche le
+ *   plan précédent plutôt que rien. La synchronisation suivante le remplace.
+ * - **La suppression échoue** → les séances voulues sont publiées, les anciennes
+ *   sont toujours là : des doublons, visibles au calendrier. La synchronisation
+ *   suivante les purge **tous les deux**, parce qu'elle décide ce qu'elle
+ *   supprime sur le seul préfixe des events qu'elle vient de lister — jamais par
+ *   comparaison avec ce qu'elle s'apprête à écrire, et sans supposer qu'un
+ *   `external_id` soit unique. C'est ce qui rend la convergence indépendante du
+ *   nombre d'échecs qui précèdent.
+ *
+ * La synchronisation reste donc idempotente — la rejouer converge vers le même
+ * calendrier — et une synchronisation ratée se rattrape à la suivante, sans
+ * compensation à écrire. Une seule limite, imposée par la règle 2 ci-dessous :
+ * un doublon dont la date est passée sort de la fenêtre et y reste. Le passé
+ * n'est pas réécrit, fût-il faux.
+ *
+ * **Limite connue, à nettoyer une fois à la main** : les events créés par les
+ * versions antérieures ne portent pas d'`external_id` — leur marqueur partait
+ * dans `uid`, que le serveur a écrasé. Ils ressortent donc avec
+ * `external_id: null`, indiscernables d'une séance saisie par l'athlète, et
+ * resteront invisibles pour la synchronisation. Il faut les supprimer depuis
+ * intervals.icu ; ensuite le problème ne se repose plus.
  *
  * ## Trois règles de sûreté, non négociables
  *
  * 1. **Le calendrier de l'athlète n'appartient pas à Trainarr.** Seuls les
- *    events dont le `uid` commence par {@link TRAINARR_UID_PREFIX} sont
- *    touchés : une course, une note, une séance saisie à la main survivent à
- *    toute synchronisation.
+ *    events dont l'`external_id` commence par
+ *    {@link TRAINARR_EXTERNAL_ID_PREFIX} sont touchés : une course, une note,
+ *    une séance saisie à la main — `external_id` nul ou d'un autre préfixe —
+ *    survivent à toute synchronisation.
  * 2. **Le passé n'est jamais touché** — ni poussé, ni supprimé. Une séance
  *    d'hier est de l'histoire ; la réécrire au calendrier n'aurait aucun effet
  *    utile et pourrait effacer ce que l'athlète y a annoté.
@@ -45,9 +100,9 @@ import { shiftCivilDate } from '@/lib/dates/civil';
 import { stepsToIntervalsSyntax } from '@/lib/plan-steps/intervals-syntax';
 
 import {
+  createWorkoutEvents,
   deleteCalendarEvents,
   listWorkoutEvents,
-  upsertWorkoutEvents,
   type IntervalsEvent,
   type IntervalsEventId,
   type IntervalsWorkoutEvent,
@@ -55,32 +110,38 @@ import {
 import { planPollerActivation } from './poll-plan';
 
 /**
- * Préfixe de tout `uid` posé par Trainarr.
+ * Préfixe de tout `external_id` posé par Trainarr.
  *
  * C'est la frontière de propriété du module : ce qui ne le porte pas n'est ni
- * mis à jour, ni supprimé, quelle que soit sa date.
+ * republié, ni supprimé, quelle que soit sa date.
  */
-export const TRAINARR_UID_PREFIX = 'trainarr-';
+export const TRAINARR_EXTERNAL_ID_PREFIX = 'trainarr-';
 
 /** Trainarr ne planifie que de la course à pied. */
 const WORKOUT_TYPE = 'Run';
 
 /**
- * `uid` d'une séance planifiée.
+ * `external_id` d'une séance planifiée.
+ *
+ * Seul le **préfixe** porte une décision : c'est lui qui dit « cet event est à
+ * Trainarr », et donc supprimable. Le reste est descriptif, pour qui lit
+ * l'event dans intervals.icu — de quel plan, de quel jour, et le rang de la
+ * séance dans la journée, dans l'ordre stable que le DAL garantit
+ * (`scheduledOn` puis `id`).
  *
  * Volontairement dérivé du **plan et du jour**, et non de l'identifiant de la
  * séance en base : un ajustement du coach supprime puis réinsère les séances à
  * venir (cf. `applyPlanUpdate`), donc leurs identifiants changent alors même que
- * la séance du mardi reste la séance du mardi. Un `uid` calé sur l'id ferait
- * disparaître puis réapparaître chaque event du calendrier à chaque instruction ;
- * calé sur le jour, il est **mis à jour sur place** par `upsertOnUid`.
- *
- * L'index départage deux séances tombant le même jour, dans l'ordre stable que
- * le DAL garantit (`scheduledOn` puis `id`). Le `planId` isole les plans entre
- * eux : archiver un plan laisse ses events orphelins, donc supprimables.
+ * la séance du mardi reste la séance du mardi. Ce n'est plus ce qui porte
+ * l'idempotence — le remplacement complet s'en charge — mais un marqueur stable
+ * reste lisible quand on compare deux synchronisations.
  */
-export function planSessionUid(planId: number, scheduledOn: string, indexInDay: number): string {
-  return `${TRAINARR_UID_PREFIX}p${planId}-${scheduledOn}-${indexInDay}`;
+export function planSessionExternalId(
+  planId: number,
+  scheduledOn: string,
+  indexInDay: number,
+): string {
+  return `${TRAINARR_EXTERNAL_ID_PREFIX}p${planId}-${scheduledOn}-${indexInDay}`;
 }
 
 /**
@@ -121,7 +182,7 @@ function describeSession(session: PlanSessionDto): string {
  *
  * `sessions` est supposé trié comme le DAL le rend (`scheduledOn` croissant,
  * puis `id`) : c'est cet ordre qui donne son index à une deuxième séance du même
- * jour, et donc la stabilité de son `uid`.
+ * jour, et donc la stabilité de son `external_id`.
  */
 export function buildWorkoutEvents(
   planId: number,
@@ -135,7 +196,7 @@ export function buildWorkoutEvents(
     countPerDay.set(session.scheduledOn, indexInDay + 1);
 
     const event: IntervalsWorkoutEvent = {
-      uid: planSessionUid(planId, session.scheduledOn, indexInDay),
+      externalId: planSessionExternalId(planId, session.scheduledOn, indexInDay),
       startDate: session.scheduledOn,
       type: WORKOUT_TYPE,
       // Même composition que la ligne du plan dans l'UI : la nature de la
@@ -173,56 +234,53 @@ export function syncWindow(today: string): { oldest: string; newest: string } {
 }
 
 /** Ce que la synchronisation doit faire pour rendre le calendrier conforme. */
-export type CalendarDiff = {
-  /** Séances à publier — création et mise à jour confondues (`upsertOnUid`). */
-  toUpsert: IntervalsWorkoutEvent[];
-  /** Events Trainarr qui ne correspondent plus à aucune séance du plan. */
+export type CalendarReplacement = {
+  /** Séances à créer : toutes celles que le plan veut, sans exception. */
+  toCreate: IntervalsWorkoutEvent[];
+  /**
+   * Events Trainarr vus dans la fenêtre : tous, sans exception — et tels que le
+   * listing les a rendus, donc **avant** toute création. C'est ce qui permet de
+   * créer avant de supprimer sans jamais effacer ce qu'on vient de publier.
+   */
   toDeleteIds: IntervalsEventId[];
 };
 
 /**
- * Le diff entre les séances voulues et les events déjà présents — fonction pure,
+ * Le remplacement à opérer : ce qu'on republie, ce qu'on efface — fonction pure,
  * cœur testable de la synchronisation.
  *
- * Toutes les séances voulues sont republiées, sans chercher lesquelles ont
- * changé : le GET ne rend ni la description ni les cibles, comparer exigerait
- * une lecture complète de chaque event pour économiser un unique appel groupé.
+ * **Toutes** les séances voulues sont recréées, et **tous** les events marqués
+ * Trainarr du listing sont supprimés, y compris ceux dont la séance n'a pas
+ * bougé. Aucune comparaison n'est tentée : le GET ne rend ni la description ni
+ * les cibles, et l'API ne sait pas mettre un event à jour sur une clé à nous
+ * (cf. l'en-tête). Décider sur le seul préfixe est ce qui purge aussi les
+ * doublons qu'une suppression ratée aurait laissés — deux exemplaires d'un même
+ * `external_id` sont deux ids, donc deux suppressions.
  *
- * Côté suppression, deux conditions cumulatives : le `uid` porte le préfixe
- * Trainarr **et** il ne correspond à aucune séance voulue. Tout le reste — un
- * event sans `uid`, un `uid` étranger — est laissé intact.
- *
- * Un même `uid` Trainarr vu deux fois n'est gardé qu'une fois : `upsertOnUid`
- * est censé l'empêcher, mais rien ne le garantit côté API, et laisser deux
- * exemplaires en place casserait la convergence — le doublon survivrait à
- * chaque resynchronisation, et l'athlète verrait la séance en double au
- * calendrier pour toujours.
+ * Une seule condition à la suppression : l'`external_id` porte le préfixe
+ * Trainarr. Tout le reste — un event sans `external_id`, un `external_id`
+ * étranger — est laissé strictement intact.
  */
-export function diffCalendarEvents(
+export function planCalendarReplacement(
   desired: readonly IntervalsWorkoutEvent[],
-  existing: readonly Pick<IntervalsEvent, 'id' | 'uid'>[],
-): CalendarDiff {
-  const desiredUids = new Set(desired.map((event) => event.uid));
-  const keptUids = new Set<string>();
-  const toDeleteIds: IntervalsEventId[] = [];
+  existing: readonly Pick<IntervalsEvent, 'id' | 'externalId'>[],
+): CalendarReplacement {
+  const toDeleteIds = existing
+    .filter((event) => event.externalId?.startsWith(TRAINARR_EXTERNAL_ID_PREFIX) === true)
+    .map((event) => event.id);
 
-  for (const event of existing) {
-    const { uid } = event;
-    if (uid === null || !uid.startsWith(TRAINARR_UID_PREFIX)) continue;
-    if (desiredUids.has(uid) && !keptUids.has(uid)) {
-      keptUids.add(uid);
-      continue;
-    }
-    toDeleteIds.push(event.id);
-  }
-
-  return { toUpsert: [...desired], toDeleteIds };
+  return { toCreate: [...desired], toDeleteIds };
 }
 
 /** Ce qu'une synchronisation a fait, ou pourquoi elle n'a rien fait. */
 export type PushReport =
   /** Pas de clé API (ou identifiant d'athlète illisible) : rien n'est tenté. */
   | { status: 'unconfigured'; reason: string }
+  /**
+   * Deux chiffres **mesurés**, pas deux intentions : `pushed` est le nombre
+   * d'events que l'API confirme avoir créés, `deleted` le compte qu'elle rend
+   * pour la suppression (`eventsDeleted`).
+   */
   | { status: 'synced'; pushed: number; deleted: number };
 
 /**
@@ -259,20 +317,23 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
   const credentials = { athleteId: activation.athleteId, apiKey: activation.apiKey };
 
   const existing = await listWorkoutEvents({ ...credentials, ...range });
-  const diff = diffCalendarEvents(desired, existing);
+  const replacement = planCalendarReplacement(desired, existing);
 
-  // Suppression d'abord : une séance déplacée libère ainsi son ancien jour avant
-  // que la nouvelle n'y soit publiée.
-  if (diff.toDeleteIds.length > 0) {
-    await deleteCalendarEvents({ ...credentials, ids: diff.toDeleteIds });
-  }
-
+  // Création d'abord, suppression ensuite (cf. l'en-tête) : si la publication
+  // échoue, l'ancien calendrier survit — périmé, mais complet. Les ids purgés
+  // sont ceux du listing, arrêtés avant cette création : les events qui viennent
+  // de naître portent d'autres ids, ils ne peuvent pas en faire partie.
   const pushed =
-    diff.toUpsert.length === 0
+    replacement.toCreate.length === 0
       ? []
-      : await upsertWorkoutEvents({ ...credentials, events: diff.toUpsert });
+      : await createWorkoutEvents({ ...credentials, events: replacement.toCreate });
 
-  return { status: 'synced', pushed: pushed.length, deleted: diff.toDeleteIds.length };
+  const deleted =
+    replacement.toDeleteIds.length === 0
+      ? 0
+      : await deleteCalendarEvents({ ...credentials, ids: replacement.toDeleteIds });
+
+  return { status: 'synced', pushed: pushed.length, deleted };
 }
 
 /**
