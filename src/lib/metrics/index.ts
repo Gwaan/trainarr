@@ -8,7 +8,19 @@
 
 export { computeTrimp, type Sex, type TrimpInput } from './trimp';
 export { computeLoadSeries, type DailyTrimp, type LoadPoint } from './load';
-export { estimateVdot, type EffortInput } from './vdot';
+export {
+  InvalidRacePerformanceError,
+  REFERENCE_DISTANCES,
+  VDOT_ZONE_FRACTIONS,
+  estimateVdot,
+  paceSecPerKmAtVdotFraction,
+  trainingPacesFromRace,
+  vdotFromRace,
+  type EffortInput,
+  type PaceZone,
+  type ReferenceDistance,
+  type TrainingPaces,
+} from './vdot';
 export { estimateEffectiveVo2max, type EffectiveVo2maxInput } from './vo2max';
 export { paceSecPerKm } from './pace';
 export { deriveVelocity } from './velocity';

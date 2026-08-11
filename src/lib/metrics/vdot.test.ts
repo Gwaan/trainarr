@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimateVdot } from './vdot';
+import {
+  InvalidRacePerformanceError,
+  REFERENCE_DISTANCES,
+  VDOT_ZONE_FRACTIONS,
+  estimateVdot,
+  paceSecPerKmAtVdotFraction,
+  trainingPacesFromRace,
+  vdotFromRace,
+  type PaceZone,
+  type TrainingPaces,
+} from './vdot';
 
 describe('estimateVdot', () => {
   /**
@@ -71,5 +81,253 @@ describe('estimateVdot', () => {
     ['durée infinie', { distanceM: 5000, movingTimeS: Number.POSITIVE_INFINITY }],
   ])('renvoie null pour une entrée invalide (%s)', (_label, effort) => {
     expect(estimateVdot(effort)).toBeNull();
+  });
+});
+
+/**
+ * Points d'ancrage relevés dans les tables publiées de Daniels, convertis en
+ * s/km. Les colonnes de la table sont imprimées en min/mile (1 mile =
+ * 1609.344 m) sauf M, qui est l'allure du chrono marathon équivalent.
+ *
+ * Sources des lignes VDOT 40 et VDOT 50 :
+ *  - https://www.brenoamelo.com/blog/vdot-pace-chart-printable (E, T, I)
+ *  - https://www.brenoamelo.com/blog/jack-daniels-vdot-explained (créneaux)
+ *  - https://therunninggenie.com/vdot-calculator (créneaux)
+ */
+const METERS_PER_MILE = 1609.344;
+const perMile = (min: number, sec: number) => ((min * 60 + sec) / METERS_PER_MILE) * 1000;
+
+/** Chronos équivalents publiés pour VDOT 40 et VDOT 50, en secondes. */
+const REFERENCE_RACES = {
+  40: { '5k': 24 * 60 + 8, '10k': 50 * 60 + 3, half: 110 * 60 + 59, marathon: 229 * 60 + 45 },
+  50: { '5k': 19 * 60 + 57, '10k': 41 * 60 + 21, half: 91 * 60 + 35, marathon: 190 * 60 + 49 },
+} as const;
+
+/** Allures de la table, en s/km. */
+const TABLE_PACES = {
+  40: {
+    easyFast: perMile(9, 50),
+    easySlow: perMile(10, 52),
+    marathon: (3 * 3600 + 49 * 60 + 45) / 42.195,
+    threshold: perMile(8, 12),
+    interval: perMile(7, 31),
+    repetition: 106 / 0.4, // 400 m en 1:46
+  },
+  50: {
+    easyFast: perMile(8, 14),
+    easySlow: perMile(9, 7),
+    marathon: (3 * 3600 + 10 * 60 + 49) / 42.195,
+    threshold: perMile(6, 51),
+    interval: perMile(6, 16),
+    repetition: 87 / 0.4, // 400 m en 1:27
+  },
+} as const;
+
+describe('vdotFromRace', () => {
+  it.each([
+    ['5k', 40],
+    ['10k', 40],
+    ['half', 40],
+    ['marathon', 40],
+    ['5k', 50],
+    ['10k', 50],
+    ['half', 50],
+    ['marathon', 50],
+  ] as const)(
+    'retrouve VDOT %s sur le chrono équivalent publié (%s)',
+    (distance, expectedVdot) => {
+      const distanceM = REFERENCE_DISTANCES[distance];
+      const timeS = REFERENCE_RACES[expectedVdot][distance];
+
+      // Les chronos de la table sont imprimés à la seconde : ±0,1 de VDOT.
+      expect(Math.abs(vdotFromRace(distanceM, timeS) - expectedVdot)).toBeLessThanOrEqual(0.1);
+    },
+  );
+
+  it('couvre chaque distance de référence sans lever', () => {
+    for (const distanceM of Object.values(REFERENCE_DISTANCES)) {
+      // 4 min/km : plausible sur les quatre distances.
+      expect(vdotFromRace(distanceM, (distanceM / 1000) * 240)).toBeGreaterThan(0);
+    }
+  });
+
+  it('croît quand le chrono s’améliore à distance égale', () => {
+    const times = [24 * 60, 22 * 60, 20 * 60, 18 * 60];
+    const vdots = times.map((t) => vdotFromRace(REFERENCE_DISTANCES['5k'], t));
+
+    for (let i = 1; i < vdots.length; i += 1) {
+      expect(vdots[i]!).toBeGreaterThan(vdots[i - 1]!);
+    }
+  });
+
+  it('est déterministe', () => {
+    expect(vdotFromRace(5000, 1200)).toBe(vdotFromRace(5000, 1200));
+  });
+
+  it.each([
+    ['distance nulle', 0, 1200],
+    ['distance négative', -5000, 1200],
+    ['distance NaN', Number.NaN, 1200],
+    ['distance infinie', Number.POSITIVE_INFINITY, 1200],
+    ['temps nul', 5000, 0],
+    ['temps négatif', 5000, -1200],
+    ['temps NaN', 5000, Number.NaN],
+    ['temps infini', 5000, Number.POSITIVE_INFINITY],
+  ])('lève InvalidRacePerformanceError (%s)', (_label, distanceM, timeS) => {
+    expect(() => vdotFromRace(distanceM, timeS)).toThrow(InvalidRacePerformanceError);
+  });
+
+  it('lève sur une vitesse implausible (erreur de saisie)', () => {
+    // 5 km en 8 min → 10.4 m/s, plus rapide que le record du monde.
+    expect(() => vdotFromRace(5000, 8 * 60)).toThrow(InvalidRacePerformanceError);
+    // 5 km en 2 h → 0.69 m/s, ce n'est pas une course.
+    expect(() => vdotFromRace(5000, 2 * 3600)).toThrow(InvalidRacePerformanceError);
+  });
+
+  it('lève hors de la plage de VDOT plausible, comme estimateVdot', () => {
+    // 5 km en 12 min → 6.94 m/s, sous le plafond de vitesse : seule la borne de
+    // VDOT (90.1) écarte ce chrono, plus rapide que le record du monde.
+    expect(() => vdotFromRace(REFERENCE_DISTANCES['5k'], 12 * 60)).toThrow(
+      InvalidRacePerformanceError,
+    );
+    // Marathon en 7 h → VDOT 18.4, sous la borne basse.
+    expect(() => vdotFromRace(REFERENCE_DISTANCES.marathon, 7 * 3600)).toThrow(
+      InvalidRacePerformanceError,
+    );
+  });
+
+  it('accepte les chronos lents mais réels des grandes distances', () => {
+    // Marathon en 5 h et 6 h, semi en 3 h : trois chronos de finisher que
+    // l'ancien plancher de 2 m/s (marathon > 5 h 51, semi > 2 h 55) refusait.
+    expect(() => vdotFromRace(REFERENCE_DISTANCES.marathon, 5 * 3600)).not.toThrow();
+    expect(() => vdotFromRace(REFERENCE_DISTANCES.marathon, 6 * 3600)).not.toThrow();
+    expect(() => vdotFromRace(REFERENCE_DISTANCES.half, 3 * 3600)).not.toThrow();
+  });
+});
+
+describe('trainingPacesFromRace', () => {
+  const ZONES = ['easy', 'marathon', 'threshold', 'interval', 'repetition'] as const;
+
+  /** Tolérance de calibrage sur les allures de la table publiée, en s/km. */
+  const TOLERANCE_S_PER_KM = 3;
+
+  /**
+   * Calibrage : les allures ponctuelles de la table sont reproduites à ±3 s/km
+   * par les fractions retenues (E 70 % et 62 %, M 81 %, T 88 %, I 98 %).
+   * Écart maximal constaté : 1,6 s/km sur la borne lente de E, dont la fraction
+   * exacte est 61,6 % — arrondie à 62 % pour ne pas surajuster à une table
+   * elle-même imprimée à la seconde près.
+   */
+  it.each([
+    [40, 'easyFast', 0.7],
+    [40, 'easySlow', 0.62],
+    [40, 'marathon', 0.81],
+    [40, 'threshold', 0.88],
+    [40, 'interval', 0.98],
+    [40, 'repetition', 1.05],
+    [50, 'easyFast', 0.7],
+    [50, 'easySlow', 0.62],
+    [50, 'marathon', 0.81],
+    [50, 'threshold', 0.88],
+    [50, 'interval', 0.98],
+  ] as const)('reproduit la table VDOT %s (%s) à ±3 s/km', (vdot, key, fraction) => {
+    const expected = TABLE_PACES[vdot][key];
+
+    expect(Math.abs(paceSecPerKmAtVdotFraction(vdot, fraction) - expected)).toBeLessThanOrEqual(
+      TOLERANCE_S_PER_KM,
+    );
+  });
+
+  /**
+   * Chaque allure publiée tombe dans le créneau calculé. C'est le contrôle qui
+   * vaut pour R à VDOT 50 : la table imprime un 400 m en 1:27 (≈ 107 % de
+   * VDOT), arrondi au demi-seconde près sur la piste — il tombe dans 105-110 %
+   * sans coïncider avec une borne.
+   */
+  it.each([40, 50] as const)('encadre les allures publiées de la table VDOT %s', (vdot) => {
+    const paces = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], REFERENCE_RACES[vdot]['10k']);
+    const table = TABLE_PACES[vdot];
+    const contains = (zone: PaceZone, pace: number) =>
+      pace >= zone.minSecPerKm - TOLERANCE_S_PER_KM &&
+      pace <= zone.maxSecPerKm + TOLERANCE_S_PER_KM;
+
+    expect(contains(paces.easy, table.easyFast)).toBe(true);
+    expect(contains(paces.easy, table.easySlow)).toBe(true);
+    expect(contains(paces.marathon, table.marathon)).toBe(true);
+    expect(contains(paces.threshold, table.threshold)).toBe(true);
+    expect(contains(paces.interval, table.interval)).toBe(true);
+    expect(contains(paces.repetition, table.repetition)).toBe(true);
+  });
+
+  it('renvoie le VDOT du chrono et des allures entières', () => {
+    const paces = trainingPacesFromRace(REFERENCE_DISTANCES['5k'], 20 * 60);
+
+    expect(paces.vdot).toBe(vdotFromRace(REFERENCE_DISTANCES['5k'], 20 * 60));
+    for (const zone of ZONES) {
+      expect(Number.isInteger(paces[zone].minSecPerKm)).toBe(true);
+      expect(Number.isInteger(paces[zone].maxSecPerKm)).toBe(true);
+    }
+  });
+
+  it('ordonne chaque créneau (borne rapide ≤ borne lente)', () => {
+    const paces = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 45 * 60);
+
+    for (const zone of ZONES) {
+      expect(paces[zone].minSecPerKm).toBeLessThanOrEqual(paces[zone].maxSecPerKm);
+    }
+  });
+
+  it('ordonne les créneaux du plus lent au plus rapide (E > M > T > I > R)', () => {
+    const paces = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 45 * 60);
+
+    expect(paces.easy.minSecPerKm).toBeGreaterThan(paces.marathon.minSecPerKm);
+    expect(paces.marathon.minSecPerKm).toBeGreaterThan(paces.threshold.minSecPerKm);
+    expect(paces.threshold.minSecPerKm).toBeGreaterThan(paces.interval.minSecPerKm);
+    expect(paces.interval.minSecPerKm).toBeGreaterThan(paces.repetition.minSecPerKm);
+  });
+
+  it('conserve le chevauchement M/T des bandes publiées', () => {
+    // Hérité de Daniels (M 75-84 %, T 83-88 %) : la borne rapide du créneau
+    // marathon est plus intense que la borne lente du seuil, donc plus rapide en
+    // allure. Figé ici pour qu'un resserrement des bandes soit un choix
+    // conscient, jamais un effet de bord (cf. `VDOT_ZONE_FRACTIONS`).
+    expect(VDOT_ZONE_FRACTIONS.marathon.fast).toBeGreaterThan(
+      VDOT_ZONE_FRACTIONS.threshold.slow,
+    );
+
+    const paces = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 45 * 60);
+    expect(paces.marathon.minSecPerKm).toBeLessThan(paces.threshold.maxSecPerKm);
+  });
+
+  it('accélère toutes les allures quand le chrono s’améliore', () => {
+    const slower = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 50 * 60);
+    const faster = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 42 * 60);
+
+    expect(faster.vdot).toBeGreaterThan(slower.vdot);
+    for (const zone of ZONES) {
+      expect(faster[zone].minSecPerKm).toBeLessThan(slower[zone].minSecPerKm);
+      expect(faster[zone].maxSecPerKm).toBeLessThan(slower[zone].maxSecPerKm);
+    }
+  });
+
+  it('donne des allures cohérentes depuis chaque distance de référence', () => {
+    // Les quatre chronos équivalents VDOT 50 doivent produire la même table.
+    const tables: TrainingPaces[] = (
+      Object.keys(REFERENCE_DISTANCES) as (keyof typeof REFERENCE_DISTANCES)[]
+    ).map((d) => trainingPacesFromRace(REFERENCE_DISTANCES[d], REFERENCE_RACES[50][d]));
+
+    for (const table of tables) {
+      expect(table.vdot).toBeCloseTo(50, 1);
+      for (const zone of ZONES) {
+        expect(
+          Math.abs(table[zone].minSecPerKm - tables[0]![zone].minSecPerKm),
+        ).toBeLessThanOrEqual(TOLERANCE_S_PER_KM);
+      }
+    }
+  });
+
+  it('propage la validation de vdotFromRace', () => {
+    expect(() => trainingPacesFromRace(5000, 8 * 60)).toThrow(InvalidRacePerformanceError);
+    expect(() => trainingPacesFromRace(0, 1200)).toThrow(InvalidRacePerformanceError);
   });
 });

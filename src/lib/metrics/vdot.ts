@@ -15,6 +15,9 @@
  * Appliquée à un footing, elle sous-estime massivement la VO2max — c'est
  * `estimateEffectiveVo2max` (`./vo2max`), corrigée par la fréquence cardiaque,
  * qui vaut pour une séance quelconque.
+ *
+ * La seconde moitié du module inverse ces régressions pour produire la table
+ * d'allures d'entraînement E/M/T/I/R à partir d'un chrono de course.
  */
 
 export type EffortInput = { distanceM: number; movingTimeS: number };
@@ -84,4 +87,218 @@ export function estimateVdot(effort: EffortInput): number | null {
   if (vdot < MIN_PLAUSIBLE_VO2MAX || vdot > MAX_PLAUSIBLE_VO2MAX) return null;
 
   return vdot;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Allures d'entraînement (méthode Daniels)                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Distances de référence sur lesquelles un chrono sert d'ancre.
+ * Semi et marathon aux distances officielles World Athletics.
+ */
+export const REFERENCE_DISTANCES = {
+  '5k': 5_000,
+  '10k': 10_000,
+  half: 21_097.5,
+  marathon: 42_195,
+} as const;
+
+export type ReferenceDistance = keyof typeof REFERENCE_DISTANCES;
+
+/**
+ * Chrono rejeté : hors du domaine où la vitesse décrit une course à pied.
+ * Erreur nommée plutôt que `null` — contrairement à `estimateVdot` qui digère
+ * des séances quelconques, ici la saisie est explicite et une valeur aberrante
+ * est une faute de frappe à signaler, pas une donnée manquante.
+ */
+export class InvalidRacePerformanceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidRacePerformanceError';
+  }
+}
+
+/**
+ * Bornes de vitesse moyenne admises pour un chrono de course, en m/s. Larges à
+ * dessein : il s'agit d'attraper la saisie qui ne décrit pas une course (un
+ * 5 km en 8 min, un 5 km en 2 h), pas de juger le niveau — c'est la plage de
+ * VDOT plausible, appliquée plus bas, qui tranche la plausibilité physiologique.
+ *
+ * Repères : 8 m/s dépasse le record du monde du 5 000 m (≈ 6,6 m/s) ; 1,6 m/s,
+ * c'est 10:25/km, l'allure d'une marche soutenue — soit un marathon en 7 h 20 ou
+ * un semi en 3 h 40.
+ *
+ * **Le plancher valait 2 m/s** : il refusait un marathon au-delà de 5 h 51 et un
+ * semi au-delà de 2 h 55, deux chronos de finisher parfaitement réels. Le
+ * commentaire qui le justifiait était faux par-dessus le marché — 2 m/s, c'est
+ * 8:20/km, plus **rapide** qu'une marche rapide, pas plus lent.
+ *
+ * Ces bornes sont aujourd'hui plus larges que celle du VDOT sur toutes les
+ * distances usuelles (elle refuse déjà un marathon au-delà de ~6 h 36, un semi
+ * au-delà de ~3 h 15). Elles restent en tête parce qu'elles nomment la faute —
+ * « ce chrono n'est pas une course » — là où l'autre n'en nomme que la
+ * conséquence.
+ */
+export const MIN_RACE_SPEED_M_PER_S = 1.6;
+export const MAX_RACE_SPEED_M_PER_S = 8;
+
+/**
+ * Fractions de VDOT définissant chaque créneau d'entraînement, en pourcentage
+ * de VO2max. `fast` est la borne haute d'intensité (donc l'allure la plus
+ * rapide), `slow` la borne basse.
+ *
+ * Sources des créneaux publiés (E 59-74 %, M 75-84 %, T 83-88 %, I 95-100 %,
+ * R ≥ 105 %) :
+ *  - https://www.brenoamelo.com/blog/jack-daniels-vdot-explained
+ *  - https://therunninggenie.com/vdot-calculator
+ *
+ * **Le chevauchement M/T est voulu** : `marathon.fast` (84 %) est plus intense
+ * que `threshold.slow` (83 %), les deux créneaux se recouvrent donc sur un point
+ * de pourcentage. Ce n'est pas une coquille mais l'héritage fidèle des bandes
+ * publiées (M 75-84 %, T 83-88 %), qui se recouvrent elles aussi : l'allure
+ * marathon d'un coureur et son seuil ne sont pas séparés par une frontière
+ * nette. Les resserrer inventerait une limite que Daniels ne pose pas — le test
+ * d'ordonnancement fige ce recouvrement pour qu'un futur resserrement soit un
+ * choix conscient.
+ *
+ * **Calibrage** : ces créneaux publiés décrivent des intensités
+ * physiologiques, pas la colonne d'allures des tables. Reproduits tels quels,
+ * ils ratent la table sur E (borne rapide à 74 % → 5:51/km pour VDOT 40, là où
+ * la table imprime 6:07/km). Les bornes ci-dessous sont donc calées sur les
+ * allures publiées elles-mêmes, vérifiées sur deux lignes de la table
+ * (VDOT 40 et VDOT 50, cf. `vdot.test.ts`) :
+ *  - E : la colonne E vaut 9:50-10:52/mi à VDOT 40 et 8:14-9:07/mi à VDOT 50,
+ *    soit 70,0 % et 61,6-61,7 % aux deux niveaux — d'où 62-70 %.
+ *  - M/T/I/R : les créneaux publiés encadrent les allures de la table
+ *    (allure marathon ≈ 81 %, T ≈ 88 %, I ≈ 98 %, R 400 m ≈ 105-107 %).
+ *
+ * Conformément à la règle du projet, ce sont les pourcentages qui ont été
+ * ajustés à la table, jamais les régressions de Daniels & Gilbert.
+ */
+export const VDOT_ZONE_FRACTIONS = {
+  easy: { slow: 0.62, fast: 0.7 },
+  marathon: { slow: 0.75, fast: 0.84 },
+  threshold: { slow: 0.83, fast: 0.88 },
+  interval: { slow: 0.95, fast: 1.0 },
+  repetition: { slow: 1.05, fast: 1.1 },
+} as const;
+
+/** Plage d'allure en s/km (`minSecPerKm` = borne rapide). */
+export type PaceZone = { minSecPerKm: number; maxSecPerKm: number };
+
+export type TrainingPaces = {
+  vdot: number;
+  easy: PaceZone;
+  marathon: PaceZone;
+  threshold: PaceZone;
+  interval: PaceZone;
+  repetition: PaceZone;
+};
+
+/**
+ * Vitesse (m/min) dont le coût en oxygène vaut `oxygenCost`. Inverse exact de
+ * `oxygenCostAtVelocity` : racine positive de la quadratique
+ * 0.000104·v² + 0.182258·v − (4.60 + coût) = 0.
+ */
+function velocityAtOxygenCost(oxygenCost: number): number {
+  const a = 0.000104;
+  const b = 0.182258;
+  const c = -4.6 - oxygenCost;
+
+  return (-b + Math.sqrt(b * b - 4 * a * c)) / (2 * a);
+}
+
+/**
+ * Allure, en s/km **non arrondies**, correspondant à la fraction `fraction` du
+ * `vdot` donné. Exposée pour permettre de vérifier les points d'ancrage des
+ * tables publiées ; les consommateurs veulent `trainingPacesFromRace`.
+ */
+export function paceSecPerKmAtVdotFraction(vdot: number, fraction: number): number {
+  return 60_000 / velocityAtOxygenCost(fraction * vdot);
+}
+
+/** Plage d'allure arrondie à la seconde pour un créneau donné. */
+function zoneOf(vdot: number, zone: { slow: number; fast: number }): PaceZone {
+  return {
+    minSecPerKm: Math.round(paceSecPerKmAtVdotFraction(vdot, zone.fast)),
+    maxSecPerKm: Math.round(paceSecPerKmAtVdotFraction(vdot, zone.slow)),
+  };
+}
+
+/**
+ * VDOT d'un chrono de course. Lève `InvalidRacePerformanceError` si la distance
+ * ou le temps n'est pas un nombre fini strictement positif, si la vitesse
+ * moyenne sort de [`MIN_RACE_SPEED_M_PER_S`, `MAX_RACE_SPEED_M_PER_S`], ou si le
+ * VDOT obtenu sort de [`MIN_PLAUSIBLE_VO2MAX`, `MAX_PLAUSIBLE_VO2MAX`].
+ *
+ * **Mêmes bornes de plausibilité qu'`estimateVdot`**, issue différente : là où
+ * une séance quelconque hors plage n'est qu'une donnée inexploitable (`null`),
+ * un chrono saisi à la main hors plage est une faute qu'il faut signaler. Sans
+ * cette borne, un 5 km en 12 min — plus rapide que le record du monde de trois
+ * quarts de minute — passait pour un VDOT 93 et calait toute une table
+ * d'allures dessus. En pratique c'est elle, et non le plancher de vitesse, qui
+ * décide du sort d'un chrono lent : elle refuse au-delà d'environ 42:40 sur
+ * 5 km, 1 h 29 sur 10 km, 3 h 15 sur semi et 6 h 36 sur marathon.
+ *
+ * **Domaine de fiabilité** : Daniels donne la régression pour la plus juste sur
+ * des efforts de 15 à 50 minutes — un 5 km ou un 10 km sont les ancres idéales.
+ * Le semi et surtout le marathon restent acceptables, mais leur VDOT dépend
+ * davantage de l'endurance et du ravitaillement que de la seule VO2max : à
+ * niveau égal, un marathon mal géré sous-estime le coureur.
+ */
+export function vdotFromRace(distanceM: number, timeS: number): number {
+  if (!Number.isFinite(distanceM) || distanceM <= 0) {
+    throw new InvalidRacePerformanceError(
+      `Distance invalide : ${distanceM} m (attendu un nombre fini > 0).`,
+    );
+  }
+  if (!Number.isFinite(timeS) || timeS <= 0) {
+    throw new InvalidRacePerformanceError(
+      `Temps invalide : ${timeS} s (attendu un nombre fini > 0).`,
+    );
+  }
+
+  const speedMPerS = distanceM / timeS;
+  if (speedMPerS < MIN_RACE_SPEED_M_PER_S || speedMPerS > MAX_RACE_SPEED_M_PER_S) {
+    throw new InvalidRacePerformanceError(
+      `Vitesse moyenne implausible : ${speedMPerS.toFixed(2)} m/s pour ${distanceM} m ` +
+        `en ${timeS} s (attendu entre ${MIN_RACE_SPEED_M_PER_S} et ` +
+        `${MAX_RACE_SPEED_M_PER_S} m/s) — probable erreur de saisie.`,
+    );
+  }
+
+  const durationMin = timeS / 60;
+  const velocityMPerMin = distanceM / durationMin;
+  const vdot =
+    oxygenCostAtVelocity(velocityMPerMin) / sustainableFractionOverDuration(durationMin);
+
+  if (vdot < MIN_PLAUSIBLE_VO2MAX || vdot > MAX_PLAUSIBLE_VO2MAX) {
+    throw new InvalidRacePerformanceError(
+      `VDOT implausible : ${vdot.toFixed(1)} pour ${distanceM} m en ${timeS} s ` +
+        `(attendu entre ${MIN_PLAUSIBLE_VO2MAX} et ${MAX_PLAUSIBLE_VO2MAX}) — ` +
+        `probable erreur de saisie.`,
+    );
+  }
+
+  return vdot;
+}
+
+/**
+ * Table d'allures d'entraînement E/M/T/I/R déduite d'un chrono de course.
+ * Déterministe et pure. Lève `InvalidRacePerformanceError` aux mêmes conditions
+ * que `vdotFromRace`. Les allures sont arrondies à la seconde par kilomètre ;
+ * `vdot` est renvoyé sans arrondi.
+ */
+export function trainingPacesFromRace(distanceM: number, timeS: number): TrainingPaces {
+  const vdot = vdotFromRace(distanceM, timeS);
+
+  return {
+    vdot,
+    easy: zoneOf(vdot, VDOT_ZONE_FRACTIONS.easy),
+    marathon: zoneOf(vdot, VDOT_ZONE_FRACTIONS.marathon),
+    threshold: zoneOf(vdot, VDOT_ZONE_FRACTIONS.threshold),
+    interval: zoneOf(vdot, VDOT_ZONE_FRACTIONS.interval),
+    repetition: zoneOf(vdot, VDOT_ZONE_FRACTIONS.repetition),
+  };
 }
