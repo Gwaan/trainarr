@@ -74,10 +74,17 @@ export const PLAN_OUTPUT_BOUNDS = {
  * - côté application, toutes les clés sont présentes, à `null` quand elles ne
  *   portent rien.
  *
- * La transformation ne fait que ce passage-là (plus l'arrondi des entiers, pour
- * les providers qui ne respectent pas `response_format`). **Aucun invariant
- * n'est redéclaré ici** : exclusivité distance/durée, exclusivité allure/zone,
- * bornes et tailles sont vérifiées par le `pipe` en sortie, à la source.
+ * La transformation fait ce passage-là (plus l'arrondi des entiers, pour les
+ * providers qui ne respectent pas `response_format`) et **normalise l'allure
+ * quand l'intention est sans ambiguïté** : une seule borne fournie = allure
+ * unique (les deux bornes égales), bornes inversées = plage remise à l'endroit.
+ * Constaté en prod : un modèle local écrit spontanément une borne unique sur
+ * quasiment chaque étape — la grammaire ne peut pas exiger « les deux bornes
+ * ensemble », et rejeter cette forme faisait échouer des générations entières
+ * pour une pure convention. Les **vrais** invariants (exclusivité
+ * distance/durée, exclusivité allure/zone, bornes et tailles) restent vérifiés
+ * par le `pipe` en sortie, à la source : une ambiguïté réelle est toujours
+ * rejetée.
  */
 const planStepOutputSchema = z
   .object({
@@ -89,17 +96,29 @@ const planStepOutputSchema = z
     hrZone: z.number().optional(),
     note: z.string().optional(),
   })
-  .transform((step) => ({
-    role: step.role,
-    distanceM: step.distanceM ?? null,
-    durationS: step.durationS === undefined ? null : Math.round(step.durationS),
-    paceMinSecPerKm:
-      step.paceMinSecPerKm === undefined ? null : Math.round(step.paceMinSecPerKm),
-    paceMaxSecPerKm:
-      step.paceMaxSecPerKm === undefined ? null : Math.round(step.paceMaxSecPerKm),
-    hrZone: step.hrZone === undefined ? null : Math.round(step.hrZone),
-    note: trimmedOrNull(step.note),
-  }));
+  .transform((step) => {
+    const roundedMin =
+      step.paceMinSecPerKm === undefined ? null : Math.round(step.paceMinSecPerKm);
+    const roundedMax =
+      step.paceMaxSecPerKm === undefined ? null : Math.round(step.paceMaxSecPerKm);
+    // Une seule borne → allure unique ; deux bornes inversées → plage remise à
+    // l'endroit. Aucun cas ambigu n'est décidé ici.
+    const single = roundedMin ?? roundedMax;
+    const paceMinSecPerKm =
+      roundedMin === null || roundedMax === null ? single : Math.min(roundedMin, roundedMax);
+    const paceMaxSecPerKm =
+      roundedMin === null || roundedMax === null ? single : Math.max(roundedMin, roundedMax);
+
+    return {
+      role: step.role,
+      distanceM: step.distanceM ?? null,
+      durationS: step.durationS === undefined ? null : Math.round(step.durationS),
+      paceMinSecPerKm,
+      paceMaxSecPerKm,
+      hrZone: step.hrZone === undefined ? null : Math.round(step.hrZone),
+      note: trimmedOrNull(step.note),
+    };
+  });
 
 const planSessionStepsOutputSchema = z
   .array(

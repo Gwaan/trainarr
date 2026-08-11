@@ -150,18 +150,26 @@ describe('planOutputSchema — déroulé structuré', () => {
     expect(parseSteps([{ steps: [{ role: 'run', hrZone: 3 }] }]).success).toBe(false);
   });
 
-  it('refuse une allure qui ne porte qu’une de ses bornes', () => {
-    expect(
-      parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 300 }] }]).success,
-    ).toBe(false);
+  it('normalise une borne unique en allure unique (constaté en prod : le modèle n’en écrit qu’une)', () => {
+    const min = parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 300 }] }]);
+    const minStep = min.data?.weeks[0].sessions[0].steps?.[0].steps[0];
+    expect(minStep?.paceMinSecPerKm).toBe(300);
+    expect(minStep?.paceMaxSecPerKm).toBe(300);
+
+    const max = parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMaxSecPerKm: 310 }] }]);
+    const maxStep = max.data?.weeks[0].sessions[0].steps?.[0].steps[0];
+    expect(maxStep?.paceMinSecPerKm).toBe(310);
+    expect(maxStep?.paceMaxSecPerKm).toBe(310);
   });
 
-  it('refuse des bornes d’allure inversées', () => {
-    expect(
-      parseSteps([
-        { steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 320, paceMaxSecPerKm: 300 }] },
-      ]).success,
-    ).toBe(false);
+  it('remet à l’endroit des bornes d’allure inversées', () => {
+    const result = parseSteps([
+      { steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 320, paceMaxSecPerKm: 300 }] },
+    ]);
+
+    const step = result.data?.weeks[0].sessions[0].steps?.[0].steps[0];
+    expect(step?.paceMinSecPerKm).toBe(300);
+    expect(step?.paceMaxSecPerKm).toBe(320);
   });
 
   it('refuse une allure et une zone cardiaque sur la même étape', () => {
