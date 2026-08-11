@@ -41,6 +41,30 @@ import 'server-only';
  * validation Zod systématique ci-dessous, et boucle de correction du modèle dans
  * `plan-service.ts`.
  *
+ * ## Le mode « thinking » n'est pas demandé
+ *
+ * Les modèles récents de la famille Qwen3 (et leurs cousins) raisonnent avant de
+ * répondre : des milliers de tokens de brouillon, émis soit dans un champ
+ * `delta.reasoning_content` distinct, soit en clair dans un bloc
+ * `<think>…</think>` qui précède la vraie réponse. Constat de production : une
+ * génération de plan passait de 33 s (IHM web de llama.cpp, qui désactive le
+ * thinking d'elle-même) à 110 s par tentative, pour finir en « n'a pas produit du
+ * JSON » — le raisonnement noyait, retardait ou tronquait la sortie contrainte.
+ *
+ * Trois dispositions, de la cause à l'effet :
+ *
+ * 1. `chat_template_kwargs: { enable_thinking: false }` est posé sur toute
+ *    requête quand `AI_PROVIDER` vaut `llamacpp` — c'est le paramètre que
+ *    llama-server passe au template de chat, et le seul qui **empêche** le
+ *    raisonnement plutôt que de le rattraper. Comme `strict`, il n'est envoyé
+ *    qu'à llama.cpp : ailleurs, un paramètre inconnu vaut un HTTP 400.
+ * 2. Le lecteur SSE **compte** `reasoning_content` dans la progression (c'est du
+ *    temps de génération réel, la barre doit avancer) sans jamais l'accumuler
+ *    dans le contenu rendu.
+ * 3. Un bloc `<think>…</think>` restant est dépouillé avant le `JSON.parse` de
+ *    {@link chatCompletionJson} — filet de dernier ressort, qui ne s'active que
+ *    sur un contenu ne commençant pas par `{` ou `[`.
+ *
  * ## Streaming — uniquement quand quelqu'un écoute
  *
  * Un `onProgress` fourni bascule l'appel en `stream: true` et fait lire la
@@ -118,6 +142,25 @@ export const AI_STREAM_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_MODEL = 'default';
 
 /**
+ * Plafond de tokens d'une génération **structurée**, quand l'appelant n'en pose
+ * pas — 4 096, de quoi écrire un objet JSON de bonne taille.
+ *
+ * Le chiffre importe moins que le fait d'en envoyer un. Sans `max_tokens`
+ * explicite, c'est le `--n-predict` du serveur qui décide, et llama-server le
+ * borne par défaut bien en deçà de ce qu'un contexte de 32 k autorise : la
+ * génération s'arrête alors **en plein JSON**, sans erreur, sans avertissement —
+ * le contenu accumulé n'est simplement plus parsable, et rien dans la réponse ne
+ * dit pourquoi. Une sortie contrainte par grammaire ne peut pas se permettre ce
+ * silence : elle n'a de valeur que complète.
+ *
+ * Ce n'est donc pas une cible mais un garde-fou : le modèle s'arrête quand il a
+ * fini, ce plafond ne sert qu'à empêcher un défaut serveur restrictif de le
+ * couper avant. Les appelants qui savent leur sortie plus longue — un plan
+ * d'entraînement — posent le leur (cf. `plan-service.ts`).
+ */
+export const AI_JSON_MAX_TOKENS = 4_096;
+
+/**
  * URL absolue d'un endpoint de l'API, à partir de `AI_BASE_URL`.
  *
  * `AI_BASE_URL` désigne la **racine** du serveur (`http://192.168.1.20:8080`) et
@@ -161,7 +204,10 @@ export type ChatMessage = {
 export type ChatCompletionOptions = {
   messages: ChatMessage[];
   temperature?: number;
-  /** Plafond de tokens générés. Omis, c'est le serveur qui décide. */
+  /**
+   * Plafond de tokens générés. Omis, c'est le serveur qui décide — sauf en
+   * génération structurée, où {@link AI_JSON_MAX_TOKENS} prend le relais.
+   */
   maxTokens?: number;
   /** Délai de garde de l'appel. Défaut : {@link AI_REQUEST_TIMEOUT_MS}. */
   timeoutMs?: number;
@@ -197,10 +243,25 @@ const chatCompletionEnvelopeSchema = z.object({
  * le dernier que `finish_reason`, et certains serveurs intercalent un chunk
  * d'`usage` sans le moindre choix. Aucun de ces cas n'est une anomalie — seule
  * une forme franchement inattendue (un `content` non textuel) doit lever.
+ *
+ * `reasoning_content` y est **déclaré** plutôt que laissé aux champs inconnus :
+ * un chunk de raisonnement ne porte pas de `content`, et le taire ferait passer
+ * des minutes de génération pour un flux qui n'avance pas (cf. « Le mode
+ * “thinking” n'est pas demandé » en tête de module). Il est compté, jamais
+ * accumulé.
  */
 const chatCompletionChunkSchema = z.object({
   choices: z
-    .array(z.object({ delta: z.object({ content: z.string().nullish() }).optional() }))
+    .array(
+      z.object({
+        delta: z
+          .object({
+            content: z.string().nullish(),
+            reasoning_content: z.string().nullish(),
+          })
+          .optional(),
+      }),
+    )
     .optional(),
 });
 
@@ -243,8 +304,14 @@ const SSE_DATA_PREFIX = 'data:';
 /** Sentinelle de fin de flux du format OpenAI. */
 const SSE_DONE = '[DONE]';
 
-/** Ce qu'une ligne du flux apporte : un fragment de contenu, la fin, ou rien. */
-type StreamEvent = { content: string } | 'done' | null;
+/**
+ * Ce qu'une ligne du flux apporte : un fragment, la fin, ou rien.
+ *
+ * Un fragment porte deux quantités distinctes : le `content`, qui compose la
+ * réponse, et le nombre de caractères de raisonnement, qui n'en fait jamais
+ * partie mais mesure du travail réellement accompli par le serveur.
+ */
+type StreamEvent = { content: string; reasoningChars: number } | 'done' | null;
 
 /**
  * Décode une ligne du flux.
@@ -287,7 +354,11 @@ function parseStreamLine(line: string, status: number): StreamEvent {
       status,
     );
   }
-  return { content: chunk.data.choices?.[0]?.delta?.content ?? '' };
+  const delta = chunk.data.choices?.[0]?.delta;
+  return {
+    content: delta?.content ?? '',
+    reasoningChars: (delta?.reasoning_content ?? '').length,
+  };
 }
 
 /**
@@ -351,15 +422,22 @@ async function readStreamedContent(
 
   let buffer = '';
   let content = '';
+  /**
+   * Caractères de raisonnement traversés : comptés dans l'avancement, absents du
+   * contenu rendu (cf. {@link StreamEvent}). Un modèle qui réfléchit pendant une
+   * minute travaille — une barre figée le ferait passer pour une panne.
+   */
+  let reasoningChars = 0;
 
   /** Accumule un fragment et signale l'avancement. Rend `true` sur `[DONE]`. */
   const consume = (line: string): boolean => {
     const event = parseStreamLine(line, response.status);
     if (event === null) return false;
     if (event === 'done') return true;
-    if (event.content === '') return false;
+    if (event.content === '' && event.reasoningChars === 0) return false;
     content += event.content;
-    onProgress(content.length);
+    reasoningChars += event.reasoningChars;
+    onProgress(content.length + reasoningChars);
     return false;
   };
 
@@ -454,6 +532,16 @@ async function postChatCompletion(
     max_tokens: options.maxTokens,
     response_format: options.responseFormat,
     stream: streaming ? true : undefined,
+    // Coupe le raisonnement des modèles qui en font (Qwen3 & co) : llama-server
+    // transmet ces arguments au template de chat, qui cesse alors d'ouvrir un
+    // bloc `<think>`. Sans lui, le modèle réfléchit pendant des minutes avant
+    // d'écrire la première accolade du plan — cf. l'en-tête de module.
+    //
+    // Conditionné à llama.cpp comme `strict`, mais pour une raison plus
+    // brutale : un paramètre inconnu du corps vaut un HTTP 400 chez OpenAI.
+    ...(env.AI_PROVIDER === 'llamacpp'
+      ? { chat_template_kwargs: { enable_thinking: false } }
+      : {}),
   };
 
   // Deux régimes de garde, un seul à la fois.
@@ -539,6 +627,67 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
   return postChatCompletion(options);
 }
 
+/** Balises du bloc de raisonnement, telles que les écrivent les templates Qwen3. */
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+
+/**
+ * Dépouille un éventuel préambule de raisonnement, pour ne garder que le JSON.
+ *
+ * Filet de dernier ressort, et rien d'autre : la vraie réponse est de ne pas
+ * demander de raisonnement (`enable_thinking: false`, cf. l'en-tête). Il ne sert
+ * que si le template du modèle ignore ce drapeau, ou si le provider n'est pas
+ * llama.cpp.
+ *
+ * **Un contenu déjà propre n'est jamais touché** : la fonction rend la main
+ * immédiatement dès que le contenu commence par `{` ou `[`. Ce n'est pas une
+ * optimisation, c'est la garantie qu'aucune sortie valide ne peut être abîmée
+ * par ce rattrapage.
+ *
+ * La balise **fermante** fait foi, y compris sans ouvrante en face : llama.cpp
+ * pré-remplit souvent `<think>` côté template, de sorte que le flux ne contient
+ * que la fermeture. Reste le cas du bloc jamais refermé — génération coupée en
+ * plein raisonnement : il n'y a alors rien à sauver, sauf si du JSON a malgré
+ * tout commencé, d'où la recherche de la première accolade.
+ */
+function stripThinkBlock(content: string): string {
+  const trimmed = content.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return trimmed;
+
+  const closing = trimmed.lastIndexOf(THINK_CLOSE);
+  if (closing !== -1) return trimmed.slice(closing + THINK_CLOSE.length).trim();
+
+  if (!trimmed.startsWith(THINK_OPEN)) return trimmed;
+  const start = trimmed.search(/[{[]/);
+  return start === -1 ? trimmed : trimmed.slice(start);
+}
+
+/** Combien de caractères du contenu fautif chaque bout du diagnostic montre. */
+const NON_JSON_LOG_EXCERPT = 200;
+
+/**
+ * Journalise ce qu'on a reçu **à la place** du JSON attendu.
+ *
+ * Sans cette trace, un échec de génération en production ne se rattache à rien :
+ * l'erreur ne dit que « pas du JSON », et la sortie fautive — la seule chose qui
+ * distingue un raisonnement fuité d'une génération tronquée ou d'un refus du
+ * modèle — est perdue. D'où le nombre de caractères, qui tranche à lui seul
+ * entre les hypothèses, et les deux extrémités : le début nomme la faute, la fin
+ * dit si la sortie s'est arrêtée en plein milieu.
+ *
+ * Aucun risque de fuite de secret : ce texte vient du modèle, jamais de la
+ * configuration — la clé API ne quitte pas l'en-tête `Authorization`.
+ *
+ * Aplati par `JSON.stringify` : une sortie de modèle est multiligne, et un
+ * journal de production se lit une ligne à la fois.
+ */
+function logNonJsonContent(content: string): void {
+  const flatten = (text: string): string => JSON.stringify(text).slice(1, -1);
+  console.error(
+    `[ai] contenu non-JSON reçu (${content.length} caractères) : début « ${flatten(content.slice(0, NON_JSON_LOG_EXCERPT))} » / fin « ${flatten(content.slice(-NON_JSON_LOG_EXCERPT))} »`,
+  );
+}
+
 export type ChatCompletionJsonOptions<T> = ChatCompletionOptions & {
   /** Nom du schéma transmis au serveur (identifiant libre, exigé par le format). */
   schemaName: string;
@@ -557,6 +706,10 @@ export type ChatCompletionJsonOptions<T> = ChatCompletionOptions & {
  * dépendantes), et rien ne dit qu'un provider tiers honore réellement
  * `response_format`.
  *
+ * L'appel part **toujours** avec un `max_tokens` : à défaut de celui de
+ * l'appelant, {@link AI_JSON_MAX_TOKENS}. Une génération structurée coupée en
+ * route ne rend pas un JSON incomplet, elle ne rend pas de JSON du tout.
+ *
  * @throws {AiUnavailableError} / {@link AiResponseError} — cf. {@link chatCompletion}.
  * @throws {AiInvalidOutputError} si le contenu n'est pas du JSON, ou ne satisfait
  * pas `schema` (les anomalies Zod sont portées par l'erreur).
@@ -565,7 +718,9 @@ export async function chatCompletionJson<T>(options: ChatCompletionJsonOptions<T
   const content = await postChatCompletion({
     messages: options.messages,
     temperature: options.temperature,
-    maxTokens: options.maxTokens,
+    // Jamais rien : un `max_tokens` absent laisse le serveur trancher, et un
+    // JSON coupé au milieu ne se rattrape pas (cf. {@link AI_JSON_MAX_TOKENS}).
+    maxTokens: options.maxTokens ?? AI_JSON_MAX_TOKENS,
     timeoutMs: options.timeoutMs,
     // Le streaming ne change ni la contrainte de grammaire ni la validation qui
     // suit : c'est le même JSON, reçu au fil de l'eau.
@@ -584,8 +739,10 @@ export async function chatCompletionJson<T>(options: ChatCompletionJsonOptions<T
 
   let payload: unknown;
   try {
-    payload = JSON.parse(content);
+    payload = JSON.parse(stripThinkBlock(content));
   } catch (cause) {
+    // Le contenu **brut**, pas le dépouillé : c'est celui qu'on a réellement reçu.
+    logNonJsonContent(content);
     throw new AiInvalidOutputError(
       `Le coach IA n'a pas produit du JSON pour « ${options.schemaName} ».`,
       [],

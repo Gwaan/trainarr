@@ -193,6 +193,25 @@ const PLAN_TEMPERATURE = 0.3;
  */
 const MAX_ATTEMPTS = 3;
 
+/**
+ * Plafond de tokens d'une génération de plan — le plus gros poste de sortie de
+ * l'application, et de loin.
+ *
+ * Diagnostic de production : sans `max_tokens` explicite, llama-server applique
+ * son `--n-predict` par défaut, bien plus bas que ce que le contexte autorise.
+ * Un plan de seize semaines à six séances se faisait donc **couper en plein
+ * JSON**, silencieusement — trois tentatives, trois « n'a pas produit du JSON »,
+ * sans que rien côté serveur ne signale une troncature. La fenêtre de contexte
+ * n'y était pour rien (32 k configurés) ; le plafond de génération, si.
+ *
+ * Le chiffre : ~3 k de tokens de prompt sur les 32 k du contexte, et le pire
+ * plan légitime (16 semaines × 6 séances, `steps` compris) pèse 10 à 12 k tokens
+ * de sortie. 24 576 laisse donc le double de la marge nécessaire tout en restant
+ * sous le contexte. Ce n'est pas une cible — le modèle s'arrête quand le plan est
+ * écrit — mais un garde-fou contre un défaut serveur restrictif.
+ */
+const PLAN_MAX_OUTPUT_TOKENS = 24_576;
+
 /*
  * Progression affichée.
  *
@@ -1100,11 +1119,18 @@ export type GenerationOptions<T> = {
  *
  * Sur llama.cpp, ce n'est presque jamais un modèle qui répond en texte libre —
  * la grammaire GBNF le lui interdit token par token — mais une génération
- * **coupée en plein JSON**. `chatCompletionJson` n'envoie pas de `max_tokens` :
- * le serveur s'arrête donc de lui-même, en butant sur la fin du contexte. C'est
- * la première piste à vérifier en production.
+ * **coupée en plein JSON**. Les deux causes constatées, toutes deux traitées
+ * depuis : le plafond de génération du serveur, quand la requête n'en portait
+ * pas ({@link PLAN_MAX_OUTPUT_TOKENS}), et le contexte saturé par des milliers
+ * de tokens de raisonnement (cf. `client.ts`, « Le mode “thinking” n'est pas
+ * demandé »).
+ *
+ * Le soupçon ne se vérifie plus par déduction : la ligne `[ai] contenu non-JSON
+ * reçu` que `client.ts` journalise juste avant celle-ci porte la taille et les
+ * deux extrémités du contenu fautif — une sortie coupée net en plein objet ne
+ * ressemble ni à un raisonnement fuité ni à un refus en texte libre.
  */
-const TRUNCATION_HINT = 'sortie probablement tronquée (contexte plein ?)';
+const TRUNCATION_HINT = 'sortie probablement tronquée (plafond de génération ou contexte ?)';
 
 /**
  * Journalise une tentative rejetée, avec ce qui est renvoyé au modèle.
@@ -1185,6 +1211,9 @@ export async function generateWithBusinessRules<T>(options: GenerationOptions<T>
         jsonSchema: options.jsonSchema,
         schema: options.schema,
         temperature: PLAN_TEMPERATURE,
+        // Explicite, sinon le serveur coupe la sortie à son propre défaut
+        // (cf. {@link PLAN_MAX_OUTPUT_TOKENS}).
+        maxTokens: PLAN_MAX_OUTPUT_TOKENS,
         // Sa seule présence bascule l'appel en streaming (cf. `client.ts`).
         onProgress:
           progressId === undefined

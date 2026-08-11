@@ -1099,6 +1099,23 @@ describe('generatePlan', () => {
     expect(input.sessions[5].scheduledOn).toBe('2026-08-23');
   });
 
+  it('borne explicitement la sortie — sinon le serveur coupe le plan en plein JSON', async () => {
+    // Sans `maxTokens`, llama-server applique son `--n-predict` par défaut : un
+    // plan de seize semaines s'arrêtait au milieu d'un objet, sans rien dire.
+    chatCompletionJson.mockResolvedValue({
+      summary: 'Deux semaines de reprise.',
+      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    });
+
+    await generatePlan(REQUEST);
+
+    const { maxTokens } = chatCompletionJson.mock.calls[0][0];
+    expect(typeof maxTokens).toBe('number');
+    // Un plan de 16 semaines × 6 séances pèse 10 à 12 k tokens : le plafond doit
+    // rester largement au-dessus, faute de quoi il tronquerait à son tour.
+    expect(maxTokens).toBeGreaterThanOrEqual(16_384);
+  });
+
   it('démarre le jour demandé et date les séances depuis le lundi de sa semaine', async () => {
     // Départ le jeudi 13 août : la première semaine ne porte que le jeudi et le
     // dimanche, la seconde est pleine.
@@ -1475,7 +1492,7 @@ describe('journal des rejets', () => {
     await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
 
     expect(loggedText()).toContain(
-      'sortie hors schéma — sortie probablement tronquée (contexte plein ?)',
+      'sortie hors schéma — sortie probablement tronquée (plafond de génération ou contexte ?)',
     );
   });
 

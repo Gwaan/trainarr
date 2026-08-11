@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { z } from 'zod';
 
 // `server-only` lève hors contexte serveur React : neutralisé pour les tests.
@@ -7,6 +7,7 @@ vi.mock('server-only', () => ({}));
 import { resetEnvCache } from '@/config/env';
 
 import {
+  AI_JSON_MAX_TOKENS,
   AI_REQUEST_TIMEOUT_MS,
   AI_STREAM_IDLE_TIMEOUT_MS,
   aiEndpointUrl,
@@ -71,6 +72,13 @@ function deltaEvent(content: string): string {
   return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}\n\n`;
 }
 
+/** Un événement de flux portant du raisonnement (Qwen3 & co), et rien d'autre. */
+function reasoningEvent(reasoning: string): string {
+  return `data: ${JSON.stringify({
+    choices: [{ index: 0, delta: { reasoning_content: reasoning } }],
+  })}\n\n`;
+}
+
 function bodyOf(call: Call): Record<string, unknown> {
   const raw = call.init?.body;
   if (typeof raw !== 'string') throw new Error('Corps de requête absent ou non textuel.');
@@ -128,6 +136,7 @@ describe('chatCompletion', () => {
   });
 
   it('transmet messages, modèle et paramètres de génération', async () => {
+    vi.stubEnv('AI_PROVIDER', 'openai');
     vi.stubEnv('AI_MODEL', 'qwen3-4b-instruct');
     resetEnvCache();
     const { calls } = stubFetch(completion('ok'));
@@ -141,6 +150,29 @@ describe('chatCompletion', () => {
       max_tokens: 512,
     });
   });
+
+  it('coupe le mode thinking sur llama.cpp, où il coûterait des minutes', async () => {
+    vi.stubEnv('AI_PROVIDER', 'llamacpp');
+    resetEnvCache();
+    const { calls } = stubFetch(completion('ok'));
+
+    await chatCompletion({ messages: MESSAGES });
+
+    expect(bodyOf(calls[0]).chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
+
+  it.each(['openai', 'anthropic'])(
+    "n'envoie pas chat_template_kwargs à %s, qui rejetterait le paramètre",
+    async (provider) => {
+      vi.stubEnv('AI_PROVIDER', provider);
+      resetEnvCache();
+      const { calls } = stubFetch(completion('ok'));
+
+      await chatCompletion({ messages: MESSAGES });
+
+      expect(bodyOf(calls[0])).not.toHaveProperty('chat_template_kwargs');
+    },
+  );
 
   it("laisse le serveur décider quand AI_MODEL et les paramètres sont absents", async () => {
     const { calls } = stubFetch(completion('ok'));
@@ -480,6 +512,45 @@ describe('chatCompletion — streaming', () => {
     }
   });
 
+  it("laisse le raisonnement hors du contenu rendu", async () => {
+    stubFetch(
+      sseResponse([
+        reasoningEvent('Voyons voir, elle court trois fois par semaine…'),
+        deltaEvent('Bonne semaine.'),
+        'data: [DONE]\n\n',
+      ]),
+    );
+
+    await expect(chatCompletion({ messages: MESSAGES, onProgress: () => {} })).resolves.toBe(
+      'Bonne semaine.',
+    );
+  });
+
+  it('compte le raisonnement dans la progression — la barre ne doit pas se figer', async () => {
+    // Un chunk qui ne porte que `reasoning_content` est du travail réel du
+    // serveur : l'ignorer laisserait la barre à zéro pendant des minutes.
+    const reasoning = 'Réfléchissons.';
+    stubFetch(sseResponse([reasoningEvent(reasoning), deltaEvent('ok'), 'data: [DONE]\n\n']));
+    const received: number[] = [];
+
+    await chatCompletion({ messages: MESSAGES, onProgress: (chars) => received.push(chars) });
+
+    expect(received).toEqual([reasoning.length, reasoning.length + 'ok'.length]);
+  });
+
+  it("ne rejette pas un chunk de raisonnement dépourvu de `content`", async () => {
+    stubFetch(sseResponse([reasoningEvent('hmm'), 'data: [DONE]\n\n']));
+
+    // Réponse vide, donc — mais parce que le modèle n'a rien dit, pas parce que
+    // le chunk était hors protocole.
+    const error = await chatCompletion({ messages: MESSAGES, onProgress: () => {} }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AiResponseError);
+    expect((error as AiResponseError).message).toContain('réponse vide');
+  });
+
   it('ne streame pas sans callback — le mode par défaut est inchangé', async () => {
     const { calls } = stubFetch(completion('ok'));
 
@@ -490,6 +561,22 @@ describe('chatCompletion — streaming', () => {
 });
 
 describe('chatCompletionJson', () => {
+  /** Le diagnostic d'un contenu non-JSON est journalisé : console muselée, et inspectée. */
+  let consoleError: MockInstance<typeof console.error>;
+
+  beforeEach(() => {
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
+  /** Tout ce qui est parti dans `console.error`, en un seul texte. */
+  function loggedText(): string {
+    return consoleError.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+  }
+
   const sessionSchema = z.object({
     distanceKm: z.number().positive(),
     intensity: z.enum(['facile', 'seuil', 'vma']),
@@ -549,6 +636,30 @@ describe('chatCompletionJson', () => {
     },
   );
 
+  it('pose toujours un max_tokens — un JSON coupé en route ne se rattrape pas', async () => {
+    // Sans lui, c'est le `--n-predict` du serveur qui tranche : llama-server
+    // coupait ainsi les gros plans en plein objet, sans rien signaler.
+    const { calls, run } = callJson('{"distanceKm": 12.5, "intensity": "seuil"}');
+
+    await run();
+
+    expect(bodyOf(calls[0]).max_tokens).toBe(AI_JSON_MAX_TOKENS);
+  });
+
+  it("laisse la main à l'appelant qui pose son propre plafond", async () => {
+    const { calls } = stubFetch(completion('{"distanceKm": 12.5, "intensity": "seuil"}'));
+
+    await chatCompletionJson({
+      messages: MESSAGES,
+      schemaName: 'seance',
+      jsonSchema,
+      schema: sessionSchema,
+      maxTokens: 24_576,
+    });
+
+    expect(bodyOf(calls[0]).max_tokens).toBe(24_576);
+  });
+
   it('rend une valeur typée par le schéma Zod', async () => {
     const { run } = callJson('{"distanceKm": 12.5, "intensity": "seuil"}');
 
@@ -591,6 +702,47 @@ describe('chatCompletionJson', () => {
       }),
     ).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
     expect(received).toEqual([15, json.length]);
+  });
+
+  it("dépouille un bloc de raisonnement qui précéderait le JSON", async () => {
+    // Le mode thinking de Qwen3, quand le template ignore `enable_thinking`.
+    const { run } = callJson(
+      '<think>Elle court 3 fois par semaine, donc 12 km au seuil.\nVoyons…</think>\n{"distanceKm": 12.5, "intensity": "seuil"}',
+    );
+
+    await expect(run()).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
+  });
+
+  it("dépouille aussi une fermeture `</think>` sans ouvrante — llama.cpp pré-remplit la balise", async () => {
+    const { run } = callJson('Réfléchissons.</think>{"distanceKm": 12.5, "intensity": "seuil"}');
+
+    await expect(run()).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
+  });
+
+  it("ne touche jamais à un JSON propre, même s'il contient « </think> »", async () => {
+    // Le rattrapage ne s'active que sur un contenu qui ne commence pas par `{` :
+    // sans cette garde, ce JSON-là se ferait couper en deux.
+    const { run } = callJson(
+      '  {"distanceKm": 12.5, "intensity": "seuil", "note": "fin </think> du bloc"}  ',
+    );
+
+    await expect(run()).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
+  });
+
+  it('journalise le contenu fautif : taille, début et fin, sur une seule ligne', async () => {
+    const content = `<think>${'a'.repeat(500)}\nfin du raisonnement`;
+    const { run } = callJson(content);
+
+    await run().catch(() => {});
+
+    const logged = loggedText();
+    expect(logged).toContain(`[ai] contenu non-JSON reçu (${content.length} caractères)`);
+    expect(logged).toContain(`début « ${'<think>' + 'a'.repeat(193)} »`);
+    expect(logged).toContain('fin « ');
+    expect(logged).toContain('fin du raisonnement »');
+    // Aplati : un journal de production se lit une ligne à la fois.
+    expect(logged).not.toContain('\n');
+    expect(logged).toContain('\\n');
   });
 
   it('propage les erreurs de transport sans les requalifier', async () => {
