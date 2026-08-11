@@ -2,6 +2,7 @@ import { CalendarRange, Flag } from "lucide-react";
 
 import { MarkdownLite } from "@/components/markdown-lite";
 import type { PlanDto } from "@/data/plans";
+import { toCivilDate } from "@/lib/dates/civil";
 
 import { formatDuration } from "../../_lib/format";
 import {
@@ -100,6 +101,18 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
         <div className="mt-4 border-t border-border pt-4">
           <MarkdownLite source={plan.summary} className="text-[0.87rem]" />
         </div>
+      )}
+
+      {/*
+        La dernière relecture automatique du plan. Rien ne s'affiche tant qu'il
+        n'y en a pas eu : une ligne « jamais révisé » n'apprendrait rien, et
+        dater la révision par la création du plan serait faux.
+      */}
+      {plan.reviewedAt === null ? null : (
+        <p className="mt-3 text-[0.72rem] text-fg-faint">
+          Révisé par le coach le{" "}
+          <span className="num">{formatCivilDay(toCivilDate(new Date(plan.reviewedAt)))}</span>
+        </p>
       )}
     </>
   );

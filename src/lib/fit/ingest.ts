@@ -8,6 +8,7 @@ import {
 } from '@/data/activities';
 import { getAthleteId } from '@/data/athlete';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
+import { maybeReviewActivePlan } from '@/lib/ai/review-service';
 
 import { parseFitActivity } from './parse';
 
@@ -91,6 +92,25 @@ async function linkToPlannedSession(activityId: number): Promise<void> {
 }
 
 /**
+ * Demande au coach de relire le plan au vu de cette séance — **sans l'attendre**.
+ *
+ * Le rapprochement, lui, reste dans le fil de l'import : c'est lui qui décide si
+ * la séance vient d'être réalisée. La révision, elle, appelle un modèle de
+ * langage et dure des minutes ; l'attendre bloquerait le watcher (et le
+ * rapatriement intervals.icu derrière lui) sur chaque fichier déposé, pour une
+ * décision qui n'a aucune influence sur le rapport d'import.
+ *
+ * Le service ne lève pas et journalise ses propres échecs en `[plan/review]` ;
+ * le `catch` est un dernier recours — une promesse abandonnée sans lui ferait
+ * remonter un rejet non géré au niveau du process.
+ */
+function scheduleActivePlanReview(): void {
+  void maybeReviewActivePlan().catch((error: unknown) => {
+    console.error('[fit] révision du plan impossible —', error);
+  });
+}
+
+/**
  * Importe le contenu d'un fichier FIT.
  *
  * Les séries temporelles suivent {@link shouldRewriteStreams}.
@@ -123,6 +143,7 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
   }
 
   await linkToPlannedSession(activityId);
+  scheduleActivePlanReview();
 
   return { status, activityId };
 }

@@ -202,6 +202,8 @@ const PLAN_ROW: Plan = {
   referenceDistance: '10k',
   referenceTimeS: 2_910,
   summary: 'Bloc de 8 semaines, une séance de seuil par semaine.',
+  reviewedSessionCount: 0,
+  reviewedAt: null,
   createdAt: new Date('2026-08-09T10:00:00.000Z'),
   updatedAt: new Date('2026-08-09T10:00:00.000Z'),
 };
@@ -293,6 +295,7 @@ const PLAN_DTO_KEYS = [
   'raceDate',
   'referenceDistance',
   'referenceTimeS',
+  'reviewedAt',
   'sessionsPerWeek',
   'startsOn',
   'status',
@@ -686,6 +689,15 @@ describe('toPlanDto', () => {
 
   it('expose le niveau du plan', () => {
     expect(toPlanDto({ ...PLAN_ROW, level: 'advanced' }).level).toBe('advanced');
+  });
+
+  it('sérialise la dernière révision du coach, `null` tant qu’il n’y en a pas eu', () => {
+    // Le compte de séances relues, lui, reste en base : c'est l'état d'un
+    // service, il n'a rien à faire côté client.
+    expect(toPlanDto(PLAN_ROW).reviewedAt).toBeNull();
+    expect(
+      toPlanDto({ ...PLAN_ROW, reviewedAt: new Date('2026-08-11T09:00:00.000Z') }).reviewedAt,
+    ).toBe('2026-08-11T09:00:00.000Z');
   });
 
   it('expose le chrono de référence, sur lequel les allures du plan sont calées', () => {

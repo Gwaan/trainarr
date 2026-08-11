@@ -12,6 +12,7 @@ const { mocks } = vi.hoisted(() => ({
     saveActivityStreams: vi.fn(),
     hasActivityStreams: vi.fn(),
     linkActivityToPlannedSession: vi.fn(),
+    maybeReviewActivePlan: vi.fn(),
   },
 }));
 
@@ -31,6 +32,10 @@ vi.mock('@/data/activities', () => ({
 
 vi.mock('@/data/plan-reconciliation', () => ({
   linkActivityToPlannedSession: mocks.linkActivityToPlannedSession,
+}));
+
+vi.mock('@/lib/ai/review-service', () => ({
+  maybeReviewActivePlan: mocks.maybeReviewActivePlan,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -75,6 +80,7 @@ beforeEach(() => {
   mocks.saveActivityStreams.mockResolvedValue(undefined);
   mocks.hasActivityStreams.mockResolvedValue(false);
   mocks.linkActivityToPlannedSession.mockResolvedValue(true);
+  mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
@@ -161,6 +167,42 @@ describe('ingestFitBuffer', () => {
 
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('[fit]'));
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('base indisponible'));
+    logged.mockRestore();
+  });
+
+  it('demande une révision du plan, après le rapprochement', async () => {
+    await ingestFitBuffer(BUFFER);
+
+    expect(mocks.maybeReviewActivePlan).toHaveBeenCalledTimes(1);
+    // Le rapprochement d'abord : c'est lui qui rend la séance « réalisée », donc
+    // qui donne au bilan de la révision son quatrième résultat.
+    expect(mocks.linkActivityToPlannedSession.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.maybeReviewActivePlan.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it('n’attend jamais la révision du plan', async () => {
+    // Une génération dure des minutes : l'import ne peut pas s'y suspendre, sans
+    // quoi le watcher (et le rapatriement derrière lui) s'arrêterait sur chaque
+    // fichier déposé. La promesse ne se résout jamais ici, l'import doit finir.
+    mocks.maybeReviewActivePlan.mockReturnValue(new Promise(() => {}));
+
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+  });
+
+  it('journalise une révision en échec sans faire échouer l’import', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.maybeReviewActivePlan.mockRejectedValue(new Error('coach injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+
+    // Le rejet est traité hors du fil de l'import : il faut laisser passer un
+    // tour de boucle pour l'observer.
+    await Promise.resolve();
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining('[fit] révision du plan impossible'),
+      expect.any(Error),
+    );
     logged.mockRestore();
   });
 

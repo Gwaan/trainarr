@@ -96,7 +96,7 @@ import {
   validatePlanBusinessRules,
   type PlanExpectations,
   type PlanRaceGoal,
-  type PlanUpdateOutput,
+  type PlanSettingsOutput,
   type PlanValidationContext,
   type PlanWeekOutput,
 } from './plan-schema';
@@ -561,8 +561,11 @@ function referenceRacePaces(race: ReferenceRace | undefined): TrainingPaces | nu
  * La seule chose que la distance de la course y change est la longueur de
  * l'affûtage, d'où la reconnaissance du seul marathon dans le texte libre de
  * l'objectif ({@link isMarathonGoal}).
+ *
+ * Exporté pour la révision automatique (`review-service.ts`) : elle juge la
+ * suite du plan avec exactement les mêmes attentes qu'un ajustement.
  */
-function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
+export function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
   return goalType === 'race' ? { isMarathon: isMarathonGoal(goalText) } : null;
 }
 
@@ -572,9 +575,21 @@ function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | nu
  * Les deux colonnes sont solidaires en base (invariant du DAL) ; le `undefined`
  * ne couvre donc que les plans antérieurs au champ, et non un demi-chrono.
  */
-function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
+export function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
   if (plan.referenceDistance === null || plan.referenceTimeS === null) return undefined;
   return { distance: plan.referenceDistance, timeS: plan.referenceTimeS };
+}
+
+/**
+ * La table d'allures d'un plan déjà écrit, `null` s'il n'a pas de chrono.
+ *
+ * Le raccourci des deux appels ci-dessus, exporté pour la révision automatique :
+ * elle réécrit des séances du même plan, donc sous les mêmes allures imposées.
+ *
+ * @throws {InvalidPlanError} si le chrono stocké ne décrit pas une course.
+ */
+export function planTrainingPaces(plan: PlanDto): TrainingPaces | null {
+  return referenceRacePaces(planReferenceRace(plan));
 }
 
 /**
@@ -642,8 +657,12 @@ function firstWeekLines(request: PlanRequest, window: PlanWindow): string[] {
  * a un chrono — la table d'allures qui remplace les règles de dérivation.
  *
  * L'ordre porte la priorité : chaque bloc surcharge le précédent, et le dit.
+ *
+ * Exporté pour la révision automatique (`review-service.ts`), qui ajoute ses
+ * propres consignes en `extra` : un coach qui relit un plan doit le juger avec
+ * la méthodologie qui l'a écrit, pas avec une autre.
  */
-function systemPrompt(
+export function planSystemPrompt(
   level: PlanLevel | null,
   paces: TrainingPaces | null,
   race: ReferenceRace | undefined,
@@ -687,7 +706,7 @@ export function buildPlanMessages(
   return [
     // La méthodologie générale, puis les seules surcharges qui concernent cet
     // athlète : son niveau, et ses allures calculées quand il a donné un chrono.
-    { role: 'system', content: systemPrompt(request.level, paces, request.referenceRace) },
+    { role: 'system', content: planSystemPrompt(request.level, paces, request.referenceRace) },
     { role: 'user', content: lines.join('\n') },
   ];
 }
@@ -768,7 +787,7 @@ export function buildPlanUpdateMessages(
   // Le plan garde le niveau **et le chrono** de sa création : l'ajustement s'y
   // tient. Un plan sans niveau (antérieur au champ) reste sur la seule
   // méthodologie générale.
-  const system = systemPrompt(plan.level, paces, planReferenceRace(plan), [
+  const system = planSystemPrompt(plan.level, paces, planReferenceRace(plan), [
     '',
     "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
     "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
@@ -854,13 +873,21 @@ export function buildSchemaIssuesMessage(issues: readonly AiOutputIssue[]): stri
  * Génération.
  */
 
-type GenerationOptions<T> = {
+export type GenerationOptions<T> = {
   messages: ChatMessage[];
   schemaName: string;
   jsonSchema: Record<string, unknown>;
   schema: z.ZodType<T>;
-  /** Les semaines produites, quelle que soit la forme de l'enveloppe. */
-  weeksOf: (output: T) => PlanWeekOutput[];
+  /**
+   * Les semaines produites, quelle que soit la forme de l'enveloppe — ou `null`
+   * quand la sortie n'en porte aucune à juger.
+   *
+   * Ce second cas n'est pas une commodité : une révision qui conclut « le plan
+   * reste adapté » ne réécrit rien, et lui appliquer les règles de volume
+   * reviendrait à lui reprocher de ne pas contenir les semaines qu'elle a
+   * justement choisi de ne pas toucher.
+   */
+  weeksOf: (output: T) => PlanWeekOutput[] | null;
   /**
    * Ce que la sortie doit respecter. Calculé **depuis la sortie** : une
    * modification peut changer les réglages du plan, et c'est alors sur les
@@ -931,7 +958,7 @@ function logRejectedAttempt(
  * le message porte alors la liste, pour que l'UI dise ce qui n'a pas pu être
  * respecté plutôt qu'« erreur ».
  */
-async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Promise<T> {
+export async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Promise<T> {
   const messages = [...options.messages];
   let violations: string[] = [];
 
@@ -986,8 +1013,12 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
       continue;
     }
 
+    const weeks = options.weeksOf(output);
+    // Rien à juger : la sortie ne réécrit aucune semaine (cf. `weeksOf`).
+    if (weeks === null) return output;
+
     violations = validatePlanBusinessRules(
-      options.weeksOf(output),
+      weeks,
       options.expectationsOf(output),
       options.paceContext,
     );
@@ -1189,10 +1220,19 @@ export function remainingPlanWindow(
   };
 }
 
-/** Les réglages que la sortie du modèle fait réellement bouger, et rien d'autre. */
-function settingsPatch(plan: PlanDto, output: PlanUpdateOutput): PlanSettingsPatch {
-  const patch: PlanSettingsPatch = { summary: output.summary };
-  const { settings } = output;
+/**
+ * Les réglages que la sortie du modèle fait réellement bouger, et rien d'autre.
+ *
+ * Le résumé est passé à part : une modification le tient du modèle, une révision
+ * automatique le compose depuis celui du plan (cf. `review-service.ts`).
+ * Exporté pour ce second appelant.
+ */
+export function planSettingsPatch(
+  plan: PlanDto,
+  settings: PlanSettingsOutput | undefined,
+  summary: string | null,
+): PlanSettingsPatch {
+  const patch: PlanSettingsPatch = { summary };
   if (settings === undefined) return patch;
 
   if (settings.sessionsPerWeek !== undefined && settings.sessionsPerWeek !== plan.sessionsPerWeek) {
@@ -1298,7 +1338,7 @@ async function writeUpdatedPlan(
   await applyPlanUpdate(active.plan.id, {
     fromDate,
     sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
-    settings: settingsPatch(active.plan, output),
+    settings: planSettingsPatch(active.plan, output.settings, output.summary),
   });
   await afterActivePlanChanged(active.plan.id);
 

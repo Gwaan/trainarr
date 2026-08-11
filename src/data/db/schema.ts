@@ -329,6 +329,25 @@ export const plans = pgTable(
     referenceTimeS: integer('reference_time_s'),
     /** Approche du plan rédigée par le coach (markdown). `NULL` tant qu'il n'a rien écrit. */
     summary: text('summary'),
+    /**
+     * Nombre de séances **réalisées** du plan que la dernière révision
+     * automatique a déjà prises en compte.
+     *
+     * C'est le marqueur qui cadence la relecture du plan par le coach : le
+     * service de révision compare ce compte à celui des séances réalisées à ce
+     * jour, et ne se déclenche qu'au-delà d'un écart de quelques séances. Un
+     * compte plutôt qu'une date, parce que c'est bien l'entraînement réalisé —
+     * pas le temps passé — qui donne matière à réviser.
+     *
+     * `0` sur un plan neuf : tout ce qui sera couru reste à examiner.
+     */
+    reviewedSessionCount: integer('reviewed_session_count').notNull().default(0),
+    /**
+     * Instant de la dernière révision automatique réussie, `NULL` tant qu'il n'y
+     * en a pas eu — l'UI ne date alors rien plutôt que d'afficher la création du
+     * plan pour une révision.
+     */
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

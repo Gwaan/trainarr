@@ -9,6 +9,8 @@ import {
   mapPlanWeeksToSessions,
   planJsonSchema,
   planOutputSchema,
+  planReviewJsonSchema,
+  planReviewOutputSchema,
   planUpdateJsonSchema,
   planUpdateOutputSchema,
   taperWeekCount,
@@ -227,6 +229,55 @@ describe('planUpdateOutputSchema', () => {
   });
 });
 
+describe('planReviewOutputSchema', () => {
+  it('accepte une révision qui ne change rien', () => {
+    const parsed = planReviewOutputSchema.parse({
+      decision: 'keep',
+      reason: 'Les séances sont dans les cibles.',
+    });
+
+    expect(parsed).toEqual({ decision: 'keep', reason: 'Les séances sont dans les cibles.' });
+  });
+
+  it('écarte les semaines d’un « keep » : rien ne doit pouvoir être appliqué', () => {
+    const parsed = planReviewOutputSchema.parse({
+      decision: 'keep',
+      reason: 'Rien à changer.',
+      weeks: [week([7])],
+    });
+
+    expect(parsed).not.toHaveProperty('weeks');
+  });
+
+  it('exige les semaines d’un « adjust »', () => {
+    // La grammaire ne sait pas exprimer cette dépendance : c'est ici qu'elle
+    // est tenue, et le modèle se voit renvoyer le champ en défaut.
+    const parsed = planReviewOutputSchema.safeParse({
+      decision: 'adjust',
+      reason: 'Charge trop élevée.',
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it('accepte un « adjust » avec ses semaines et un patch de réglages', () => {
+    const parsed = planReviewOutputSchema.parse({
+      decision: 'adjust',
+      reason: 'Trois séances manquées : on repasse à 3 par semaine.',
+      settings: { sessionsPerWeek: 3 },
+      weeks: [week([7])],
+    });
+
+    expect(parsed).toMatchObject({ decision: 'adjust', settings: { sessionsPerWeek: 3 } });
+  });
+
+  it('refuse une décision inventée', () => {
+    expect(
+      planReviewOutputSchema.safeParse({ decision: 'rewrite', reason: 'x' }).success,
+    ).toBe(false);
+  });
+});
+
 describe('JSON Schema', () => {
   it('interdit les propriétés inventées à tous les niveaux', () => {
     const json = JSON.stringify(planJsonSchema);
@@ -253,6 +304,21 @@ describe('JSON Schema', () => {
     expect(update.settings.additionalProperties).toBe(false);
     // `settings` reste facultatif : le modèle ne le rend que s'il change quelque chose.
     expect(planUpdateJsonSchema.required).toEqual(['summary', 'weeks']);
+  });
+
+  it('n’exige d’une révision que sa décision et sa raison', () => {
+    // `weeks` hors de `required` : c'est ce qui permet de conclure « keep » sans
+    // écrire un plan entier. Zod tient l'implication inverse.
+    expect(planReviewJsonSchema.required).toEqual(['decision', 'reason']);
+
+    const review = planReviewJsonSchema.properties as Record<string, Record<string, unknown>>;
+    expect(review.decision.enum).toEqual(['keep', 'adjust']);
+    expect(review.reason.maxLength).toBe(PLAN_OUTPUT_BOUNDS.reasonChars);
+    // Les semaines et les réglages sont ceux d'un ajustement, à la lettre.
+    expect(review.weeks).toBe((planUpdateJsonSchema.properties as Record<string, unknown>).weeks);
+    expect(review.settings).toBe(
+      (planUpdateJsonSchema.properties as Record<string, unknown>).settings,
+    );
   });
 });
 

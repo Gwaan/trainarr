@@ -92,6 +92,15 @@ export type PlanDto = {
   referenceDistance: PlanReferenceDistance | null;
   referenceTimeS: number | null;
   summary: string | null;
+  /**
+   * Dernière révision automatique du plan par le coach, sérialisée en ISO-8601,
+   * `null` tant qu'il n'y en a pas eu.
+   *
+   * Le compte de séances qui va avec (`reviewed_session_count`) reste en base :
+   * c'est l'état d'un service, il n'a rien à faire côté client. Cet instant-là,
+   * si — c'est ce qui permet à la page du plan de dire quand le coach l'a relu.
+   */
+  reviewedAt: string | null;
   /** Instant de création, sérialisé en ISO-8601 (le DTO traverse la frontière client). */
   createdAt: string;
 };
@@ -306,6 +315,7 @@ export function toPlanDto(row: Plan): PlanDto {
     referenceDistance: row.referenceDistance,
     referenceTimeS: row.referenceTimeS,
     summary: row.summary,
+    reviewedAt: row.reviewedAt === null ? null : row.reviewedAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
   };
 }

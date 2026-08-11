@@ -56,6 +56,8 @@ export const PLAN_OUTPUT_BOUNDS = {
   titleChars: 140,
   noteChars: 200,
   summaryChars: 1_500,
+  /** La justification d'une révision : une ou deux phrases, pas un rapport. */
+  reasonChars: 400,
 } as const;
 
 /*
@@ -216,11 +218,44 @@ export const planUpdateOutputSchema = z.object({
   weeks: planWeeksSchema,
 });
 
+/**
+ * Ce que le modèle produit pour une **révision** du plan actif.
+ *
+ * Union discriminée, et c'est tout l'objet du contrat : une révision qui
+ * conclut « rien à changer » ne porte **aucune** semaine, et le type l'impose —
+ * `keep` ne se laisse pas accompagner d'un plan réécrit qu'on risquerait
+ * d'appliquer par mégarde. `adjust`, lui, a exactement la forme d'un ajustement
+ * ({@link planUpdateOutputSchema}), semaines comprises, et suit le même chemin
+ * d'écriture.
+ *
+ * Le `summary` de l'ajustement n'y figure pas : une révision n'est pas demandée
+ * par l'athlète, elle survient toute seule après quelques séances — ce qu'elle
+ * doit rendre, c'est ce qu'elle a constaté (`reason`), pas une nouvelle
+ * présentation du plan. Le service reporte cette raison dans le résumé existant.
+ *
+ * La grammaire, elle, ne sait pas exprimer cette dépendance : elle autorise
+ * `weeks` dans les deux cas, et c'est Zod qui refuse un `adjust` sans semaines —
+ * la reprise du modèle est alors la même que pour toute sortie hors schéma.
+ */
+export const planReviewOutputSchema = z.discriminatedUnion('decision', [
+  z.object({
+    decision: z.literal('keep'),
+    reason: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.reasonChars),
+  }),
+  z.object({
+    decision: z.literal('adjust'),
+    reason: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.reasonChars),
+    settings: planSettingsPatchSchema.optional(),
+    weeks: planWeeksSchema,
+  }),
+]);
+
 export type PlanSessionOutput = z.infer<typeof planSessionSchema>;
 export type PlanWeekOutput = z.infer<typeof planWeekSchema>;
 export type PlanOutput = z.infer<typeof planOutputSchema>;
 export type PlanUpdateOutput = z.infer<typeof planUpdateOutputSchema>;
 export type PlanSettingsOutput = z.infer<typeof planSettingsPatchSchema>;
+export type PlanReviewOutput = z.infer<typeof planReviewOutputSchema>;
 
 /*
  * JSON Schema, écrit à la main.
@@ -383,6 +418,29 @@ export const planJsonSchema: Record<string, unknown> = {
   properties: { summary: summaryJsonSchema, weeks: weeksJsonSchema },
 };
 
+/** Les réglages durables, tels que la modification et la révision les rendent. */
+const settingsJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    sessionsPerWeek: {
+      type: 'integer',
+      minimum: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
+      maximum: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
+    },
+    longRunDay: {
+      type: 'integer',
+      minimum: PLAN_OUTPUT_BOUNDS.day.min,
+      maximum: PLAN_OUTPUT_BOUNDS.day.max,
+    },
+    weeklyTimeMinutes: {
+      type: 'integer',
+      minimum: PLAN_OUTPUT_BOUNDS.weeklyTimeMinutes.min,
+      maximum: PLAN_OUTPUT_BOUNDS.weeklyTimeMinutes.max,
+    },
+  },
+} as const;
+
 /** JSON Schema d'une modification — le pendant de {@link planUpdateOutputSchema}. */
 export const planUpdateJsonSchema: Record<string, unknown> = {
   type: 'object',
@@ -390,27 +448,36 @@ export const planUpdateJsonSchema: Record<string, unknown> = {
   required: ['summary', 'weeks'],
   properties: {
     summary: summaryJsonSchema,
-    settings: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        sessionsPerWeek: {
-          type: 'integer',
-          minimum: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-          maximum: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
-        },
-        longRunDay: {
-          type: 'integer',
-          minimum: PLAN_OUTPUT_BOUNDS.day.min,
-          maximum: PLAN_OUTPUT_BOUNDS.day.max,
-        },
-        weeklyTimeMinutes: {
-          type: 'integer',
-          minimum: PLAN_OUTPUT_BOUNDS.weeklyTimeMinutes.min,
-          maximum: PLAN_OUTPUT_BOUNDS.weeklyTimeMinutes.max,
-        },
-      },
+    settings: settingsJsonSchema,
+    weeks: weeksJsonSchema,
+  },
+};
+
+/**
+ * JSON Schema d'une révision — le pendant de {@link planReviewOutputSchema}.
+ *
+ * `weeks` et `settings` restent hors de `required` : c'est ce qui permet à une
+ * révision de conclure « keep » sans écrire un plan entier — la contrainte
+ * inverse (« adjust exige des semaines ») n'est pas exprimable ici sans `oneOf`,
+ * que la conversion GBNF traduit mal, et vit donc dans Zod.
+ */
+export const planReviewJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['decision', 'reason'],
+  properties: {
+    decision: {
+      type: 'string',
+      enum: ['keep', 'adjust'],
+      description: "keep = le plan reste tel quel, adjust = la suite du plan est réécrite",
     },
+    reason: {
+      type: 'string',
+      minLength: 1,
+      maxLength: PLAN_OUTPUT_BOUNDS.reasonChars,
+      description: 'ce qui est constaté et ce qui en est fait, en une ou deux phrases',
+    },
+    settings: settingsJsonSchema,
     weeks: weeksJsonSchema,
   },
 };
