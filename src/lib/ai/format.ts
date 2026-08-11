@@ -19,6 +19,7 @@
  */
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
+import type { PlanSessionSteps, PlanStep, PlanStepBlock, PlanStepRole } from '@/lib/plan-steps/schema';
 
 /** Jours ISO en toutes lettres : `day` vaut 1 pour lundi … 7 pour dimanche. */
 const ISO_DAY_NAMES = [
@@ -102,6 +103,79 @@ export function formatDaysAgo(date: string, today: string): string {
   if (days <= 0) return "aujourd'hui";
   if (days === 1) return 'hier';
   return `il y a ${days} jours`;
+}
+
+/*
+ * Déroulé structuré d'une séance, pour les prompts.
+ */
+
+/**
+ * Rôles en toutes lettres. Le rôle `run` n'est pas nommé : c'est le cas
+ * ordinaire, et le préfixer coûterait un mot par étape d'effort pour ne rien
+ * lever d'ambigu.
+ */
+const STEP_ROLE_LABELS: Record<PlanStepRole, string> = {
+  warmup: 'échauffement',
+  run: '',
+  recover: 'récup',
+  cooldown: 'retour au calme',
+};
+
+/**
+ * Mesure d'une étape, **dans les unités du contrat** : mètres et secondes, sans
+ * conversion ni virgule décimale.
+ *
+ * `2,0 km` ou `15 min` se lirait mieux, mais le prompt impose des mètres et des
+ * secondes dans `steps` : le modèle relit ce déroulé pour réécrire la séance
+ * lors d'un ajustement, et un petit modèle qui recopie `2,0` produit une sortie
+ * hors schéma. La séance, elle, garde ses kilomètres et ses minutes — c'est là
+ * que le contrat les attend.
+ */
+function formatStepMeasure(step: PlanStep): string {
+  if (step.distanceM !== null) return `${Math.round(step.distanceM)} m`;
+  // Le schéma garantit l'autre mesure quand la distance manque.
+  return step.durationS === null ? '' : `${Math.round(step.durationS)} s`;
+}
+
+/**
+ * Cible de l'étape : allure (`@ 4:00–4:10/km`) ou zone cardiaque (`@ Z2`), et
+ * rien du tout sur une étape sans consigne. Les deux sont exclusives par
+ * construction, cf. `lib/plan-steps/schema`.
+ */
+function formatStepTarget(step: PlanStep): string {
+  if (step.paceMinSecPerKm !== null && step.paceMaxSecPerKm !== null) {
+    const fast = formatPace(step.paceMinSecPerKm);
+    const slow = formatPace(step.paceMaxSecPerKm);
+    // Une seule fois l'unité sur une fourchette : `4:00–4:10/km` se lit mieux
+    // que `4:00/km–4:10/km`, et coûte trois tokens de moins.
+    return fast === slow ? ` @ ${fast}` : ` @ ${fast.replace('/km', '')}–${slow}`;
+  }
+  if (step.hrZone !== null) return ` @ Z${step.hrZone}`;
+  return '';
+}
+
+function formatStep(step: PlanStep): string {
+  const label = STEP_ROLE_LABELS[step.role];
+  const prefix = label === '' ? '' : `${label} `;
+  return `${prefix}${formatStepMeasure(step)}${formatStepTarget(step)}`;
+}
+
+function formatStepBlock(block: PlanStepBlock): string {
+  const inner = block.steps.map(formatStep).join(' + ');
+  return block.repeat > 1 ? `${block.repeat} × (${inner})` : inner;
+}
+
+/**
+ * Le déroulé d'une séance sur **une ligne**, ex. `échauffement 900 s @ Z2 +
+ * 6 × (400 m @ 3:40/km + récup 90 s) + retour au calme 600 s`.
+ *
+ * Destiné au prompt d'ajustement : le modèle doit pouvoir réécrire une séance
+ * en sachant ce qu'elle contient déjà. Les notes des étapes sont volontairement
+ * omises — elles peuvent faire 200 caractères chacune, et le déroulé chiffré
+ * suffit à décider ce qu'on garde.
+ */
+export function formatPlanSteps(steps: PlanSessionSteps): string {
+  return steps.map(formatStepBlock).join(' + ');
 }
 
 /** Le profil sur une ligne. Les champs absents ne sont pas mentionnés. */

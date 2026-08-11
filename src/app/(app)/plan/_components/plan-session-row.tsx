@@ -1,26 +1,39 @@
-import Link from "next/link";
-import { CircleCheck } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { ChevronDown, CircleCheck, CircleDashed, CircleDot } from "lucide-react";
 
 import type { PlanSessionDto } from "@/data/plans";
 import { cn } from "@/lib/utils";
 
-import { formatDistance, formatDuration, formatPace } from "../../_lib/format";
 import { formatSessionDay } from "../_lib/format-plan";
-import { planSessionState } from "../_lib/plan-weeks";
+import { planSessionState, type PlanSessionState } from "../_lib/plan-weeks";
+import { planSessionDetail, planSessionSummary } from "../_lib/session-detail";
+
+import { PlanSessionDetailPanel } from "./plan-session-detail";
 
 /**
- * Une séance du plan.
+ * Une séance du plan, dépliable sur son déroulé.
  *
- * Quatre lectures possibles, portées par le seul style : réalisée (marqueur
- * `positive`, la ligne mène à l'activité), aujourd'hui (filet accent, comme
- * l'item actif de la navigation), manquée (atténuée), à venir (neutre).
+ * `<details>` natif plutôt qu'un état React : le dépliage est clavier et lecteur
+ * d'écran d'origine (le `summary` annonce son état), et la page reste
+ * entièrement rendue côté serveur. La séance du jour s'ouvre d'office — sur
+ * téléphone, c'est elle qu'on vient lire.
+ *
+ * Son état se lit à trois endroits qui se doublent : la pastille nommée
+ * (jamais une couleur seule), le filet accent du jour, l'atténuation d'une
+ * séance manquée.
  */
 
-const DETAIL_LABELS = [
-  { key: "warmup", label: "Échauffement" },
-  { key: "recovery", label: "Récupération" },
-  { key: "cooldown", label: "Retour au calme" },
-] as const;
+const STATE_BADGES: Record<
+  PlanSessionState,
+  { label: string; icon: LucideIcon; className: string } | null
+> = {
+  completed: { label: "Réalisée", icon: CircleCheck, className: "text-positive" },
+  today: { label: "Aujourd'hui", icon: CircleDot, className: "text-accent" },
+  // Une séance passée sans activité rapprochée n'a pas eu lieu. Ce n'est pas une
+  // alerte physiologique : elle reste en gris, pas en `warning`.
+  missed: { label: "Manquée", icon: CircleDashed, className: "text-fg-faint" },
+  upcoming: null,
+};
 
 export function PlanSessionRow({
   session,
@@ -30,24 +43,15 @@ export function PlanSessionRow({
   today: string;
 }) {
   const state = planSessionState(session, today);
-  const isToday = session.scheduledOn === today;
+  const isToday = state === "today";
+  const badge = STATE_BADGES[state];
 
-  const details: { label: string; value: string }[] = [];
-  for (const detail of DETAIL_LABELS) {
-    const value = session[detail.key];
-    if (value !== null) details.push({ label: detail.label, value });
-  }
+  const detail = planSessionDetail(session);
+  const summary = planSessionSummary(session);
+  // Rien à révéler : ni déroulé, ni consigne, ni activité à rejoindre.
+  const isExpandable = !detail.isEmpty || session.completedActivityId !== null;
 
-  // Une seule ligne chiffrée, en mono : volume, durée, allure cible.
-  const metrics = [
-    session.volumeM === null ? null : formatDistance(session.volumeM),
-    session.durationS === null ? null : formatDuration(session.durationS),
-    session.targetPaceSecPerKm === null ? null : `@ ${formatPace(session.targetPaceSecPerKm)}`,
-  ]
-    .filter((metric): metric is string => metric !== null)
-    .join(" · ");
-
-  const body = (
+  const heading = (
     <>
       <span
         className={cn(
@@ -60,37 +64,31 @@ export function PlanSessionRow({
       </span>
 
       <span className="min-w-0 flex-1">
-        <span className="eyebrow block">{session.kind}</span>
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="eyebrow">{session.kind}</span>
+          {badge === null ? null : (
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 text-[0.62rem] font-medium tracking-[0.08em] uppercase",
+                badge.className,
+              )}
+            >
+              <badge.icon aria-hidden="true" strokeWidth={2} className="size-3" />
+              {badge.label}
+            </span>
+          )}
+        </span>
+
         <span className="mt-1 block text-[0.9rem] leading-snug font-medium text-fg">
           {session.title}
         </span>
 
-        {metrics.length > 0 ? (
-          <span className="num mt-1.5 block text-[0.78rem] text-fg-muted">{metrics}</span>
-        ) : null}
-
-        {details.length > 0 ? (
-          <span className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.76rem] leading-snug text-fg-faint">
-            {details.map((detail) => (
-              <span key={detail.label}>
-                {detail.label} : <span className="text-fg-muted">{detail.value}</span>
-              </span>
-            ))}
+        {summary.length > 0 ? (
+          <span className="num mt-1.5 block text-[0.78rem] text-fg-muted">
+            {summary.join(" · ")}
           </span>
         ) : null}
       </span>
-
-      {state === "completed" ? (
-        <>
-          {/* Le marqueur est graphique : sa signification est dite au lecteur d'écran. */}
-          <span className="sr-only">Séance réalisée — voir l&apos;activité</span>
-          <CircleCheck
-            aria-hidden="true"
-            strokeWidth={1.8}
-            className="mt-0.5 size-[1.05rem] shrink-0 text-positive"
-          />
-        </>
-      ) : null}
     </>
   );
 
@@ -98,21 +96,41 @@ export function PlanSessionRow({
     <li
       className={cn(
         "border-b border-border last:border-b-0",
-        isToday && "border-l-2 border-l-accent bg-accent-soft",
-        // Une séance passée sans activité rapprochée n'a pas eu lieu : elle
-        // reste lisible, mais ne dispute pas l'attention aux séances à venir.
+        isToday && "border-l-2 border-l-accent",
+        // Lisible, mais elle ne dispute pas l'attention aux séances à venir.
         state === "missed" && "opacity-70",
       )}
     >
-      {session.completedActivityId === null ? (
-        <div className="flex gap-3 px-4 py-3 sm:px-5">{body}</div>
+      {isExpandable ? (
+        <details open={isToday} className="group/session">
+          <summary
+            className={cn(
+              "flex cursor-pointer list-none gap-3 px-4 py-3 sm:px-5",
+              "transition-colors duration-150 ease-out hover:bg-surface-2",
+              "[&::-webkit-details-marker]:hidden",
+              isToday && "bg-accent-soft",
+            )}
+          >
+            {heading}
+            <ChevronDown
+              aria-hidden="true"
+              strokeWidth={1.8}
+              className="mt-0.5 size-4 shrink-0 text-fg-faint transition-transform duration-150 ease-out group-open/session:rotate-180"
+            />
+          </summary>
+
+          <PlanSessionDetailPanel
+            detail={detail}
+            completedActivityId={session.completedActivityId}
+          />
+        </details>
       ) : (
-        <Link
-          href={`/activities/${session.completedActivityId}`}
-          className="flex gap-3 px-4 py-3 transition-colors duration-150 ease-out hover:bg-surface-2 sm:px-5"
-        >
-          {body}
-        </Link>
+        <div className={cn("flex gap-3 px-4 py-3 sm:px-5", isToday && "bg-accent-soft")}>
+          {heading}
+          {/* Réserve la gouttière du chevron : les titres s'alignent d'une
+              ligne à l'autre, qu'elle soit dépliable ou non. */}
+          <span aria-hidden="true" className="size-4 shrink-0" />
+        </div>
       )}
     </li>
   );

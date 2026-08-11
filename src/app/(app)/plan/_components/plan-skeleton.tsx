@@ -40,11 +40,16 @@ export function PlanSkeleton() {
 
       {/* Trois semaines : le reste arrive en même temps, inutile de les figurer */}
       <div className="flex flex-col gap-3">
+        <Skeleton className="h-3 w-24" />
         {[0, 1, 2].map((week) => (
           <div key={week} className="rounded-card border border-border bg-surface">
-            <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
-              <Skeleton className="h-3 w-44 max-w-full" />
-              <Skeleton className="h-3 w-16" />
+            {/* En-tête sur deux lignes : intitulé de semaine, puis résumé */}
+            <div className="flex items-start justify-between gap-3 px-4 py-3 sm:px-5">
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <Skeleton className="h-3 w-44 max-w-full" />
+                <Skeleton className="h-3 w-28" />
+              </div>
+              <Skeleton className="size-4 shrink-0" />
             </div>
             {[0, 1].map((session) => (
               <div
@@ -57,6 +62,8 @@ export function PlanSkeleton() {
                   <Skeleton className="mt-2 h-4 w-48 max-w-full" />
                   <Skeleton className="mt-2 h-3 w-32" />
                 </div>
+                {/* Chevron de dépliage du déroulé */}
+                <Skeleton className="size-4 shrink-0" />
               </div>
             ))}
           </div>

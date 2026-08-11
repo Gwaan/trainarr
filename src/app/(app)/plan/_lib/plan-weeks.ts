@@ -11,6 +11,8 @@
 import type { PlanSessionDto } from "@/data/plans";
 import { shiftCivilDate } from "@/lib/dates/civil";
 
+import { formatDistance } from "../../_lib/format";
+
 import { formatCivilRange } from "./format-plan";
 
 /**
@@ -32,7 +34,15 @@ export type PlanWeekView = {
   sessions: PlanSessionDto[];
   /** Somme des volumes annoncés, `null` si aucune séance n'en porte. */
   totalVolumeM: number | null;
+  /** Séances rapprochées d'une activité — l'avancement réel de la semaine. */
+  completedCount: number;
   status: "past" | "current" | "upcoming";
+  /**
+   * Semaine dépliée au chargement. Sur téléphone, une pile de douze semaines
+   * ouvertes n'est pas un plan : seules la semaine en cours et la suivante
+   * s'ouvrent d'office, le reste attend un geste.
+   */
+  expanded: boolean;
 };
 
 /** Dernier jour couvert par le plan (inclus). */
@@ -82,9 +92,64 @@ export function groupPlanWeeks(
       sessions: weekSessions,
       totalVolumeM:
         volumes.length > 0 ? volumes.reduce((total, volume) => total + volume, 0) : null,
+      completedCount: weekSessions.filter(
+        (session) => session.completedActivityId !== null,
+      ).length,
       status: endsOn < today ? "past" : startsOn > today ? "upcoming" : "current",
+      // Renseigné juste après : l'ouverture d'une semaine dépend de ses voisines.
+      expanded: false,
     });
   }
 
+  // La semaine en cours et celle qui suit. Plan terminé ou pas encore commencé,
+  // il n'y a pas de semaine en cours : on ouvre la première à venir, sinon la
+  // dernière — jamais un écran de cartes toutes fermées.
+  const current = weeks.findIndex((week) => week.status === "current");
+  const firstUpcoming = weeks.findIndex((week) => week.status === "upcoming");
+  const anchor =
+    current !== -1 ? current : firstUpcoming !== -1 ? firstUpcoming : weeks.length - 1;
+
+  for (const [index, week] of weeks.entries()) {
+    week.expanded = index === anchor || (current !== -1 && index === current + 1);
+  }
+
   return weeks;
+}
+
+/** Accord en nombre — « 1 séance », « 3 séances ». */
+function plural(count: number, singular: string): string {
+  return count > 1 ? `${singular}s` : singular;
+}
+
+/**
+ * Résumé d'une semaine sous son intitulé : ce qui a été fait quand la semaine
+ * est entamée, ce qui est prévu sinon, suivi du volume annoncé.
+ *
+ * `null` pour une semaine sans séance — c'est l'état vide qui parle alors, pas
+ * un « 0 séance ».
+ */
+export function formatWeekSummary(week: PlanWeekView): string | null {
+  const total = week.sessions.length;
+  if (total === 0) return null;
+
+  const parts: string[] = [
+    week.status === "upcoming"
+      ? `${total} ${plural(total, "séance")}`
+      : `${week.completedCount}/${total} ${plural(total, "réalisée")}`,
+  ];
+
+  if (week.totalVolumeM !== null) parts.push(formatDistance(week.totalVolumeM));
+
+  return parts.join(" · ");
+}
+
+/**
+ * Où en est le plan, pour l'en-tête : `Semaine 3 / 12` tant qu'il court, son
+ * étendue sinon.
+ */
+export function formatPlanProgress(weeks: readonly PlanWeekView[]): string {
+  const current = weeks.find((week) => week.status === "current");
+  return current === undefined
+    ? `${weeks.length} semaines`
+    : `Semaine ${current.number} / ${weeks.length}`;
 }

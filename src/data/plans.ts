@@ -3,6 +3,11 @@ import 'server-only';
 import { and, asc, eq, gte, inArray, isNull } from 'drizzle-orm';
 
 import { shiftCivilDate } from '@/lib/dates/civil';
+import {
+  planSessionStepsSchema,
+  sessionStepsTotals,
+  type PlanSessionSteps,
+} from '@/lib/plan-steps/schema';
 
 import { AthleteNotFoundError, getAthleteId, isCivilDate, todayCivilDate } from './athlete';
 import { db } from './db/client';
@@ -76,6 +81,14 @@ export type PlanSessionDto = {
   targetPaceSecPerKm: number | null;
   volumeM: number | null;
   durationS: number | null;
+  /**
+   * Déroulé structuré de la séance, `null` quand elle n'en a pas.
+   *
+   * Sa place dans le DTO est légitime : c'est de l'affichage (le détail de la
+   * séance), pas de l'interne — et `lib/plan-steps/schema` est un module pur,
+   * donc importable par un composant client.
+   */
+  steps: PlanSessionSteps | null;
   /** Activité qui a réalisé la séance, `null` tant qu'elle ne l'est pas. */
   completedActivityId: number | null;
 };
@@ -97,6 +110,11 @@ export type NewPlanSessionInput = {
   targetPaceSecPerKm?: number | null;
   volumeM?: number | null;
   durationS?: number | null;
+  /**
+   * Déroulé structuré, si le coach en propose un. Validé par
+   * {@link planSessionStepsSchema} avant toute écriture.
+   */
+  steps?: PlanSessionSteps | null;
 };
 
 /** Le plan tel que le coach le soumet à la création. */
@@ -228,6 +246,7 @@ export function toPlanSessionDto(row: PlannedSession): PlanSessionDto {
     targetPaceSecPerKm: row.targetPaceSecPerKm,
     volumeM: row.volumeM,
     durationS: row.durationS,
+    steps: row.steps,
     completedActivityId: row.completedActivityId,
   };
 }
@@ -256,6 +275,32 @@ function requireIntegerInRange(
  */
 export function planEndExclusive(startsOn: string, weeks: number): string {
   return shiftCivilDate(startsOn, weeks * 7);
+}
+
+/**
+ * Étapes de la séance, validées et normalisées, `null` si elle n'en porte pas.
+ *
+ * Le retour du parse est ce qui part en base, jamais l'objet d'entrée : Zod en
+ * retire les clés inconnues, et ce JSON vient du modèle — une clé inventée n'a
+ * rien à faire dans la colonne.
+ *
+ * @throws {InvalidPlanError}
+ */
+function parseSessionSteps(session: NewPlanSessionInput): PlanSessionSteps | null {
+  const steps = session.steps ?? null;
+  if (steps === null) return null;
+
+  const parsed = planSessionStepsSchema.safeParse(steps);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : issue.path.join('.');
+    throw new InvalidPlanError(
+      'sessions',
+      `Séance du ${session.scheduledOn} : déroulé invalide${path.length > 0 ? ` (${path})` : ''} — ${issue?.message ?? 'structure inattendue'}`,
+    );
+  }
+
+  return parsed.data;
 }
 
 /**
@@ -289,6 +334,9 @@ export function validatePlanSessions(
     if (session.kind.trim().length === 0 || session.title.trim().length === 0) {
       throw new InvalidPlanError('sessions', 'Séance : type et intitulé sont requis.');
     }
+    // Le déroulé structuré est éprouvé ici, avant la moindre écriture — la
+    // valeur retenue, elle, est reparsée au moment de construire la ligne.
+    parseSessionSteps(session);
   }
 }
 
@@ -375,6 +423,16 @@ function toPlannedSessionValues(
   athleteId: number,
   planId: number,
 ): NewPlannedSession {
+  const steps = parseSessionSteps(session);
+  // Volume et durée déclarés priment, même s'ils s'écartent des totaux du
+  // déroulé : « ~12 km » pour 12,4 km est un arrondi de coach, pas une erreur, et
+  // le corriger reviendrait à réécrire ce qui est affiché à l'athlète. En
+  // revanche, quand ils manquent, on les dérive des étapes plutôt que de laisser
+  // la séance sans volume : une somme d'étapes déclarées est une donnée
+  // *dérivée*, pas une métrique inventée (`sessionStepsTotals` rend `null` dès
+  // qu'il faudrait supposer une allure).
+  const totals = steps === null ? null : sessionStepsTotals(steps);
+
   return {
     athleteId,
     planId,
@@ -385,8 +443,9 @@ function toPlannedSessionValues(
     recovery: session.recovery ?? null,
     cooldown: session.cooldown ?? null,
     targetPaceSecPerKm: session.targetPaceSecPerKm ?? null,
-    volumeM: session.volumeM ?? null,
-    durationS: session.durationS ?? null,
+    volumeM: session.volumeM ?? totals?.distanceM ?? null,
+    durationS: session.durationS ?? totals?.durationS ?? null,
+    steps,
   };
 }
 

@@ -156,6 +156,7 @@ const PLANNED_SESSION: PlannedSession = {
   cooldown: '10 min souple',
   volumeM: 12_400,
   durationS: 3_900,
+  steps: null,
   completedActivityId: null,
   createdAt: new Date('2026-08-01T10:00:00.000Z'),
 };

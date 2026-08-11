@@ -66,6 +66,7 @@ function session(overrides: Partial<PlanSessionDto> & { scheduledOn: string }): 
     targetPaceSecPerKm: null,
     volumeM: null,
     durationS: null,
+    steps: null,
     completedActivityId: null,
     ...overrides,
   };
@@ -177,6 +178,87 @@ describe('buildWorkoutEvents', () => {
     expect(workout).not.toHaveProperty('timeTargetS');
     expect(workout).not.toHaveProperty('distanceTargetM');
     expect(workout).not.toHaveProperty('target');
+  });
+
+  it("publie le déroulé structuré dans la syntaxe native quand la séance en a un", () => {
+    // C'est ce qui rend la séance exécutable pas à pas sur la montre : du texte
+    // plat s'afficherait au calendrier sans jamais être découpé en étapes.
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-18',
+        kind: 'VMA courte · piste',
+        title: '6 × 800 m',
+        warmup: '15 min footing',
+        cooldown: '10 min souple',
+        targetPaceSecPerKm: 240,
+        durationS: 3_600,
+        volumeM: 12_000,
+        steps: [
+          {
+            repeat: 1,
+            steps: [
+              {
+                role: 'warmup',
+                distanceM: null,
+                durationS: 900,
+                paceMinSecPerKm: null,
+                paceMaxSecPerKm: null,
+                hrZone: 2,
+                note: null,
+              },
+            ],
+          },
+          {
+            repeat: 6,
+            steps: [
+              {
+                role: 'run',
+                distanceM: 800,
+                durationS: null,
+                paceMinSecPerKm: 235,
+                paceMaxSecPerKm: 245,
+                hrZone: null,
+                note: null,
+              },
+              {
+                role: 'recover',
+                distanceM: null,
+                durationS: 90,
+                paceMinSecPerKm: null,
+                paceMaxSecPerKm: null,
+                hrZone: null,
+                note: 'trot',
+              },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    expect(workout.description).toBe(
+      [
+        '- Echauffement 15m Z2 HR',
+        '',
+        '6x',
+        '- Course 800mtr 3:55-4:05/km Pace',
+        '- Recuperation - trot 1m30s',
+      ].join('\n'),
+    );
+    // Les cibles de l'event restent alimentées comme avant : c'est le DAL qui
+    // dérive volume et durée des étapes à l'écriture.
+    expect(workout.timeTargetS).toBe(3_600);
+    expect(workout.distanceTargetM).toBe(12_000);
+    expect(workout.target).toBe('PACE');
+  });
+
+  it('reste en texte plat pour une séance sans déroulé structuré', () => {
+    const [workout] = buildWorkoutEvents(3, [
+      session({ scheduledOn: '2026-08-18', title: '45 min souple', warmup: '10 min de marche' }),
+    ]);
+
+    expect(workout.description).toBe(
+      ['Échauffement : 10 min de marche', 'Séance : 45 min souple'].join('\n'),
+    );
   });
 
   it('distingue deux séances du même jour par leur index', () => {

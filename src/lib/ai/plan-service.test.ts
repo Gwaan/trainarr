@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
 import type { PlanDto, PlanSessionDto } from '@/data/plans';
+import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
-import { AiInvalidOutputError, AiUnavailableError } from './errors';
+import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
   buildPlanMessages,
   buildPlanUpdateMessages,
+  buildSchemaIssuesMessage,
   buildViolationsMessage,
   generatePlan,
   nextPlanStart,
@@ -99,10 +101,38 @@ function planSession(overrides: Partial<PlanSessionDto> & { scheduledOn: string 
     targetPaceSecPerKm: null,
     volumeM: null,
     durationS: null,
+    steps: null,
     completedActivityId: null,
     ...overrides,
   };
 }
+
+/** Une étape complète : le contrat porte ses sept clés, `null` pour absent. */
+function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
+  return {
+    role,
+    distanceM: null,
+    durationS: null,
+    paceMinSecPerKm: null,
+    paceMaxSecPerKm: null,
+    hrZone: null,
+    note: null,
+    ...overrides,
+  };
+}
+
+/** Le déroulé d'une séance au seuil, tel qu'il est déjà en base. */
+const THRESHOLD_STEPS = [
+  { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+  {
+    repeat: 4,
+    steps: [
+      step('run', { durationS: 480, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 }),
+      step('recover', { durationS: 120 }),
+    ],
+  },
+  { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+];
 
 const REQUEST: PlanRequest = {
   goalType: 'free',
@@ -112,11 +142,14 @@ const REQUEST: PlanRequest = {
   longRunDay: 7,
 };
 
-/** Une semaine conforme : 3 séances, la plus longue le dimanche. */
+/**
+ * Une semaine conforme : 3 séances, la plus longue le dimanche, et la séance de
+ * qualité livrée avec son déroulé — sans lui, elle violerait les règles métier.
+ */
 const CONFORMING_WEEK = {
   sessions: [
     { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10 },
+    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
     { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
   ],
 };
@@ -247,6 +280,69 @@ describe('buildPlanMessages', () => {
     expect(messages[0].content).toContain('10 %');
   });
 
+  it('encode la méthodologie : polarisation, typologie, progression, affûtage', () => {
+    const system = messages[0].content;
+
+    // Distribution polarisée et espacement des séances dures.
+    expect(system).toContain('80 %');
+    expect(system).toContain('Jamais deux jours de suite');
+    // Typologie des séances, telle que le `kind` doit la nommer.
+    expect(system).toContain('« Seuil »');
+    expect(system).toContain('« VMA »');
+    expect(system).toContain('« Sortie longue »');
+    // Progression et affûtage.
+    expect(system).toContain('25 à 30 %');
+    expect(system).toContain('Affûtage');
+    expect(system).toContain('10 à 14 jours');
+  });
+
+  it('impose la structure des séances de qualité et le format des étapes', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('`steps`');
+    expect(system).toContain('échauffement progressif de 10 à 20 min');
+    expect(system).toContain("retour au calme de 5 à 10 min");
+    expect(system).toContain("role: 'recover'");
+    // Une mesure, une cible : les invariants du contrat, dits au modèle.
+    expect(system).toContain('jamais les deux');
+    expect(system).toContain('Un bloc ne contient pas de bloc');
+  });
+
+  it('ancre les allures sur une référence dite pour ce qu’elle est : une allure d’endurance', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('Allure moyenne des dernières sorties');
+    expect(system).toContain("Ce n'est pas une allure de tempo");
+    expect(system).toContain('endurance fondamentale et sortie longue : référence + 0 à 15 s/km');
+    expect(system).toContain('seuil : référence − 30 à 45 s/km');
+    expect(system).toContain('VMA : référence − 60 à 80 s/km');
+    expect(system).toContain('répétitions courtes : référence − 80 à 100 s/km');
+    expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
+  });
+
+  it('confronte un objectif chiffré aux données, sans s’y soumettre', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('« 10 km sous 50 min » vaut 5:00/km');
+    expect(system).toContain('le plan reste ancré sur les données');
+  });
+
+  it('dérive les allures des seules données du snapshot, et sait se taire', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('maxima prudents');
+    // Donnée manquante : on cible par zone cardiaque, et on le dit.
+    expect(system).toContain("Si l'allure de référence est inconnue");
+    expect(system).toContain('`hrZone`');
+    expect(system).toContain("Tu n'inventes jamais une valeur");
+  });
+
+  it('exige la mesure de séance en plus du déroulé, pour que les volumes se comparent', () => {
+    expect(messages[0].content).toContain(
+      'Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance',
+    );
+  });
+
   it('porte objectif, fenêtre et contraintes en toutes lettres', () => {
     const user = messages[1].content;
 
@@ -275,7 +371,13 @@ describe('buildPlanUpdateMessages', () => {
   const messages = buildPlanUpdateMessages(
     PLAN,
     [
-      planSession({ scheduledOn: '2026-08-13', kind: 'Seuil', title: '3 × 8 min', volumeM: 10_400 }),
+      planSession({
+        scheduledOn: '2026-08-13',
+        kind: 'Seuil',
+        title: '3 × 8 min',
+        volumeM: 10_400,
+        steps: THRESHOLD_STEPS,
+      }),
       planSession({ scheduledOn: '2026-08-16', kind: 'Sortie longue', title: '16 km', durationS: 5_400 }),
       planSession({ scheduledOn: '2026-08-20', kind: 'Endurance', title: 'Footing', targetPaceSecPerKm: 330 }),
     ],
@@ -286,6 +388,24 @@ describe('buildPlanUpdateMessages', () => {
   it('annonce au modèle qu’il ne régénère que la suite', () => {
     expect(messages[0].content).toContain('semaines restantes');
     expect(messages[0].content).toContain('`settings`');
+  });
+
+  it('porte la même méthodologie que la génération, déroulés compris', () => {
+    const system = messages[0].content;
+
+    expect(system).toContain('coach de course à pied');
+    expect(system).toContain('endurance fondamentale et sortie longue : référence + 0 à 15 s/km');
+    expect(system).toContain('`steps` compris');
+  });
+
+  it('réaffiche le déroulé des séances à venir, pour qu’il se réécrive en connaissance de cause', () => {
+    const user = messages[1].content;
+
+    expect(user).toContain(
+      '  déroulé : échauffement 900 s @ Z2 + 4 × (480 s @ 5:00–5:10/km + récup 120 s) + retour au calme 600 s',
+    );
+    // Une séance sans déroulé n'en invente pas un.
+    expect(user).toContain('- dimanche : Sortie longue — 16 km (1 h 30)\n');
   });
 
   it('groupe les séances à venir par semaine et signale la semaine entamée', () => {
@@ -309,6 +429,44 @@ describe('buildViolationsMessage', () => {
 
     expect(message).toContain('- Semaine 1 : trop de séances.');
     expect(message).toContain('Régénère le plan complet');
+  });
+});
+
+/** Une anomalie Zod, telle que `chatCompletionJson` la porte sur son erreur. */
+function issue(path: (string | number)[], message: string): AiOutputIssue {
+  return { code: 'custom', path, message, input: undefined };
+}
+
+/** L'échec type : une étape sur les deux cent cinquante viole un invariant. */
+const OFF_SCHEMA = new AiInvalidOutputError(
+  'Sortie du coach IA hors schéma « training_plan ».',
+  [
+    issue(
+      ['weeks', 0, 'sessions', 1, 'steps', 1, 'steps', 0],
+      'une étape se mesure soit en distance, soit en durée — exactement une des deux.',
+    ),
+  ],
+);
+
+describe('buildSchemaIssuesMessage', () => {
+  it('donne le chemin du champ fautif et son motif', () => {
+    const message = buildSchemaIssuesMessage(OFF_SCHEMA.issues);
+
+    expect(message).toContain('- weeks.0.sessions.1.steps.1.steps.0 : une étape se mesure');
+    expect(message).toContain('Régénère le plan complet');
+  });
+
+  it('borne la liste : un modèle égaré produirait des centaines d’anomalies', () => {
+    const message = buildSchemaIssuesMessage(
+      Array.from({ length: 14 }, (_, index) => issue(['weeks', index], 'hors bornes.')),
+    );
+
+    expect(message.split('\n').filter((line) => line.startsWith('- weeks.'))).toHaveLength(10);
+    expect(message).toContain('et 4 autres anomalies');
+  });
+
+  it("le dit autrement quand la réponse n'était même pas du JSON", () => {
+    expect(buildSchemaIssuesMessage([])).toContain("n'était pas du JSON exploitable");
   });
 });
 
@@ -404,6 +562,40 @@ describe('generatePlan', () => {
     // La sortie fautive n'est pas renvoyée : elle coûterait le double de contexte.
     expect(retryMessages.some((message: { content: string }) => message.content.includes('"sessions"'))).toBe(false);
     expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('reprend une sortie hors schéma en pointant le champ fautif, puis écrit le plan', async () => {
+    chatCompletionJson
+      .mockRejectedValueOnce(OFF_SCHEMA)
+      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: [CONFORMING_WEEK, CONFORMING_WEEK] });
+
+    await expect(generatePlan(REQUEST)).resolves.toBe(PLAN);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    const retryMessages = chatCompletionJson.mock.calls[1][0].messages;
+    expect(retryMessages).toHaveLength(3);
+    expect(retryMessages[2].role).toBe('user');
+    // Le chemin désigne l'étape à reprendre : sans lui, le modèle regénère à
+    // l'aveugle une sortie de plusieurs centaines d'étapes.
+    expect(retryMessages[2].content).toContain('weeks.0.sessions.1.steps.1.steps.0');
+    expect(dal.createPlanWithSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('renonce quand la sortie reste hors schéma après reprise', async () => {
+    chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
+
+    await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(dal.createPlanWithSessions).not.toHaveBeenCalled();
+  });
+
+  it("ne redemande rien quand c'est l'API qui est en défaut", async () => {
+    // Une réponse HTTP cassée ne s'arrangera pas en reposant la question : elle
+    // remonte au premier coup.
+    chatCompletionJson.mockRejectedValue(new AiResponseError('502 Bad Gateway', 502));
+
+    await expect(generatePlan(REQUEST)).rejects.toThrow(AiResponseError);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
   });
 
   it("renonce après un second échec, en disant ce qui n'a pas été respecté", async () => {
@@ -534,7 +726,7 @@ describe('updatePlanFromInstruction', () => {
         { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
         {
           sessions: [
-            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10 },
+            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
             { day: 7, kind: 'Sortie longue', title: '16 km', distanceKm: 16 },
           ],
         },
@@ -548,6 +740,21 @@ describe('updatePlanFromInstruction', () => {
       summary: 'Deux séances désormais.',
       sessionsPerWeek: 2,
     });
+  });
+
+  it('reprend aussi sur une sortie hors schéma, comme à la génération', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    chatCompletionJson.mockRejectedValueOnce(OFF_SCHEMA).mockResolvedValueOnce({
+      summary: 'ok',
+      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
+    });
+
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
+      'weeks.0.sessions.1.steps.1.steps.0',
+    );
   });
 
   it('renonce après un second échec sans rien écrire', async () => {

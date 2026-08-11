@@ -42,6 +42,7 @@ import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/d
 // ferait diverger la description d'une séance de ce que le coach en écrit.
 import { formatPace } from '@/lib/ai/format';
 import { shiftCivilDate } from '@/lib/dates/civil';
+import { stepsToIntervalsSyntax } from '@/lib/plan-steps/intervals-syntax';
 
 import {
   deleteCalendarEvents,
@@ -85,12 +86,23 @@ export function planSessionUid(planId: number, scheduledOn: string, indexInDay: 
 /**
  * Description de la séance, telle qu'elle s'affiche dans le calendrier.
  *
- * Du texte plat assumé : intervals.icu sait interpréter son propre format de
- * séance structurée, mais Trainarr ne stocke pas de structure d'intervalles —
- * fabriquer une syntaxe à partir d'un texte libre reviendrait à inventer la
- * séance. Ce qui manque au plan ne produit pas de ligne.
+ * Deux régimes, selon ce que le plan porte :
+ *
+ * 1. **Séance structurée** (`steps`) : la description est le déroulé écrit dans
+ *    la syntaxe native du workout builder d'intervals.icu, et **rien d'autre**.
+ *    C'est ce que le service parse pour en faire une séance exécutable, poussée
+ *    pas à pas à la montre par l'app Companion. Y ajouter le résumé en texte
+ *    plat ne servirait qu'à donner au parseur des lignes à mal interpréter,
+ *    alors que les étapes disent déjà l'échauffement, les récupérations, le
+ *    retour au calme et les allures.
+ * 2. **Séance en texte libre** (plans écrits avant les étapes structurées) : du
+ *    texte plat assumé — fabriquer une syntaxe à partir d'un intitulé
+ *    reviendrait à inventer la séance. Ce qui manque au plan ne produit pas de
+ *    ligne.
  */
 function describeSession(session: PlanSessionDto): string {
+  if (session.steps !== null) return stepsToIntervalsSyntax(session.steps);
+
   const lines: string[] = [];
 
   if (session.warmup !== null) lines.push(`Échauffement : ${session.warmup}`);

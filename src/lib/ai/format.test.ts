@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
+import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import {
   formatCivilDate,
@@ -10,9 +11,24 @@ import {
   formatIsoDay,
   formatNumber,
   formatPace,
+  formatPlanSteps,
   formatSignedPercent,
   formatTrainingSnapshot,
 } from './format';
+
+/** Une étape complète : le contrat porte ses sept clés, `null` pour absent. */
+function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
+  return {
+    role,
+    distanceM: null,
+    durationS: null,
+    paceMinSecPerKm: null,
+    paceMaxSecPerKm: null,
+    hrZone: null,
+    note: null,
+    ...overrides,
+  };
+}
 
 describe('formatNumber', () => {
   it('arrondit et rend la virgule décimale française', () => {
@@ -75,6 +91,53 @@ describe('formatDaysAgo', () => {
     expect(formatDaysAgo('2026-08-11', '2026-08-11')).toBe("aujourd'hui");
     expect(formatDaysAgo('2026-08-10', '2026-08-11')).toBe('hier');
     expect(formatDaysAgo('2026-07-30', '2026-08-11')).toBe('il y a 12 jours');
+  });
+});
+
+describe('formatPlanSteps', () => {
+  it('rend une séance de qualité sur une ligne, répétitions comprises', () => {
+    const text = formatPlanSteps([
+      { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
+      {
+        repeat: 6,
+        steps: [
+          step('run', { distanceM: 400, paceMinSecPerKm: 220, paceMaxSecPerKm: 220 }),
+          step('recover', { durationS: 90 }),
+        ],
+      },
+      { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
+    ]);
+
+    expect(text).toBe(
+      'échauffement 900 s @ Z2 + 6 × (400 m @ 3:40/km + récup 90 s) + retour au calme 600 s',
+    );
+  });
+
+  it('rend une fourchette d’allure sans répéter l’unité', () => {
+    const text = formatPlanSteps([
+      { repeat: 3, steps: [step('run', { distanceM: 2_000, paceMinSecPerKm: 240, paceMaxSecPerKm: 250 })] },
+    ]);
+
+    expect(text).toBe('3 × (2000 m @ 4:00–4:10/km)');
+  });
+
+  it('rend les mesures dans les unités du contrat : mètres et secondes, sans virgule', () => {
+    // Le modèle relit ce déroulé pour réécrire la séance : `2,0 km` recopié tel
+    // quel dans `steps` produirait une sortie hors schéma.
+    expect(formatPlanSteps([{ repeat: 1, steps: [step('recover', { durationS: 45 })] }])).toBe(
+      'récup 45 s',
+    );
+    expect(formatPlanSteps([{ repeat: 1, steps: [step('recover', { durationS: 90 })] }])).toBe(
+      'récup 90 s',
+    );
+    expect(formatPlanSteps([{ repeat: 1, steps: [step('run', { durationS: 150 })] }])).toBe('150 s');
+    expect(formatPlanSteps([{ repeat: 1, steps: [step('run', { distanceM: 10_000 })] }])).toBe(
+      '10000 m',
+    );
+  });
+
+  it('n’annonce aucune cible quand l’étape n’en porte pas', () => {
+    expect(formatPlanSteps([{ repeat: 1, steps: [step('run', { distanceM: 400 })] }])).toBe('400 m');
   });
 });
 

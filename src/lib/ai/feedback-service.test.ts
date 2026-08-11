@@ -129,6 +129,7 @@ const PLANNED: PlanSessionDto = {
   targetPaceSecPerKm: 310,
   volumeM: 18_000,
   durationS: 5_580,
+  steps: null,
   completedActivityId: 7,
 };
 

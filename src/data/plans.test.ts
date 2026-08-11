@@ -2,6 +2,8 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+
 import { AthleteNotFoundError } from './athlete';
 import type { Plan, PlannedSession } from './db/schema';
 import {
@@ -161,9 +163,69 @@ const SESSION_ROW: PlannedSession = {
   cooldown: '10 min souple',
   volumeM: 12_400,
   durationS: 3_900,
+  steps: null,
   completedActivityId: null,
   createdAt: new Date('2026-08-09T10:00:00.000Z'),
 };
+
+/** « 2 km d'échauffement, puis 3 × (800 m + 2 min de récup) ». */
+const SESSION_STEPS: PlanSessionSteps = [
+  {
+    repeat: 1,
+    steps: [
+      {
+        role: 'warmup',
+        distanceM: 2_000,
+        durationS: null,
+        paceMinSecPerKm: 330,
+        paceMaxSecPerKm: 360,
+        hrZone: null,
+        note: null,
+      },
+    ],
+  },
+  {
+    repeat: 3,
+    steps: [
+      {
+        role: 'run',
+        distanceM: 800,
+        durationS: null,
+        paceMinSecPerKm: 225,
+        paceMaxSecPerKm: 230,
+        hrZone: null,
+        note: null,
+      },
+      {
+        role: 'recover',
+        distanceM: null,
+        durationS: 120,
+        paceMinSecPerKm: null,
+        paceMaxSecPerKm: null,
+        hrZone: null,
+        note: 'trot souple',
+      },
+    ],
+  },
+];
+
+/** Le même déroulé, mais tout en distance : ses totaux sont calculables. */
+const DISTANCE_ONLY_STEPS: PlanSessionSteps = [
+  {
+    repeat: 2,
+    steps: [
+      {
+        role: 'run',
+        distanceM: 1_000,
+        durationS: null,
+        paceMinSecPerKm: 240,
+        paceMaxSecPerKm: 250,
+        hrZone: null,
+        note: null,
+      },
+    ],
+  },
+];
 
 const PLAN_DTO_KEYS = [
   'createdAt',
@@ -188,6 +250,7 @@ const SESSION_DTO_KEYS = [
   'kind',
   'recovery',
   'scheduledOn',
+  'steps',
   'targetPaceSecPerKm',
   'title',
   'volumeM',
@@ -360,6 +423,42 @@ describe('validatePlanInput', () => {
       validatePlanInput({ ...VALID_INPUT, sessions: [{ ...SESSION_INPUT, kind: '' }] }),
     ).toThrow(InvalidPlanError);
   });
+
+  it('accepte une séance avec son déroulé structuré, ou sans', () => {
+    expect(
+      validatePlanInput({
+        ...VALID_INPUT,
+        sessions: [{ ...SESSION_INPUT, steps: SESSION_STEPS }],
+      }).sessions,
+    ).toHaveLength(1);
+    expect(
+      validatePlanInput({ ...VALID_INPUT, sessions: [{ ...SESSION_INPUT, steps: null }] }).sessions,
+    ).toHaveLength(1);
+  });
+
+  it('refuse un déroulé qui viole un invariant des étapes', () => {
+    const refused: PlanSessionSteps[] = [
+      // Aucune étape.
+      [{ repeat: 1, steps: [] }],
+      // Deux mesures sur la même étape.
+      [{ repeat: 1, steps: [{ ...SESSION_STEPS[1].steps[0], durationS: 300 }] }],
+      // Allure et zone cardiaque à la fois.
+      [{ repeat: 1, steps: [{ ...SESSION_STEPS[1].steps[0], hrZone: 4 }] }],
+      // Répétitions hors bornes.
+      [{ repeat: 0, steps: SESSION_STEPS[1].steps }],
+    ];
+
+    for (const steps of refused) {
+      try {
+        validatePlanInput({ ...VALID_INPUT, sessions: [{ ...SESSION_INPUT, steps }] });
+        expect.unreachable('un déroulé incohérent ne doit pas passer la validation');
+      } catch (error) {
+        expect(error).toBeInstanceOf(InvalidPlanError);
+        expect((error as InvalidPlanError).field).toBe('sessions');
+        expect((error as InvalidPlanError).message).toContain('2026-08-12');
+      }
+    }
+  });
 });
 
 describe('toPlanDto', () => {
@@ -410,6 +509,11 @@ describe('toPlanSessionDto', () => {
     expect(Object.keys(dto).sort()).toEqual(SESSION_DTO_KEYS);
     expect(dto).not.toHaveProperty('athleteId');
     expect(dto).not.toHaveProperty('planId');
+  });
+
+  it('expose le déroulé structuré tel quel — c’est de l’affichage', () => {
+    expect(toPlanSessionDto({ ...SESSION_ROW, steps: SESSION_STEPS }).steps).toEqual(SESSION_STEPS);
+    expect(toPlanSessionDto(SESSION_ROW).steps).toBeNull();
   });
 });
 
@@ -509,6 +613,7 @@ describe('createPlanWithSessions', () => {
         targetPaceSecPerKm: null,
         volumeM: null,
         durationS: null,
+        steps: null,
       },
       {
         athleteId: 1,
@@ -522,8 +627,70 @@ describe('createPlanWithSessions', () => {
         targetPaceSecPerKm: null,
         volumeM: null,
         durationS: null,
+        steps: null,
       },
     ]);
+  });
+
+  it('écrit le déroulé structuré dans la colonne `steps`', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+
+    await createPlanWithSessions({
+      ...VALID_INPUT,
+      sessions: [{ ...SESSION_INPUT, steps: SESSION_STEPS }],
+    });
+
+    const insert = dbState.inserts.find((row) => row.table === 'planned_sessions');
+    expect(insert?.values).toMatchObject([{ steps: SESSION_STEPS }]);
+  });
+
+  it('ne stocke pas les clés inconnues glissées dans une étape', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+    const step = { ...DISTANCE_ONLY_STEPS[0].steps[0], watts: 320 };
+
+    await createPlanWithSessions({
+      ...VALID_INPUT,
+      // Le déroulé vient du modèle : ce qui n'est pas au contrat n'entre pas en base.
+      sessions: [{ ...SESSION_INPUT, steps: [{ repeat: 1, steps: [step] }] }],
+    });
+
+    const insert = dbState.inserts.find((row) => row.table === 'planned_sessions');
+    expect(insert?.values).toMatchObject([
+      { steps: [{ repeat: 1, steps: [DISTANCE_ONLY_STEPS[0].steps[0]] }] },
+    ]);
+  });
+
+  it('dérive volume et durée des étapes quand la séance ne les déclare pas', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+
+    await createPlanWithSessions({
+      ...VALID_INPUT,
+      sessions: [
+        { ...SESSION_INPUT, steps: DISTANCE_ONLY_STEPS },
+        // Étapes mixtes (distance + durée) : aucun total n'est calculable sans
+        // supposer une allure, la séance reste sans volume ni durée.
+        { ...SESSION_INPUT, steps: SESSION_STEPS },
+      ],
+    });
+
+    const insert = dbState.inserts.find((row) => row.table === 'planned_sessions');
+    expect(insert?.values).toMatchObject([
+      { volumeM: 2_000, durationS: null },
+      { volumeM: null, durationS: null },
+    ]);
+  });
+
+  it('laisse un volume déclaré primer sur le total des étapes', async () => {
+    dbState.returning.plans = [PLAN_ROW];
+
+    await createPlanWithSessions({
+      ...VALID_INPUT,
+      // « ~2,5 km » annoncé pour 2 km d'étapes : l'arrondi du coach fait foi.
+      sessions: [{ ...SESSION_INPUT, steps: DISTANCE_ONLY_STEPS, volumeM: 2_500 }],
+    });
+
+    const insert = dbState.inserts.find((row) => row.table === 'planned_sessions');
+    expect(insert?.values).toMatchObject([{ volumeM: 2_500 }]);
   });
 
   it('emporte les séances à venir non réalisées du plan qu’il archive', async () => {

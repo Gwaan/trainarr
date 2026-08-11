@@ -1,0 +1,1 @@
+ALTER TABLE "planned_sessions" ADD COLUMN "steps" jsonb;

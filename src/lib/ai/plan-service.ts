@@ -17,14 +17,27 @@ import 'server-only';
  * tentative coûte des minutes pour la même erreur, et une génération de plan est
  * déclenchée par un clic — l'utilisatrice attend devant.
  *
+ * La même boucle rattrape les sorties **hors schéma**. Les invariants croisés
+ * d'une étape (exactement une mesure, allure ou zone cardiaque mais pas les
+ * deux, bornes d'allure ordonnées) ne s'expriment pas dans la grammaire GBNF :
+ * ils tombent en Zod, et une seule étape fautive sur les deux cent cinquante
+ * d'un plan de douze semaines suffirait à tout perdre. Le message de reprise
+ * porte alors les chemins des champs en défaut, comme il porte ailleurs les
+ * violations métier.
+ *
  * ## Budget de contexte
  *
  * 32 k de contexte, partagés entre le prompt et la **sortie** — et un plan de
- * douze semaines fait déjà plusieurs milliers de tokens à écrire. Le prompt de
- * génération vise donc ~600 tokens (rôle + contraintes + snapshot), celui de
- * modification ~1 500 (il porte en plus les séances à venir). Le retry n'ajoute
- * que les violations, jamais la sortie fautive : la renvoyer doublerait la
- * facture pour rien.
+ * douze semaines fait déjà plusieurs milliers de tokens à écrire.
+ *
+ * Le poste le plus lourd est la méthodologie ({@link COACH_RULES}, ~1 500
+ * tokens), et c'est le seul qui vaut son prix : sans elle, le modèle produit un
+ * plan bien formé et sans logique d'entraînement. Tout le reste est compté au
+ * plus juste — le contexte de l'athlète tient en ~120 tokens, les consignes de
+ * la demande en une dizaine de lignes, et le retry n'ajoute que les violations,
+ * jamais la sortie fautive (la renvoyer doublerait la facture pour rien). Le
+ * prompt de modification y ajoute les séances à venir avec leur déroulé, soit
+ * ~40 tokens par séance de qualité.
  */
 
 import { after } from 'next/server';
@@ -49,13 +62,14 @@ import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 
 import { requireAi } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
-import { AiInvalidOutputError } from './errors';
+import { AiInvalidOutputError, type AiOutputIssue } from './errors';
 import {
   formatCivilDate,
   formatDistanceKm,
   formatDuration,
   formatIsoDay,
   formatPace,
+  formatPlanSteps,
   formatTrainingSnapshot,
 } from './format';
 import {
@@ -175,19 +189,66 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
  * modèle — les données chiffrées attendues, et rien d'autre.
  */
 
-/** Les principes d'entraînement, communs à la création et à la modification. */
+/**
+ * La méthodologie du coach, commune à la création et à la modification.
+ *
+ * C'est le cœur de la qualité des plans produits : un petit modèle sait écrire
+ * du JSON, il ne sait pas *entraîner*. Le contenu reprend donc les références
+ * établies du métier — distribution polarisée (Seiler), typologie des allures
+ * (Daniels), progression et affûtage — sous une forme prescriptive et chiffrée,
+ * la seule qu'un modèle de cette taille applique fidèlement.
+ *
+ * Dense par nécessité : ~900 tokens partagés avec la sortie sur les 32 k du
+ * modèle cible. Chaque ligne doit changer une décision du plan ; les
+ * explications physiologiques, elles, n'en changent aucune et n'y sont pas.
+ */
 const COACH_RULES = [
-  "Tu es un coach de course à pied francophone. Tu écris des plans prudents et progressifs, calés sur le niveau réel de l'athlète.",
-  'Principes que tu ne transgresses pas :',
-  "- le volume hebdomadaire n'augmente jamais de plus de 10 % d'une semaine à l'autre ;",
-  '- une semaine de décharge (environ −30 % de volume) toutes les 3 à 4 semaines ;',
-  "- avant une course, 1 à 2 semaines d'affûtage : volume réduit, intensité maintenue ;",
-  '- une seule sortie longue par semaine, le jour imposé par l\'athlète, et c\'est la plus longue séance de sa semaine ;',
-  '- au plus deux séances de qualité (seuil, VMA, côtes) par semaine, jamais deux jours de suite ;',
-  '- un seul entraînement par jour, `day` valant 1 pour lundi jusqu\'à 7 pour dimanche.',
-  "Tu ne t'appuies que sur les données fournies : tu n'inventes aucune valeur. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu l'écris dans le résumé.",
-  'Les allures cibles (`targetPaceSecPerKm`) sont en secondes par kilomètre, les distances en kilomètres, les durées en minutes.',
-  "Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
+  "Tu es un coach de course à pied francophone. Tu appliques les méthodes établies de l'entraînement en endurance (distribution polarisée de Seiler, typologie des allures de Daniels, périodisation), et tu cales chaque plan sur le niveau réel de l'athlète — jamais sur un modèle générique.",
+  '',
+  'RÉPARTITION DE LA CHARGE',
+  "- Distribution polarisée : environ 80 % du volume hebdomadaire en endurance fondamentale (zones FC 1-2, allure de conversation), 20 % au plus en intensité.",
+  "- Au plus 2 séances de qualité par semaine — une seule si le volume récent est faible ou l'athlète en reprise. Jamais deux jours de suite : une séance dure est toujours suivie d'un jour facile ou de repos.",
+  "- Une seule sortie longue par semaine, le jour imposé par l'athlète, et c'est la plus longue séance de sa semaine (environ 25 à 30 % du volume hebdomadaire).",
+  '- Un seul entraînement par jour, `day` valant 1 pour lundi jusqu\'à 7 pour dimanche.',
+  '',
+  'TYPOLOGIE DES SÉANCES — `kind` est choisi dans ce vocabulaire',
+  "- « Endurance fondamentale » : footing à allure de conversation, l'ossature du plan.",
+  '- « Sortie longue » : endurance fondamentale, progressive si utile (dernier tiers un peu plus rapide), avec un bloc à allure objectif quand la course approche.',
+  "- « Seuil » : allure tenable environ 1 h, en continu 20 à 40 min ou en blocs de 8 à 15 min séparés de 1 à 3 min de trot. Développe l'endurance à haute intensité.",
+  "- « VMA » : intervalles de 3 à 5 min à environ l'allure 5 km, récupération trottée de durée voisine de l'effort, 4 à 6 répétitions. Développe la puissance aérobie.",
+  "- « Répétitions » : 200 à 400 m plus rapides que l'allure 5 km, récupération complète (2 à 3 fois la durée de l'effort). Travaille la vitesse et l'économie de course, pas la filière aérobie — jamais en volume.",
+  '- « Récupération » : footing court très souple, ou repos.',
+  '',
+  'DÉROULÉ STRUCTURÉ (`steps`) — obligatoire pour toute séance de qualité',
+  "- Une séance de qualité s'écrit : échauffement progressif de 10 à 20 min, puis le corps de séance en blocs répétés, puis un retour au calme de 5 à 10 min.",
+  '- `steps` est une suite de blocs. Un bloc = `repeat` (1 par défaut) × la liste `steps` de ses étapes. Un bloc ne contient pas de bloc : « 6 × (400 m + récup 90 s) » est un bloc de deux étapes répété 6 fois.',
+  "- Tout bloc répété contient la récupération de l'effort (`role: 'recover'`) : sans elle, la séance décrite n'est pas celle qui sera courue.",
+  "- Une étape porte : `role` ('warmup', 'run', 'recover', 'cooldown'), exactement UNE mesure (`distanceM` en mètres OU `durationS` en secondes, jamais les deux), et AU PLUS une cible (`paceMinSecPerKm` avec `paceMaxSecPerKm`, en secondes par kilomètre, OU `hrZone` de 1 à 5, jamais les deux). Un footing peut n'avoir aucune cible.",
+  "- Une séance d'endurance simple se réduit à un bloc d'une étape ; elle peut aussi n'avoir aucun `steps`.",
+  '',
+  'ALLURES CIBLES — dérivées des seules données fournies',
+  "- Référence = « Allure moyenne des dernières sorties » du contexte. Ce n'est pas une allure de tempo : c'est l'allure d'entraînement courante de l'athlète, donc à peu près son allure d'endurance, puisque l'essentiel de son volume est couru en endurance. Toutes les allures s'en déduisent, en secondes par kilomètre (un nombre plus petit est plus rapide) :",
+  "  · endurance fondamentale et sortie longue : référence + 0 à 15 s/km — la référence EST déjà l'allure d'endurance, ne ralentis pas l'athlète artificiellement ;",
+  '  · seuil : référence − 30 à 45 s/km ;',
+  '  · VMA : référence − 60 à 80 s/km ;',
+  '  · répétitions courtes : référence − 80 à 100 s/km ;',
+  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.',
+  "- Ces écarts sont des maxima prudents : reste dans le bas de la fourchette si le volume récent est faible, si la charge (TSB) est très négative, ou si l'historique est court.",
+  "- La VO2max estimée et les zones FC servent à vérifier la cohérence de ces allures, jamais à en fabriquer une.",
+  "- Si l'allure de référence est inconnue, tu ne cibles AUCUNE allure : tu cibles par `hrZone` (endurance et sortie longue Z2, seuil Z4, VMA Z5, récupération Z1) et tu le dis dans le résumé.",
+  "- Si l'objectif porte un chiffre (« 10 km sous 50 min » vaut 5:00/km), cette allure objectif est l'ancre des séances de spécificité à l'approche de la course. Confronte-la à l'allure récente : si elle est bien plus rapide que ce que les données soutiennent, le plan reste ancré sur les données et tu le dis honnêtement dans le résumé.",
+  "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
+  '',
+  'PROGRESSION',
+  "- Le volume hebdomadaire n'augmente jamais de plus de 10 % d'une semaine à l'autre.",
+  '- Une semaine allégée (−20 à −30 % de volume) toutes les 3 à 4 semaines.',
+  "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
+  "- Affûtage avant une course : environ 7 à 10 jours pour un 5 ou 10 km, 10 à 14 jours pour un semi-marathon, 2 à 3 semaines pour un marathon. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
+  '',
+  'FORMAT',
+  '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
+  "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
+  "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
 ].join('\n');
 
 /** Les contraintes déclarées par l'athlète, en une ligne lisible. */
@@ -233,7 +294,14 @@ export function buildPlanMessages(
   ];
 }
 
-/** Une séance à venir, en une ligne compacte (~25 tokens). */
+/**
+ * Une séance à venir, en une ligne compacte (~25 tokens), plus une seconde
+ * ligne pour son déroulé quand elle en porte un.
+ *
+ * Le déroulé n'est pas un détail d'affichage ici : sans lui, le modèle réécrit
+ * « Seuil — 3 × 8 min » à l'aveugle et perd l'échauffement, les récupérations et
+ * les allures déjà calées. Avec lui, il ajuste ce qui existe.
+ */
 function formatUpcomingSession(session: PlanSessionDto, weekStart: string): string {
   const day = formatIsoDay(civilDaysBetween(weekStart, session.scheduledOn) + 1);
   const details: string[] = [];
@@ -242,7 +310,8 @@ function formatUpcomingSession(session: PlanSessionDto, weekStart: string): stri
   if (session.targetPaceSecPerKm !== null) details.push(formatPace(session.targetPaceSecPerKm));
 
   const suffix = details.length > 0 ? ` (${details.join(' · ')})` : '';
-  return `- ${day} : ${session.kind} — ${session.title}${suffix}`;
+  const line = `- ${day} : ${session.kind} — ${session.title}${suffix}`;
+  return session.steps === null ? line : `${line}\n  déroulé : ${formatPlanSteps(session.steps)}`;
 }
 
 /**
@@ -298,6 +367,7 @@ export function buildPlanUpdateMessages(
     COACH_RULES,
     '',
     "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
+    "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
     "Si l'instruction change une contrainte durable (nombre de séances, jour de la sortie longue, temps hebdomadaire), reporte-la dans `settings` ; sinon, omets `settings`.",
     "Le résumé décrit le plan modifié dans son ensemble, pas la modification.",
   ].join('\n');
@@ -325,6 +395,46 @@ export function buildViolationsMessage(violations: readonly string[]): string {
   ].join('\n');
 }
 
+/**
+ * Combien d'anomalies de schéma partent au modèle.
+ *
+ * Une seule étape mal formée en produit déjà plusieurs (le champ, puis
+ * l'invariant croisé), et un modèle qui se trompe de convention sur tout un plan
+ * en produirait des centaines — de quoi noyer le budget de contexte pour dire
+ * dix fois la même chose. Les premières suffisent à faire comprendre la faute.
+ */
+const MAX_REPORTED_ISSUES = 10;
+
+/**
+ * Le message de reprise sur sortie **hors schéma** : les champs en défaut, avec
+ * leur chemin.
+ *
+ * Même mécanique que {@link buildViolationsMessage}, pour une faute d'une autre
+ * nature : là, le plan est bien formé mais mal pensé ; ici, une étape ne
+ * respecte pas le contrat (deux mesures, une allure ET une zone, des bornes
+ * inversées). Le chemin est ce qui rend la correction possible — « weeks.3…
+ * .steps.1 » désigne l'étape à reprendre parmi les deux cent cinquante du plan.
+ */
+export function buildSchemaIssuesMessage(issues: readonly AiOutputIssue[]): string {
+  const listed = issues
+    .slice(0, MAX_REPORTED_ISSUES)
+    .map((issue) => `- ${issue.path.join('.') || '(racine)'} : ${issue.message}`);
+
+  if (issues.length > MAX_REPORTED_ISSUES) {
+    listed.push(`- … et ${issues.length - MAX_REPORTED_ISSUES} autres anomalies du même ordre.`);
+  }
+
+  return [
+    // Aucune anomalie listée : le contenu n'était même pas du JSON (cf.
+    // `AiInvalidOutputError`), il n'y a pas de champ à désigner.
+    listed.length === 0
+      ? "Ta réponse n'était pas du JSON exploitable."
+      : 'Ta réponse ne respecte pas le format demandé, ces champs sont en défaut :',
+    ...listed,
+    'Régénère le plan complet en corrigeant ces points, dans le même format.',
+  ].join('\n');
+}
+
 /*
  * Génération.
  */
@@ -345,10 +455,20 @@ type GenerationOptions<T> = {
 };
 
 /**
- * Génère, vérifie les règles métier, et reprend une fois en cas de violation.
+ * Génère, vérifie le contrat **et** les règles métier, et reprend une fois en
+ * cas de manquement — quel qu'en soit le genre.
  *
- * @throws {AiInvalidOutputError} si la seconde tentative viole encore les
- * règles — le message porte la liste, pour que l'UI dise ce qui n'a pas pu être
+ * Les deux échecs se rattrapent de la même façon parce qu'ils ont la même
+ * cause : un petit modèle qui a mal lu une consigne. Seul le message de reprise
+ * diffère, selon qu'on lui reproche un champ ou une décision d'entraîneur.
+ *
+ * Les autres erreurs du socle IA remontent immédiatement : un coach injoignable
+ * ({@link AiUnavailableError}) ou une réponse HTTP cassée
+ * ({@link AiResponseError}) ne s'arrangeront pas en redemandant.
+ *
+ * @throws {AiInvalidOutputError} si la seconde tentative reste hors schéma (
+ * l'erreur d'origine, avec ses anomalies) ou viole encore les règles métier —
+ * le message porte alors la liste, pour que l'UI dise ce qui n'a pas pu être
  * respecté plutôt qu'« erreur ».
  */
 async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Promise<T> {
@@ -356,13 +476,20 @@ async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Prom
   let violations: string[] = [];
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const output = await chatCompletionJson<T>({
-      messages,
-      schemaName: options.schemaName,
-      jsonSchema: options.jsonSchema,
-      schema: options.schema,
-      temperature: PLAN_TEMPERATURE,
-    });
+    let output: T;
+    try {
+      output = await chatCompletionJson<T>({
+        messages,
+        schemaName: options.schemaName,
+        jsonSchema: options.jsonSchema,
+        schema: options.schema,
+        temperature: PLAN_TEMPERATURE,
+      });
+    } catch (error) {
+      if (!(error instanceof AiInvalidOutputError) || attempt === MAX_ATTEMPTS) throw error;
+      messages.push({ role: 'user', content: buildSchemaIssuesMessage(error.issues) });
+      continue;
+    }
 
     violations = validatePlanBusinessRules(options.weeksOf(output), options.expectationsOf(output));
     if (violations.length === 0) return output;

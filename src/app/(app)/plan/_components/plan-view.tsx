@@ -7,7 +7,7 @@ import type { AiUnavailableReason } from "@/lib/ai/errors";
 
 import { formatDuration } from "../../_lib/format";
 import { formatCivilDay, formatIsoDay } from "../_lib/format-plan";
-import { groupPlanWeeks, planEndsOn } from "../_lib/plan-weeks";
+import { formatPlanProgress, groupPlanWeeks, planEndsOn } from "../_lib/plan-weeks";
 
 import { PlanAdjustForm } from "./plan-adjust-form";
 import { PlanArchiveForm } from "./plan-archive-form";
@@ -74,7 +74,9 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
     <>
       <Panel
         title="Objectif"
-        meta={<span className="num">{plan.weeks} semaines</span>}
+        // Où en est le plan, plutôt que sa seule longueur : c'est la première
+        // question qu'on se pose en ouvrant la page.
+        meta={<span className="num">{formatPlanProgress(weeks)}</span>}
       >
         <div className="flex flex-wrap items-center gap-2">
           <GoalBadge plan={plan} />
@@ -110,11 +112,14 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
         )}
       </Panel>
 
-      <div className="flex flex-col gap-3">
+      {/* Les semaines forment une section à part entière : elles méritent un
+          intitulé, pas d'être posées entre deux panneaux. */}
+      <section className="flex flex-col gap-3">
+        <h2 className="eyebrow px-0.5">Programme</h2>
         {weeks.map((week) => (
           <PlanWeekCard key={week.startsOn} week={week} today={today} />
         ))}
-      </div>
+      </section>
 
       <Panel title="Ajuster le plan">
         {unavailableReason === null ? (

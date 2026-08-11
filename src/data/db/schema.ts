@@ -13,6 +13,8 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+
 /**
  * Schéma Drizzle de Trainarr.
  *
@@ -277,8 +279,14 @@ export const plans = pgTable(
 );
 
 /**
- * Une séance planifiée : une case du calendrier, décrite en texte tel que l'UI
- * l'affiche (pas de modèle de blocs structurés — le coach rédige, on restitue).
+ * Une séance planifiée : une case du calendrier.
+ *
+ * Deux descriptions cohabitent, et c'est voulu : les textes libres (`warmup`,
+ * `recovery`, `cooldown`) que le coach rédige et que l'UI restitue tels quels,
+ * et `steps`, le déroulé **structuré** en blocs d'étapes (cf.
+ * `lib/plan-steps/schema`) qu'un lecteur de montre peut exécuter. `steps` est
+ * nullable : les séances déjà planifiées n'en portent pas, et le coach peut
+ * proposer une séance qui ne se structure pas (« sortie libre au feeling »).
  *
  * `plan_id` est **nullable** : une séance peut exister hors plan (jeu de
  * développement, séances historiques antérieures au premier plan). Rattachée à
@@ -307,6 +315,15 @@ export const plannedSessions = pgTable(
     warmup: text('warmup'),
     recovery: text('recovery'),
     cooldown: text('cooldown'),
+    /**
+     * Déroulé structuré de la séance, `null` quand elle n'en a pas.
+     *
+     * En `jsonb` plutôt qu'en tables `blocks`/`steps` : la donnée est lue et
+     * écrite d'un seul tenant avec sa séance, jamais interrogée par étape — deux
+     * tables de plus coûteraient deux jointures pour zéro requête gagnée. Sa
+     * forme est tenue par Zod à l'écriture (`planSessionStepsSchema`).
+     */
+    steps: jsonb('steps').$type<PlanSessionSteps>(),
     volumeM: real('volume_m'),
     durationS: integer('duration_s'),
     /** Activité qui a réalisé la séance. `null` tant qu'elle n'est pas faite (ou pas rapprochée). */

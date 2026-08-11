@@ -28,6 +28,7 @@ import { z } from 'zod';
 
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
+import { PLAN_STEP_BOUNDS, PLAN_STEP_ROLES, planSessionStepsSchema } from '@/lib/plan-steps/schema';
 
 import { formatIsoDay } from './format';
 
@@ -60,6 +61,63 @@ export const PLAN_OUTPUT_BOUNDS = {
  * Schémas Zod.
  */
 
+/**
+ * Le déroulé d'une séance **tel que le modèle l'écrit**, puis normalisé vers le
+ * contrat du projet ({@link planSessionStepsSchema}).
+ *
+ * Deux formes pour une même donnée, et c'est délibéré :
+ *
+ * - côté modèle, un champ sans valeur est **absent** — c'est le style du reste
+ *   de ce fichier (cf. `targetPaceSecPerKm`), celui que la conversion GBNF de
+ *   llama.cpp traduit sans surprise, et celui qui évite de faire écrire sept
+ *   `null` par étape à un petit modèle ;
+ * - côté application, toutes les clés sont présentes, à `null` quand elles ne
+ *   portent rien.
+ *
+ * La transformation ne fait que ce passage-là (plus l'arrondi des entiers, pour
+ * les providers qui ne respectent pas `response_format`). **Aucun invariant
+ * n'est redéclaré ici** : exclusivité distance/durée, exclusivité allure/zone,
+ * bornes et tailles sont vérifiées par le `pipe` en sortie, à la source.
+ */
+const planStepOutputSchema = z
+  .object({
+    role: z.enum(PLAN_STEP_ROLES),
+    distanceM: z.number().optional(),
+    durationS: z.number().optional(),
+    paceMinSecPerKm: z.number().optional(),
+    paceMaxSecPerKm: z.number().optional(),
+    hrZone: z.number().optional(),
+    note: z.string().optional(),
+  })
+  .transform((step) => ({
+    role: step.role,
+    distanceM: step.distanceM ?? null,
+    durationS: step.durationS === undefined ? null : Math.round(step.durationS),
+    paceMinSecPerKm:
+      step.paceMinSecPerKm === undefined ? null : Math.round(step.paceMinSecPerKm),
+    paceMaxSecPerKm:
+      step.paceMaxSecPerKm === undefined ? null : Math.round(step.paceMaxSecPerKm),
+    hrZone: step.hrZone === undefined ? null : Math.round(step.hrZone),
+    note: trimmedOrNull(step.note),
+  }));
+
+const planSessionStepsOutputSchema = z
+  .array(
+    z.object({
+      // Facultatif : la très grande majorité des blocs ne se répètent pas, et
+      // `repeat: 1` partout est du bruit que le modèle finit par mal recopier.
+      repeat: z.number().optional(),
+      steps: z.array(planStepOutputSchema),
+    }),
+  )
+  .transform((blocks) =>
+    blocks.map((block) => ({
+      repeat: block.repeat === undefined ? 1 : Math.round(block.repeat),
+      steps: block.steps,
+    })),
+  )
+  .pipe(planSessionStepsSchema);
+
 const planSessionSchema = z.object({
   /** Jour ISO : 1 = lundi … 7 = dimanche. */
   day: z.number().int().min(PLAN_OUTPUT_BOUNDS.day.min).max(PLAN_OUTPUT_BOUNDS.day.max),
@@ -84,6 +142,8 @@ const planSessionSchema = z.object({
     .min(PLAN_OUTPUT_BOUNDS.durationMin.min)
     .max(PLAN_OUTPUT_BOUNDS.durationMin.max)
     .optional(),
+  /** Déroulé structuré. Absent sur une séance qui n'en appelle pas (footing simple). */
+  steps: planSessionStepsOutputSchema.optional(),
 });
 
 const planWeekSchema = z.object({
@@ -156,6 +216,85 @@ export type PlanSettingsOutput = z.infer<typeof planSettingsPatchSchema>;
  * échauffement pour un footing qui n'en a pas.
  */
 
+/**
+ * Une étape du déroulé. Même style que le reste du fichier : les champs qui
+ * peuvent manquer sont simplement hors de `required` — pas de `type: [..., 'null']`,
+ * que la conversion GBNF traduit mal et qui ferait écrire des `null` au modèle.
+ *
+ * Les exclusions (une mesure, une cible) ne sont pas exprimables en JSON Schema
+ * sans `oneOf` ; elles sont laissées à Zod, qui les tient depuis
+ * `lib/plan-steps/schema`. La grammaire borne, elle ne prouve pas.
+ */
+const stepJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['role'],
+  properties: {
+    role: {
+      type: 'string',
+      enum: [...PLAN_STEP_ROLES],
+      description: 'warmup = échauffement, run = effort, recover = récupération, cooldown = retour au calme',
+    },
+    distanceM: {
+      type: 'number',
+      minimum: PLAN_STEP_BOUNDS.distanceM.min,
+      maximum: PLAN_STEP_BOUNDS.distanceM.max,
+      description: 'mètres — exclusif de durationS',
+    },
+    durationS: {
+      type: 'integer',
+      minimum: PLAN_STEP_BOUNDS.durationS.min,
+      maximum: PLAN_STEP_BOUNDS.durationS.max,
+      description: 'secondes — exclusif de distanceM',
+    },
+    paceMinSecPerKm: {
+      type: 'integer',
+      minimum: PLAN_STEP_BOUNDS.paceSecPerKm.min,
+      maximum: PLAN_STEP_BOUNDS.paceSecPerKm.max,
+      description: 'borne rapide de l’allure, en s/km — va avec paceMaxSecPerKm',
+    },
+    paceMaxSecPerKm: {
+      type: 'integer',
+      minimum: PLAN_STEP_BOUNDS.paceSecPerKm.min,
+      maximum: PLAN_STEP_BOUNDS.paceSecPerKm.max,
+      description: 'borne lente de l’allure, en s/km',
+    },
+    hrZone: {
+      type: 'integer',
+      minimum: PLAN_STEP_BOUNDS.hrZone.min,
+      maximum: PLAN_STEP_BOUNDS.hrZone.max,
+      description: 'zone cardiaque 1 à 5 — exclusive d’une allure',
+    },
+    note: { type: 'string', maxLength: PLAN_STEP_BOUNDS.noteChars },
+  },
+} as const;
+
+/** Le déroulé complet : des blocs d'étapes, sans imbrication possible. */
+const stepsJsonSchema = {
+  type: 'array',
+  minItems: PLAN_STEP_BOUNDS.blocksPerSession.min,
+  maxItems: PLAN_STEP_BOUNDS.blocksPerSession.max,
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['steps'],
+    properties: {
+      repeat: {
+        type: 'integer',
+        minimum: PLAN_STEP_BOUNDS.repeat.min,
+        maximum: PLAN_STEP_BOUNDS.repeat.max,
+        description: 'nombre de passages du bloc, 1 par défaut',
+      },
+      steps: {
+        type: 'array',
+        minItems: PLAN_STEP_BOUNDS.stepsPerBlock.min,
+        maxItems: PLAN_STEP_BOUNDS.stepsPerBlock.max,
+        items: stepJsonSchema,
+      },
+    },
+  },
+} as const;
+
 const sessionJsonSchema = {
   type: 'object',
   additionalProperties: false,
@@ -187,6 +326,7 @@ const sessionJsonSchema = {
       minimum: PLAN_OUTPUT_BOUNDS.durationMin.min,
       maximum: PLAN_OUTPUT_BOUNDS.durationMin.max,
     },
+    steps: stepsJsonSchema,
   },
 } as const;
 
@@ -294,6 +434,10 @@ export function mapPlanWeeksToSessions(
         targetPaceSecPerKm: session.targetPaceSecPerKm ?? null,
         volumeM: session.distanceKm === undefined ? null : Math.round(session.distanceKm * 1000),
         durationS: session.durationMin === undefined ? null : Math.round(session.durationMin * 60),
+        // Déjà normalisé et validé par le schéma : le DAL le revalide malgré
+        // tout (il ne fait confiance à aucun appelant) et en dérive volume et
+        // durée quand la séance ne les déclare pas.
+        steps: session.steps ?? null,
       });
     }
   });
@@ -340,6 +484,93 @@ function weekSessionMeasures(week: PlanWeekOutput): number[] | null {
     return week.sessions.map((session) => session.durationMin ?? 0);
   }
   return null;
+}
+
+/**
+ * Ce qui, dans un `kind`, désigne une séance de qualité.
+ *
+ * Le `kind` est une chaîne libre, mais le prompt en impose le vocabulaire
+ * (« Seuil », « VMA », « Répétitions », « Côtes »…) : ces racines couvrent ce
+ * vocabulaire et ses variantes courantes. Le doute profite au modèle — un
+ * libellé non reconnu n'entraîne aucune violation plutôt qu'une régénération de
+ * plusieurs minutes pour une séance peut-être correcte.
+ *
+ * « Spécifique » n'en fait délibérément pas partie : le prompt encourage la
+ * « sortie longue spécifique », qui est une séance d'endurance avec un bloc à
+ * allure objectif — la classer en qualité lui réclamerait un déroulé complet
+ * qu'elle n'a pas à porter.
+ */
+const INTENSITY_KIND_ROOTS = [
+  'vma',
+  'seuil',
+  'tempo',
+  'fractionn',
+  'interval',
+  'repetition',
+  'cote',
+  'piste',
+] as const;
+
+const COMBINING_MARKS = /[\u0300-\u036f]/gu;
+
+/** Minuscules sans accents : `Côtes`, `cotes` et `COTES` se reconnaissent pareil. */
+function normalizeKind(kind: string): string {
+  return kind
+    .normalize('NFD')
+    .replace(COMBINING_MARKS, '')
+    .toLowerCase();
+}
+
+function isIntensitySession(session: PlanSessionOutput): boolean {
+  const kind = normalizeKind(session.kind);
+  return INTENSITY_KIND_ROOTS.some((root) => kind.includes(root));
+}
+
+/**
+ * Ce qui cloche dans le **déroulé** d'une séance.
+ *
+ * Deux fautes d'entraîneur, invisibles pour la grammaire comme pour Zod :
+ * envoyer un athlète sur des efforts durs sans l'échauffer ni le ramener au
+ * calme, et répéter un bloc d'effort sans récupération entre les passages (un
+ * « 6 × 800 m » enchaîné sans respirer n'est pas la séance décrite).
+ */
+function sessionStepViolations(session: PlanSessionOutput, label: string): string[] {
+  const violations: string[] = [];
+  const where = `${label}, séance du ${formatIsoDay(session.day)} (${session.kind})`;
+  const { steps } = session;
+
+  if (isIntensitySession(session)) {
+    if (steps === undefined) {
+      violations.push(
+        `${where} : une séance de qualité exige un déroulé \`steps\` — échauffement, blocs d'effort avec leurs récupérations, retour au calme.`,
+      );
+    } else {
+      const roles = new Set(steps.flatMap((block) => block.steps.map((step) => step.role)));
+      if (!roles.has('warmup')) {
+        violations.push(
+          `${where} : aucun échauffement — commence par une étape \`warmup\` de 10 à 20 min avant les efforts.`,
+        );
+      }
+      if (!roles.has('cooldown')) {
+        violations.push(
+          `${where} : aucun retour au calme — termine par une étape \`cooldown\` de 5 à 10 min.`,
+        );
+      }
+    }
+  }
+
+  // Un seul message par séance : deux blocs fautifs décrivent la même erreur, et
+  // la répéter dilue la consigne de reprise.
+  const withoutRecovery = steps?.find(
+    (block) => block.repeat > 1 && !block.steps.some((step) => step.role === 'recover'),
+  );
+  if (withoutRecovery !== undefined) {
+    violations.push(
+      `${where} : le bloc répété ${withoutRecovery.repeat} fois n'a pas de récupération — chaque passage porte son effort ET son étape \`recover\`.`,
+    );
+  }
+
+  return violations;
 }
 
 /**
@@ -393,6 +624,12 @@ export function validatePlanBusinessRules(
         violations.push(`${label} : deux séances tombent le ${formatIsoDay(day)}, un seul jour chacune.`);
       }
       seen.add(day);
+    }
+
+    // Avant les règles de sortie longue, qui sortent de la semaine par `return` :
+    // le déroulé d'une séance se juge quelle que soit la place du long run.
+    for (const session of week.sessions) {
+      violations.push(...sessionStepViolations(session, label));
     }
 
     // Sur une semaine entamée dont le jour de sortie longue est déjà passé, la

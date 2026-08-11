@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
+
 import {
   PLAN_OUTPUT_BOUNDS,
   mapPlanWeeksToSessions,
@@ -14,6 +16,32 @@ import {
 /** Une séance minimale — chaque test n'en précise que ce qu'il éprouve. */
 function session(day: number, overrides: Partial<PlanWeekOutput['sessions'][number]> = {}) {
   return { day, kind: 'Endurance', title: 'Footing', ...overrides };
+}
+
+/** Une étape normalisée, telle qu'elle sort du schéma : sept clés, `null` pour absent. */
+function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
+  return {
+    role,
+    distanceM: null,
+    durationS: null,
+    paceMinSecPerKm: null,
+    paceMaxSecPerKm: null,
+    hrZone: null,
+    note: null,
+    ...overrides,
+  };
+}
+
+/** Le déroulé type d'une séance de qualité : échauffement, blocs, retour au calme. */
+function qualitySteps(overrides: { warmup?: boolean; cooldown?: boolean; recover?: boolean } = {}) {
+  const { warmup = true, cooldown = true, recover = true } = overrides;
+  const effort = step('run', { durationS: 480, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 });
+
+  return [
+    ...(warmup ? [{ repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] }] : []),
+    { repeat: 4, steps: recover ? [effort, step('recover', { durationS: 120 })] : [effort] },
+    ...(cooldown ? [{ repeat: 1, steps: [step('cooldown', { durationS: 600 })] }] : []),
+  ] satisfies PlanSessionSteps;
 }
 
 /** Une semaine de `days.length` séances, une par jour donné. */
@@ -59,6 +87,117 @@ describe('planOutputSchema', () => {
   });
 });
 
+describe('planOutputSchema — déroulé structuré', () => {
+  /** Le déroulé tel que le modèle l'écrit : les champs sans valeur sont absents. */
+  function parseSteps(steps: unknown) {
+    return planOutputSchema.safeParse({
+      summary: 'x',
+      weeks: [{ sessions: [{ day: 3, kind: 'Seuil', title: '3 × 8 min', steps }] }],
+    });
+  }
+
+  it('accepte un déroulé et le normalise : clés absentes à `null`, `repeat` à 1', () => {
+    const result = parseSteps([
+      { steps: [{ role: 'warmup', durationS: 900, hrZone: 2 }] },
+      {
+        repeat: 4,
+        steps: [
+          { role: 'run', distanceM: 1_000, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 },
+          { role: 'recover', durationS: 120, note: '  trot souple  ' },
+        ],
+      },
+    ]);
+
+    expect(result.success).toBe(true);
+    const parsed = result.data?.weeks[0].sessions[0].steps;
+    expect(parsed?.[0]).toEqual({
+      repeat: 1,
+      steps: [
+        {
+          role: 'warmup',
+          distanceM: null,
+          durationS: 900,
+          paceMinSecPerKm: null,
+          paceMaxSecPerKm: null,
+          hrZone: 2,
+          note: null,
+        },
+      ],
+    });
+    expect(parsed?.[1].repeat).toBe(4);
+    expect(parsed?.[1].steps[1].note).toBe('trot souple');
+  });
+
+  it('laisse `steps` absent sur une séance qui n’en porte pas', () => {
+    const parsed = planOutputSchema.parse({ summary: 'x', weeks: [week([7])] });
+
+    expect(parsed.weeks[0].sessions[0].steps).toBeUndefined();
+  });
+
+  it('arrondit les valeurs entières que le contrat exige', () => {
+    const result = parseSteps([{ steps: [{ role: 'run', durationS: 150.4 }] }]);
+
+    expect(result.data?.weeks[0].sessions[0].steps?.[0].steps[0].durationS).toBe(150);
+  });
+
+  it('refuse une étape qui porte ses deux mesures', () => {
+    expect(parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, durationS: 300 }] }]).success).toBe(
+      false,
+    );
+  });
+
+  it('refuse une étape sans aucune mesure', () => {
+    expect(parseSteps([{ steps: [{ role: 'run', hrZone: 3 }] }]).success).toBe(false);
+  });
+
+  it('refuse une allure qui ne porte qu’une de ses bornes', () => {
+    expect(
+      parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 300 }] }]).success,
+    ).toBe(false);
+  });
+
+  it('refuse des bornes d’allure inversées', () => {
+    expect(
+      parseSteps([
+        { steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 320, paceMaxSecPerKm: 300 }] },
+      ]).success,
+    ).toBe(false);
+  });
+
+  it('refuse une allure et une zone cardiaque sur la même étape', () => {
+    expect(
+      parseSteps([
+        {
+          steps: [
+            { role: 'run', distanceM: 1_000, paceMinSecPerKm: 300, paceMaxSecPerKm: 310, hrZone: 4 },
+          ],
+        },
+      ]).success,
+    ).toBe(false);
+  });
+
+  it('refuse une zone cardiaque hors des cinq zones du projet', () => {
+    expect(parseSteps([{ steps: [{ role: 'run', durationS: 600, hrZone: 6 }] }]).success).toBe(false);
+  });
+
+  it('refuse une allure aberrante, un rôle inventé et un bloc vide', () => {
+    expect(
+      parseSteps([
+        { steps: [{ role: 'run', distanceM: 400, paceMinSecPerKm: 30, paceMaxSecPerKm: 30 }] },
+      ]).success,
+    ).toBe(false);
+    expect(parseSteps([{ steps: [{ role: 'sprint', distanceM: 400 }] }]).success).toBe(false);
+    expect(parseSteps([{ steps: [] }]).success).toBe(false);
+  });
+
+  it('refuse un nombre de répétitions hors bornes', () => {
+    expect(parseSteps([{ repeat: 0, steps: [{ role: 'run', distanceM: 400 }] }]).success).toBe(false);
+    expect(parseSteps([{ repeat: 21, steps: [{ role: 'run', distanceM: 400 }] }]).success).toBe(
+      false,
+    );
+  });
+});
+
 describe('planUpdateOutputSchema', () => {
   it('accepte une sortie sans `settings` : rien ne change côté réglages', () => {
     const parsed = planUpdateOutputSchema.parse({ summary: 'Ajusté.', weeks: [week([7])] });
@@ -81,6 +220,17 @@ describe('JSON Schema', () => {
     const json = JSON.stringify(planJsonSchema);
     expect(json).toContain('"additionalProperties":false');
     expect(planJsonSchema.required).toEqual(['summary', 'weeks']);
+  });
+
+  it('déclare le déroulé sans type nullable, comme le reste du fichier', () => {
+    const json = JSON.stringify(planJsonSchema);
+
+    // Un bloc exige ses étapes, une étape exige son rôle ; tout le reste est
+    // facultatif par absence — c'est ce que la conversion GBNF traduit.
+    expect(json).toContain('"required":["steps"]');
+    expect(json).toContain('"required":["role"]');
+    expect(json).toContain('"enum":["warmup","run","recover","cooldown"]');
+    expect(json).not.toContain('null');
   });
 
   it('reste cohérent avec les bornes partagées par le schéma Zod', () => {
@@ -143,7 +293,18 @@ describe('mapPlanWeeksToSessions', () => {
       targetPaceSecPerKm: 330,
       volumeM: 18_400,
       durationS: 6_300,
+      steps: null,
     });
+  });
+
+  it('transmet le déroulé au DAL tel quel — c’est lui qui en dérive volume et durée', () => {
+    const steps = qualitySteps();
+    const sessions = mapPlanWeeksToSessions(
+      [{ sessions: [session(4, { kind: 'Seuil', steps })] }],
+      '2026-08-17',
+    );
+
+    expect(sessions[0].steps).toEqual(steps);
   });
 });
 
@@ -244,6 +405,117 @@ describe('validatePlanBusinessRules', () => {
     ];
 
     expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
+  });
+
+  describe('déroulé des séances', () => {
+    /** Une semaine conforme dont la séance du jeudi est celle qu'on éprouve. */
+    function weekWith(quality: Partial<PlanWeekOutput['sessions'][number]>): PlanWeekOutput {
+      return {
+        sessions: [
+          session(2, { distanceKm: 8 }),
+          session(4, { kind: 'Seuil', title: '4 × 8 min', distanceKm: 10, ...quality }),
+          session(7, { kind: 'Sortie longue', title: '16 km', distanceKm: 16 }),
+        ],
+      };
+    }
+
+    const conforming = week([2, 4, 7], [8, 10, 18]);
+
+    it('ne relève rien sur une séance de qualité complète', () => {
+      expect(
+        validatePlanBusinessRules([weekWith({ steps: qualitySteps() }), conforming], EXPECTED),
+      ).toEqual([]);
+    });
+
+    it('relève une séance d’intensité livrée sans déroulé', () => {
+      const violations = validatePlanBusinessRules([weekWith({}), conforming], EXPECTED);
+
+      expect(violations).toContain(
+        "Semaine 1, séance du jeudi (Seuil) : une séance de qualité exige un déroulé `steps` — échauffement, blocs d'effort avec leurs récupérations, retour au calme.",
+      );
+    });
+
+    it('relève une séance dure sans échauffement, et sans retour au calme', () => {
+      const violations = validatePlanBusinessRules(
+        [
+          weekWith({
+            kind: 'VMA',
+            title: '5 × 3 min',
+            steps: qualitySteps({ warmup: false, cooldown: false }),
+          }),
+          conforming,
+        ],
+        EXPECTED,
+      );
+
+      expect(violations).toContain(
+        'Semaine 1, séance du jeudi (VMA) : aucun échauffement — commence par une étape `warmup` de 10 à 20 min avant les efforts.',
+      );
+      expect(violations).toContain(
+        'Semaine 1, séance du jeudi (VMA) : aucun retour au calme — termine par une étape `cooldown` de 5 à 10 min.',
+      );
+    });
+
+    it('reconnaît le vocabulaire des séances de qualité, accents compris', () => {
+      for (const kind of ['Côtes', 'Fractionné', 'VMA · piste', 'Répétitions courtes']) {
+        expect(
+          validatePlanBusinessRules([weekWith({ kind }), conforming], EXPECTED).join(' '),
+        ).toContain('exige un déroulé');
+      }
+    });
+
+    it('ne réclame pas de déroulé à une sortie longue spécifique', () => {
+      // Libellé que le prompt encourage : une sortie longue avec un bloc à
+      // allure objectif reste une séance d'endurance, pas une séance de qualité.
+      const weeks: PlanWeekOutput[] = [
+        {
+          sessions: [
+            session(2, { distanceKm: 8 }),
+            session(4, { kind: 'Endurance fondamentale', distanceKm: 10 }),
+            session(7, { kind: 'Sortie longue spécifique', title: '18 km', distanceKm: 18 }),
+          ],
+        },
+        conforming,
+      ];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED)).toEqual([]);
+    });
+
+    it('relève un bloc répété sans étape de récupération', () => {
+      const violations = validatePlanBusinessRules(
+        [weekWith({ steps: qualitySteps({ recover: false }) }), conforming],
+        EXPECTED,
+      );
+
+      expect(violations).toContain(
+        "Semaine 1, séance du jeudi (Seuil) : le bloc répété 4 fois n'a pas de récupération — chaque passage porte son effort ET son étape `recover`.",
+      );
+    });
+
+    it('ne réclame ni échauffement ni déroulé à une séance facile', () => {
+      const easy: PlanWeekOutput = {
+        sessions: [
+          session(2, { distanceKm: 8 }),
+          session(4, { kind: 'Endurance fondamentale', distanceKm: 10 }),
+          session(7, { kind: 'Sortie longue', title: '16 km', distanceKm: 16 }),
+        ],
+      };
+
+      expect(validatePlanBusinessRules([easy, conforming], EXPECTED)).toEqual([]);
+    });
+
+    it('juge le déroulé même quand la semaine perd sa sortie longue', () => {
+      // La règle de sortie longue sort de la semaine par `return` : les étapes
+      // doivent avoir été jugées avant.
+      const weeks: PlanWeekOutput[] = [
+        { sessions: [session(2, { distanceKm: 8 }), session(4, { kind: 'Seuil', distanceKm: 10 }), session(5, { distanceKm: 16 })] },
+        conforming,
+      ];
+      const violations = validatePlanBusinessRules(weeks, EXPECTED);
+
+      expect(violations).toContain('Semaine 1 : aucune séance le dimanche, jour de la sortie longue.');
+      expect(violations.join(' ')).toContain('exige un déroulé');
+    });
   });
 
   describe('première semaine entamée', () => {
