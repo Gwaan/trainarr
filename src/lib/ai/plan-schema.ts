@@ -1761,8 +1761,16 @@ export function planWeeksPostProcessing(
  * envoyer un athlète sur des efforts durs sans l'échauffer ni le ramener au
  * calme, et répéter un bloc d'effort sans récupération entre les passages (un
  * « 6 × 800 m » enchaîné sans respirer n'est pas la séance décrite).
+ *
+ * Exportée pour le remplissage d'un **créneau de qualité** (`quality-fill.ts`),
+ * qui juge une séance seule : une séance écrite créneau par créneau se juge
+ * exactement comme celle d'un plan entier, et deux définitions de ces règles
+ * finiraient par diverger.
+ *
+ * @param label ce qui situe la séance dans son contexte (« Semaine 3 ») — il
+ * préfixe chaque violation.
  */
-function sessionStepViolations(session: PlanSessionOutput, label: string): string[] {
+export function sessionStepViolations(session: PlanSessionOutput, label: string): string[] {
   const violations: string[] = [];
   const where = `${label}, séance du ${formatIsoDay(session.day)} (${session.kind})`;
   const { steps } = session;
