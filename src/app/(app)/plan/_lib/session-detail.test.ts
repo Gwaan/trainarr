@@ -110,8 +110,98 @@ describe('formatStepTarget', () => {
     expect(formatStepTarget(step({ hrZone: 2 }))).toBe('Z2');
   });
 
+  it('rend des battements dès que la FC max est connue', () => {
+    // C'est ce qui se surveille au poignet : « Z2 » ne dit rien à qui court.
+    expect(formatStepTarget(step({ hrZone: 2 }), 184)).toBe('120–145 bpm');
+  });
+
+  it('retombe sur le rang de zone quand rien n’est calculable', () => {
+    expect(formatStepTarget(step({ hrZone: 2 }), null)).toBe('Z2');
+    // Zone sans créneau de prescription déclaré : rien n'est inventé.
+    expect(formatStepTarget(step({ hrZone: 4 }), 184)).toBe('Z4');
+  });
+
   it('rend null quand l’étape n’a pas de cible', () => {
     expect(formatStepTarget(step())).toBeNull();
+  });
+});
+
+/**
+ * L'affichage d'une séance d'endurance prescrite en fréquence cardiaque.
+ *
+ * La règle, décidée avec l'athlète : **la cible FC en premier, l'allure en
+ * indication**. C'est la FC qu'on suit en courant ; l'allure ne sert plus qu'à
+ * situer le temps que la séance prendra, et le `~` le dit.
+ */
+describe('séance prescrite en fréquence cardiaque', () => {
+  /** Un footing de 7 km prescrit en zone 2, avec son allure indicative. */
+  const easy = session({
+    kind: 'Endurance fondamentale',
+    title: 'Footing en endurance',
+    volumeM: 7000,
+    durationS: 3000,
+    targetPaceSecPerKm: 428,
+    steps: [{ repeat: 1, steps: [step({ distanceM: 7000, hrZone: 2 })] }],
+  });
+
+  it('annonce la cible FC avant l’allure sur la ligne repliée', () => {
+    expect(planSessionSummary(easy, 184)).toEqual([
+      '7 km',
+      '50 min',
+      '120–145 bpm',
+      '~7:08/km',
+    ]);
+  });
+
+  it('nomme l’allure « indicative » dans le récapitulatif, cible FC devant', () => {
+    expect(planSessionDetail(easy, 184).totals).toEqual([
+      { label: 'Distance', value: '7 km' },
+      { label: 'Durée', value: '50 min' },
+      { label: 'Cible FC', value: '120–145 bpm' },
+      { label: 'Allure indicative', value: '~7:08/km' },
+    ]);
+  });
+
+  it('garde l’allure cible telle quelle sans FC max — le repli', () => {
+    expect(planSessionSummary(easy, null)).toEqual(['7 km', '50 min', '@ 7:08/km']);
+    expect(planSessionDetail(easy, null).totals).toEqual([
+      { label: 'Distance', value: '7 km' },
+      { label: 'Durée', value: '50 min' },
+      { label: 'Allure cible', value: '7:08/km' },
+    ]);
+  });
+
+  it('n’annonce aucune cible FC de séance quand les étapes n’en partagent pas une', () => {
+    // Une sortie longue spécifique : son corps est en FC, son bloc à allure
+    // objectif reste en allure. Aucune cible unique à annoncer — chaque étape
+    // dit la sienne.
+    const mixed = session({
+      volumeM: 12000,
+      targetPaceSecPerKm: 428,
+      steps: [
+        { repeat: 1, steps: [step({ distanceM: 9000, hrZone: 2 })] },
+        {
+          repeat: 1,
+          steps: [step({ distanceM: 3000, paceMinSecPerKm: 295, paceMaxSecPerKm: 320 })],
+        },
+      ],
+    });
+
+    expect(planSessionSummary(mixed, 184)).toEqual(['12 km', '@ 7:08/km']);
+  });
+
+  it('ignore les étapes qui ne sont pas du corps de séance', () => {
+    // Échauffement et récupération n'ont pas voix au chapitre : la cible de la
+    // séance est celle de sa course.
+    const withEnvelope = session({
+      volumeM: 8000,
+      steps: [
+        { repeat: 1, steps: [step({ role: 'warmup', distanceM: 1000 })] },
+        { repeat: 1, steps: [step({ distanceM: 7000, hrZone: 2 })] },
+      ],
+    });
+
+    expect(planSessionSummary(withEnvelope, 184)).toEqual(['8 km', '120–145 bpm']);
   });
 });
 

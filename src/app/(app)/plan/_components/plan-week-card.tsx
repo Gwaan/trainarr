@@ -19,7 +19,16 @@ import { PlanSessionRow } from "./plan-session-row";
  * sans rien emprunter au CTA de la page : c'est la même grammaire que l'item
  * actif de la navigation.
  */
-export function PlanWeekCard({ week, today }: { week: PlanWeekView; today: string }) {
+export function PlanWeekCard({
+  week,
+  today,
+  maxHrBpm,
+}: {
+  week: PlanWeekView;
+  today: string;
+  /** FC max du profil, `null` sans saisie — cf. `PlanSessionRow`. */
+  maxHrBpm: number | null;
+}) {
   const isCurrent = week.status === "current";
   const summary = formatWeekSummary(week);
 
@@ -68,7 +77,12 @@ export function PlanWeekCard({ week, today }: { week: PlanWeekView; today: strin
       {week.sessions.length > 0 ? (
         <ul className="border-t border-border">
           {week.sessions.map((session) => (
-            <PlanSessionRow key={session.id} session={session} today={today} />
+            <PlanSessionRow
+              key={session.id}
+              session={session}
+              today={today}
+              maxHrBpm={maxHrBpm}
+            />
           ))}
         </ul>
       ) : (

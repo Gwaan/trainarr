@@ -90,7 +90,7 @@ import 'server-only';
  */
 
 import { env } from '@/config/env';
-import { todayCivilDate } from '@/data/athlete';
+import { getAthleteProfile, todayCivilDate } from '@/data/athlete';
 import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/data/plans';
 // Formateurs de `@/lib/ai/format` : purs, sans `server-only`, et déjà porteurs
 // des conventions françaises du projet (allure `m:ss/km`). Les redéclarer ici
@@ -228,12 +228,16 @@ function singleRunSteps(session: PlanSessionDto): PlanSessionSteps | null {
  *    n'y a aucune étape à écrire, et fabriquer une syntaxe à partir d'un
  *    intitulé reviendrait à inventer la séance. Ce qui manque au plan ne produit
  *    pas de ligne.
+ *
+ * @param maxHrBpm la FC max du profil, qui traduit les zones cardiaques des
+ * étapes en battements explicites — la cible ne dépend alors d'aucun réglage de
+ * zones côté intervals.icu (cf. `lib/plan-steps/intervals-syntax`).
  */
-function describeSession(session: PlanSessionDto): string {
-  if (session.steps !== null) return stepsToIntervalsSyntax(session.steps);
+function describeSession(session: PlanSessionDto, maxHrBpm: number | null): string {
+  if (session.steps !== null) return stepsToIntervalsSyntax(session.steps, maxHrBpm);
 
   const synthesized = singleRunSteps(session);
-  if (synthesized !== null) return stepsToIntervalsSyntax(synthesized);
+  if (synthesized !== null) return stepsToIntervalsSyntax(synthesized, maxHrBpm);
 
   const lines: string[] = [];
 
@@ -254,10 +258,17 @@ function describeSession(session: PlanSessionDto): string {
  * `sessions` est supposé trié comme le DAL le rend (`scheduledOn` croissant,
  * puis `id`) : c'est cet ordre qui donne son index à une deuxième séance du même
  * jour, et donc la stabilité de son `external_id`.
+ *
+ * @param maxHrBpm la FC max du profil, `null` quand l'athlète ne l'a pas saisie.
+ * Elle n'est **pas** lue depuis la séance : les étapes ne stockent qu'un rang de
+ * zone, et c'est ici, à la publication, que les battements se calculent — une FC
+ * max corrigée au profil repart donc à la synchronisation suivante sans qu'un
+ * seul plan soit réécrit.
  */
 export function buildWorkoutEvents(
   planId: number,
   sessions: readonly PlanSessionDto[],
+  maxHrBpm: number | null = null,
 ): IntervalsWorkoutEvent[] {
   const countPerDay = new Map<string, number>();
   const events: IntervalsWorkoutEvent[] = [];
@@ -273,7 +284,7 @@ export function buildWorkoutEvents(
       // Même composition que la ligne du plan dans l'UI : la nature de la
       // séance, puis son intitulé.
       name: `${session.kind} — ${session.title}`,
-      description: describeSession(session),
+      description: describeSession(session, maxHrBpm),
     };
 
     // Aucune valeur inventée : un champ que le plan ne donne pas n'est pas
@@ -373,7 +384,9 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
   if (!activation.active) return { status: 'unconfigured', reason: activation.reason };
 
   const today = todayCivilDate();
-  const active = await getActivePlanWithSessions();
+  // Le profil est lu à **chaque** synchronisation, et jamais figé dans le plan :
+  // c'est ce qui fait suivre une FC max corrigée sur tout le calendrier.
+  const [active, profile] = await Promise.all([getActivePlanWithSessions(), getAthleteProfile()]);
   const desired =
     active === null
       ? []
@@ -382,6 +395,7 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
           // Comparaison lexicographique : sur des dates civiles `YYYY-MM-DD`,
           // elle coïncide avec l'ordre chronologique.
           active.sessions.filter((session) => session.scheduledOn >= today),
+          profile?.maxHrBpm ?? null,
         );
 
   const range = syncWindow(today);

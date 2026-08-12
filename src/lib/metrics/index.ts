@@ -33,6 +33,15 @@ export {
   type Split,
 } from './splits';
 export { computeHrZones, hrZoneOf, type HrZoneNumber, type ZoneTime } from './hr-zones';
+export {
+  EASY_HR_ZONE,
+  PRESCRIBED_HR_ZONES,
+  PRESCRIPTION_MAX_HR_BOUNDS,
+  canPrescribeHeartRate,
+  hrZoneTargetBpm,
+  type HrTargetBpm,
+  type PrescribedHrZone,
+} from './hr-targets';
 export { strideLengthM, strideSeries } from './stride';
 export {
   computeTimeDistribution,

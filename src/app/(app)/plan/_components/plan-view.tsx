@@ -30,11 +30,23 @@ export type PlanViewProps = {
   sessions: PlanSessionDto[];
   /** Date civile du jour, calculée côté serveur dans le fuseau de l'athlète. */
   today: string;
+  /**
+   * FC max du profil, `null` tant qu'elle n'est pas saisie. Lue une fois par la
+   * page et descendue telle quelle : c'est elle qui traduit en battements les
+   * zones cardiaques prescrites sur les séances faciles.
+   */
+  maxHrBpm: number | null;
   /** `null` quand le coach est joignable. */
   unavailableReason: AiUnavailableReason | null;
 };
 
-export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewProps) {
+export function PlanView({
+  plan,
+  sessions,
+  today,
+  maxHrBpm,
+  unavailableReason,
+}: PlanViewProps) {
   const weeks = groupPlanWeeks(plan, sessions, today);
 
   return (
@@ -62,7 +74,7 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
       <section className="flex flex-col gap-3">
         <h2 className="eyebrow px-0.5">Programme</h2>
         {weeks.map((week) => (
-          <PlanWeekCard key={week.startsOn} week={week} today={today} />
+          <PlanWeekCard key={week.startsOn} week={week} today={today} maxHrBpm={maxHrBpm} />
         ))}
       </section>
 

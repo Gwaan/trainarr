@@ -47,7 +47,16 @@ export const PLAN_STEP_BOUNDS = {
   durationS: { min: 5, max: 21_600 },
   /** 2:00/km (record du monde du 10 km) à 12:00/km (marche rapide). */
   paceSecPerKm: { min: 120, max: 720 },
-  /** Zones cardiaques du projet, cf. `lib/metrics/hr-zones`. */
+  /**
+   * Rang de zone cardiaque, de 1 à 5.
+   *
+   * C'est un **ordinal**, pas une référence à une table : les bornes en
+   * battements ne sont jamais stockées ici. La **prescription** les résout à
+   * l'affichage et à la publication depuis `lib/metrics/hr-targets` (zone 2 =
+   * endurance fondamentale, 65–79 % de FC max chez Daniels) ; l'**analyse** du
+   * temps passé en zone partitionne de son côté sur les bornes de
+   * `lib/metrics/hr-zones`. Les deux tables sont documentées l'une par l'autre.
+   */
   hrZone: { min: 1, max: 5 },
   /** 20 répétitions : au-delà, c'est un bloc mal découpé. */
   repeat: { min: 1, max: 20 },

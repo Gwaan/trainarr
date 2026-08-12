@@ -92,6 +92,53 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     );
   });
 
+  /**
+   * ## Forme figée, **non vérifiée empiriquement**
+   *
+   * `120-145 bpm HR` est le décalque de la plage d'allure documentée
+   * (`4:25-4:35/km Pace`) : même position dans la ligne, borne basse d'abord,
+   * suffixe de type à la fin. Aucun exemple de plage cardiaque ne figure dans la
+   * documentation du workout builder, et ce test n'a **pas** été confronté au
+   * parseur d'intervals.icu sur le compte réel — il fige une hypothèse pour
+   * qu'une correction future soit une décision explicite, au même titre que les
+   * faits d'API notés dans `push-plan.ts`.
+   *
+   * Ce qu'il garantit en revanche sans réserve : la cible poussée ne référence
+   * **aucune** configuration de zones distante.
+   */
+  it('rend une plage en battements dès que la FC max est connue', () => {
+    expect(
+      stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], 184),
+    ).toBe('- Course 2km 120-145 bpm HR');
+  });
+
+  it('ne pousse jamais un numéro de zone quand elle peut pousser des battements', () => {
+    const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], 184);
+    expect(line).not.toContain('Z2');
+  });
+
+  it('retombe sur le numéro de zone sans FC max exploitable', () => {
+    const steps: PlanSessionSteps = [{ repeat: 1, steps: [step({ hrZone: 2 })] }];
+    expect(stepsToIntervalsSyntax(steps, null)).toBe('- Course 2km Z2 HR');
+    // Hors bornes de plausibilité : rien n'est calculé, rien n'est deviné.
+    expect(stepsToIntervalsSyntax(steps, 40)).toBe('- Course 2km Z2 HR');
+    // Zone sans créneau de prescription déclaré (cf. `lib/metrics/hr-targets`).
+    expect(
+      stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 4 })] }], 184),
+    ).toBe('- Course 2km Z4 HR');
+  });
+
+  it('laisse la cible d’allure intacte quand la FC max est connue', () => {
+    // La FC max ne déplace **que** les étapes ciblées en zone : la qualité reste
+    // prescrite en allure de bout en bout.
+    expect(
+      stepsToIntervalsSyntax(
+        [{ repeat: 1, steps: [step({ paceMinSecPerKm: 265, paceMaxSecPerKm: 275 })] }],
+        184,
+      ),
+    ).toBe('- Course 2km 4:25-4:35/km Pace');
+  });
+
   it("n'invente aucune intensité quand l'étape n'en porte pas", () => {
     expect(serializeOne({ distanceM: null, durationS: 2_700 })).toBe('- Course 45m');
   });

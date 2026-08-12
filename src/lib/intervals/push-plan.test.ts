@@ -27,7 +27,9 @@ const { api } = vi.hoisted(() => ({
     deleteCalendarEvents: vi.fn(),
   },
 }));
-const { dal } = vi.hoisted(() => ({ dal: { getActivePlanWithSessions: vi.fn() } }));
+const { dal } = vi.hoisted(() => ({
+  dal: { getActivePlanWithSessions: vi.fn(), getAthleteProfile: vi.fn() },
+}));
 
 vi.mock('./client', () => api);
 vi.mock('@/data/plans', async () => {
@@ -35,6 +37,13 @@ vi.mock('@/data/plans', async () => {
   // (dont dépend l'horizon de synchronisation) restent le vrai code.
   const actual = await vi.importActual<typeof import('@/data/plans')>('@/data/plans');
   return { ...actual, getActivePlanWithSessions: dal.getActivePlanWithSessions };
+});
+vi.mock('@/data/athlete', async () => {
+  // Même principe : `todayCivilDate` est pure et reste le vrai code, seule la
+  // lecture du profil (la FC max qui traduit les zones en battements) est
+  // remplacée.
+  const actual = await vi.importActual<typeof import('@/data/athlete')>('@/data/athlete');
+  return { ...actual, getAthleteProfile: dal.getAthleteProfile };
 });
 
 const API_KEY = 'cle-api-de-test';
@@ -118,6 +127,10 @@ beforeEach(() => {
     async ({ ids }: { ids: readonly unknown[] }) => ids.length,
   );
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
+  // Profil sans FC max par défaut : le régime de repli, celui que tous les cas
+  // ci-dessous décrivent. Ceux qui prescrivent en fréquence cardiaque la posent
+  // eux-mêmes, explicitement.
+  dal.getAthleteProfile.mockResolvedValue(null);
   // Le verrou vit sur `globalThis` : il survit d'un cas à l'autre.
   resetManualSyncLock();
 });
@@ -253,6 +266,45 @@ describe('buildWorkoutEvents', () => {
     expect(workout.timeTargetS).toBe(3_600);
     expect(workout.distanceTargetM).toBe(12_000);
     expect(workout.target).toBe('PACE');
+  });
+
+  /**
+   * La FC max ne vit **que** dans le profil : elle n'est jamais figée dans une
+   * étape. Elle entre ici, à la publication — donc une correction du profil
+   * repart au calendrier à la synchronisation suivante, sans réécrire un plan.
+   */
+  it('traduit les zones cardiaques en battements quand la FC max est connue', () => {
+    const easySession = session({
+      scheduledOn: '2026-08-18',
+      kind: 'Endurance fondamentale',
+      title: 'Footing en endurance',
+      volumeM: 7_000,
+      targetPaceSecPerKm: 428,
+      steps: [
+        {
+          repeat: 1,
+          steps: [
+            {
+              role: 'run',
+              distanceM: 7_000,
+              durationS: null,
+              paceMinSecPerKm: null,
+              paceMaxSecPerKm: null,
+              hrZone: 2,
+              note: null,
+            },
+          ],
+        },
+      ],
+    });
+
+    const [withHr] = buildWorkoutEvents(3, [easySession], 184);
+    expect(withHr.description).toBe('- Course 7km 120-145 bpm HR');
+
+    // Sans FC max, la zone part telle quelle : le comportement d'avant, au bit
+    // près. C'est le repli si le parseur refusait la plage en battements.
+    const [without] = buildWorkoutEvents(3, [easySession]);
+    expect(without.description).toBe('- Course 7km Z2 HR');
   });
 
   it('reste en texte plat pour une séance sans mesure : rien à structurer', () => {
@@ -582,6 +634,47 @@ describe('syncPlanToIntervals', () => {
     await syncPlanToIntervals();
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
+  });
+
+  it('lit la FC max du profil et la fait descendre jusqu’à la description', async () => {
+    dal.getAthleteProfile.mockResolvedValue({
+      displayName: 'Gwen',
+      sex: 'female',
+      maxHrBpm: 184,
+      restingHrBpm: null,
+      weightKg: null,
+      birthDate: null,
+    });
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [
+        session({
+          scheduledOn: '2026-08-18',
+          volumeM: 7_000,
+          steps: [
+            {
+              repeat: 1,
+              steps: [
+                {
+                  role: 'run',
+                  distanceM: 7_000,
+                  durationS: null,
+                  paceMinSecPerKm: null,
+                  paceMaxSecPerKm: null,
+                  hrZone: 2,
+                  note: null,
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+    });
+
+    await syncPlanToIntervals();
+
+    const { events } = api.createWorkoutEvents.mock.calls[0][0];
+    expect(events[0].description).toBe('- Course 7km 120-145 bpm HR');
   });
 
   it("n'émet aucune suppression quand la publication échoue", async () => {

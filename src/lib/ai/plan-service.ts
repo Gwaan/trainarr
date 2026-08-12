@@ -1263,6 +1263,10 @@ async function writeGeneratedPlan(
   const context: PlanValidationContext = {
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
     paces,
+    // L'endurance se prescrit en fréquence cardiaque dès que le profil porte une
+    // FC max. La même valeur alimente la reconstruction de la fenêtre restante,
+    // depuis le même instantané : à FC max égale, même prescription.
+    maxHrBpm: snapshot.profile.maxHrBpm ?? null,
     // Une création, et elle seule, se juge sur l'historique d'avant-plan.
     recentWeeklyKm: bestRecentWeeklyKm(snapshot),
     // Une création ne porte pas de réglages : le budget est celui de la requête.
@@ -2653,6 +2657,9 @@ export async function rewriteRemainingPlan(
   const context: PlanValidationContext = {
     referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
     paces,
+    // La même FC max qu'à la création, lue au même endroit : une fenêtre
+    // reconstruite prescrit donc exactement comme la création l'aurait fait.
+    maxHrBpm: snapshot.profile.maxHrBpm ?? null,
     // Pas de `recentWeeklyKm` : cette règle-là plafonne la **première semaine
     // pleine d'une création**, et la fenêtre reconstruite n'en est pas une. Son
     // ancrage sur le réel est déjà fait, une fois, par les cibles ci-dessus.

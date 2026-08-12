@@ -482,7 +482,15 @@ function skeletonFor(combination: Combination, targets: readonly WeeklyVolumeTar
 }
 
 /**
- * Les deux post-traitements du pipeline, appliqués au squelette rempli — et la
+ * La FC max sur laquelle le troisième régime est balayé — celle de l'athlète du
+ * projet. Sa valeur exacte n'a aucune importance pour la propriété (seules les
+ * distances et les durées sont jugées) ; ce qui compte est qu'elle soit
+ * exploitable, donc que la prescription en fréquence cardiaque s'active.
+ */
+const PROPERTY_MAX_HR_BPM = 184;
+
+/**
+ * Les post-traitements du pipeline, appliqués au squelette rempli — et la
  * validation qui va avec chacun.
  *
  * Les deux régimes tournent sur **chaque** combinaison, table ou pas : ce qui
@@ -513,6 +521,28 @@ function postProcessed(
         paces: athlete.paces ?? REFERENCE_PACES,
         weeklyTimeMinutes: athlete.weeklyTimeMinutes,
         recentWeeklyKm: athlete.recentWeeklyKm,
+      },
+    },
+    /*
+     * Le même régime, **FC max renseignée** : le corps des séances faciles
+     * passe alors de la plage d'allure à la zone cardiaque, et les footings
+     * jusque-là dépourvus de déroulé en reçoivent un.
+     *
+     * Il est balayé à part et sur toutes les combinaisons parce que c'est
+     * exactement ce que la propriété doit démontrer : changer l'unité de la
+     * **cible** ne déplace ni un mètre ni une minute. Les volumes hebdomadaires,
+     * les budgets temps et les parts de sortie longue restent dans leurs cibles,
+     * et le corridor d'allures — qui ne juge que des allures — n'a rien à
+     * redire d'une étape qui n'en porte plus.
+     */
+    {
+      label: 'avec table et FC max (endurance prescrite en FC)',
+      weeks: applyImposedPaces(weeks, athlete.paces ?? REFERENCE_PACES, null, PROPERTY_MAX_HR_BPM),
+      context: {
+        paces: athlete.paces ?? REFERENCE_PACES,
+        weeklyTimeMinutes: athlete.weeklyTimeMinutes,
+        recentWeeklyKm: athlete.recentWeeklyKm,
+        maxHrBpm: PROPERTY_MAX_HR_BPM,
       },
     },
   ];

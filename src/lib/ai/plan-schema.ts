@@ -39,8 +39,13 @@ import { z } from 'zod';
 import type { PlanLevel } from '@/data/db/schema';
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
+import { EASY_HR_ZONE, canPrescribeHeartRate } from '@/lib/metrics/hr-targets';
 import type { PaceZone, TrainingPaces } from '@/lib/metrics/vdot';
-import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
+import {
+  PLAN_STEP_BOUNDS,
+  type PlanSessionSteps,
+  type PlanStep,
+} from '@/lib/plan-steps/schema';
 
 import {
   formatDuration,
@@ -866,12 +871,17 @@ function stepPaceZone(
 }
 
 /**
- * L'étape, allure imposée.
+ * L'étape, cible imposée.
  *
  * Une `hrZone` posée par le modèle est **conservée telle quelle**, et l'étape
  * ressort intacte : une étape ne porte jamais les deux cibles (cf.
  * `lib/plan-steps/schema`), et ce que le modèle a exprimé en fréquence
  * cardiaque n'est pas une allure fautive à corriger.
+ *
+ * @param hrZone la zone cardiaque à poser sur le **corps** de la séance à la
+ * place de sa plage d'allure, `null` quand la séance se prescrit en allure
+ * (cf. {@link imposeSessionPaces}). Seule la cible change d'unité : la mesure de
+ * l'étape (ses mètres, ses secondes) n'est jamais touchée.
  */
 function imposeStepPace(
   step: PlanStep,
@@ -879,10 +889,39 @@ function imposeStepPace(
   envelope: PaceZone | null,
   paces: TrainingPaces,
   goal: PaceZone | null,
+  hrZone: number | null,
 ): PlanStep {
   if (step.hrZone !== null) return step;
 
   const zone = stepPaceZone(step, session, envelope, paces, goal);
+
+  /*
+   * `zone === session` — identité d'objet, et c'est la condition juste.
+   *
+   * `stepPaceZone` rend l'argument `session` lui-même quand l'étape suit le
+   * créneau de sa séance, et un **autre** objet dès qu'une note la déplace
+   * (« bloc à allure objectif » dans une sortie longue, cf. STEP_NOTE_ZONES).
+   * Ce bloc-là est de la qualité posée dans une séance facile : il garde son
+   * allure, où la FC ne dirait rien de juste (inertie sur quelques minutes
+   * d'effort). Seul le corps courant de la séance passe en fréquence cardiaque.
+   *
+   * `!isShortStep` — même raisonnement, poussé à son terme sur les étapes trop
+   * brèves pour qu'une fréquence cardiaque veuille dire quelque chose (cf.
+   * {@link SHORT_STEP_BOUNDS} : 60 s ou 200 m). Une ligne droite de 90 m dure
+   * vingt secondes : la FC n'y monte pas, et la cible se retrouverait à
+   * contredire la consigne — la note dit « accélère » pendant que 120–145 bpm
+   * dirait de ralentir. Idem pour les portions courues d'une marche/course.
+   */
+  if (
+    hrZone !== null &&
+    step.role === 'run' &&
+    zone !== null &&
+    zone === session &&
+    !isShortStep(step)
+  ) {
+    return { ...step, paceMinSecPerKm: null, paceMaxSecPerKm: null, hrZone };
+  }
+
   return {
     ...step,
     paceMinSecPerKm: zone === null ? null : zone.minSecPerKm,
@@ -1111,10 +1150,70 @@ function imposedDurationMin(
   return Math.max(bySteps, Math.round((distanceKm * fallback) / 60));
 }
 
+/**
+ * Le déroulé d'une séance facile qui n'en a pas : l'unique étape de course
+ * qu'elle décrit déjà — ou `undefined` quand elle ne déclare pas de distance.
+ *
+ * Ce que cela débloque : le squelette écrit la majorité des footings **sans
+ * `steps`** (la variation `plain`, cf. `plan-skeleton/variations`), et une
+ * cible cardiaque n'a alors aucun support où se poser — `PlanSessionOutput` ne
+ * porte de cible qu'en allure (`targetPaceSecPerKm`). Sans cette étape, la
+ * prescription en FC manquerait précisément les séances les plus nombreuses.
+ *
+ * **Rien n'est inventé** : un footing de 7 km *est* une étape de course de
+ * 7 km. C'est le même raisonnement, et la même forme, que la synthèse déjà
+ * faite à la publication vers intervals.icu (`singleRunSteps` de
+ * `lib/intervals/push-plan`) — ni échauffement fabriqué, ni fractionné déduit
+ * d'un intitulé.
+ *
+ * **La comptabilité ne bouge pas d'un mètre** : la couverture de ce déroulé
+ * vaut exactement la distance déclarée, donc {@link imposedDistanceKm} conserve
+ * cette dernière et {@link imposedDurationMin} retombe sur le même produit
+ * `distance × allure` qu'il calculait sans déroulé. C'est vérifié par test.
+ *
+ * Uniquement depuis la **distance**, et seulement si l'étape obtenue tient dans
+ * les bornes du schéma : une séance mesurée en minutes seules pourrait dépasser
+ * le plafond de durée d'une étape, et un déroulé que le DAL refuserait à
+ * l'écriture vaudrait bien moins que pas de déroulé du tout — il ferait échouer
+ * l'enregistrement de tout le plan pour une cible d'affichage.
+ */
+function singleEasyRunSteps(session: PlanSessionOutput): PlanSessionSteps | undefined {
+  if (session.distanceKm === undefined) return undefined;
+
+  const distanceM = Math.round(session.distanceKm * 1000);
+  if (distanceM < PLAN_STEP_BOUNDS.distanceM.min || distanceM > PLAN_STEP_BOUNDS.distanceM.max) {
+    return undefined;
+  }
+
+  return [
+    {
+      repeat: 1,
+      steps: [
+        {
+          role: 'run',
+          distanceM,
+          durationS: null,
+          // Sans cible : c'est `imposeStepPace` qui pose la zone, par le même
+          // chemin que toutes les autres étapes.
+          paceMinSecPerKm: null,
+          paceMaxSecPerKm: null,
+          hrZone: null,
+          note: null,
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * @param prescribeHr la FC max du profil permet-elle de prescrire en fréquence
+ * cardiaque ? Sans elle, tout ce qui suit retrouve son comportement d'avant.
+ */
 function imposeSessionPaces(
   session: PlanSessionOutput,
   paces: TrainingPaces,
   goal: PaceZone | null,
+  prescribeHr: boolean,
 ): PlanSessionOutput {
   const kindZone = sessionPaceZone(session.kind);
   // Une séance de récupération ne porte aucune cible, ni au niveau séance ni sur
@@ -1123,22 +1222,56 @@ function imposeSessionPaces(
   const zone = isRecovery ? null : paces[kindZone];
   const envelope = envelopePaceZone(kindZone, paces);
 
-  const steps = session.steps?.map((block) => ({
+  /*
+   * La zone cardiaque prescrite sur cette séance, `null` quand elle se
+   * prescrit en allure.
+   *
+   * Trois conditions, et chacune répond d'elle-même :
+   *
+   * - `prescribeHr` : sans FC max au profil, la conversion zone → bpm n'existe
+   *   pas et une étape en Z2 ne dirait rien à l'athlète ;
+   * - `kindZone === 'easy'` : la **qualité reste en allure**. La FC met une à
+   *   deux minutes à monter et dérive sur la durée — sur un fractionné, elle
+   *   arrive après l'effort, et l'allure est de toute façon l'objet du travail ;
+   * - `zone !== null` : une séance de récupération n'a pas de cible du tout, et
+   *   lui poser la plage de l'endurance en ferait un footing — exactement ce
+   *   que {@link RECOVERY_KIND_PATTERN} existe pour éviter.
+   */
+  const hrZone = prescribeHr && kindZone === 'easy' && zone !== null ? EASY_HR_ZONE : null;
+
+  const source = session.steps ?? (hrZone === null ? undefined : singleEasyRunSteps(session));
+
+  const steps = source?.map((block) => ({
     repeat: block.repeat,
-    steps: block.steps.map((step) => imposeStepPace(step, zone, envelope, paces, goal)),
+    steps: block.steps.map((step) => imposeStepPace(step, zone, envelope, paces, goal, hrZone)),
   }));
 
   const fallback = middleOf(zone ?? paces.easy);
-  // Les totaux se calculent une fois, sur les étapes **allures posées** : c'est
-  // d'eux que sortent la distance manquante puis la durée.
+  // Les totaux se calculent une fois, sur les étapes **cibles posées** : c'est
+  // d'eux que sortent la distance manquante puis la durée. Une étape passée en
+  // FC n'a plus d'allure, et retombe donc sur `fallback` — qui vaut le milieu
+  // du même créneau d'endurance que ses bornes d'allure encadraient. Les durées
+  // et le budget temps sont, au calcul près, ceux du régime en allure.
   const totals =
     steps === undefined ? null : stepsTotals(steps, fallback, middleOf(paces.easy));
   const { distanceKm, fromSteps } = imposedDistanceKm(session.distanceKm, totals);
 
   return {
     ...session,
-    // Le milieu du créneau : une cible de séance est un chiffre, pas une plage.
-    targetPaceSecPerKm: zone === null || targetsHeartRateOnly(steps) ? undefined : middleOf(zone),
+    /*
+     * Le milieu du créneau : une cible de séance est un chiffre, pas une plage.
+     *
+     * Il est **conservé** quand c'est l'appli qui a posé la FC (`hrZone`), et
+     * c'est délibéré : il alimente les durées, le budget temps hebdomadaire, et
+     * l'« allure indicative » que l'UI affiche à côté de la cible cardiaque.
+     * L'effacement ne vaut que pour une séance dont le **modèle** a écrit les
+     * zones ({@link targetsHeartRateOnly}) — là, personne n'a demandé de cible
+     * d'allure, et en afficher une ferait cohabiter deux systèmes.
+     */
+    targetPaceSecPerKm:
+      zone === null || (hrZone === null && targetsHeartRateOnly(steps))
+        ? undefined
+        : middleOf(zone),
     steps,
     distanceKm,
     durationMin: imposedDurationMin(session, distanceKm, fromSteps, totals, fallback),
@@ -1167,18 +1300,41 @@ function imposeSessionPaces(
  * reconstruit. Rien d'autre de la sortie du modèle n'est modifié — ni les
  * répétitions, ni les notes, ni les mesures des étapes.
  *
+ * ## Endurance en fréquence cardiaque
+ *
+ * Quand le profil porte une FC max exploitable, le corps des séances **faciles**
+ * (footings, sorties longues) reçoit la zone d'endurance à la place de sa plage
+ * d'allure : la FC s'auto-corrige de la chaleur, du dénivelé et de la fatigue,
+ * là où une allure suppose des conditions constantes. La **qualité reste en
+ * allure**, ainsi que les blocs spécifiques posés dans une séance facile et les
+ * étapes trop courtes pour que la FC ait le temps d'y monter (lignes droites,
+ * portions courues d'une marche/course — cf. {@link SHORT_STEP_BOUNDS}).
+ *
+ * La conversion zone → bpm ne se fait **pas** ici : l'étape ne stocke qu'un
+ * rang, et les battements se calculent à l'affichage et à la publication
+ * (`lib/metrics/hr-targets`). Une FC max corrigée au profil suit donc tout le
+ * plan, sans le réécrire.
+ *
+ * Sans FC max, `maxHrBpm` à `null` : le comportement est celui d'avant, à
+ * l'étape près.
+ *
  * @param goalPaceSecPerKm l'allure de l'objectif chiffré de l'athlète
  * ({@link goalPaceSecPerKm}), quand son but en donne une : les étapes « allure
  * objectif » la reçoivent à la place de la zone M ({@link goalPaceZone}).
+ * @param maxHrBpm la FC max du profil, `null` quand l'athlète ne l'a pas saisie.
  */
 export function applyImposedPaces(
   weeks: readonly PlanWeekOutput[],
   paces: TrainingPaces,
   goalPaceSecPerKm: number | null = null,
+  maxHrBpm: number | null = null,
 ): PlanWeekOutput[] {
   const goal = goalPaceZone(goalPaceSecPerKm, paces);
+  const prescribeHr = canPrescribeHeartRate(maxHrBpm);
   return weeks.map((week) => ({
-    sessions: week.sessions.map((session) => imposeSessionPaces(session, paces, goal)),
+    sessions: week.sessions.map((session) =>
+      imposeSessionPaces(session, paces, goal, prescribeHr),
+    ),
   }));
 }
 
@@ -1329,11 +1485,14 @@ export type PlanWeeksPostProcessing = (weeks: readonly PlanWeekOutput[]) => Plan
  * le premier — le trou exact que ce module avait.
  */
 export function planWeeksPostProcessing(
-  context: Pick<PlanValidationContext, 'paces' | 'referencePaceSecPerKm'>,
+  context: Pick<PlanValidationContext, 'paces' | 'referencePaceSecPerKm' | 'maxHrBpm'>,
   goalPaceSecPerKm: number | null,
 ): PlanWeeksPostProcessing {
   const paces = context.paces ?? null;
-  if (paces !== null) return (weeks) => applyImposedPaces(weeks, paces, goalPaceSecPerKm);
+  const maxHrBpm = context.maxHrBpm ?? null;
+  if (paces !== null) {
+    return (weeks) => applyImposedPaces(weeks, paces, goalPaceSecPerKm, maxHrBpm);
+  }
 
   const reference = context.referencePaceSecPerKm ?? null;
   return (weeks) => applyDerivedMeasures(weeks, reference);
@@ -2768,6 +2927,18 @@ export type PlanValidationContext = {
    * un élargissement demandé par l'athlète est réputé violé à chaque tentative.
    */
   weeklyTimeMinutes?: number | null;
+  /**
+   * FC max du profil de l'athlète, en bpm — `null` ou absente tant qu'elle ne
+   * l'a pas saisie, et l'endurance est alors prescrite en allure comme avant.
+   *
+   * Elle ne **valide** rien : aucune règle métier ne la lit. Elle voyage dans ce
+   * contexte parce que c'est lui que {@link planWeeksPostProcessing} reçoit
+   * déjà, et que les deux chemins d'écriture d'un plan (création et
+   * reconstruction de la fenêtre restante) le construisent tous deux depuis le
+   * même instantané d'entraînement — d'où la même prescription à FC max égale,
+   * sans qu'aucun paramètre nouveau ne traverse la chaîne d'appels.
+   */
+  maxHrBpm?: number | null;
   /**
    * Le **meilleur** volume hebdomadaire réellement couru récemment, en km —
    * `null`, absent ou `0` quand il n'y a pas d'historique, et le départ n'est

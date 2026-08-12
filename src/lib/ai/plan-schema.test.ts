@@ -952,6 +952,48 @@ describe('validatePlanBusinessRules — corridor VDOT', () => {
       expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
     });
   });
+
+  /**
+   * Le corridor **ne juge que des allures** : une étape ciblée en fréquence
+   * cardiaque n'en porte aucune, elle ne peut donc pas en sortir.
+   *
+   * C'est le comportement d'origine de `hrZone` (une étape en zone n'a jamais
+   * eu de bornes d'allure à comparer), et c'est ce qui autorise l'endurance à
+   * passer en FC sans toucher à cette règle. Le vérifier explicitement plutôt
+   * que de le supposer : la prescription en FC en dépend entièrement.
+   */
+  describe('étape ciblée en fréquence cardiaque', () => {
+    /** La semaine conforme, dont le footing du mardi est prescrit en zone 2. */
+    function weekWithEasyInZone(
+      overrides: Partial<PlanWeekOutput['sessions'][number]> = {},
+    ): PlanWeekOutput {
+      return {
+        sessions: [
+          session(2, {
+            distanceKm: 8,
+            steps: [{ repeat: 1, steps: [step('run', { distanceM: 8_000, hrZone: 2 })] }],
+            ...overrides,
+          }),
+          session(4, { kind: 'Seuil', title: '4 × 8 min', distanceKm: 10, steps: stepsAtPace(286) }),
+          session(7, { kind: 'Sortie longue', title: '16 km', distanceKm: 16 }),
+        ],
+      };
+    }
+
+    it('ne juge pas une étape sans allure — elle n’a rien à comparer', () => {
+      const weeks = [weekWithEasyInZone(), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toEqual([]);
+    });
+
+    it('continue de juger la cible d’allure de la séance qui les porte', () => {
+      // L'« allure indicative » d'une séance prescrite en FC reste une allure
+      // prescrite : elle passe bien devant le corridor.
+      const weeks = [weekWithEasyInZone({ targetPaceSecPerKm: 900 }), conforming];
+
+      expect(validatePlanBusinessRules(weeks, EXPECTED, { paces: PACES })).toHaveLength(1);
+    });
+  });
 });
 
 /**
@@ -2476,6 +2518,234 @@ describe('applyImposedPaces', () => {
 });
 
 /**
+ * L'endurance prescrite en **fréquence cardiaque**, quand le profil porte une
+ * FC max.
+ *
+ * Le principe que chaque cas ci-dessous décline : **seule la cible change
+ * d'unité**. Les mesures des étapes, les distances, les durées et le budget
+ * temps ne bougent pas d'un mètre ni d'une seconde — c'est la condition pour
+ * que la fonctionnalité soit un changement d'affichage de la consigne, et non
+ * une réécriture du plan.
+ */
+describe('applyImposedPaces — endurance en fréquence cardiaque', () => {
+  /** La FC max de l'athlète du projet : zone 2 = 120–145 bpm. */
+  const MAX_HR = 184;
+
+  /** Le déroulé d'un footing enrichi : mise en route, corps, lignes droites. */
+  const easySteps: PlanSessionSteps = [
+    { repeat: 1, steps: [step('run', { distanceM: 6_000, note: 'Souple' })] },
+    { repeat: 4, steps: [step('run', { distanceM: 100, note: 'Ligne droite' })] },
+  ];
+
+  function imposeEasy(overrides = {}, maxHrBpm: number | null = MAX_HR) {
+    const [imposed] = applyImposedPaces(
+      [{ sessions: [session(2, { kind: 'Endurance fondamentale', ...overrides })] }],
+      PACES,
+      null,
+      maxHrBpm,
+    );
+    return imposed.sessions[0];
+  }
+
+  /**
+   * Le déroulé d'une marche/course de reprise, tel que `walkRunShape` l'écrit au
+   * premier rang de la fenêtre : 9 × (200 m courus / 400 m marchés).
+   */
+  const walkRunSteps: PlanSessionSteps = [
+    {
+      repeat: 9,
+      steps: [
+        step('run', { distanceM: 200, note: 'Portion courue, souple' }),
+        step('recover', { distanceM: 400, note: 'Marche, sans forcer' }),
+      ],
+    },
+  ];
+
+  it('pose la zone 2 sur le corps des séances faciles, à la place de l’allure', () => {
+    const steps = imposeEasy({ steps: easySteps, distanceKm: 6.4 }).steps ?? [];
+
+    expect(steps[0].steps[0]).toMatchObject({
+      hrZone: 2,
+      paceMinSecPerKm: null,
+      paceMaxSecPerKm: null,
+    });
+  });
+
+  /**
+   * La contre-partie du principe : une **étape courte** garde son allure.
+   *
+   * Vingt secondes de ligne droite ne laissent pas à la FC le temps de monter en
+   * zone 2 ; la cible arriverait après l'étape, et surtout elle contredirait la
+   * consigne — « ligne droite » veut dire accélère, 120–145 bpm dirait ralentis.
+   */
+  it('laisse en allure les lignes droites d’un footing — la FC n’y monte pas', () => {
+    const steps = imposeEasy({ steps: easySteps, distanceKm: 6.4 }).steps ?? [];
+
+    expect(steps[1].steps[0]).toMatchObject({
+      hrZone: null,
+      paceMinSecPerKm: PACES.easy.minSecPerKm,
+      paceMaxSecPerKm: PACES.easy.maxSecPerKm,
+    });
+  });
+
+  it('laisse en allure les portions courues d’une marche/course', () => {
+    const steps = imposeEasy({ steps: walkRunSteps, distanceKm: 5.4 }).steps ?? [];
+
+    // 200 m courus : la portion est trop brève pour qu'une FC veuille dire
+    // quelque chose — c'est le seuil d'étape courte du corridor, réutilisé tel
+    // quel.
+    expect(steps[0].steps[0]).toMatchObject({
+      hrZone: null,
+      paceMinSecPerKm: PACES.easy.minSecPerKm,
+      paceMaxSecPerKm: PACES.easy.maxSecPerKm,
+    });
+    // La marche, elle, ne porte toujours aucune cible : ni allure, ni FC.
+    expect(steps[0].steps[1]).toMatchObject({
+      hrZone: null,
+      paceMinSecPerKm: null,
+      paceMaxSecPerKm: null,
+    });
+  });
+
+  it('bascule bien en FC dès que l’étape est assez longue pour la porter', () => {
+    // Le seuil est celui du corridor (60 s / 200 m) : 300 m courus, la FC a le
+    // temps d'arriver — la fin de la rampe de marche/course y passe donc.
+    const longer: PlanSessionSteps = [
+      { repeat: 6, steps: [step('run', { distanceM: 300, note: 'Portion courue, souple' })] },
+    ];
+
+    expect(imposeEasy({ steps: longer, distanceKm: 1.8 }).steps?.[0].steps[0]).toMatchObject({
+      hrZone: 2,
+      paceMinSecPerKm: null,
+    });
+  });
+
+  it('ne touche pas à la mesure des étapes — seule la cible change d’unité', () => {
+    const withHr = imposeEasy({ steps: easySteps, distanceKm: 6.4 }).steps ?? [];
+    const withPace = imposeEasy({ steps: easySteps, distanceKm: 6.4 }, null).steps ?? [];
+
+    const measures = (blocks: PlanSessionSteps) =>
+      blocks.map((block) => ({
+        repeat: block.repeat,
+        steps: block.steps.map((s) => ({ distanceM: s.distanceM, durationS: s.durationS })),
+      }));
+
+    expect(measures(withHr)).toEqual(measures(withPace));
+  });
+
+  it('garde l’allure de séance : c’est elle qui chiffre durées et budget temps', () => {
+    const withHr = imposeEasy({ steps: easySteps, distanceKm: 6.4 });
+    const withPace = imposeEasy({ steps: easySteps, distanceKm: 6.4 }, null);
+
+    // Le milieu du créneau E, dans les deux régimes — l'UI l'affiche en
+    // indication à côté de la cible cardiaque.
+    expect(withHr.targetPaceSecPerKm).toBe(353);
+    expect(withHr.targetPaceSecPerKm).toBe(withPace.targetPaceSecPerKm);
+  });
+
+  /**
+   * Le garde-fou central : la FC ne convertit pas en kilomètres, et une durée
+   * calculée sur une étape sans allure retombe sur le milieu du même créneau
+   * d'endurance que ses bornes encadraient.
+   */
+  it('laisse distance et durée strictement identiques au régime en allure', () => {
+    for (const overrides of [
+      { steps: easySteps, distanceKm: 6.4 },
+      { steps: walkRunSteps, distanceKm: 5.4 },
+      { distanceKm: 7 },
+      { distanceKm: 12.5, kind: 'Sortie longue' },
+      { distanceKm: 9, durationMin: 63 },
+    ]) {
+      const withHr = imposeEasy(overrides);
+      const withPace = imposeEasy(overrides, null);
+
+      expect(withHr.distanceKm, JSON.stringify(overrides)).toBe(withPace.distanceKm);
+      expect(withHr.durationMin, JSON.stringify(overrides)).toBe(withPace.durationMin);
+    }
+  });
+
+  it('donne un déroulé au footing qui n’en avait pas — sans quoi rien ne porte la cible', () => {
+    // La variation `plain` du squelette écrit la majorité des footings sans
+    // `steps`, et `PlanSessionOutput` n'a pas de cible cardiaque au niveau
+    // séance : sans cette étape, la prescription manquerait le cas le plus
+    // fréquent.
+    const imposed = imposeEasy({ distanceKm: 7 });
+
+    expect(imposed.steps).toEqual([
+      { repeat: 1, steps: [step('run', { distanceM: 7_000, hrZone: 2 })] },
+    ]);
+  });
+
+  it('n’en fabrique aucun sans FC max : le repli est le comportement d’avant', () => {
+    expect(imposeEasy({ distanceKm: 7 }, null).steps).toBeUndefined();
+  });
+
+  it('laisse la qualité en allure, de bout en bout', () => {
+    const [imposed] = applyImposedPaces(
+      [{ sessions: [session(4, { kind: 'Seuil', steps: qualitySteps() })] }],
+      PACES,
+      null,
+      MAX_HR,
+    );
+    const steps = imposed.sessions[0].steps ?? [];
+
+    // L'effort : les bornes du créneau seuil, pas une zone cardiaque.
+    expect(steps[1].steps[0]).toMatchObject({
+      paceMinSecPerKm: 280,
+      paceMaxSecPerKm: 292,
+      hrZone: null,
+    });
+    expect(imposed.sessions[0].targetPaceSecPerKm).toBe(286);
+  });
+
+  it('laisse en allure le bloc spécifique d’une sortie longue', () => {
+    // Une intention écrite dans la note déplace le créneau de l'étape : ce
+    // bloc-là est de la qualité posée dans une séance facile, et la FC dirait
+    // n'importe quoi sur quelques minutes d'effort.
+    const specific: PlanSessionSteps = [
+      { repeat: 1, steps: [step('run', { distanceM: 4_000, note: 'Mise en route' })] },
+      { repeat: 1, steps: [step('run', { distanceM: 3_000, note: 'Bloc à allure objectif' })] },
+    ];
+    const steps =
+      imposeEasy({ kind: 'Sortie longue', steps: specific, distanceKm: 7 }).steps ?? [];
+
+    expect(steps[0].steps[0]).toMatchObject({ hrZone: 2, paceMinSecPerKm: null });
+    // Zone M, en allure.
+    expect(steps[1].steps[0]).toMatchObject({
+      hrZone: null,
+      paceMinSecPerKm: 295,
+      paceMaxSecPerKm: 320,
+    });
+  });
+
+  it('laisse une séance de récupération sans aucune cible', () => {
+    // La doctrine du module ne change pas : « plus lent que E.max, ou rien ».
+    // Lui poser la plage d'endurance — en bpm comme en allure — en ferait un
+    // footing.
+    const imposed = imposeEasy({ kind: 'Récupération', distanceKm: 5 });
+
+    expect(imposed.steps).toBeUndefined();
+    expect(imposed.targetPaceSecPerKm).toBeUndefined();
+  });
+
+  it('respecte une zone que le modèle a lui-même écrite, et n’annonce alors pas d’allure', () => {
+    // Le comportement d'avant, préservé : quand les zones viennent du modèle,
+    // personne n'a demandé de cible d'allure de séance.
+    const modelZones: PlanSessionSteps = [
+      { repeat: 1, steps: [step('run', { distanceM: 6_000, hrZone: 3 })] },
+    ];
+    const imposed = imposeEasy({ steps: modelZones, distanceKm: 6 }, null);
+
+    expect(imposed.steps?.[0].steps[0].hrZone).toBe(3);
+    expect(imposed.targetPaceSecPerKm).toBeUndefined();
+  });
+
+  it('ne prescrit rien en FC sur une FC max implausible', () => {
+    expect(imposeEasy({ distanceKm: 7 }, 60).steps).toBeUndefined();
+  });
+});
+
+/**
  * Le régime **sans table** : le modèle garde ses allures, l'appli complète la
  * seule comptabilité.
  *
@@ -2719,6 +2989,35 @@ describe('planWeeksPostProcessing', () => {
       paceMaxSecPerKm: null,
     });
     expect(tested.distanceKm).toBe(0.9);
+  });
+
+  it('fait descendre la FC max du contexte jusqu’à l’imposition', () => {
+    // Le seul chemin par lequel la FC max atteint la prescription : le contexte
+    // de validation, que les deux écritures d'un plan (création et fenêtre
+    // restante) construisent depuis le même instantané d'entraînement.
+    const easy: PlanWeekOutput[] = [
+      { sessions: [session(2, { kind: 'Endurance fondamentale', distanceKm: 7 })] },
+    ];
+
+    const [withHr] = planWeeksPostProcessing({ paces: PACES, maxHrBpm: 184 }, null)(easy);
+    expect(withHr.sessions[0].steps?.[0].steps[0].hrZone).toBe(2);
+
+    const [without] = planWeeksPostProcessing({ paces: PACES }, null)(easy);
+    expect(without.sessions[0].steps).toBeUndefined();
+  });
+
+  it('ne prescrit aucune FC sans table d’allures : ce régime n’écrit aucune cible', () => {
+    // Sans table, l'appli ne prescrit rien — ni allure ni zone. La FC max ne
+    // rouvre pas cette porte : le modèle reste maître de ses consignes.
+    const easy: PlanWeekOutput[] = [
+      { sessions: [session(2, { kind: 'Endurance fondamentale', distanceKm: 7 })] },
+    ];
+    const [processed] = planWeeksPostProcessing(
+      { referencePaceSecPerKm: 400, maxHrBpm: 184 },
+      null,
+    )(easy);
+
+    expect(processed.sessions[0].steps).toBeUndefined();
   });
 });
 

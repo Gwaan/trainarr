@@ -38,16 +38,23 @@ const STATE_BADGES: Record<
 export function PlanSessionRow({
   session,
   today,
+  maxHrBpm,
 }: {
   session: PlanSessionDto;
   today: string;
+  /**
+   * FC max du profil, `null` tant qu'elle n'est pas saisie — elle traduit les
+   * zones cardiaques des étapes en battements. Résolue à l'affichage, jamais
+   * stockée dans la séance : une correction du profil suit tout le plan.
+   */
+  maxHrBpm: number | null;
 }) {
   const state = planSessionState(session, today);
   const isToday = state === "today";
   const badge = STATE_BADGES[state];
 
-  const detail = planSessionDetail(session);
-  const summary = planSessionSummary(session);
+  const detail = planSessionDetail(session, maxHrBpm);
+  const summary = planSessionSummary(session, maxHrBpm);
   // Rien à révéler : ni déroulé, ni consigne, ni activité à rejoindre.
   const isExpandable = !detail.isEmpty || session.completedActivityId !== null;
 

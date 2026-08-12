@@ -27,12 +27,15 @@ export function PlanProposal({
   plan,
   sessions,
   today,
+  maxHrBpm,
   hasActivePlan,
 }: {
   plan: PlanDto;
   sessions: PlanSessionDto[];
   /** Date civile du jour, calculée côté serveur dans le fuseau de l'athlète. */
   today: string;
+  /** FC max du profil, `null` sans saisie — cf. `PlanView`. */
+  maxHrBpm: number | null;
   /** Un plan actif que l'adoption archiverait. */
   hasActivePlan: boolean;
 }) {
@@ -67,7 +70,7 @@ export function PlanProposal({
       <section className="flex flex-col gap-3">
         <h2 className="eyebrow px-0.5">Le programme proposé</h2>
         {weeks.map((week) => (
-          <PlanWeekCard key={week.startsOn} week={week} today={today} />
+          <PlanWeekCard key={week.startsOn} week={week} today={today} maxHrBpm={maxHrBpm} />
         ))}
       </section>
 

@@ -27,7 +27,29 @@
  * Ce qui n'a pas de cible ne produit que sa mesure : une étape sans consigne
  * d'allure ni de fréquence cardiaque reste une étape libre, on ne lui invente
  * pas d'intensité.
+ *
+ * ## Fréquence cardiaque : une plage en bpm, pas un numéro de zone
+ *
+ * `Z2 HR` référence la **configuration de zones du compte intervals.icu**, que
+ * Trainarr ne contrôle pas : si l'athlète y a laissé les zones par défaut d'une
+ * montre grand public, le « Z2 » poussé vaudrait 60–70 % de FC max là où le plan
+ * en veut 65–79 % (cf. `lib/metrics/hr-targets`). La prescription changerait de
+ * sens en chemin, sans que rien ne le signale.
+ *
+ * Dès que la FC max est connue, la cible part donc en **battements explicites**,
+ * sur le modèle exact de la plage d'allure : `120-145 bpm HR`. Elle ne dépend
+ * plus d'aucun réglage distant.
+ *
+ * **Cette forme n'est pas vérifiée empiriquement** sur le compte réel — la
+ * documentation du builder n'en donne pas d'exemple, et le parseur n'est pas
+ * public. Elle est le décalque de `4:25-4:35/km Pace`, qui est documentée et
+ * fonctionne : même position dans la ligne, même ordre des bornes, même suffixe
+ * de type (`HR`). Un test la fige pour qu'une correction future soit une
+ * décision et non une dérive. Si le parseur la refuse, le repli connu est
+ * `Z2 HR` — c'est ce qui sort déjà sans FC max.
  */
+
+import { hrZoneTargetBpm } from '@/lib/metrics/hr-targets';
 
 import { toSingleLine, type PlanSessionSteps, type PlanStep, type PlanStepRole } from './schema';
 
@@ -83,8 +105,14 @@ function formatDistanceToken(distanceM: number): string {
   return meters % 1000 === 0 ? `${meters / 1000}km` : `${meters}mtr`;
 }
 
-/** La cible de l'étape, ou `null` quand elle n'en porte pas. */
-function formatTargetToken(step: PlanStep): string | null {
+/**
+ * La cible de l'étape, ou `null` quand elle n'en porte pas.
+ *
+ * @param maxHrBpm la FC max du profil : elle seule permet de traduire un rang de
+ * zone en battements (cf. l'en-tête). `null` — ou une zone dont le créneau n'est
+ * pas déclaré — laisse sortir le `Z<n> HR` d'origine.
+ */
+function formatTargetToken(step: PlanStep, maxHrBpm: number | null): string | null {
   if (step.paceMinSecPerKm !== null && step.paceMaxSecPerKm !== null) {
     const min = paceClock(step.paceMinSecPerKm);
     // Bornes égales : une allure unique, pas une plage de largeur nulle.
@@ -92,9 +120,12 @@ function formatTargetToken(step: PlanStep): string | null {
     return `${min}-${paceClock(step.paceMaxSecPerKm)}/km Pace`;
   }
 
-  if (step.hrZone !== null) return `Z${step.hrZone} HR`;
+  if (step.hrZone === null) return null;
 
-  return null;
+  const target = hrZoneTargetBpm(step.hrZone, maxHrBpm);
+  if (target === null) return `Z${step.hrZone} HR`;
+
+  return `${target.minBpm}-${target.maxBpm} bpm HR`;
 }
 
 /**
@@ -109,7 +140,7 @@ function formatTargetToken(step: PlanStep): string | null {
  * ce sérialiseur reçoit aussi des `steps` écrits en base avant cette contrainte,
  * et un retour à la ligne y ouvrirait une étape fantôme.
  */
-function stepLine(step: PlanStep): string {
+function stepLine(step: PlanStep, maxHrBpm: number | null): string {
   const label = ROLE_LABELS[step.role];
   const note = step.note === null ? '' : toSingleLine(step.note);
   const cue = note === '' ? label : `${label} - ${note}`;
@@ -122,7 +153,7 @@ function stepLine(step: PlanStep): string {
         ? formatDurationToken(step.durationS)
         : null;
 
-  const parts = [cue, measure, formatTargetToken(step)].filter(
+  const parts = [cue, measure, formatTargetToken(step, maxHrBpm)].filter(
     (part): part is string => part !== null,
   );
 
@@ -136,8 +167,15 @@ function stepLine(step: PlanStep): string {
  * Les blocs non répétés (`repeat === 1`) sont rendus à plat : un `1x` serait du
  * bruit, et une ligne vide de séparation inviterait le parseur à découper là où
  * il n'y a rien à découper.
+ *
+ * @param maxHrBpm la FC max du profil, qui traduit les zones cardiaques en
+ * battements explicites (cf. l'en-tête). Omise ou `null` : les zones sortent en
+ * `Z<n> HR`, exactement comme avant.
  */
-export function stepsToIntervalsSyntax(steps: PlanSessionSteps): string {
+export function stepsToIntervalsSyntax(
+  steps: PlanSessionSteps,
+  maxHrBpm: number | null = null,
+): string {
   const lines: string[] = [];
 
   /** Une ligne vide, jamais deux d'affilée, jamais en tête. */
@@ -149,12 +187,12 @@ export function stepsToIntervalsSyntax(steps: PlanSessionSteps): string {
     if (block.repeat > 1) {
       separate();
       lines.push(`${block.repeat}x`);
-      lines.push(...block.steps.map(stepLine));
+      lines.push(...block.steps.map((step) => stepLine(step, maxHrBpm)));
       lines.push('');
       continue;
     }
 
-    lines.push(...block.steps.map(stepLine));
+    lines.push(...block.steps.map((step) => stepLine(step, maxHrBpm)));
   }
 
   // La ligne vide qui suit un bloc répété final n'a rien à séparer.

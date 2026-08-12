@@ -32,7 +32,7 @@ const HINTS = {
   displayName: "Il sert à t'accueillir sur le tableau de bord.",
   sex: "Les coefficients du modèle de charge (Banister) diffèrent — sans cette info, la charge n'est pas calculée.",
   heartRate:
-    "La FC max et la FC de repos permettent de calculer ta charge d'entraînement (TRIMP).",
+    "La FC max et la FC de repos permettent de calculer ta charge d'entraînement (TRIMP). La FC max sert aussi à prescrire tes séances d'endurance en zone cardiaque plutôt qu'en allure — indique-la mesurée, jamais estimée depuis ton âge.",
   weightKg:
     "Enregistré pour en suivre l'évolution ; aucun calcul actuel ne s'en sert.",
   birthDate:

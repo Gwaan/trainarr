@@ -1191,7 +1191,15 @@ describe('generatePlan — chrono de référence', () => {
 
     await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
 
-    const quality = writtenSessions().find((session) => session.steps !== null);
+    // Une séance de **qualité**, et pas simplement la première à porter un
+    // déroulé : l'instantané de ce fichier déclare une FC max, donc les séances
+    // faciles se prescrivent en fréquence cardiaque et portent désormais toutes
+    // un déroulé (cf. `applyImposedPaces`). Ce sont les allures de la qualité
+    // qui sont en jeu ici.
+    const EASY_KINDS = ['Endurance fondamentale', 'Récupération', 'Sortie longue'];
+    const quality = writtenSessions().find(
+      (session) => session.steps !== null && !EASY_KINDS.includes(session.kind),
+    );
     const [warmup, block, cooldown] = quality?.steps ?? [];
 
     // L'échauffement se court en endurance, pas à l'allure de la séance.
@@ -1858,6 +1866,85 @@ describe('rewriteRemainingPlan — l’ancrage d’une continuation', () => {
     const targets = await rewriteFrom('2026-06-01', [0, 0, 0, 0], 2);
 
     expect(targets[1]).toBe(23.9);
+  });
+
+  /**
+   * La **prescription en fréquence cardiaque sur le chemin de reconstruction**.
+   *
+   * Le risque que ces cas ferment est précis : la FC max voyage dans le contexte
+   * de validation, que **deux** fonctions construisent — la création
+   * (`writeGeneratedPlan`) et cette reconstruction. En oublier une donnerait un
+   * plan dont les séances changent d'unité de cible à chaque révision, sans que
+   * rien ne le signale. Les deux lisent le même champ du même instantané : à FC
+   * max égale, même prescription.
+   */
+  describe('l’endurance prescrite en fréquence cardiaque', () => {
+    /**
+     * Le même plan libre, mais avec un chrono de référence : sans table
+     * d'allures, l'appli ne prescrit rien du tout — ni allure, ni zone.
+     */
+    const PACED_PLAN: PlanDto = {
+      ...OPEN_PLAN,
+      referenceDistance: REFERENCE_RACE.distance,
+      referenceTimeS: REFERENCE_RACE.timeS,
+    };
+
+    async function rewriteWith(maxHrBpm: number | undefined) {
+      const base = snapshotOf('2026-05-31', [42, 42, 42, 42]);
+      const profile = { ...base.profile };
+      if (maxHrBpm === undefined) delete profile.maxHrBpm;
+      else profile.maxHrBpm = maxHrBpm;
+
+      const rewrite = await rewriteRemainingPlan({
+        plan: { ...PACED_PLAN, startsOn: '2026-06-01' },
+        window: { firstWeekStart: '2026-06-01', weeks: 12, firstWeekFromDay: 1 },
+        snapshot: { ...base, profile },
+        plannedWeeklyKm: new Map(),
+      });
+
+      return rewrite.weeks[1].sessions.filter((s) => s.kind === 'Endurance fondamentale');
+    }
+
+    it('pose la zone 2 sur les footings reconstruits quand le profil porte une FC max', async () => {
+      const easy = await rewriteWith(184);
+
+      expect(easy.length).toBeGreaterThan(0);
+      for (const s of easy) {
+        const runs = (s.steps ?? []).flatMap((b) => b.steps).filter((x) => x.role === 'run');
+        // Les lignes droites d'un footing enrichi (90 m, ~20 s) restent en
+        // allure : la FC n'y monte pas, et la cible contredirait la consigne.
+        // Seul le corps de la séance change d'unité.
+        const body = runs.filter((x) => (x.distanceM ?? 0) > 200);
+        expect(body.length).toBeGreaterThan(0);
+        for (const run of body) {
+          expect(run).toMatchObject({ hrZone: 2, paceMinSecPerKm: null });
+        }
+        for (const stride of runs.filter((x) => (x.distanceM ?? 0) <= 200)) {
+          expect(stride.hrZone).toBeNull();
+        }
+      }
+    });
+
+    it('les prescrit en allure sans FC max — le repli, sur ce chemin aussi', async () => {
+      const easy = await rewriteWith(undefined);
+
+      expect(easy.length).toBeGreaterThan(0);
+      for (const s of easy) {
+        for (const run of (s.steps ?? []).flatMap((b) => b.steps)) {
+          expect(run.hrZone).toBeNull();
+        }
+      }
+    });
+
+    it('ne fait bouger ni distance ni durée d’une séance selon la FC max', async () => {
+      // Le garde-fou, mesuré sur le chemin complet : changer l'unité de la cible
+      // ne convertit rien en kilomètres.
+      const [withHr, without] = await Promise.all([rewriteWith(184), rewriteWith(undefined)]);
+
+      expect(withHr.map((s) => [s.day, s.distanceKm, s.durationMin])).toEqual(
+        without.map((s) => [s.day, s.distanceKm, s.durationMin]),
+      );
+    });
   });
 
   /**

@@ -14,6 +14,7 @@
  */
 
 import type { PlanSessionDto } from "@/data/plans";
+import { hrZoneTargetBpm, type HrTargetBpm } from "@/lib/metrics/hr-targets";
 import {
   sessionStepsTotals,
   type PlanStep,
@@ -126,12 +127,24 @@ export function formatStepMeasure(step: PlanStep): string | null {
   return null;
 }
 
+/** Une cible cardiaque, telle qu'elle se lit sur la ligne d'une étape. */
+export function formatHrTarget(target: HrTargetBpm): string {
+  return `${target.minBpm}–${target.maxBpm} bpm`;
+}
+
 /**
  * La cible de l'étape : fourchette d'allure (`4:25–4:35/km`), allure unique
- * (`4:30/km`) ou zone cardiaque (`Z2`). `null` quand l'étape n'en porte pas —
- * un footing se court sans consigne.
+ * (`4:30/km`) ou cible cardiaque. `null` quand l'étape n'en porte pas — un
+ * footing se court sans consigne.
+ *
+ * La cible cardiaque s'affiche en **battements** (`120–145 bpm`) dès que la FC
+ * max est connue : c'est ce qui se surveille au poignet. « Z2 » ne se lit que
+ * faute de FC max au profil — un rang de zone nu ne dit rien à qui court.
+ *
+ * La conversion se fait **ici, à l'affichage**, et jamais à l'écriture du plan :
+ * une FC max corrigée au profil met à jour tout le plan d'un coup.
  */
-export function formatStepTarget(step: PlanStep): string | null {
+export function formatStepTarget(step: PlanStep, maxHrBpm: number | null = null): string | null {
   const { paceMinSecPerKm: min, paceMaxSecPerKm: max } = step;
 
   if (min !== null && max !== null) {
@@ -143,7 +156,37 @@ export function formatStepTarget(step: PlanStep): string | null {
   if (min !== null) return formatPace(min);
   if (max !== null) return formatPace(max);
 
-  return step.hrZone === null ? null : `Z${step.hrZone}`;
+  if (step.hrZone === null) return null;
+
+  const target = hrZoneTargetBpm(step.hrZone, maxHrBpm);
+  return target === null ? `Z${step.hrZone}` : formatHrTarget(target);
+}
+
+/**
+ * La cible cardiaque de la **séance**, quand elle en porte une — `null` sinon.
+ *
+ * Elle se lit sur le déroulé, jamais sur un champ dédié : c'est la zone que
+ * portent les étapes de **course**, et elle n'existe que si elles la portent
+ * toutes, à l'identique. Une séance dont un bloc est prescrit autrement (le bloc
+ * à allure objectif d'une sortie longue spécifique, par exemple) n'a pas de
+ * cible cardiaque unique à annoncer — ses étapes disent chacune la leur.
+ *
+ * Fonction pure, exportée pour les tests.
+ */
+export function sessionHrTarget(
+  session: Pick<PlanSessionDto, "steps">,
+  maxHrBpm: number | null = null,
+): HrTargetBpm | null {
+  const runs = (session.steps ?? []).flatMap((block) =>
+    block.steps.filter((step) => step.role === "run"),
+  );
+  if (runs.length === 0) return null;
+
+  const zone = runs[0].hrZone;
+  if (zone === null) return null;
+  if (!runs.every((step) => step.hrZone === zone)) return null;
+
+  return hrZoneTargetBpm(zone, maxHrBpm);
 }
 
 export type PlanStepView = {
@@ -201,31 +244,43 @@ export function planSessionTotals(
 /**
  * Ligne chiffrée de la séance repliée : `8,4 km · 45 min · @ 4:30/km`, réduite
  * à ce qui est connu.
+ *
+ * **Quand la séance est prescrite en fréquence cardiaque**, la cible cardiaque
+ * passe devant et l'allure devient une indication : `7 km · 50 min ·
+ * 120–145 bpm · ~7:08/km`. C'est la FC qu'on suit en courant — l'allure ne dit
+ * plus que l'ordre de grandeur du temps qu'on y passera, et le `~` le dit.
  */
 export function planSessionSummary(
   session: Pick<PlanSessionDto, "volumeM" | "durationS" | "steps" | "targetPaceSecPerKm">,
+  maxHrBpm: number | null = null,
 ): string[] {
   const { distanceM, durationS } = planSessionTotals(session);
+  const hrTarget = sessionHrTarget(session, maxHrBpm);
   const summary: string[] = [];
 
   if (distanceM !== null) summary.push(formatStepDistance(distanceM));
   if (durationS !== null) summary.push(formatDuration(durationS));
+  if (hrTarget !== null) summary.push(formatHrTarget(hrTarget));
   if (session.targetPaceSecPerKm !== null) {
-    summary.push(`@ ${formatPace(session.targetPaceSecPerKm)}`);
+    const pace = formatPace(session.targetPaceSecPerKm);
+    summary.push(hrTarget === null ? `@ ${pace}` : `~${pace}`);
   }
 
   return summary;
 }
 
 /** Le contenu déplié d'une séance : déroulé, consignes, récapitulatif. */
-export function planSessionDetail(session: PlanSessionDto): PlanSessionDetail {
+export function planSessionDetail(
+  session: PlanSessionDto,
+  maxHrBpm: number | null = null,
+): PlanSessionDetail {
   const blocks: PlanStepBlockView[] = (session.steps ?? []).map((block) => ({
     repeat: block.repeat,
     steps: block.steps.map((step) => ({
       role: step.role,
       roleLabel: PLAN_STEP_ROLE_LABELS[step.role],
       measure: formatStepMeasure(step),
-      target: formatStepTarget(step),
+      target: formatStepTarget(step, maxHrBpm),
       note: step.note,
     })),
   }));
@@ -237,11 +292,23 @@ export function planSessionDetail(session: PlanSessionDto): PlanSessionDetail {
   }
 
   const { distanceM, durationS } = planSessionTotals(session);
+  const hrTarget = sessionHrTarget(session, maxHrBpm);
   const totals: PlanSessionMetric[] = [];
   if (distanceM !== null) totals.push({ label: "Distance", value: formatStepDistance(distanceM) });
   if (durationS !== null) totals.push({ label: "Durée", value: formatDuration(durationS) });
+  // La cible cardiaque passe **devant** l'allure : c'est elle la consigne, et
+  // l'allure ne reste là que pour situer le temps que la séance prendra.
+  if (hrTarget !== null) {
+    totals.push({ label: "Cible FC", value: formatHrTarget(hrTarget) });
+  }
   if (session.targetPaceSecPerKm !== null) {
-    totals.push({ label: "Allure cible", value: formatPace(session.targetPaceSecPerKm) });
+    totals.push({
+      label: hrTarget === null ? "Allure cible" : "Allure indicative",
+      value:
+        hrTarget === null
+          ? formatPace(session.targetPaceSecPerKm)
+          : `~${formatPace(session.targetPaceSecPerKm)}`,
+    });
   }
 
   return {

@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
+import { getAthleteProfile } from "@/data/athlete";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
@@ -37,18 +38,25 @@ const SUBTITLES = {
  * la page pendant `next build` (image Docker), où ni la base ni l'API IA
  * n'existent. Cf. `.claude/rules/nextjs.md`.
  *
- * Les trois lectures sont indépendantes : les plans viennent de la base, la
- * disponibilité du coach d'un ping réseau mémorisé — elles partent ensemble.
+ * Les lectures sont indépendantes : les plans et le profil viennent de la base,
+ * la disponibilité du coach d'un ping réseau mémorisé — elles partent ensemble.
+ *
+ * Le profil n'est lu que pour sa **FC max** : c'est elle qui traduit en
+ * battements les zones cardiaques prescrites sur les séances faciles. La
+ * conversion se fait à l'affichage, jamais à l'écriture du plan — une FC max
+ * corrigée met donc tout le programme à jour au rechargement suivant.
  */
 async function PlanContent() {
   await connection();
-  const [active, draft, availability] = await Promise.all([
+  const [active, draft, availability, profile] = await Promise.all([
     getActivePlanWithSessions(),
     getDraftPlanWithSessions(),
     getAiAvailability(),
+    getAthleteProfile(),
   ]);
 
   const today = toCivilDate(new Date());
+  const maxHrBpm = profile?.maxHrBpm ?? null;
 
   /*
    * Une proposition en attente prend toute la place : c'est la décision du
@@ -65,6 +73,7 @@ async function PlanContent() {
           plan={draft.plan}
           sessions={draft.sessions}
           today={today}
+          maxHrBpm={maxHrBpm}
           hasActivePlan={active !== null}
         />
         {active === null ? null : (
@@ -75,6 +84,7 @@ async function PlanContent() {
                 plan={active.plan}
                 sessions={active.sessions}
                 today={today}
+                maxHrBpm={maxHrBpm}
                 unavailableReason={availability.available ? null : availability.reason}
               />
             </div>
@@ -117,6 +127,7 @@ async function PlanContent() {
         plan={active.plan}
         sessions={active.sessions}
         today={today}
+        maxHrBpm={maxHrBpm}
         unavailableReason={availability.available ? null : availability.reason}
       />
     </>
