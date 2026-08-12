@@ -141,7 +141,7 @@ describe('latestRaceDate', () => {
 
 /** Demande de plan minimale : seule la date de course compte ici. */
 const RACE = {
-  goalType: 'race',
+  intent: 'race',
   goalText: '10 km sous 50 min',
   level: 'intermediate',
   sessionsPerWeek: 3,
@@ -149,4 +149,4 @@ const RACE = {
 } as const;
 
 /** La même, sans échéance : seule la date de démarrage compte. */
-const FREE = { ...RACE, goalType: 'free', weeks: 4 } as const;
+const FREE = { ...RACE, intent: 'faster', weeks: 4 } as const;

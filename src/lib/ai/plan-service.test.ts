@@ -10,6 +10,7 @@ import {
   MIN_RACE_PLAN_WEEKS,
   generatePlan,
   InvalidGeneratedPlanError,
+  planVolumeTargets,
   planWeeklyVolumeKm,
   planWindow,
   remainingPlanWindow,
@@ -107,6 +108,7 @@ const SNAPSHOT: TrainingSnapshotDto = {
   fitness: { ctl: 52.4, atl: 61.2, tsb: -8.8 },
   vo2max: 48.6,
   weeks: [{ startsOn: '2026-08-03', distanceKm: 42.1, movingTimeS: 13_500, sessions: 4 }],
+  longestSessionKm30d: 14.2,
   recentAvgPaceSecPerKm: 324,
 };
 
@@ -121,6 +123,8 @@ const PLAN: PlanDto = {
   id: 3,
   status: 'active',
   goalType: 'race',
+  intent: 'race',
+  returnInjuryHistory: false,
   level: 'intermediate',
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
@@ -174,7 +178,7 @@ function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
 const REFERENCE_RACE = { distance: '10k', timeS: 2_910 } as const;
 
 const REQUEST: PlanRequest = {
-  goalType: 'free',
+  intent: 'faster',
   level: 'intermediate',
   goalText: 'reprendre le volume',
   weeks: 2,
@@ -350,11 +354,11 @@ describe('planWindow', () => {
   it("déduit la durée de la date de course, jour de course compris", () => {
     // Du lundi 17 août au dimanche 13 septembre : 4 semaines pleines.
     expect(
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-09-13' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2026-09-13' }, '2026-08-11'),
     ).toEqual({ startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 });
     // Course un lundi : la semaine qui la porte compte quand même.
     expect(
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-09-14' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2026-09-14' }, '2026-08-11'),
     ).toEqual({ startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 5, firstWeekFromDay: 1 });
   });
 
@@ -362,7 +366,7 @@ describe('planWindow', () => {
     // Du lundi 17 au dimanche 30 : deux semaines, et le message dit les jours
     // réellement disponibles plutôt qu'un compte de cases du calendrier.
     expect(() =>
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-08-30' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2026-08-30' }, '2026-08-11'),
     ).toThrow(new RegExp(`13 jours avant la course.*${MIN_RACE_PLAN_WEEKS} semaines au minimum`));
   });
 
@@ -371,21 +375,21 @@ describe('planWindow', () => {
     // 2027. Un jour de plus et la fenêtre déborde — la tronquer produirait un
     // plan qui s'arrête avant la course qu'il prépare.
     expect(
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2027-08-15' }, '2026-08-11')
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2027-08-15' }, '2026-08-11')
         .weeks,
     ).toBe(MAX_PLAN_WEEKS);
 
     expect(() =>
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2027-08-16' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2027-08-16' }, '2026-08-11'),
     ).toThrow(new RegExp(`Course trop lointaine.*${MAX_PLAN_WEEKS} au plus`));
   });
 
   it('refuse un objectif course sans date exploitable', () => {
-    expect(() => planWindow({ ...REQUEST, ...MONDAY, goalType: 'race' }, '2026-08-11')).toThrow(
+    expect(() => planWindow({ ...REQUEST, ...MONDAY, intent: 'race' }, '2026-08-11')).toThrow(
       /date de la course/,
     );
     expect(() =>
-      planWindow({ ...REQUEST, ...MONDAY, goalType: 'race', raceDate: '2026-02-31' }, '2026-08-11'),
+      planWindow({ ...REQUEST, ...MONDAY, intent: 'race', raceDate: '2026-02-31' }, '2026-08-11'),
     ).toThrow(/date de la course/);
   });
 
@@ -406,7 +410,7 @@ describe('planWindow', () => {
     });
 
     it('recompte les semaines d’une course depuis ce lundi-là', () => {
-      const race = { ...REQUEST, goalType: 'race', raceDate: '2026-09-27' } as const;
+      const race = { ...REQUEST, intent: 'race', raceDate: '2026-09-27' } as const;
 
       // Départ le lundi 17 août : 6 semaines jusqu'à la course.
       expect(planWindow({ ...race, ...MONDAY }, '2026-08-11').weeks).toBe(6);
@@ -422,7 +426,7 @@ describe('planWindow', () => {
     it('refuse une course devenue trop proche du démarrage choisi', () => {
       expect(() =>
         planWindow(
-          { ...REQUEST, goalType: 'race', raceDate: '2026-09-13', startsOn: '2026-08-31' },
+          { ...REQUEST, intent: 'race', raceDate: '2026-09-13', startsOn: '2026-08-31' },
           '2026-08-11',
         ),
       ).toThrow(/trop court/);
@@ -484,7 +488,7 @@ describe('planWindow', () => {
     });
 
     it('exclut une semaine entamée trop courte du minimum d’un plan course', () => {
-      const race = { ...REQUEST, goalType: 'race' } as const;
+      const race = { ...REQUEST, intent: 'race' } as const;
 
       // Dimanche 16 août, course le lundi 24 : trois semaines ISO depuis l'ancre,
       // mais huit jours de préparation — la semaine entamée d'un jour ne prépare
@@ -505,7 +509,7 @@ describe('planWindow', () => {
     });
 
     it('compte les semaines d’une course depuis l’ancre, semaine entamée comprise', () => {
-      const race = { ...REQUEST, goalType: 'race', raceDate: '2026-09-13' } as const;
+      const race = { ...REQUEST, intent: 'race', raceDate: '2026-09-13' } as const;
 
       // Jeudi 13 août → dimanche 13 septembre : 5 semaines ISO depuis le lundi 10.
       expect(planWindow({ ...race, startsOn: '2026-08-13' }, '2026-08-11')).toEqual({
@@ -587,7 +591,7 @@ describe('remainingPlanWindow', () => {
 describe('generatePlan', () => {
   /** Une préparation marathon datée : 8 semaines, jour J le dimanche 11 octobre. */
   const RACE_REQUEST: PlanRequest = {
-    goalType: 'race',
+    intent: 'race',
     level: 'intermediate',
     goalText: 'Marathon de Nantes',
     raceDate: '2026-10-11',
@@ -699,6 +703,126 @@ describe('generatePlan', () => {
    * refuse d'écrire (`PlanSkeletonInfeasibleError`). Le service le lui dit sur le
    * champ qu'elle peut changer, et n'appelle pas le modèle pour rien.
    */
+  /*
+   * L'intention **reprise**, de bout en bout : ce qu'elle écrit en base, le
+   * régime de volume qu'elle applique, et le plafond qu'elle tire des données
+   * réelles de l'athlète.
+   *
+   * Les trois se décident dans ce service et nulle part ailleurs : le squelette
+   * ne voit ni l'historique ni le plan enregistré.
+   */
+  describe('une reprise', () => {
+    const RETURN_REQUEST: PlanRequest = {
+      ...REQUEST,
+      intent: 'return',
+      returnInjuryHistory: true,
+      goalText: '',
+      weeks: 8,
+      sessionsPerWeek: 4,
+      // Départ un lundi : la première semaine est pleine, donc son volume se lit
+      // sans proratisation.
+      startsOn: '2026-08-17',
+    };
+
+    it('écrit son intention et son antécédent dans le plan', async () => {
+      coachAnswers();
+
+      await generatePlan(RETURN_REQUEST);
+
+      const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
+      expect(input.intent).toBe('return');
+      expect(input.returnInjuryHistory).toBe(true);
+      // `goal_type` reste solidaire : seule une intention datée porte une date.
+      expect(input.goalType).toBe('free');
+      expect(input.raceDate).toBeNull();
+      // La note est facultative : rien n'oblige l'athlète à en écrire une.
+      expect(input.goalText).toBe('');
+    });
+
+    /*
+     * Le niveau **de charge** d'une reprise est celui d'une débutante, quel que
+     * soit le niveau déclaré : ce qui se perd à l'arrêt n'est pas ce qui met le
+     * plus longtemps à revenir, et une confirmée qui reprend a le tissu
+     * conjonctif d'une débutante avec le moteur d'une confirmée.
+     */
+    it('vise les volumes d’une débutante, quel que soit le niveau déclaré', () => {
+      const window = planWindow(RETURN_REQUEST, '2026-08-11');
+      const asAdvanced = planVolumeTargets(
+        { ...RETURN_REQUEST, level: 'advanced' },
+        window,
+        SNAPSHOT,
+      );
+
+      expect(asAdvanced).toEqual(
+        planVolumeTargets({ ...RETURN_REQUEST, level: 'beginner' }, window, SNAPSHOT),
+      );
+      // Et c'est bien un changement de régime : à niveau déclaré égal, une
+      // recherche de vitesse monte plus vite.
+      expect(asAdvanced).not.toEqual(
+        planVolumeTargets({ ...RETURN_REQUEST, intent: 'faster', level: 'advanced' }, window, SNAPSHOT),
+      );
+    });
+
+    it('démarre au volume d’une débutante quand rien n’ancre la reprise', () => {
+      // `defaultStartKm` du niveau débutant : sans historique, une reprise
+      // démarre bas, et c'est voulu.
+      const empty: TrainingSnapshotDto = { ...SNAPSHOT, weeks: [], longestSessionKm30d: null };
+      const window = planWindow(RETURN_REQUEST, '2026-08-11');
+
+      // `defaultStartKm` vaut 12 km pour une débutante et 32 pour une
+      // confirmée : à niveau déclaré identique, une reprise démarre presque
+      // trois fois plus bas, et c'est exactement ce qu'on veut d'une reprise.
+      expect(planVolumeTargets({ ...RETURN_REQUEST, level: 'advanced' }, window, empty)[0].targetKm)
+        .toBe(11.9);
+      expect(
+        planVolumeTargets({ ...RETURN_REQUEST, intent: 'faster', level: 'advanced' }, window, empty)[0]
+          .targetKm,
+      ).toBe(31.9);
+    });
+
+    /*
+     * Le plafond de sortie longue vient des **données**, pas d'une constante :
+     * la plus longue séance des trente derniers jours, majorée de 10 %
+     * (Frandsen 2025). Sans donnée, pas de plafond — on n'invente pas un chiffre
+     * pour combler un historique vide.
+     */
+    it('plafonne sa première sortie longue à la plus longue séance récente + 10 %', async () => {
+      coachAnswers();
+      dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, longestSessionKm30d: 12 });
+
+      await generatePlan(RETURN_REQUEST);
+      const capped = firstLongRunKm();
+
+      expect(capped).toBeLessThanOrEqual(12 * 1.1 + 1e-9);
+
+      // Sans historique de séance longue, le même plan repart sans plafond.
+      dal.createDraftPlanWithSessions.mockClear();
+      dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, longestSessionKm30d: null });
+      await generatePlan(RETURN_REQUEST);
+
+      expect(firstLongRunKm()).toBeGreaterThan(capped);
+    });
+
+    it('ne plafonne rien sous les autres intentions', async () => {
+      coachAnswers();
+      dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, longestSessionKm30d: 12 });
+
+      await generatePlan({ ...RETURN_REQUEST, intent: 'faster', returnInjuryHistory: false });
+
+      // La plus longue séance récente est une donnée de reprise : ailleurs, elle
+      // n'a aucun titre à rogner la sortie longue.
+      expect(firstLongRunKm()).toBeGreaterThan(12 * 1.1);
+    });
+
+    /** La sortie longue de la première semaine écrite, en km. */
+    function firstLongRunKm(): number {
+      const sessions = writtenSessions();
+      const first = sessions[0].scheduledOn;
+      const week = sessions.filter((session) => session.scheduledOn < shiftDays(first, 7));
+      return Math.max(...week.map((session) => (session.volumeM ?? 0) / 1_000));
+    }
+  });
+
   describe('quand le volume ne finance pas les séances demandées', () => {
     /** Le cas de la revue : 3 km récents, 6 séances, marathon dans 8 semaines. */
     const TOO_MANY_SESSIONS: PlanRequest = {
@@ -782,7 +906,8 @@ describe('generatePlan', () => {
       expect(logged).toContain('plan tout-déterministe encore hors règles');
       expect(logged).toContain(VIOLATION);
       // La configuration exacte, pour rejouer le cas.
-      expect(logged).toContain('objectif free « reprendre le volume »');
+      expect(logged).toContain('intention faster');
+      expect(logged).toContain('note « reprendre le volume »');
       expect(logged).toContain('3 séances/semaine');
     });
   });
@@ -876,7 +1001,7 @@ describe('generatePlan', () => {
    * « sur un objectif libre, il n'y a pas d'allure objectif à travailler, et
    * prescrire un bloc à une allure qui n'existe pas ferait fabriquer une
    * échéance ») ; le chemin du squelette, lui, lisait la distance dans le texte
-   * sans regarder `goalType`.
+   * sans regarder l'intention.
    *
    * Mesuré avant correction : « me remettre après mon semi » recevait 3 sorties
    * longues découpées en « Mise en route / Bloc à allure objectif / Retour au
@@ -940,14 +1065,21 @@ describe('generatePlan', () => {
 
       expect(summaryCall.messages[0].content).toContain('DÉJÀ ÉCRIT');
       expect(summaryCall.messages[0].content).toContain("Tu n'écris aucune allure");
-      expect(user).toContain('Objectif : la course « Marathon de Nantes »');
+      expect(user).toContain('Intention : préparer une course datée');
+      expect(user).toContain('Course le dimanche 11 octobre 2026.');
+      // La note de l'athlète est transmise **comme une note**, pas comme
+      // l'objectif du plan : c'est l'intention qui dit ce qu'il prépare.
+      expect(user).toContain("Note de l'athlète : « Marathon de Nantes »");
       expect(user).toContain('Plan écrit : 8 semaines');
       expect(user).toContain('Périodisation :');
       expect(user).toContain('Volume hebdomadaire :');
       expect(user).toContain('Séances de qualité :');
       // Aucune séance : le résumé décrit une forme, il ne recopie pas un plan.
       expect(user).not.toContain('Jour J : la course');
-      expect(user.length).toBeLessThan(600);
+      // Le plafond a monté de 600 à 800 caractères avec la ligne d'intention,
+      // qui vient d'une table figée (`INTENT_SUMMARY_CONTEXT`) : ce que ce
+      // plafond interdit reste ce qui grandirait avec le plan — les séances.
+      expect(user.length).toBeLessThan(800);
     });
 
     it('retombe sur un résumé écrit par l’appli quand le modèle échoue', async () => {
@@ -1286,7 +1418,9 @@ describe('updatePlanFromInstruction', () => {
 
     const instruction = userMessage(0);
     expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('plan_instruction');
-    expect(instruction).toContain('Plan en cours : « 10 km sous 50 min »');
+    expect(instruction).toContain(
+      'Plan en cours : préparation de course — « 10 km sous 50 min »',
+    );
     expect(instruction).toContain('Semaines restantes : 6.');
     expect(instruction).toContain("Consigne de l'athlète : « plutôt 3 séances »");
   });
@@ -1506,6 +1640,7 @@ describe('rewriteRemainingPlan — l’ancrage d’une continuation', () => {
   const OPEN_PLAN: PlanDto = {
     ...ACTIVE_PLAN,
     goalType: 'free',
+    intent: 'faster',
     goalText: 'reprendre le volume',
     raceDate: null,
     weeks: 12,
@@ -1698,7 +1833,13 @@ describe('rewriteRemainingPlan — l’ancrage d’une continuation', () => {
     const rewrite = await rewriteRemainingPlan({
       // Course le 20 septembre ; la fenêtre, elle, s'arrête douze semaines après
       // le 1er juin, soit le 23 août.
-      plan: { ...OPEN_PLAN, goalType: 'race', raceDate: '2026-09-20', startsOn: '2026-06-01' },
+      plan: {
+        ...OPEN_PLAN,
+        goalType: 'race',
+        intent: 'race',
+        raceDate: '2026-09-20',
+        startsOn: '2026-06-01',
+      },
       window: { firstWeekStart: '2026-06-01', weeks: 12, firstWeekFromDay: 1 },
       snapshot: snapshotOf('2026-05-31', [42, 42, 42, 42]),
       plannedWeeklyKm: new Map(),
@@ -2021,6 +2162,7 @@ describe('remainingVolumeTargets — la vie d’un plan', () => {
   const LONG_PLAN: PlanDto = {
     ...ACTIVE_PLAN,
     goalType: 'free',
+    intent: 'faster',
     goalText: 'reprendre le volume',
     raceDate: null,
     startsOn: '2026-06-01',
@@ -2034,6 +2176,7 @@ describe('remainingVolumeTargets — la vie d’un plan', () => {
   const RACE_PLAN: PlanDto = {
     ...LONG_PLAN,
     goalType: 'race',
+    intent: 'race',
     goalText: 'semi-marathon en 1 h 45',
     raceDate: '2026-09-20',
     weeks: 16,
@@ -2797,6 +2940,7 @@ describe('remainingVolumeTargets × validatePlanBusinessRules', () => {
                   weeks: weeks + planOffset,
                   weeklyTimeMinutes,
                   goalType: goal === 'free' ? 'free' : 'race',
+                  intent: goal === 'free' ? 'faster' : 'race',
                   goalText: goal === 'marathon' ? 'marathon de Paris' : '10 km sous 50 min',
                   raceDate:
                     goal === 'free' ? null : shiftDays(firstWeekStart, weeks * 7 - 1),
@@ -2894,6 +3038,7 @@ describe('remainingVolumeTargets — les défauts mesurés', () => {
   const PLAN: PlanDto = {
     ...ACTIVE_PLAN,
     goalType: 'free',
+    intent: 'faster',
     goalText: 'reprendre le volume',
     raceDate: null,
     startsOn: '2026-06-01',
@@ -3077,6 +3222,7 @@ describe('remainingVolumeTargets — l’affûtage d’une fenêtre ouverte en m
   const RACE_PLAN: PlanDto = {
     ...ACTIVE_PLAN,
     goalType: 'race',
+    intent: 'race',
     goalText: 'semi-marathon en 1 h 45',
     raceDate: '2026-09-20',
     startsOn: '2026-06-01',
@@ -3154,6 +3300,7 @@ describe('remainingVolumeTargets — l’affûtage d’une fenêtre ouverte en m
     const plan: PlanDto = {
       ...ACTIVE_PLAN,
       goalType: 'free',
+      intent: 'faster',
       goalText: 'reprendre le volume',
       raceDate: null,
       startsOn: '2026-06-01',

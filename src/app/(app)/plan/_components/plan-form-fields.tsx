@@ -150,6 +150,72 @@ export function RadioCards<T extends string>({
 }
 
 /**
+ * Case à cocher, habillée comme les cartes de {@link RadioCards} : une seule
+ * question, un oui ou un non.
+ *
+ * Le `<input>` natif est masqué et la case dessinée à côté — même mécanique que
+ * les radios, pour la même raison : la couleur d'un contrôle natif n'est pas
+ * thémable, et le focus clavier est reporté sur l'étiquette entière.
+ *
+ * Non cochée, une case n'envoie **rien** dans le `FormData` : l'absence vaut
+ * « non », et c'est ce que la Server Action lit.
+ */
+export function Checkbox({
+  id,
+  name,
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  id: string;
+  name: string;
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      htmlFor={id}
+      className={cn(
+        "cursor-pointer rounded-button border px-3 py-2.5",
+        "transition-colors duration-150 ease-out",
+        "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent",
+        checked ? "border-accent bg-accent-soft" : "border-border bg-surface-2 hover:border-fg-faint/35",
+      )}
+    >
+      <span className="flex items-center gap-2.5">
+        <input
+          id={id}
+          type="checkbox"
+          name={name}
+          checked={checked}
+          onChange={(event) => onChange(event.target.checked)}
+          aria-describedby={`${id}-hint`}
+          className="sr-only"
+        />
+        <span
+          aria-hidden="true"
+          className={cn(
+            "flex size-[1.05rem] shrink-0 items-center justify-center rounded-[4px] border",
+            checked ? "border-accent" : "border-fg-faint",
+          )}
+        >
+          {checked ? <span className="size-2 rounded-[2px] bg-accent" /> : null}
+        </span>
+        <span className={cn("text-[0.85rem]", checked ? "font-medium text-fg" : "text-fg-muted")}>
+          {label}
+        </span>
+      </span>
+      <span id={`${id}-hint`} className="mt-1.5 block text-[0.74rem] leading-snug text-fg-faint">
+        {hint}
+      </span>
+    </label>
+  );
+}
+
+/**
  * Liste déroulante native, habillée aux tokens du champ de saisie : sur mobile
  * elle ouvre le sélecteur du système, qu'aucun composant maison n'égale.
  */

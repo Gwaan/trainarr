@@ -37,6 +37,7 @@ describe("PLAN_STEPS", () => {
   it("va de l'objectif au récapitulatif, qui ferme la marche", () => {
     expect(PLAN_STEPS.map((candidate) => candidate.id)).toEqual([
       "goal",
+      "expectations",
       "profile",
       "race",
       "constraints",
@@ -58,21 +59,30 @@ describe("PLAN_STEPS", () => {
   it("ne pose aucun champ sur le récapitulatif, qui ne fait que relire", () => {
     expect(step("summary").fields).toEqual([]);
   });
+
+  it("ne pose aucun champ sur l'étape des attentes : elle se lit, elle ne se remplit pas", () => {
+    expect(step("expectations").fields).toEqual([]);
+    expect(isStepComplete(step("expectations"), values())).toBe(true);
+  });
 });
 
 describe("incompleteStepFields", () => {
-  it("retient l'objectif tant que sa phrase et sa date manquent", () => {
-    expect(incompleteStepFields(step("goal"), values())).toEqual(["goalText", "raceDate"]);
+  it("retient l'objectif tant que la date de course manque", () => {
+    // La note libre, elle, ne retient rien : c'est l'intention qui dit ce que le
+    // plan prépare.
+    expect(incompleteStepFields(step("goal"), values())).toEqual(["raceDate"]);
   });
 
-  it("laisse passer une course datée complète", () => {
+  it("laisse passer une course datée, note ou pas", () => {
+    expect(isStepComplete(step("goal"), values({ raceDate: "2026-11-08" }))).toBe(true);
     const complete = values({ goalText: "10 km sous 50 min", raceDate: "2026-11-08" });
     expect(isStepComplete(step("goal"), complete)).toBe(true);
   });
 
-  it("n'exige pas de date de course pour un objectif libre, ni de durée pour une course", () => {
-    const free = values({ goalType: "free", goalText: "Améliorer mon endurance", raceDate: "" });
-    expect(isStepComplete(step("goal"), free)).toBe(true);
+  it("n'exige pas de date de course sans échéance, ni de durée pour une course", () => {
+    for (const intent of ["faster", "weight_loss", "return"] as const) {
+      expect(isStepComplete(step("goal"), values({ intent, raceDate: "" })), intent).toBe(true);
+    }
 
     const race = values({ goalText: "Semi de Nantes", raceDate: "2026-11-08", weeks: "" });
     expect(isStepComplete(step("goal"), race)).toBe(true);

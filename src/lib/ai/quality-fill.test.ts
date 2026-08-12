@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PlanLevel } from '@/data/db/schema';
 import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
-import type { QualitySlot, QualityZone } from '@/lib/plan-skeleton';
+import {
+  buildPlanSkeleton,
+  type PlanIntent,
+  type QualitySlot,
+  type QualityZone,
+} from '@/lib/plan-skeleton';
 import {
   planSessionStepsSchema,
   sessionStepsTotals,
@@ -15,11 +20,14 @@ import {
   applyDerivedMeasures,
   applyImposedPaces,
   sessionStepViolations,
+  weeklyVolumeTargets,
+  type PlanRaceGoal,
   type PlanSessionOutput,
 } from './plan-schema';
 import {
   budgetToleranceKm,
   buildQualitySessionMessages,
+  deterministicQualitySession,
   fillQualitySlot,
   fillQualitySlots,
   QUALITY_REQUEST_TIMEOUT_MS,
@@ -802,5 +810,90 @@ describe('fillQualitySlots', () => {
   it("ne demande rien quand il n'y a pas de créneau", async () => {
     await expect(fillQualitySlots([])).resolves.toEqual([]);
     expect(chatCompletionJson).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * ------------------------------------------------------------------------
+ * Le gel : « Bloc à l'allure de l'objectif » n'existe que sous une course.
+ * ------------------------------------------------------------------------
+ *
+ * C'est le défaut d'origine du chantier des intentions, mesuré en production :
+ * huit séances à l'allure d'une course qui n'existait pas. La grille de qualité
+ * le ferme en amont — seule `race` regarde la distance d'objectif
+ * (`plan-skeleton/quality.ts`) —, mais le titre, lui, vit **ici**, et c'est lui
+ * que l'athlète lit sur sa timeline. Le geler des deux côtés à la fois demande
+ * de partir de vrais squelettes plutôt que de créneaux fabriqués à la main : un
+ * créneau écrit à la main peut porter n'importe quelle zone, un squelette non.
+ *
+ * Le balayage passe **même une distance d'objectif** aux intentions sans
+ * échéance — ce que le service ne fait pas (il ne la lit que sous `race`), mais
+ * c'est le seul chemin par lequel le défaut reviendrait, et il doit rester
+ * fermé au niveau de la grille.
+ */
+describe('l’allure d’objectif ne s’écrit que sous une intention datée', () => {
+  const ATHLETE = { recentWeeklyKm: 30, weeklyTimeMinutes: 300, easyPaceSecPerKm: 420 };
+
+  function skeletonFor(
+    intent: PlanIntent,
+    options: { weeks: number; sessionsPerWeek: number; goalDistanceKm: number | null },
+  ) {
+    const race: PlanRaceGoal | null = intent === 'race' ? { isMarathon: false } : null;
+    return buildPlanSkeleton({
+      intent,
+      weeks: options.weeks,
+      firstWeekFromDay: 1,
+      sessionsPerWeek: options.sessionsPerWeek,
+      longRunDay: 7,
+      level: 'intermediate',
+      race,
+      raceDay: race === null ? null : 7,
+      goalDistanceKm: options.goalDistanceKm,
+      targets: weeklyVolumeTargets({
+        weeks: options.weeks,
+        firstWeekFromDay: 1,
+        recentWeeklyKm: ATHLETE.recentWeeklyKm,
+        weeklyTimeMinutes: ATHLETE.weeklyTimeMinutes,
+        easyPaceSecPerKm: ATHLETE.easyPaceSecPerKm,
+        race,
+        level: 'intermediate',
+      }),
+    });
+  }
+
+  it('n’ouvre jamais la zone marathon hors course, donc jamais son titre', () => {
+    let checked = 0;
+
+    for (const intent of ['faster', 'weight_loss', 'return'] as const) {
+      for (const sessionsPerWeek of [3, 4, 5, 6]) {
+        for (const weeks of [6, 12, 16]) {
+          for (const goalDistanceKm of [null, 10, 21.0975, 42.195]) {
+            for (const week of skeletonFor(intent, { weeks, sessionsPerWeek, goalDistanceKm })) {
+              for (const slot of week.qualitySlots) {
+                checked += 1;
+                const where = `${intent}, ${sessionsPerWeek} séances, semaine ${week.weekNumber}`;
+                expect(slot.zone, where).not.toBe('marathon');
+                expect(deterministicQualitySession(slot).title, where).not.toBe(
+                  "Bloc à l'allure de l'objectif",
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Sans créneau balayé, le test ne prouverait rien.
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('l’écrit bien sous une course, sans quoi ce gel ne mesurerait rien', () => {
+    const titles = skeletonFor('race', {
+      weeks: 16,
+      sessionsPerWeek: 4,
+      goalDistanceKm: 21.0975,
+    }).flatMap((week) => week.qualitySlots.map((slot) => deterministicQualitySession(slot).title));
+
+    expect(titles).toContain("Bloc à l'allure de l'objectif");
   });
 });

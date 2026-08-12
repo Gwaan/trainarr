@@ -196,14 +196,22 @@ describe('le plan type de chaque intention', () => {
 
   /*
    * `return` — la moitié du plan en base, **aucune séance dure**, les deux
-   * premières semaines en marche/course (Hottenrott 2016), et une sortie longue
-   * plafonnée à 30 % de la semaine au lieu de 40 % (Frandsen 2025). Ce qui reste
-   * de vivacité : les lignes droites et les côtes courtes des footings.
+   * premières semaines en marche/course (Hottenrott 2016) **sortie longue
+   * comprise**, et une sortie longue plafonnée à 30 % de la semaine au lieu de
+   * 40 % (Frandsen 2025). Ce qui reste de vivacité : les lignes droites et les
+   * côtes courtes des footings.
+   *
+   * La sortie longue de S01 et S02 porte le même format et le même ratio que les
+   * footings de sa semaine, pour son propre kilométrage : une semaine dont tous
+   * les footings alternent marche et course et dont la séance **la plus longue**
+   * se courrait d'un trait ne suit aucune consigne — c'est le défaut mesuré au
+   * chantier précédent (footings en marche/course et sortie longue continue de
+   * 10,6 km à côté).
    */
   it('reprendre la course', () => {
     expect(planTable(skeletonFor('return'))).toEqual([
-      'S01 base     | Sortie longue en endurance 10,6 | — | Marche/course : 12 × (200 m course / 400 m marche) 7,5 · Marche/course : 13 × (200 m course / 400 m marche) 8,3 · Marche/course : 15 × (200 m course / 400 m marche) 9,0',
-      'S02 base     | Sortie longue en endurance 11,4 | — | Marche/course : 13 × (400 m course / 200 m marche) 8,0 · Marche/course : 15 × (400 m course / 200 m marche) 9,0 · Marche/course : 16 × (400 m course / 200 m marche) 9,8',
+      'S01 base     | Marche/course : 17 × (200 m course / 400 m marche) 10,6 | — | Marche/course : 12 × (200 m course / 400 m marche) 7,5 · Marche/course : 13 × (200 m course / 400 m marche) 8,3 · Marche/course : 15 × (200 m course / 400 m marche) 9,0',
+      'S02 base     | Marche/course : 19 × (400 m course / 200 m marche) 11,4 | — | Marche/course : 13 × (400 m course / 200 m marche) 8,0 · Marche/course : 15 × (400 m course / 200 m marche) 9,0 · Marche/course : 16 × (400 m course / 200 m marche) 9,8',
       'S03 base     | Sortie longue en endurance 12,2 | — | Footing avec lignes droites 8,5 · Footing en endurance 9,5 · Footing en endurance 10,5',
       'S04 base     | Sortie longue en endurance 10,3 | — | Footing avec côtes courtes 7,3 · Footing en endurance 8,1 · Footing en endurance 8,8',
       'S05 base     | Sortie longue en endurance 11,1 | — | Footing avec lignes droites 7,9 · Footing en endurance 8,7 · Footing en endurance 9,5',
@@ -293,13 +301,31 @@ describe('la marche/course d’une reprise', () => {
       .map((week) => week.weekNumber);
 
     expect(weeksWithWalkRun).toEqual([1, 2]);
-    // Et **tous** les footings de ces semaines-là, pas un seul : ce n'est pas
-    // une variation qu'on saupoudre, c'est la forme de la séance.
+    // **Toutes** les séances de ces semaines-là, sortie longue comprise : ce
+    // n'est pas une variation qu'on saupoudre, c'est la forme de la semaine. La
+    // sortie longue en était exclue, ce qui donnait une semaine 1 de reprise
+    // dont la séance la plus coûteuse était la seule à se courir d'un trait.
     for (const weekNumber of weeksWithWalkRun) {
       const week = skeleton[weekNumber - 1];
-      const easy = week.sessions.filter((session) => session.kind === 'Endurance fondamentale');
-      expect(walkRunSessions(week), `semaine ${weekNumber}`).toHaveLength(easy.length);
+      expect(walkRunSessions(week), `semaine ${weekNumber}`).toHaveLength(week.sessions.length);
+      const longRun = week.sessions.find((session) => session.kind === 'Sortie longue');
+      expect(longRun?.title, `semaine ${weekNumber}`).toMatch(/^Marche\/course/);
     }
+  });
+
+  it('donne à la sortie longue le ratio de sa semaine, sans toucher à son budget', () => {
+    // Même rampe que les footings (1:2 puis 2:1), et le kilométrage de la
+    // décomposition reste intact : la forme change, pas la charge.
+    const skeleton = skeletonFor('return');
+    const longRunOf = (index: number) =>
+      skeleton[index].sessions.find((session) => session.kind === 'Sortie longue');
+
+    expect(longRunOf(0)?.title).toContain('200 m course / 400 m marche');
+    expect(longRunOf(1)?.title).toContain('400 m course / 200 m marche');
+    expect(longRunOf(0)?.distanceKm).toBe(10.6);
+    expect(longRunOf(1)?.distanceKm).toBe(11.4);
+    // Et hors fenêtre, la sortie longue redevient une sortie longue.
+    expect(longRunOf(2)?.title).toBe('Sortie longue en endurance');
   });
 
   it('double la fenêtre quand un antécédent de blessure est déclaré', () => {

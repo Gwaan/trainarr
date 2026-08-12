@@ -63,7 +63,7 @@ const IDLE: PlanFormState = { status: 'idle' };
 const TODAY = '2026-08-11';
 
 const VALID_FIELDS: Record<string, string> = {
-  goalType: 'race',
+  intent: 'race',
   level: 'intermediate',
   goalText: '10 km sous 50 min',
   raceDate: '2026-09-13',
@@ -114,7 +114,7 @@ describe('createPlanAction — date de course', () => {
 
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
-      expect.objectContaining({ goalType: 'race', raceDate: LATEST_RACE }),
+      expect.objectContaining({ intent: 'race', raceDate: LATEST_RACE }),
       undefined,
     );
   });
@@ -248,17 +248,86 @@ describe('createPlanAction — date de démarrage', () => {
     expect(mocks.generatePlan).not.toHaveBeenCalled();
   });
 
-  it('accepte un objectif libre démarrant plus tard', async () => {
+  it('accepte une intention sans échéance démarrant plus tard', async () => {
     const state = await createPlanAction(
       IDLE,
-      form({ goalType: 'free', weeks: '8', raceDate: '', startsOn: '2026-09-07' }),
+      form({ intent: 'faster', weeks: '8', raceDate: '', startsOn: '2026-09-07' }),
     );
 
     expect(state.status).toBe('success');
     expect(mocks.generatePlan).toHaveBeenCalledWith(
-      expect.objectContaining({ goalType: 'free', weeks: 8, startsOn: '2026-09-07' }),
+      expect.objectContaining({ intent: 'faster', weeks: 8, startsOn: '2026-09-07' }),
       undefined,
     );
+  });
+});
+
+/*
+ * Le sélecteur d'intention et ses champs conditionnels.
+ *
+ * L'action est un endpoint public : ce qui arrive ici n'est pas ce que la modale
+ * affiche, mais ce qu'un POST veut bien envoyer. D'où les trois cas ci-dessous —
+ * une intention inconnue, une case cochée là où elle ne veut rien dire, et une
+ * note absente, qui est désormais le cas nominal.
+ */
+describe("createPlanAction — intention", () => {
+  it("transmet l'intention choisie et la durée demandée", async () => {
+    const state = await createPlanAction(
+      IDLE,
+      form({ intent: 'weight_loss', weeks: '12', raceDate: '' }),
+    );
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'weight_loss', weeks: 12, returnInjuryHistory: false }),
+      undefined,
+    );
+  });
+
+  it("refuse une intention inconnue sur son champ, sans appeler le coach", async () => {
+    const state = await createPlanAction(IDLE, form({ intent: 'sprint' }));
+
+    expect(state.status).toBe('error');
+    expect(state.fieldErrors?.intent).toContain('Choisis ce que tu viens chercher');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+  });
+
+  it("transmet l'antécédent de blessure d'une reprise, et l'ignore ailleurs", async () => {
+    await createPlanAction(
+      IDLE,
+      form({ intent: 'return', weeks: '12', raceDate: '', returnInjuryHistory: 'on' }),
+    );
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'return', returnInjuryHistory: true }),
+      undefined,
+    );
+
+    // Cochée sous une autre intention, la case ne veut rien dire : elle ne
+    // déplace aucun paramètre du plan, et n'a donc rien à y faire.
+    mocks.generatePlan.mockClear();
+    await createPlanAction(IDLE, form({ returnInjuryHistory: 'on' }));
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'race', returnInjuryHistory: false }),
+      undefined,
+    );
+  });
+
+  it("accepte une note absente : c'est l'intention qui dit ce que le plan prépare", async () => {
+    const state = await createPlanAction(IDLE, form({ goalText: '' }));
+
+    expect(state.status).toBe('success');
+    expect(mocks.generatePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ goalText: '' }),
+      undefined,
+    );
+  });
+
+  it('refuse une note trop longue, sur son champ', async () => {
+    const state = await createPlanAction(IDLE, form({ goalText: 'x'.repeat(201) }));
+
+    expect(state.status).toBe('error');
+    expect(state.fieldErrors?.goalText).toContain('200 caractères');
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
   });
 });
 

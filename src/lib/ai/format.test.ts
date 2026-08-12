@@ -151,6 +151,7 @@ const SNAPSHOT: TrainingSnapshotDto = {
     { startsOn: '2026-07-20', distanceKm: 42.15, movingTimeS: 13_500, sessions: 4 },
     { startsOn: '2026-07-27', distanceKm: 0, movingTimeS: 0, sessions: 0 },
   ],
+  longestSessionKm30d: 18.4,
   recentAvgPaceSecPerKm: 324,
 };
 
@@ -173,6 +174,7 @@ describe('formatTrainingSnapshot', () => {
       profile: {},
       fitness: null,
       vo2max: null,
+      longestSessionKm30d: null,
       weeks: [],
       recentAvgPaceSecPerKm: null,
     });

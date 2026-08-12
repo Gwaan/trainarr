@@ -50,6 +50,7 @@ import {
   parseRaceTimeSeconds,
   type PlanFormField,
 } from './form-options';
+import { PLAN_INTENTS } from './plan-intent';
 import {
   MAX_PLAN_START_LEAD_WEEKS,
   earliestPlanStart,
@@ -241,20 +242,29 @@ function readReferenceRace(distance: string, time: string): ReferenceRaceRead {
 
 const planFormSchema = z
   .object({
-    goalType: z.enum(['race', 'free'], { error: "Choisis un type d'objectif." }),
+    intent: z.enum(PLAN_INTENTS, { error: 'Choisis ce que tu viens chercher.' }),
+    /**
+     * La case « j'ai eu une blessure ces derniers mois ».
+     *
+     * Une case non cochée n'envoie rien : l'absence vaut « non ». Toute autre
+     * valeur qu'`on` est traitée comme un « non » plutôt que refusée — il n'y a
+     * pas de saisie à corriger sur une case, et faire échouer le formulaire sur
+     * un POST bricolé n'apprendrait rien à personne.
+     */
+    returnInjuryHistory: z.string().transform((value) => value === 'on'),
     // Le niveau n'a pas de défaut côté serveur : le formulaire en propose un,
     // mais un POST direct qui l'omet est refusé plutôt que rangé d'office parmi
     // les intermédiaires.
     level: z.enum(['beginner', 'intermediate', 'advanced'], {
       error: 'Choisis ton niveau en course.',
     }),
+    /** Note libre : facultative depuis que l'intention dit ce que le plan prépare. */
     goalText: z
       .string()
       .trim()
-      .min(1, 'Décris ton objectif en une phrase.')
       .max(
         BOUNDS.goalTextMaxChars,
-        `L'objectif ne peut pas dépasser ${BOUNDS.goalTextMaxChars} caractères.`,
+        `La note ne peut pas dépasser ${BOUNDS.goalTextMaxChars} caractères.`,
       ),
     // Ces deux-là s'excluent : seul celui qu'impose `goalType` est vérifié.
     raceDate: z.string().trim(),
@@ -314,7 +324,7 @@ const planFormSchema = z
       // semaine ouvre une première semaine entamée (cf. `planWindow`).
     }
 
-    if (form.goalType === 'race') {
+    if (form.intent === 'race') {
       // La course est jugée sur la fenêtre réelle du plan : tant que la date de
       // démarrage est fautive, il n'y a pas de fenêtre à opposer à la course.
       if (!validStart) return;
@@ -374,7 +384,10 @@ const planFormSchema = z
  * par le service, son message reste général.
  */
 const FIELD_OF_PLAN_INPUT: Partial<Record<PlanInputField, PlanFormField>> = {
-  goalType: 'goalType',
+  // `goalType` n'a plus de champ à lui : il se déduit de l'intention, et c'est
+  // donc le sélecteur qui porte le message.
+  goalType: 'intent',
+  intent: 'intent',
   level: 'level',
   goalText: 'goalText',
   raceDate: 'raceDate',
@@ -445,7 +458,8 @@ export async function createPlanAction(
   // l'appelant — un contrôle au niveau de la page ne protège pas cette action.
 
   const parsed = planFormSchema.safeParse({
-    goalType: textField(formData, 'goalType'),
+    intent: textField(formData, 'intent'),
+    returnInjuryHistory: textField(formData, 'returnInjuryHistory'),
     level: textField(formData, 'level'),
     goalText: textField(formData, 'goalText'),
     raceDate: textField(formData, 'raceDate'),
@@ -470,11 +484,14 @@ export async function createPlanAction(
 
   const form = parsed.data;
   const request: PlanRequest = {
-    goalType: form.goalType,
+    intent: form.intent,
+    // L'antécédent ne veut rien dire hors reprise : le service et le DAL le
+    // rangeraient de toute façon à `false`, autant ne pas le transmettre.
+    returnInjuryHistory: form.intent === 'return' && form.returnInjuryHistory,
     level: form.level,
     goalText: form.goalText,
-    raceDate: form.goalType === 'race' ? form.raceDate : undefined,
-    weeks: form.goalType === 'free' ? Number(form.weeks) : undefined,
+    raceDate: form.intent === 'race' ? form.raceDate : undefined,
+    weeks: form.intent === 'race' ? undefined : Number(form.weeks),
     // Vide : le service repart de son défaut, aujourd'hui.
     startsOn: form.startsOn === '' ? undefined : form.startsOn,
     sessionsPerWeek: form.sessionsPerWeek,

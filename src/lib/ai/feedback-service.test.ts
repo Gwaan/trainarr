@@ -105,6 +105,7 @@ const SNAPSHOT: TrainingSnapshotDto = {
   fitness: { ctl: 52.4, atl: 61.2, tsb: -8.8 },
   vo2max: 48.6,
   weeks: [{ startsOn: '2026-08-03', distanceKm: 42.1, movingTimeS: 13_500, sessions: 4 }],
+  longestSessionKm30d: 14.2,
   recentAvgPaceSecPerKm: 324,
 };
 

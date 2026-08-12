@@ -63,6 +63,17 @@ export type TrainingSnapshotDto = {
   vo2max: number | null;
   /** Les {@link SNAPSHOT_WEEKS} dernières semaines, de la plus ancienne à la semaine en cours. */
   weeks: SnapshotWeekDto[];
+  /**
+   * La plus longue course des {@link LONGEST_SESSION_DAYS} derniers jours, en
+   * km — `null` quand l'athlète n'en a couru aucune.
+   *
+   * C'est l'entrée du **plafond de sortie longue** d'une reprise : le pic d'une
+   * séance isolée est le paramètre de charge que Frandsen 2025 (5 205 coureurs)
+   * associe au risque, et le plan ne rouvre donc pas une reprise sur une sortie
+   * plus longue que ce que l'athlète vient de courir. `null` veut dire « pas de
+   * plafond » et non « plafond à zéro » : sans donnée, on n'invente rien.
+   */
+  longestSessionKm30d: number | null;
   /** Allure moyenne des {@link RECENT_PACE_ACTIVITIES} dernières courses, `null` si aucune. */
   recentAvgPaceSecPerKm: number | null;
 };
@@ -85,6 +96,16 @@ export const SNAPSHOT_WEEKS = 4;
 
 /** Fenêtre de l'allure de référence : les 5 dernières courses. */
 export const RECENT_PACE_ACTIVITIES = 5;
+
+/**
+ * Fenêtre de la plus longue séance : 30 jours.
+ *
+ * Un mois, parce que c'est l'horizon sur lequel une sortie longue reste une
+ * capacité **actuelle** — au-delà, un 18 km couru il y a deux mois ne dit plus
+ * ce que les tendons encaissent aujourd'hui, ce qui est justement la question
+ * que pose une reprise.
+ */
+export const LONGEST_SESSION_DAYS = 30;
 
 /**
  * Écart de distance toléré pour qu'une sortie soit « comparable » : ±25 %.
@@ -184,6 +205,35 @@ export function recentRunPace(
   return distanceM > 0 ? movingTimeS / (distanceM / 1000) : null;
 }
 
+/**
+ * La plus longue course des `days` derniers jours, en km — `null` s'il n'y en a
+ * aucune.
+ *
+ * Course à pied uniquement, comme partout ailleurs dans ce module : une sortie
+ * vélo de 40 km ne dit rien de ce qu'une sortie longue à pied coûtera. La
+ * fenêtre est fermée des deux côtés — rien après `today`, rien avant `today −
+ * days` — et une distance nulle n'est pas une séance : elle ne peut donc pas
+ * devenir un plafond de zéro kilomètre.
+ */
+export function longestRunKm(
+  rows: readonly Activity[],
+  today: string,
+  days = LONGEST_SESSION_DAYS,
+): number | null {
+  const from = shiftCivilDate(today, -days);
+  let longestM = 0;
+
+  for (const row of rows) {
+    if (!isRunning(row.sportType)) continue;
+    const day = toCivilDate(row.startedAt);
+    // Les dates civiles `YYYY-MM-DD` s'ordonnent lexicographiquement.
+    if (day < from || day > today) continue;
+    if (row.distanceM > longestM) longestM = row.distanceM;
+  }
+
+  return longestM > 0 ? longestM / 1000 : null;
+}
+
 /** DTO d'une sortie comparable. Le TRIMP est recalculé : il n'est pas stocké. */
 export function toComparableActivityDto(row: Activity, profile: Athlete): ComparableActivityDto {
   return {
@@ -214,6 +264,7 @@ function emptySnapshot(today: string): TrainingSnapshotDto {
     fitness: null,
     vo2max: null,
     weeks: [],
+    longestSessionKm30d: null,
     recentAvgPaceSecPerKm: null,
   };
 }
@@ -253,6 +304,7 @@ export async function getTrainingSnapshot(): Promise<TrainingSnapshotDto> {
     fitness: fitness === null ? null : { ctl: fitness.ctl, atl: fitness.atl, tsb: fitness.tsb },
     vo2max: vo2max === null ? null : vo2max.value,
     weeks: buildRecentWeeks(rows, today),
+    longestSessionKm30d: longestRunKm(rows, today),
     recentAvgPaceSecPerKm: recentRunPace(rows),
   };
 }

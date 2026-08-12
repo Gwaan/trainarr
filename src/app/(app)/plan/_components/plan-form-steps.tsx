@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import type { PlanFormField } from "../_lib/actions";
 import { formatCivilDay } from "../_lib/format-plan";
 import {
-  GOAL_TYPE_CHOICES,
   LEVEL_CHOICES,
   LONG_RUN_DAY_CHOICES,
   REFERENCE_DISTANCE_CHOICES,
@@ -13,10 +12,11 @@ import {
   WEEK_CHOICES,
   asReferenceDistance,
 } from "../_lib/form-options";
+import { INTENT_CHOICES, INTENT_HONEST_NOTES } from "../_lib/plan-intent";
 import { planRecapEntries } from "../_lib/plan-recap";
 import type { PlanFormValues, PlanStep } from "../_lib/plan-steps";
 
-import { Field, RadioCards, Select, describedBy } from "./plan-form-fields";
+import { Checkbox, Field, RadioCards, Select, describedBy } from "./plan-form-fields";
 
 /**
  * Le contenu de chaque étape de la modale de création.
@@ -28,10 +28,21 @@ import { Field, RadioCards, Select, describedBy } from "./plan-form-fields";
  */
 
 const HINTS = {
-  goalText:
-    "Ce que tu veux atteindre, en une phrase : c'est ce que le coach cherchera à préparer.",
+  /**
+   * Deux textes, parce que la note n'a pas le même poids selon l'intention.
+   * Sous `race`, elle est la **seule** source de la distance d'objectif que lit
+   * `goalDistanceKm()` : vide, un marathon reçoit un plan calé sur un format
+   * 10 km. Ailleurs, elle ne fait que passer au coach. Un hint unique mentirait
+   * dans un cas ou dans l'autre.
+   */
+  goalTextRace:
+    "Écris la distance visée et ton chrono cible (« marathon en 3h45 », « 10 km sous 50 min ») : sans eux, le plan se cale sur un format 10 km — affûtage plus court, pas de bloc à allure objectif.",
+  goalTextOther:
+    "Une précision pour le coach, si tu veux — elle n'influence pas la structure du plan.",
   raceDate: "Le plan court jusqu'au jour de la course, affûtage compris.",
   weeks: "La durée du bloc d'entraînement, sans échéance particulière.",
+  returnInjuryHistory:
+    "C'est le facteur de risque le mieux établi : le plan allonge alors sa base et double la période en marche/course.",
   sessionsPerWeek: "Le nombre de sorties que tu peux tenir chaque semaine, durablement.",
   weeklyTimeHours:
     "Le temps que tu peux consacrer à courir sur une semaine. Sans réponse, le coach reste prudent.",
@@ -74,6 +85,8 @@ export function PlanStepFields(props: PlanStepFieldsProps) {
   switch (props.step.id) {
     case "goal":
       return <GoalFields {...props} />;
+    case "expectations":
+      return <ExpectationsNote intent={props.values.intent} />;
     case "profile":
       return <ProfileFields {...props} />;
     case "race":
@@ -85,45 +98,49 @@ export function PlanStepFields(props: PlanStepFieldsProps) {
   }
 }
 
+/**
+ * Ce que le plan peut donner, et ce qu'il ne promet pas — l'étape qui se lit,
+ * avant de générer.
+ *
+ * Le texte vit dans `_lib/plan-intent.ts` : la page du plan en réutilise une
+ * partie, et deux copies divergeraient. Aucun champ ici, rien à valider.
+ */
+function ExpectationsNote({ intent }: { intent: PlanFormValues["intent"] }) {
+  return (
+    <div className="rounded-card border border-border bg-surface-2 px-3.5 py-3">
+      <p className="text-[0.85rem] leading-relaxed text-fg-muted">
+        {INTENT_HONEST_NOTES[intent]}
+      </p>
+    </div>
+  );
+}
+
 function GoalFields({ values, onChange, errors, fieldId, bounds }: PlanStepFieldsProps) {
   return (
     <div className="flex flex-col gap-5">
       <RadioCards
-        name="goalType"
-        legend="Type d'objectif"
-        choices={GOAL_TYPE_CHOICES}
-        value={values.goalType}
-        onChange={(value) => onChange("goalType", value)}
-        error={errors?.goalType}
-        errorId={`${fieldId("goalType")}-error`}
+        name="intent"
+        legend="Ce que tu viens chercher"
+        choices={INTENT_CHOICES}
+        value={values.intent}
+        onChange={(value) => onChange("intent", value)}
+        error={errors?.intent}
+        errorId={`${fieldId("intent")}-error`}
         columns="sm:grid-cols-2"
       />
 
-      <Field
-        id={fieldId("goalText")}
-        label={values.goalType === "race" ? "Ta course" : "Ton objectif"}
-        hint={HINTS.goalText}
-        error={errors?.goalText}
-      >
-        <Input
-          id={fieldId("goalText")}
-          name="goalText"
-          type="text"
-          maxLength={200}
-          autoComplete="off"
-          placeholder={values.goalType === "race" ? "10 km sous 50 min" : "Améliorer mon endurance"}
-          aria-required="true"
-          aria-invalid={errors?.goalText ? true : undefined}
-          aria-describedby={describedBy(
-            `${fieldId("goalText")}-hint`,
-            Boolean(errors?.goalText) && `${fieldId("goalText")}-error`,
-          )}
-          value={values.goalText}
-          onChange={(event) => onChange("goalText", event.target.value)}
+      {values.intent === "return" ? (
+        <Checkbox
+          id={fieldId("returnInjuryHistory")}
+          name="returnInjuryHistory"
+          label="J'ai eu une blessure ces derniers mois"
+          hint={HINTS.returnInjuryHistory}
+          checked={values.returnInjuryHistory}
+          onChange={(checked) => onChange("returnInjuryHistory", checked)}
         />
-      </Field>
+      ) : null}
 
-      {values.goalType === "race" ? (
+      {values.intent === "race" ? (
         <Field
           id={fieldId("raceDate")}
           label="Date de la course"
@@ -169,6 +186,36 @@ function GoalFields({ values, onChange, errors, fieldId, bounds }: PlanStepField
           </Select>
         </Field>
       )}
+
+      {/*
+        L'ancien objectif en texte libre, devenu une **note**. C'est le
+        sélecteur qui donne au plan sa forme — sauf pour une chose, et elle
+        compte : la distance visée ne se lit qu'ici (« 10 km sous 50 min »),
+        d'où un hint qui, sous `race`, dit ce que coûte de laisser le champ vide.
+      */}
+      <Field
+        id={fieldId("goalText")}
+        label="Une note pour le coach"
+        hint={values.intent === "race" ? HINTS.goalTextRace : HINTS.goalTextOther}
+        error={errors?.goalText}
+        optional
+      >
+        <Input
+          id={fieldId("goalText")}
+          name="goalText"
+          type="text"
+          maxLength={200}
+          autoComplete="off"
+          placeholder={values.intent === "race" ? "10 km sous 50 min" : "Ce que tu veux préciser"}
+          aria-invalid={errors?.goalText ? true : undefined}
+          aria-describedby={describedBy(
+            `${fieldId("goalText")}-hint`,
+            Boolean(errors?.goalText) && `${fieldId("goalText")}-error`,
+          )}
+          value={values.goalText}
+          onChange={(event) => onChange("goalText", event.target.value)}
+        />
+      </Field>
     </div>
   );
 }

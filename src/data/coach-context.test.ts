@@ -7,6 +7,7 @@ import {
   buildRecentWeeks,
   getComparableActivities,
   getTrainingSnapshot,
+  longestRunKm,
   recentRunPace,
   toComparableActivityDto,
   toSnapshotProfile,
@@ -202,6 +203,49 @@ describe('buildRecentWeeks', () => {
   });
 });
 
+/*
+ * La plus longue course des 30 derniers jours : l'entrée du plafond de sortie
+ * longue d'une reprise (Frandsen 2025). Un plafond calculé sur une donnée fausse
+ * serait pire que pas de plafond du tout — d'où les trois gardes ci-dessous.
+ */
+describe('longestRunKm', () => {
+  it('rend la plus longue course de la fenêtre, en km', () => {
+    expect(
+      longestRunKm(
+        [
+          run({ startedAt: new Date('2026-08-10T06:00:00.000Z'), distanceM: 12_000 }),
+          run({ startedAt: new Date('2026-07-20T06:00:00.000Z'), distanceM: 18_400 }),
+          run({ startedAt: new Date('2026-08-01T06:00:00.000Z'), distanceM: 9_000 }),
+        ],
+        '2026-08-11',
+      ),
+    ).toBe(18.4);
+  });
+
+  it('ignore les autres sports, le futur et ce qui précède la fenêtre', () => {
+    expect(
+      longestRunKm(
+        [
+          // Une sortie vélo ne dit rien de ce qu'une sortie longue à pied coûte.
+          run({ startedAt: new Date('2026-08-10T06:00:00.000Z'), sportType: 'Ride', distanceM: 60_000 }),
+          run({ startedAt: new Date('2026-08-14T06:00:00.000Z'), distanceM: 30_000 }),
+          // 31 jours avant : hors fenêtre, donc muette.
+          run({ startedAt: new Date('2026-07-11T06:00:00.000Z'), distanceM: 25_000 }),
+          run({ startedAt: new Date('2026-07-12T06:00:00.000Z'), distanceM: 6_000 }),
+        ],
+        '2026-08-11',
+      ),
+    ).toBe(6);
+  });
+
+  it('rend `null` sans course exploitable — pas un plafond de zéro kilomètre', () => {
+    expect(longestRunKm([], '2026-08-11')).toBeNull();
+    expect(
+      longestRunKm([run({ startedAt: new Date('2026-08-10T06:00:00.000Z'), distanceM: 0 })], '2026-08-11'),
+    ).toBeNull();
+  });
+});
+
 describe('recentRunPace', () => {
   it('pondère par la distance plutôt que de moyenner les allures', () => {
     const pace = recentRunPace(
@@ -266,6 +310,7 @@ describe('getTrainingSnapshot', () => {
       fitness: null,
       vo2max: null,
       weeks: [],
+      longestSessionKm30d: null,
       recentAvgPaceSecPerKm: null,
     });
   });
@@ -286,6 +331,7 @@ describe('getTrainingSnapshot', () => {
     expect(snapshot.fitness).not.toBeNull();
     expect(snapshot.weeks).toHaveLength(4);
     expect(snapshot.weeks[3].distanceKm).toBe(12);
+    expect(snapshot.longestSessionKm30d).toBe(12);
     expect(snapshot.recentAvgPaceSecPerKm).toBe(300);
   });
 

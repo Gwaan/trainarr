@@ -1874,6 +1874,11 @@ describe('la rampe de composition sur le plan de l’utilisatrice', () => {
           completedDevelopmentWeeks:
             PLAN_DEVELOPMENT_WEEKS - phases.filter(isDevelopmentPhase).length,
         },
+        // Et l'ancrage plan-relatif des formes, que le service passe lui aussi.
+        planWeekOffset: offset,
+        completedBaseWeeks:
+          FULL_PHASES.filter((phase) => phase === 'base').length -
+          phases.filter((phase) => phase === 'base').length,
       });
     }
 
@@ -1940,30 +1945,24 @@ describe('création et reconstruction se rejoignent, intention par intention', (
   const PLAN_SESSIONS = 4;
 
   /**
-   * Ce que la reconstruction doit reproduire à l'identique, semaine par semaine.
+   * Ce que la reconstruction doit reproduire à l'identique, semaine par semaine
+   * — **séance par séance**, titres et distances compris.
    *
-   * ## Ce qui n'y figure pas, et pourquoi
+   * ## Ce que cette comparaison a coûté avant d'être écrite
    *
-   * La **répartition** des footings entre eux, et le footing qui porte la
-   * variation de la semaine. Les deux se décident sur la parité du numéro de
-   * semaine (`weeklyEasyVariation`), qui est celui de la **fenêtre** et non celui
-   * du plan : une fenêtre ouvrant sur un rang impair intervertit lignes droites et
-   * côtes courtes, et le rééquilibrage `spreadEasyDistances` change alors de
-   * donneur.
+   * Elle ne portait que sur le **total** des footings, et une note expliquait
+   * pourquoi : `weeklyEasyVariation` et `longRunFinishSteps` se décidaient sur le
+   * numéro de semaine de la **fenêtre**, renumérotée depuis 1 à chaque
+   * reconstruction. Mesuré alors, sur `race` : 16 semaines, 6 séances, débutante,
+   * fenêtre de 15 — la semaine calendaire 5 sortait en `6,1 · 6,8 · 6,8 · 7,4` km
+   * à la création et en `7,5 · 6,8 · 6,8 · 6,0` à la reconstruction. Mêmes
+   * kilomètres au total, autres séances : le total ne le voyait pas.
    *
-   * C'est un défaut **antérieur à ce chantier**, et mesurable sur l'intention
-   * `race` seule : 16 semaines, 6 séances, débutante (donc un créneau de qualité
-   * et trois footings), fenêtre de 15 semaines — la semaine calendaire 5 sort en
-   * `6,1 · 6,8 · 6,8 · 7,4` à la création et en `7,5 · 6,8 · 6,8 · 6,0` à la
-   * reconstruction. Il ne se voyait pas jusqu'ici parce que le plan de
-   * l'utilisatrice (4 séances, 2 créneaux) n'a qu'un seul footing par semaine, et
-   * qu'un footing seul n'a personne avec qui échanger.
-   *
-   * Le corriger demande un numéro de semaine **plan-relatif**, que l'appelant
-   * seul connaît — c'est le même chaînon manquant que pour la fenêtre de
-   * marche/course, et il ne se règle pas dans ce module. Ce qui est vérifié ici
-   * est donc tout le reste, qui est bien ancré au plan : la phase, la sortie
-   * longue, les créneaux de qualité et le **total** des footings.
+   * La même cause déplaçait la sortie longue à fin appuyée (une sur trois) et
+   * rouvrait la fenêtre de marche/course d'une reprise. Les trois se referment par
+   * l'ancrage plan-relatif que l'appelant passe désormais
+   * (`planWeekOffset`, `completedBaseWeeks`), et c'est **cette égalité-ci** qui le
+   * prouve : les formes individuelles, pas leur somme.
    */
   function composition(week: SkeletonWeek) {
     const longRun = week.sessions.find(
@@ -1972,11 +1971,18 @@ describe('création et reconstruction se rejoignent, intention par intention', (
     const easy = week.sessions.filter((session) => session !== longRun);
     return {
       phase: week.phase,
-      longRunKm: longRun?.distanceKm ?? null,
+      // Le titre **et** le déroulé de la sortie longue : « fin de parcours
+      // appuyée » ou marche/course sont des formes, pas des kilomètres.
+      longRun:
+        longRun === undefined
+          ? null
+          : `${longRun.title} ${longRun.distanceKm} ${JSON.stringify(longRun.steps ?? null)}`,
       quality: week.qualitySlots.map((slot) => `${slot.kind} ${slot.budgetKm}`),
-      easyCount: easy.length,
-      easyTotalKm: Math.round(
-        easy.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0) * 10,
+      // Chaque footing dans l'ordre des jours : sa forme, sa longueur, son
+      // déroulé. C'est ce que l'athlète lit sur sa timeline.
+      easy: easy.map(
+        (session) =>
+          `j${session.day} ${session.title} ${session.distanceKm} ${JSON.stringify(session.steps ?? null)}`,
       ),
     };
   }
@@ -2033,6 +2039,14 @@ describe('création et reconstruction se rejoignent, intention par intention', (
                   completedDevelopmentWeeks:
                     planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
                 },
+                // Les deux ancrages plan-relatifs, comptés exactement comme
+                // `remainingComposition` les compte : par soustraction, pour que
+                // la démotion de la première semaine en `partial` ne décale pas
+                // les suivantes.
+                planWeekOffset: fullPhases.length - phases.length,
+                completedBaseWeeks:
+                  fullPhases.filter((phase) => phase === 'base').length -
+                  phases.filter((phase) => phase === 'base').length,
               }
             : {}),
         });

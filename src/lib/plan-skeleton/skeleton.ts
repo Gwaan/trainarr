@@ -227,7 +227,15 @@ export type QualitySlot = {
 
 /** Une semaine du squelette : ce qui est écrit, et ce qui reste à écrire. */
 export type SkeletonWeek = {
-  /** Numéro 1-based dans la numérotation du **plan entier**. */
+  /**
+   * Numéro 1-based dans la **fenêtre construite** — donc dans le plan entier
+   * lors d'une création, et dans la fenêtre seule lors d'une reconstruction.
+   *
+   * C'est un repère de diagnostic (le refus d'une semaine infaisable la nomme
+   * par ce numéro), jamais une entrée de décision : tout ce qui doit rendre la
+   * même chose d'une fenêtre à l'autre se compte du plan
+   * ({@link PlanSkeletonParams.planWeekOffset}).
+   */
   weekNumber: number;
   phase: PlanPhase;
   target: WeeklyVolumeTarget;
@@ -349,6 +357,43 @@ export type PlanSkeletonParams = {
    * réadaptation.
    */
   compositionAnchor?: CompositionAnchor;
+  /**
+   * Le nombre de semaines du **plan** qui précèdent cette fenêtre — `0` ou
+   * absent quand la fenêtre *est* le plan, ce qui est le cas d'une création.
+   *
+   * ## Le défaut qu'il ferme
+   *
+   * {@link weeklyEasyVariation} et {@link longRunFinishSteps} se décident du
+   * **numéro de semaine**, et ce numéro était celui de la fenêtre : une
+   * reconstruction renumérote depuis 1, donc une même semaine calendaire
+   * changeait de parité d'un ajustement à l'autre. Mesuré sur une préparation
+   * de 16 semaines à 6 séances, fenêtre de 15 : la semaine calendaire 5 sortait
+   * en `6,1 · 6,8 · 6,8 · 7,4` km à la création et en `7,5 · 6,8 · 6,8 · 6,0` à
+   * la reconstruction — mêmes kilomètres au total, autres séances. La sortie
+   * longue à fin appuyée, une semaine sur trois, se déplaçait de la même façon.
+   *
+   * Le paramètre suit l'esprit de {@link compositionAnchor} : l'appelant sait où
+   * sa fenêtre commence, le module ne peut pas le deviner.
+   */
+  planWeekOffset?: number;
+  /**
+   * Le nombre de semaines de **base du plan** que cette fenêtre ne porte pas —
+   * `0` ou absent quand la fenêtre est le plan.
+   *
+   * Même chaînon manquant que {@link planWeekOffset}, pour la fenêtre de
+   * marche/course : elle couvre les premières semaines de base **du plan**, et
+   * un compteur qui ne voit que la fenêtre la rouvrirait à chaque
+   * reconstruction ouverte en pleine base — une reprise de quatrième semaine
+   * retomberait au ratio 1:2 du premier jour.
+   *
+   * Compté par **soustraction** chez l'appelant (semaines de base du plan moins
+   * celles que la fenêtre porte), comme
+   * {@link CompositionAnchor.completedDevelopmentWeeks} : la première semaine
+   * d'une fenêtre entamée est ramenée à `partial` et perd son rang de base, et
+   * la soustraction la range du bon côté là où un décompte de préfixe
+   * décalerait toutes les suivantes.
+   */
+  completedBaseWeeks?: number;
 };
 
 /**
@@ -411,10 +456,14 @@ type LongRunShape = { title: string; steps?: PlanSessionSteps };
  * Le repli sur le titre nu quand le déroulé n'a pas pu s'écrire (séance trop
  * courte pour être découpée) n'est pas cosmétique : un titre qui annonce un
  * découpage absent est un mensonge sur la timeline.
+ *
+ * @param planWeekNumber le rang de la semaine dans le **plan**, jamais dans la
+ * fenêtre : c'est lui qui décide de la cadence « une sortie longue sur trois »,
+ * et une numérotation de fenêtre la déplacerait à chaque reconstruction.
  */
 function longRunShape(
   phase: PlanPhase,
-  weekNumber: number,
+  planWeekNumber: number,
   goalDistanceKm: number | null,
   distanceKm: number,
 ): LongRunShape {
@@ -425,7 +474,7 @@ function longRunShape(
       : { title: SESSION_TITLES.specificLongRun, steps };
   }
 
-  const finish = longRunFinishSteps(phase, weekNumber, distanceKm);
+  const finish = longRunFinishSteps(phase, planWeekNumber, distanceKm);
   return finish === undefined
     ? { title: SESSION_TITLES.longRun }
     : { title: SESSION_TITLES.longRunFinish, steps: finish };
@@ -469,6 +518,16 @@ function qualitySlotCount(
  */
 type WeekPlan = {
   weekNumber: number;
+  /**
+   * Le numéro de la semaine dans le **plan entier** — `weekNumber` décalé de
+   * {@link PlanSkeletonParams.planWeekOffset}.
+   *
+   * C'est lui, et jamais `weekNumber`, que lisent les décisions de **forme**
+   * (variation d'endurance, fin de sortie longue appuyée) : elles doivent rendre
+   * la même chose pour une semaine calendaire donnée, quelle que soit la fenêtre
+   * qui l'écrit.
+   */
+  planWeekNumber: number;
   phase: PlanPhase;
   target: WeeklyVolumeTarget;
   /** Premier jour ISO disponible : 1 partout, sauf sur une première semaine entamée. */
@@ -511,20 +570,17 @@ type WeekPlan = {
  * qu'une seule fois sur un plan qui démarre un jeudi.
  *
  * Les phases étant ordonnées, un simple compteur suffit — les semaines de base
- * sont contiguës et en tête.
- *
- * ## Ce que le compteur ne sait pas
- *
- * Il compte les semaines de base **de la fenêtre**, pas du plan : une
- * reconstruction ouvrant en pleine base rouvrirait une fenêtre de marche/course.
- * C'est le même angle mort que la parité de {@link weeklyEasyVariation}, et il a
- * la même cause — le module ne reçoit pas de numéro de semaine plan-relatif. Il
- * ne coûte aucun kilomètre (la marche/course ne change ni la distance des séances
- * ni le volume de la semaine, seulement leur forme), et il se refermera avec
- * l'ancrage que l'appelant passera.
+ * sont contiguës et en tête. Il démarre à `completed`, les semaines de base que
+ * la fenêtre ne porte pas (cf. {@link PlanSkeletonParams.completedBaseWeeks}) :
+ * c'est ce qui fait qu'une reconstruction ouverte en pleine base reprend la rampe
+ * où elle en était au lieu de la rouvrir.
  */
-function walkRunBaseRanks(phases: readonly PlanPhase[], count: number): (number | null)[] {
-  let seen = 0;
+function walkRunBaseRanks(
+  phases: readonly PlanPhase[],
+  count: number,
+  completed: number,
+): (number | null)[] {
+  let seen = completed;
   return phases.map((phase) => {
     if (phase !== 'base' || seen >= count) return null;
     const rank = seen;
@@ -673,9 +729,14 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   // La composition de chaque semaine, décidée par sa position dans le PLAN et
   // non dans la fenêtre (cf. {@link PlanSkeletonParams.compositionAnchor}).
   const qualityShares = weeklyQualityShares(intent, phases, params.compositionAnchor);
-  // Les semaines de marche/course : les premières de la base, et elles seules.
+  // Les semaines de marche/course : les premières de la base **du plan**, et
+  // elles seules — d'où l'ancrage, sans lequel une reconstruction rouvrirait la
+  // rampe à son premier barreau.
   const walkRunWeeks = intentWalkRunBaseWeeks(intent, returnInjuryHistory);
-  const walkRunRanks = walkRunBaseRanks(phases, walkRunWeeks);
+  const walkRunRanks = walkRunBaseRanks(phases, walkRunWeeks, params.completedBaseWeeks ?? 0);
+  // Où la fenêtre commence dans le plan : tout ce qui se décide de la **forme**
+  // d'une semaine se compte à partir de là (cf. `planWeekOffset`).
+  const planWeekOffset = params.planWeekOffset ?? 0;
 
   const plans: WeekPlan[] = [];
   for (let index = 0; index < weeks; index += 1) {
@@ -693,6 +754,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
 
     plans.push({
       weekNumber: index + 1,
+      planWeekNumber: planWeekOffset + index + 1,
       phase,
       target: targets[index],
       fromDay,
@@ -717,6 +779,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
 
   for (const {
     weekNumber,
+    planWeekNumber,
     phase,
     target,
     fromDay,
@@ -807,7 +870,17 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       // Aucun déroulé le jour J : ni `wantsSpecificLongRun` ni
       // `longRunFinishSteps` n'acceptent la phase `race`, et une course ne se
       // découpe pas.
-      const shape = longRunShape(phase, weekNumber, goalDistanceKm, longBudget.km);
+      //
+      // Pendant la fenêtre de marche/course, la sortie longue se court comme le
+      // reste de la semaine : mêmes blocs, même ratio, budget kilométrique
+      // inchangé. Mesuré sur une semaine 1 de reprise : des footings en
+      // marche/course et, à côté, une sortie longue continue de 10,6 km — la
+      // séance la plus coûteuse de la semaine était la seule à ne pas suivre la
+      // consigne de la semaine.
+      const walkRunLong =
+        walkRunRank === null ? undefined : walkRunShape(longBudget.km, walkRunRank, walkRunWeeks);
+      const shape =
+        walkRunLong ?? longRunShape(phase, planWeekNumber, goalDistanceKm, longBudget.km);
       const steps = isRaceWeek ? undefined : shape.steps;
 
       sessions.push({
@@ -835,7 +908,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     // La variation de la semaine se décide sur le nombre de footings **budgétés**
     // : c'est le rang dans cette liste-là que `spreadEasyDistances` et l'écriture
     // ci-dessous partagent.
-    const variation = weeklyEasyVariation(phase, weekNumber, easyBudgets.length);
+    const variation = weeklyEasyVariation(phase, planWeekNumber, easyBudgets.length);
     // La sortie longue reste la séance la plus longue de sa semaine : c'est elle
     // qui plafonne le footing qui s'allonge. Quand elle n'a pas lieu, son budget
     // est devenu le plus gros footing et joue le même rôle de plafond.

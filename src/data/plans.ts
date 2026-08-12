@@ -8,6 +8,7 @@ import {
   REFERENCE_DISTANCES,
   vdotFromRace,
 } from '@/lib/metrics/vdot';
+import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import {
   planSessionStepsSchema,
   sessionStepsTotals,
@@ -19,6 +20,7 @@ import { db } from './db/client';
 import { isUniqueViolation } from './db/errors';
 import {
   PLAN_GOAL_TYPES,
+  PLAN_INTENTS,
   PLAN_LEVELS,
   PLAN_REFERENCE_DISTANCES,
   plannedSessions,
@@ -70,10 +72,23 @@ export type PlanDto = {
   status: PlanStatus;
   goalType: PlanGoalType;
   /**
+   * Ce que l'athlète est venue chercher : c'est ce qui décide de la forme du
+   * plan, et ce que la page affiche en titre. Solidaire de `goalType`
+   * (`intent === 'race'` ⇔ `goalType === 'race'`).
+   */
+  intent: PlanIntent;
+  /** Antécédent de blessure déclaré — ne joue qu'en reprise, `false` ailleurs. */
+  returnInjuryHistory: boolean;
+  /**
    * Niveau déclaré à la création, `null` sur les plans antérieurs à ce champ —
    * l'UI et le coach s'en passent alors plutôt que d'en supposer un.
    */
   level: PlanLevel | null;
+  /**
+   * Note libre de l'athlète, telle qu'elle l'a écrite — **facultative** depuis
+   * que le sélecteur d'intention a remplacé l'objectif en texte libre. Chaîne
+   * vide quand elle n'a rien noté.
+   */
   goalText: string;
   /** Date civile `YYYY-MM-DD`, renseignée pour un objectif `race` uniquement. */
   raceDate: string | null;
@@ -159,8 +174,13 @@ export type NewPlanSessionInput = {
 /** Le plan tel que le coach le soumet à la création. */
 export type CreatePlanInput = {
   goalType: PlanGoalType;
+  /** Requis : c'est l'intention qui décide de la structure du plan. */
+  intent: PlanIntent;
+  /** Facultatif, et sans effet hors reprise (cf. {@link validatePlanInput}). */
+  returnInjuryHistory?: boolean;
   /** Requis : un plan créé aujourd'hui se cale toujours sur un niveau déclaré. */
   level: PlanLevel;
+  /** Note libre, facultative : chaîne vide acceptée. */
   goalText: string;
   raceDate?: string | null;
   startsOn: string;
@@ -178,6 +198,8 @@ export type CreatePlanInput = {
 /** Même chose, une fois les facultatifs normalisés en `null`. */
 export type ValidatedPlanInput = {
   goalType: PlanGoalType;
+  intent: PlanIntent;
+  returnInjuryHistory: boolean;
   level: PlanLevel;
   goalText: string;
   raceDate: string | null;
@@ -232,6 +254,7 @@ export const PLAN_LIMITS = {
 /** Champ d'un plan mis en cause par {@link InvalidPlanError}. */
 export type PlanInputField =
   | 'goalType'
+  | 'intent'
   | 'level'
   | 'goalText'
   | 'raceDate'
@@ -304,6 +327,8 @@ export function toPlanDto(row: Plan): PlanDto {
     id: row.id,
     status: row.status,
     goalType: row.goalType,
+    intent: row.intent,
+    returnInjuryHistory: row.returnInjuryHistory,
     level: row.level,
     goalText: row.goalText,
     raceDate: row.raceDate,
@@ -514,16 +539,29 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
     throw new InvalidPlanError('goalType', "Type d'objectif inattendu.");
   }
 
+  if (!PLAN_INTENTS.includes(input.intent)) {
+    throw new InvalidPlanError('intent', 'Intention inattendue : choisis ce que tu veux préparer.');
+  }
+
+  // Les deux colonnes disent la même chose, l'une pour la structure du plan,
+  // l'autre pour ce qui le date : les laisser diverger ferait un plan daté sans
+  // affûtage, ou un affûtage sans jour J.
+  if ((input.intent === 'race') !== (input.goalType === 'race')) {
+    throw new InvalidPlanError(
+      'intent',
+      "Incohérence : seule l'intention « course » porte un objectif daté.",
+    );
+  }
+
   // Le niveau n'a pas de valeur de repli : un plan calé sur un niveau supposé
   // serait faux sans le dire.
   if (!PLAN_LEVELS.includes(input.level)) {
     throw new InvalidPlanError('level', 'Niveau inattendu : choisis ton niveau en course.');
   }
 
+  // Facultative depuis le sélecteur d'intention : c'est lui qui dit ce que
+  // l'athlète prépare, la note n'ajoute qu'un détail quand elle en a un.
   const goalText = input.goalText.trim();
-  if (goalText.length === 0) {
-    throw new InvalidPlanError('goalText', "L'objectif est requis : c'est lui qui date le plan.");
-  }
 
   const raceDate = input.raceDate ?? null;
   if (input.goalType === 'race') {
@@ -576,6 +614,11 @@ export function validatePlanInput(input: CreatePlanInput): ValidatedPlanInput {
 
   return {
     goalType: input.goalType,
+    intent: input.intent,
+    // Hors reprise, l'antécédent ne joue sur rien (cf. `intent.ts`) : le
+    // stocker à `true` écrirait une donnée qui ne veut rien dire, et qu'une
+    // lecture ultérieure prendrait pour un fait.
+    returnInjuryHistory: input.intent === 'return' && (input.returnInjuryHistory ?? false),
     level: input.level,
     goalText,
     raceDate,
@@ -956,6 +999,8 @@ function draftPlanTransaction(athleteId: number, values: ValidatedPlanInput): Pr
         athleteId,
         status: 'draft',
         goalType: values.goalType,
+        intent: values.intent,
+        returnInjuryHistory: values.returnInjuryHistory,
         level: values.level,
         goalText: values.goalText,
         raceDate: values.raceDate,

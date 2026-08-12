@@ -92,6 +92,13 @@
       "when": 1786455392594,
       "tag": "0012_plan_review_marker",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786526889144,
+      "tag": "0013_plan_intent",
+      "breakpoints": true
     }
   ]
 }

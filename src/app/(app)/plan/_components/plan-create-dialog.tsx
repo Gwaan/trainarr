@@ -254,8 +254,8 @@ export function PlanCreateDialog(bounds: PlanCreateDialogProps) {
             <div className="min-w-0">
               <DialogTitle>Créer mon plan</DialogTitle>
               <DialogDescription>
-                Cinq étapes : ton objectif, ton profil, ton chrono, tes contraintes, puis la
-                relecture.
+                Six étapes : ton objectif, ce que ce plan peut te donner, ton profil, ton chrono,
+                tes contraintes, puis la relecture.
               </DialogDescription>
             </div>
             <Button

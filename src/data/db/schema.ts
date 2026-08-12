@@ -1,5 +1,6 @@
 import { sql, type InferInsertModel, type InferSelectModel } from 'drizzle-orm';
 import {
+  boolean,
   date,
   index,
   integer,
@@ -14,6 +15,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
+import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 /**
@@ -232,6 +234,28 @@ export const PLAN_GOAL_TYPES = ['race', 'free'] as const;
 export type PlanGoalType = (typeof PLAN_GOAL_TYPES)[number];
 
 /**
+ * Ce que l'athlète vient chercher dans son plan — le paramètre qui décide de sa
+ * **forme** (longueur de la base, existence d'une spécificité, nombre de séances
+ * dures, plafond de la sortie longue, marche/course d'une reprise).
+ *
+ * C'est le sélecteur du formulaire de création, et il a remplacé l'objectif en
+ * texte libre : `goal_text` n'est plus qu'une note facultative. `goal_type` reste
+ * **solidaire** de cette colonne — `intent = 'race'` si et seulement si
+ * `goal_type = 'race'` (invariant porté par le DAL) : les deux disent la même
+ * chose, l'une pour la structure du plan, l'autre pour ce qui le date.
+ *
+ * La liste est recopiée plutôt qu'importée — la base ne dépend pas du module de
+ * calcul — mais `satisfies` interdit qu'elle en diverge : une intention ajoutée
+ * dans `lib/plan-skeleton/intent.ts` et oubliée ici ne compilerait plus.
+ */
+export const PLAN_INTENTS = [
+  'race',
+  'faster',
+  'weight_loss',
+  'return',
+] as const satisfies readonly PlanIntent[];
+
+/**
  * Niveau en course de l'athlète, déclaré à la création du plan.
  *
  * - `beginner` : moins d'un an de pratique, ou une pratique intermittente ;
@@ -292,6 +316,20 @@ export const plans = pgTable(
       .references(() => athlete.id),
     status: text('status', { enum: PLAN_STATUSES }).notNull(),
     goalType: text('goal_type', { enum: PLAN_GOAL_TYPES }).notNull(),
+    /**
+     * L'intention du plan, choisie au sélecteur à la création
+     * ({@link PLAN_INTENTS}). Les plans antérieurs à cette colonne ont été
+     * repris par la migration : `goal_type = 'race'` → `'race'`, tout le reste
+     * → `'faster'`, qui est la structure que ces plans-là recevaient déjà.
+     */
+    intent: text('intent', { enum: PLAN_INTENTS }).notNull(),
+    /**
+     * L'athlète a déclaré un **antécédent de blessure** à la création. Ne joue
+     * qu'en reprise (`intent = 'return'`), où il rallonge la base et double la
+     * fenêtre de marche/course — c'est le prédicteur le plus fort du dossier
+     * (OR 7,56, Relph 2023). `false` partout ailleurs.
+     */
+    returnInjuryHistory: boolean('return_injury_history').notNull().default(false),
     /**
      * Niveau déclaré par l'athlète à la création. **Nullable** : les plans
      * antérieurs à ce champ n'en portent pas, et rien ne permet de le deviner

@@ -25,7 +25,7 @@ import { ISO_DAY_LABELS } from "./format-plan";
  * viendra jamais. `plan-steps.test.ts` compare les deux ensembles.
  */
 export const PLAN_FORM_FIELDS = [
-  "goalType",
+  "intent",
   "level",
   "goalText",
   "raceDate",
@@ -39,21 +39,6 @@ export const PLAN_FORM_FIELDS = [
 ] as const;
 
 export type PlanFormField = (typeof PLAN_FORM_FIELDS)[number];
-
-export type GoalType = "race" | "free";
-
-export const GOAL_TYPE_CHOICES: readonly { value: GoalType; label: string; hint: string }[] = [
-  {
-    value: "race",
-    label: "Course datée",
-    hint: "Le plan se cale sur la date : développement, puis affûtage.",
-  },
-  {
-    value: "free",
-    label: "Objectif libre",
-    hint: "Un bloc de la durée que tu choisis, sans échéance.",
-  },
-];
 
 /**
  * Niveau en course de l'athlète. Repris de l'union du schéma (`PLAN_LEVELS`),

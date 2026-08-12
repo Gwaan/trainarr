@@ -191,6 +191,8 @@ const PLAN_ROW: Plan = {
   athleteId: 1,
   status: 'active',
   goalType: 'race',
+  intent: 'race',
+  returnInjuryHistory: false,
   level: 'intermediate',
   goalText: '10 km sous 50 min le 15 novembre',
   raceDate: '2026-11-15',
@@ -290,11 +292,13 @@ const PLAN_DTO_KEYS = [
   'goalText',
   'goalType',
   'id',
+  'intent',
   'level',
   'longRunDay',
   'raceDate',
   'referenceDistance',
   'referenceTimeS',
+  'returnInjuryHistory',
   'reviewedAt',
   'sessionsPerWeek',
   'startsOn',
@@ -328,6 +332,7 @@ const SESSION_INPUT: NewPlanSessionInput = {
 /** Plan valide — chaque test n'en modifie que ce qu'il éprouve. */
 const VALID_INPUT: CreatePlanInput = {
   goalType: 'race',
+  intent: 'race',
   level: 'intermediate',
   referenceDistance: '10k',
   referenceTimeS: 2_910,
@@ -374,6 +379,7 @@ describe('validatePlanInput', () => {
     const values = validatePlanInput({
       ...VALID_INPUT,
       goalType: 'free',
+      intent: 'faster',
       goalText: '  améliorer mon endurance  ',
       raceDate: undefined,
       weeklyTimeMinutes: undefined,
@@ -438,8 +444,43 @@ describe('validatePlanInput', () => {
     );
   });
 
-  it('exige un objectif non vide', () => {
-    expect(() => validatePlanInput({ ...VALID_INPUT, goalText: '   ' })).toThrow(InvalidPlanError);
+  it('accepte une note vide : c’est l’intention qui dit ce que le plan prépare', () => {
+    expect(validatePlanInput({ ...VALID_INPUT, goalText: '   ' }).goalText).toBe('');
+  });
+
+  it('recopie l’intention, et refuse celle qui contredit le type d’objectif', () => {
+    expect(validatePlanInput(VALID_INPUT).intent).toBe('race');
+    // Une intention datée sans objectif daté (et l'inverse) laisserait un plan
+    // qui s'affûte sans jour J, ou un jour J sans affûtage.
+    expect(() =>
+      validatePlanInput({ ...VALID_INPUT, intent: 'faster' }),
+    ).toThrow(InvalidPlanError);
+    expect(() =>
+      validatePlanInput({ ...VALID_INPUT, goalType: 'free', raceDate: null }),
+    ).toThrow(InvalidPlanError);
+    expect(() =>
+      // Le DAL n'est pas la seule porte d'entrée : la garde vaut pour ce que le
+      // typage ne voit pas.
+      validatePlanInput({ ...VALID_INPUT, intent: 'sprint' as unknown as CreatePlanInput['intent'] }),
+    ).toThrow(InvalidPlanError);
+  });
+
+  it('n’enregistre l’antécédent de blessure que sur une reprise', () => {
+    const resumption = validatePlanInput({
+      ...VALID_INPUT,
+      goalType: 'free',
+      intent: 'return',
+      raceDate: null,
+      returnInjuryHistory: true,
+    });
+    expect(resumption.returnInjuryHistory).toBe(true);
+
+    // Ailleurs il ne déplace aucun paramètre : le stocker ferait passer pour un
+    // fait une donnée qui ne sert à rien.
+    expect(validatePlanInput({ ...VALID_INPUT, returnInjuryHistory: true }).returnInjuryHistory).toBe(
+      false,
+    );
+    expect(validatePlanInput(VALID_INPUT).returnInjuryHistory).toBe(false);
   });
 
   it('exige au moins une semaine, en nombre entier', () => {

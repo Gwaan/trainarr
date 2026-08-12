@@ -136,13 +136,31 @@ import { deterministicQualitySession, fillQualitySlots } from './quality-fill';
 
 /** Ce que le formulaire de création soumet au coach. */
 export type PlanRequest = {
-  goalType: 'race' | 'free';
+  /**
+   * Ce que l'athlète vient chercher, tel que le sélecteur du formulaire le pose.
+   *
+   * Il a remplacé le couple « type d'objectif + texte libre » : c'est lui qui
+   * décide de la forme du plan (cf. `plan-skeleton/intent.ts`), et le type
+   * d'objectif stocké s'en déduit — `race` d'un côté, `free` des trois autres.
+   */
+  intent: PlanIntent;
+  /**
+   * L'athlète déclare un antécédent de blessure. Ne joue qu'en `return`, où il
+   * rallonge la base et double la fenêtre de marche/course.
+   */
+  returnInjuryHistory?: boolean;
   /** Niveau en course déclaré par l'athlète : il choisit la méthodologie appliquée. */
   level: PlanLevel;
+  /**
+   * Note libre de l'athlète — **facultative**, chaîne vide acceptée. C'est le
+   * seul endroit où une distance d'objectif peut encore se lire (« 10 km sous
+   * 50 min ») ; sans elle, un plan de course n'a pas d'allure objectif à
+   * travailler, et n'en invente pas.
+   */
   goalText: string;
-  /** Date civile de la course, exigée par `goalType: 'race'`. */
+  /** Date civile de la course, exigée par `intent: 'race'`. */
   raceDate?: string;
-  /** Durée voulue, exigée par `goalType: 'free'` (une course la déduit de sa date). */
+  /** Durée voulue, exigée hors `race` (une course la déduit de sa date). */
   weeks?: number;
   sessionsPerWeek: number;
   weeklyTimeMinutes?: number;
@@ -307,7 +325,7 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
   const firstWeekFromDay = isoDayIndex(startsOn) + 1;
   const base = { startsOn, anchor, firstWeekFromDay };
 
-  if (request.goalType === 'race') {
+  if (request.intent === 'race') {
     const { raceDate } = request;
     if (raceDate === undefined || !isCivilDate(raceDate)) {
       throw new InvalidPlanError('raceDate', 'Un objectif « course » exige la date de la course.');
@@ -340,7 +358,7 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
 
   const { weeks } = request;
   if (weeks === undefined || !Number.isInteger(weeks) || weeks < PLAN_LIMITS.weeks.min) {
-    throw new InvalidPlanError('weeks', 'Un objectif libre exige une durée en semaines.');
+    throw new InvalidPlanError('weeks', 'Un plan sans échéance exige une durée en semaines.');
   }
 
   // Une semaine entamée trop courte s'ajoute aux semaines demandées plutôt que
@@ -350,6 +368,21 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
   return { ...base, weeks: Math.min(total, MAX_PLAN_WEEKS) };
 }
 
+
+/**
+ * L'intention, telle que les prompts la nomment — en français, comme le reste de
+ * ce que le modèle lit.
+ *
+ * Distincte de {@link INTENT_SUMMARY_CONTEXT}, qui explique ce que l'intention
+ * change : celle-ci ne fait que la **nommer**, là où une phrase entière
+ * déséquilibrerait la ligne.
+ */
+const INTENT_PROMPT_LABELS: Record<PlanIntent, string> = {
+  race: 'préparation de course',
+  faster: 'courir plus vite',
+  weight_loss: 'perte de poids',
+  return: 'reprise de la course',
+};
 
 /** Le niveau, tel que les prompts le nomment. */
 const LEVEL_LABELS: Record<PlanLevel, string> = {
@@ -401,20 +434,59 @@ function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | nu
 }
 
 /**
- * L'intention du plan, telle que le squelette la lit — **déduite du type
- * d'objectif, faute de mieux**.
+ * Le type d'objectif que le plan stocke, déduit de l'intention.
  *
- * Le formulaire ne demande pas encore laquelle des quatre intentions l'athlète
- * poursuit (`race`, `faster`, `weight_loss`, `return`), et le plan ne la stocke
- * pas : ce branchement-là est le chantier suivant. En attendant, un objectif daté
- * est une préparation de course, et tout le reste est une recherche de vitesse —
- * la structure la plus proche de celle que ces plans recevaient jusqu'ici, moins
- * les séances « Spécifique allure course » qu'un objectif libre n'aurait jamais
- * dû recevoir (cf. `plan-skeleton/quality.ts`).
+ * Les deux colonnes disent la même chose (invariant du DAL) : l'intention décide
+ * de la **forme** du plan, le type d'objectif de ce qui le **date**. Seule
+ * `race` a un jour J.
  */
-function planIntentOf(goalType: PlanGoalType): PlanIntent {
-  return goalType === 'race' ? 'race' : 'faster';
+function goalTypeOf(intent: PlanIntent): PlanGoalType {
+  return intent === 'race' ? 'race' : 'free';
 }
+
+/**
+ * Le niveau que les **volumes cibles** appliquent, qui n'est pas toujours celui
+ * que l'athlète a déclaré.
+ *
+ * Une **reprise court au taux de croissance d'une débutante**, quel que soit son
+ * passé : c'est le seul endroit où l'intention touche aux kilomètres, et c'est
+ * assumé — ce qui est perdu à l'arrêt n'est pas ce qui met le plus longtemps à
+ * revenir. Le cœur remonte en quelques semaines, les tendons et les os en
+ * plusieurs mois, et une confirmée qui reprend a exactement le tissu conjonctif
+ * d'une débutante avec le moteur d'une confirmée — c'est la combinaison qui
+ * blesse.
+ *
+ * Conséquence chiffrée, et elle est voulue : le volume de départ d'une athlète
+ * sans historique passe de 24 à 12 km par semaine
+ * (`VOLUME_TARGET_RULES.defaultStartKm`), et la progression hebdomadaire suit le
+ * régime le plus doux. Une reprise démarre bas.
+ *
+ * Le niveau **déclaré**, lui, continue de décider de la méthodologie partout
+ * ailleurs (nombre de créneaux de qualité, forme des séances dures) : ce n'est
+ * pas le savoir-faire de l'athlète qu'on rabaisse, c'est la charge.
+ */
+function volumeLevelOf(intent: PlanIntent, level: PlanLevel): PlanLevel {
+  return intent === 'return' ? 'beginner' : level;
+}
+
+/**
+ * Le plafond de la **première sortie longue**, en km — `null` partout sauf en
+ * reprise, et `null` en reprise même quand l'historique ne dit rien.
+ *
+ * La plus longue séance des trente derniers jours, majorée de 10 % : le pic
+ * d'une séance isolée est le paramètre de charge que Frandsen 2025 associe au
+ * risque, et une reprise ne rouvre donc pas sur plus long que ce que l'athlète
+ * vient de courir. Sans donnée, pas de plafond — on ne fabrique pas un chiffre
+ * pour combler un historique vide.
+ */
+function returnLongRunCapKm(intent: PlanIntent, snapshot: TrainingSnapshotDto): number | null {
+  if (intent !== 'return') return null;
+  const longest = snapshot.longestSessionKm30d;
+  return longest === null || longest <= 0 ? null : longest * RETURN_LONG_RUN_CAP_RATIO;
+}
+
+/** La marge accordée à la plus longue séance récente : +10 % (Frandsen 2025). */
+const RETURN_LONG_RUN_CAP_RATIO = 1.1;
 
 /**
  * Le chrono d'un plan déjà écrit, `undefined` s'il n'en porte pas.
@@ -519,8 +591,10 @@ export function planVolumeTargets(
     recentWeeklyKm: bestRecentWeeklyKm(snapshot),
     weeklyTimeMinutes: request.weeklyTimeMinutes ?? null,
     easyPaceSecPerKm: easyPaceSecPerKm(snapshot, paces),
-    race: raceGoalOf(request.goalType, request.goalText),
-    level: request.level,
+    race: raceGoalOf(goalTypeOf(request.intent), request.goalText),
+    // Le niveau **de charge**, pas celui que l'athlète a déclaré : une reprise
+    // progresse au régime d'une débutante (cf. {@link volumeLevelOf}).
+    level: volumeLevelOf(request.intent, request.level),
   });
 }
 
@@ -580,7 +654,11 @@ export function formatUpcomingPlan(
   }
 
   const header = [
-    `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+    // L'intention d'abord : c'est elle qui dit ce que ce plan est. La note de
+    // l'athlète ne s'ajoute que si elle en a écrit une — depuis le sélecteur
+    // d'intention, elle est facultative, et « Plan en cours : « » » ne dirait
+    // rien de plus que rien.
+    `Plan en cours : ${INTENT_PROMPT_LABELS[plan.intent]}${plan.goalText.trim() === '' ? '' : ` — « ${plan.goalText.trim()} »`}${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
     // Les plans antérieurs au champ n'en portent pas : rien n'est dit plutôt
     // qu'un niveau supposé, qui orienterait tout l'ajustement.
     ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
@@ -689,6 +767,25 @@ function summarySystemPrompt(extra: readonly string[] = []): string {
   ].join('\n');
 }
 
+/**
+ * Ce que l'athlète est venue chercher, en une ligne — pour le prompt du résumé.
+ *
+ * Une ligne par intention, et elle porte **ce que le plan peut honnêtement
+ * promettre**. Celle de `weight_loss` est la plus contrainte du lot : le modèle
+ * doit savoir qu'il n'a aucun kilo à annoncer, sans quoi il en annonce (courir
+ * seul fait perdre 2 à 3 kg en moyenne dans les méta-analyses, très variable —
+ * ce n'est pas un chiffre à mettre dans la bouche d'un coach qui s'adresse à une
+ * personne).
+ */
+const INTENT_SUMMARY_CONTEXT: Record<PlanIntent, string> = {
+  race: "Intention : préparer une course datée. L'affûtage final retire du volume sans toucher à l'intensité ni au nombre de séances — c'est le paramètre le mieux démontré de la préparation.",
+  faster: "Intention : courir plus vite, sans échéance. Ce qui fait progresser est d'abord le volume total et la régularité, pas la structure fine des séances ; l'ordre de grandeur honnête est 2 à 7 % sur 8 à 16 semaines.",
+  weight_loss:
+    "Intention : perdre du poids. NE PROMETS AUCUN KILO ET AUCUN CHIFFRE DE POIDS : ce que ce plan apporte de démontré est de la condition physique, un tour de taille qui baisse et un meilleur profil cardiométabolique, même si la balance ne bouge pas. Rappelle qu'augmenter le volume tout en réduisant fortement l'alimentation expose à la faible disponibilité énergétique.",
+  return:
+    "Intention : reprendre la course. La phase de reprise est longue exprès — le cœur revient en quelques semaines, les tendons et les os en plusieurs mois. Ne promets aucune absence de blessure : le plan progresse lentement et évite les à-coups, c'est tout ce qu'il peut dire.",
+};
+
 /** Ce qu'une phase pèse dans le résumé : son nom en français. */
 const PHASE_LABELS: Record<PlanPhase, string> = {
   partial: 'reprise',
@@ -783,14 +880,20 @@ function buildPlanSummaryMessages(
 ): ChatMessage[] {
   const endsOn = shiftCivilDate(window.anchor, window.weeks * 7 - 1);
 
+  const note = request.goalText.trim();
+
   return [
     { role: 'system', content: summarySystemPrompt() },
     {
       role: 'user',
       content: [
-        request.goalType === 'race' && request.raceDate !== undefined
-          ? `Objectif : la course « ${request.goalText} », le ${formatCivilDate(request.raceDate)}.`
-          : `Objectif : ${request.goalText}.`,
+        INTENT_SUMMARY_CONTEXT[request.intent],
+        ...(request.intent === 'race' && request.raceDate !== undefined
+          ? [`Course le ${formatCivilDate(request.raceDate)}.`]
+          : []),
+        // La note de l'athlète, quand elle en a écrit une : ce n'est plus
+        // l'objectif du plan, seulement ce qu'elle a voulu préciser.
+        ...(note === '' ? [] : [`Note de l'athlète : « ${note} »`]),
         `Niveau déclaré : ${LEVEL_LABELS[request.level]}.`,
         `Plan écrit : ${window.weeks} semaines, du ${formatCivilDate(window.startsOn)} au ${formatCivilDate(endsOn)}.`,
         `Contraintes : ${formatConstraints(request)}.`,
@@ -799,6 +902,25 @@ function buildPlanSummaryMessages(
     },
   ];
 }
+
+/**
+ * Ce que le plan vise, en une phrase écrite par l'appli.
+ *
+ * Le repli n'a pas le droit d'en promettre moins que le modèle, ni plus : celle
+ * de `weight_loss` **ne parle pas de kilos** — pas parce que c'est délicat à
+ * dire, mais parce que le chiffre honnête (2 à 3 kg en moyenne, très variable)
+ * n'est pas une prévision individuelle et n'a rien à faire dans le résumé du
+ * plan d'une personne. Ce que le plan apporte de démontré, lui, s'écrit.
+ */
+const INTENT_FALLBACK_LINE: Record<PlanIntent, string> = {
+  race: "Objectif : préparer ta course, l'affûtage final retirant du volume sans toucher à l'intensité.",
+  faster:
+    'Objectif : courir plus vite — ce qui compte le plus ici est le volume total et la régularité.',
+  weight_loss:
+    'Objectif : perdre du poids — ce plan te donne de la condition physique, un tour de taille qui baisse et un meilleur profil cardiométabolique, même si la balance ne bouge pas.',
+  return:
+    'Objectif : reprendre la course, progressivement — le cœur revient en quelques semaines, les tendons et les os en plusieurs mois.',
+};
 
 /**
  * Le résumé écrit par l'appli — factuel, et suffisant.
@@ -819,7 +941,8 @@ function fallbackPlanSummary(
 
   return [
     `Plan de ${window.weeks} semaines à partir du ${formatCivilDate(window.startsOn)}, ` +
-      `pour l'objectif « ${request.goalText} », niveau ${LEVEL_LABELS[request.level]}.`,
+      `niveau ${LEVEL_LABELS[request.level]}.`,
+    INTENT_FALLBACK_LINE[request.intent],
     `Périodisation : ${phaseBreakdown(skeleton)}.`,
     `Le volume hebdomadaire va de ${formatNumber(Math.min(...volumes), 1)} à ` +
       `${formatNumber(Math.max(...volumes), 1)} km, pour ${request.sessionsPerWeek} séances par semaine ` +
@@ -933,7 +1056,7 @@ export async function generatePlan(request: PlanRequest, progressId?: string): P
  */
 function raceIsoDay(request: PlanRequest): number | null {
   const { raceDate } = request;
-  if (request.goalType !== 'race' || raceDate === undefined || !isCivilDate(raceDate)) return null;
+  if (request.intent !== 'race' || raceDate === undefined || !isCivilDate(raceDate)) return null;
   return isoDayIndex(raceDate) + 1;
 }
 
@@ -1078,7 +1201,8 @@ function validatedPlanWeeks(params: {
 /** La demande, en une ligne : de quoi rejouer un plan fautif à l'identique. */
 function describePlanRequest(request: PlanRequest): string {
   return [
-    `objectif ${request.goalType} « ${request.goalText} »`,
+    `intention ${request.intent}${request.returnInjuryHistory === true ? ' (antécédent de blessure)' : ''}`,
+    request.goalText.trim() === '' ? null : `note « ${request.goalText.trim()} »`,
     request.raceDate === undefined ? null : `course le ${request.raceDate}`,
     request.weeks === undefined ? null : `${request.weeks} semaines`,
     `niveau ${request.level}`,
@@ -1118,7 +1242,8 @@ async function writeGeneratedPlan(
   // Les volumes que l'appli a chiffrés : c'est d'eux que le squelette tire les
   // budgets de chaque séance, et c'est eux que la validation vérifiera.
   const volumeTargets = planVolumeTargets(request, window, snapshot, paces);
-  const race = raceGoalOf(request.goalType, request.goalText);
+  const goalType = goalTypeOf(request.intent);
+  const race = raceGoalOf(goalType, request.goalText);
   const raceDay = raceIsoDay(request);
 
   const expectations: PlanExpectations = {
@@ -1147,7 +1272,11 @@ async function writeGeneratedPlan(
   // 1. Le squelette : périodisation, volumes, jours, footings, sortie longue et
   //    séance du jour J. Tout ce qui se calcule est écrit ici, par l'appli.
   const skeleton = planSkeletonOrInvalid({
-    intent: planIntentOf(request.goalType),
+    intent: request.intent,
+    returnInjuryHistory: request.returnInjuryHistory,
+    // Le plafond de la première sortie longue d'une reprise, calculé sur les
+    // données réelles : le squelette ne voit pas l'historique, l'appelant si.
+    longRunCapKm: returnLongRunCapKm(request.intent, snapshot),
     weeks: window.weeks,
     firstWeekFromDay: window.firstWeekFromDay,
     sessionsPerWeek: request.sessionsPerWeek,
@@ -1165,7 +1294,7 @@ async function writeGeneratedPlan(
     // chrono. C'est la règle que le prompt énonce déjà de son côté
     // (cf. `coachRuleTailLines`) : sur un objectif libre il n'y a pas d'allure
     // objectif à travailler, et en prescrire une fabriquerait une échéance.
-    goalDistanceKm: request.goalType === 'race' ? goalDistanceKm(request.goalText) : null,
+    goalDistanceKm: request.intent === 'race' ? goalDistanceKm(request.goalText) : null,
     targets: volumeTargets,
   });
 
@@ -1200,10 +1329,12 @@ async function writeGeneratedPlan(
   const summary = await planSummary(request, window, volumeTargets, skeleton);
 
   return createDraftPlanWithSessions({
-    goalType: request.goalType,
+    goalType,
+    intent: request.intent,
+    returnInjuryHistory: request.returnInjuryHistory,
     level: request.level,
     goalText: request.goalText,
-    raceDate: request.goalType === 'race' ? (request.raceDate ?? null) : null,
+    raceDate: request.intent === 'race' ? (request.raceDate ?? null) : null,
     referenceDistance: request.referenceRace?.distance ?? null,
     referenceTimeS: request.referenceRace?.timeS ?? null,
     // Le jour **réel** du départ est ce que le plan stocke ; la grille des jours
@@ -1481,19 +1612,36 @@ function planRaceIsoDay(plan: PlanDto, window: RemainingPlanWindow): number | nu
  * elle, garde sa phase : elle ne porte de toute façon aucune qualité, et lui
  * retirer son étiquette lui retirerait sa course.
  *
- * ## L'ancrage de composition, rendu par la même fonction
+ * ## Les trois ancrages, rendus par la même fonction
  *
- * Parce qu'il se déduit des mêmes deux tableaux, et que les séparer ferait
+ * Parce qu'ils se déduisent des mêmes deux tableaux, et que les séparer ferait
  * calculer deux fois la périodisation du plan entier — deux occasions de
  * diverger, sur exactement le genre de position que ce chantier corrige.
+ *
+ * - la **composition** (rampe de qualité, cf. {@link CompositionAnchor}) ;
+ * - le **rang plan-relatif** des semaines, dont dépendent la variation
+ *   d'endurance et la cadence des sorties longues à fin appuyée ;
+ * - les **semaines de base déjà passées**, qui referment la fenêtre de
+ *   marche/course d'une reprise au lieu de la rouvrir.
+ *
+ * Les trois se comptent par **soustraction** (ce que la fenêtre ne porte pas),
+ * pour la raison décrite plus bas : la démotion de la première semaine en
+ * `partial` lui retire son rang, et un décompte de préfixe décalerait toutes
+ * les suivantes.
  */
 function remainingComposition(
   plan: PlanDto,
   window: RemainingPlanWindow,
-): { phases: PlanPhase[]; compositionAnchor: CompositionAnchor } {
+): {
+  phases: PlanPhase[];
+  compositionAnchor: CompositionAnchor;
+  planWeekOffset: number;
+  completedBaseWeeks: number;
+} {
   const race = raceGoalOf(plan.goalType, plan.goalText);
   const full = planPhases({
-    intent: planIntentOf(plan.goalType),
+    intent: plan.intent,
+    returnInjuryHistory: plan.returnInjuryHistory,
     weeks: plan.weeks,
     // La périodisation d'origine : celle qu'a connue le plan quand il a été
     // écrit, jour de départ compris.
@@ -1522,7 +1670,15 @@ function remainingComposition(
     completedDevelopmentWeeks: planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
   };
 
-  return { phases, compositionAnchor };
+  const isBase = (phase: PlanPhase): boolean => phase === 'base';
+
+  return {
+    phases,
+    compositionAnchor,
+    // Les semaines du plan qui précèdent la fenêtre : elle en est le suffixe.
+    planWeekOffset: full.length - phases.length,
+    completedBaseWeeks: full.filter(isBase).length - phases.filter(isBase).length,
+  };
 }
 
 /**
@@ -1910,8 +2066,11 @@ export function remainingVolumeTargets(
   if (weeks <= 0) return [];
 
   // Les plans antérieurs au champ n'en portent pas : `intermediate` est le
-  // régime médian, celui qui ne durcit ni n'allège la progression.
-  const level = plan.level ?? 'intermediate';
+  // régime médian, celui qui ne durcit ni n'allège la progression. Une reprise,
+  // elle, progresse au régime d'une débutante quel que soit le niveau déclaré —
+  // c'est la même règle qu'à la création (cf. {@link volumeLevelOf}), sans quoi
+  // la première réadaptation ferait repartir la progression au régime déclaré.
+  const level = volumeLevelOf(plan.intent, plan.level ?? 'intermediate');
   const race = raceGoalOf(plan.goalType, plan.goalText);
   const growth = VOLUME_TARGET_RULES.weeklyGrowth[level];
   const paceMinPerKm =
@@ -2417,7 +2576,7 @@ function describeRemainingPlan(
   settings: EffectivePlanSettings,
 ): string {
   return [
-    `plan ${plan.id} « ${plan.goalText} »`,
+    `plan ${plan.id} intention ${plan.intent}${plan.returnInjuryHistory ? ' (antécédent de blessure)' : ''}`,
     plan.raceDate === null ? null : `course le ${plan.raceDate}`,
     `${window.weeks}/${plan.weeks} semaines restantes à partir du ${window.firstWeekStart} (jour ${window.firstWeekFromDay})`,
     `niveau ${plan.level ?? 'inconnu'}`,
@@ -2502,7 +2661,12 @@ export async function rewriteRemainingPlan(
 
   // 1. Le squelette de la fenêtre — périodisation conservée, volumes recalculés.
   const skeleton = planSkeletonOrInvalid({
-    intent: planIntentOf(plan.goalType),
+    intent: plan.intent,
+    returnInjuryHistory: plan.returnInjuryHistory,
+    // Le même plafond qu'à la création, recalculé sur l'historique du jour : une
+    // reprise qui a déjà rallongé ses sorties n'est plus plafonnée par celles
+    // d'il y a deux mois.
+    longRunCapKm: returnLongRunCapKm(plan.intent, snapshot),
     weeks: window.weeks,
     firstWeekFromDay: window.firstWeekFromDay,
     sessionsPerWeek: effectiveSettings.sessionsPerWeek,
@@ -2514,7 +2678,7 @@ export async function rewriteRemainingPlan(
     // distance dans du texte libre, et sans ce garde-fou un objectif libre
     // « me remettre après mon semi » recevrait des sorties longues spécifiques
     // pour une échéance qui n'existe pas.
-    goalDistanceKm: plan.goalType === 'race' ? goalDistanceKm(plan.goalText) : null,
+    goalDistanceKm: plan.intent === 'race' ? goalDistanceKm(plan.goalText) : null,
     targets,
     ...remainingComposition(plan, window),
   });
@@ -2605,7 +2769,7 @@ export function buildPlanInstructionMessages(
     {
       role: 'user',
       content: [
-        `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+        `Plan en cours : ${INTENT_PROMPT_LABELS[plan.intent]}${plan.goalText.trim() === '' ? '' : ` — « ${plan.goalText.trim()} »`}${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
         ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
         `Réglages actuels : ${formatConstraints(plan)}.`,
         `Semaines restantes : ${window.weeks}.`,
@@ -2696,7 +2860,9 @@ function buildAdjustedSummaryMessages(
     {
       role: 'user',
       content: [
-        `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+        INTENT_SUMMARY_CONTEXT[plan.intent],
+        ...(plan.raceDate === null ? [] : [`Course le ${formatCivilDate(plan.raceDate)}.`]),
+        ...(plan.goalText.trim() === '' ? [] : [`Note de l'athlète : « ${plan.goalText.trim()} »`]),
         ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
         `Semaines recalculées : ${window.weeks}, du ${formatCivilDate(window.firstWeekStart)} au ${formatCivilDate(endsOn)}.`,
         `Contraintes : ${formatConstraints(rewrite.effectiveSettings)}.`,
@@ -2723,6 +2889,7 @@ function fallbackAdjustedSummary(
   return [
     `Les ${window.weeks} semaines restantes ont été recalculées à partir du ${formatCivilDate(window.firstWeekStart)}, ` +
       `sur le volume réellement couru ces dernières semaines.`,
+    INTENT_FALLBACK_LINE[plan.intent],
     `Périodisation : ${phaseBreakdown(rewrite.skeleton)}.`,
     `Le volume hebdomadaire va de ${formatNumber(Math.min(...volumes), 1)} à ` +
       `${formatNumber(Math.max(...volumes), 1)} km, pour ${rewrite.effectiveSettings.sessionsPerWeek} séances par semaine ` +

@@ -26,8 +26,8 @@ describe("planRecapEntries", () => {
       values({ goalText: "  Semi de Nantes  ", raceDate: "2026-11-08", weeklyTimeHours: "4,5" }),
     );
 
-    expect(valueOf(entries, "Type d'objectif")).toBe("Course datée");
-    expect(valueOf(entries, "Ta course")).toBe("Semi de Nantes");
+    expect(valueOf(entries, "Ton intention")).toBe("Préparer une course");
+    expect(valueOf(entries, "Note pour le coach")).toBe("Semi de Nantes");
     expect(valueOf(entries, "Date de la course")).toBe("8 nov.");
     expect(valueOf(entries, "Ton niveau")).toBe("Intermédiaire");
     expect(valueOf(entries, "Chrono de référence")).toBe("Aucun — le coach restera prudent");
@@ -37,14 +37,27 @@ describe("planRecapEntries", () => {
     expect(valueOf(entries, "Début du programme")).toBe("11 août");
   });
 
-  it("remplace la date de course par la durée sur un objectif libre", () => {
+  it("remplace la date de course par la durée sur une intention sans échéance", () => {
     const entries = planRecapEntries(
-      values({ goalType: "free", goalText: "Améliorer mon endurance", weeks: "12" }),
+      values({ intent: "faster", goalText: "Améliorer mon endurance", weeks: "12" }),
     );
 
-    expect(valueOf(entries, "Ton objectif")).toBe("Améliorer mon endurance");
+    expect(valueOf(entries, "Ton intention")).toBe("Courir plus vite");
+    expect(valueOf(entries, "Note pour le coach")).toBe("Améliorer mon endurance");
     expect(valueOf(entries, "Durée du plan")).toBe("12 semaines");
     expect(entries.some((entry) => entry.label === "Date de la course")).toBe(false);
+  });
+
+  it("dit qu'aucune note n'a été écrite plutôt que de laisser un vide", () => {
+    expect(valueOf(planRecapEntries(values()), "Note pour le coach")).toBe("Aucune");
+  });
+
+  it("ne relit l'antécédent de blessure que sur une reprise", () => {
+    const resumption = planRecapEntries(values({ intent: "return", returnInjuryHistory: true }));
+    expect(valueOf(resumption, "Blessure récente")).toBe("Oui");
+
+    const other = planRecapEntries(values({ intent: "weight_loss", returnInjuryHistory: true }));
+    expect(other.some((entry) => entry.label === "Blessure récente")).toBe(false);
   });
 
   it("relit le chrono avec sa distance en toutes lettres", () => {

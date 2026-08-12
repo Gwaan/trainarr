@@ -1,4 +1,4 @@
-import { CalendarRange, Flag } from "lucide-react";
+import { CalendarRange, Dumbbell, Flag } from "lucide-react";
 
 import { MarkdownLite } from "@/components/markdown-lite";
 import type { PlanDto } from "@/data/plans";
@@ -11,6 +11,7 @@ import {
   formatRaceTimeSeconds,
 } from "../_lib/form-options";
 import { formatCivilDay, formatIsoDay } from "../_lib/format-plan";
+import { INTENT_LABELS, INTENT_STRENGTH_NOTES } from "../_lib/plan-intent";
 import { planEndsOn } from "../_lib/plan-weeks";
 
 /**
@@ -23,9 +24,9 @@ import { planEndsOn } from "../_lib/plan-weeks";
  * l'appelant qui décide du titre et du contenu de son en-tête.
  */
 
-/** Étiquette du type d'objectif, avec l'échéance quand il y en a une. */
+/** Étiquette de l'échéance : la date de la course, ou l'absence de date. */
 function GoalBadge({ plan }: { plan: PlanDto }) {
-  const isRace = plan.goalType === "race" && plan.raceDate !== null;
+  const isRace = plan.intent === "race" && plan.raceDate !== null;
   const Icon = isRace ? Flag : CalendarRange;
 
   return (
@@ -36,9 +37,35 @@ function GoalBadge({ plan }: { plan: PlanDto }) {
           Course le <span className="num text-fg">{formatCivilDay(plan.raceDate)}</span>
         </>
       ) : (
-        "Objectif libre"
+        "Sans échéance"
       )}
     </span>
+  );
+}
+
+/**
+ * La recommandation de renforcement, en encart discret.
+ *
+ * Elle n'est pas dans le calendrier et n'y sera pas : ce plan n'écrit que de la
+ * course, et prescrire des séances qu'il ne sait ni doser ni suivre serait
+ * décoratif. Mais c'est le complément le mieux étayé après le volume — le taire
+ * pour rester dans son périmètre reviendrait à cacher ce qui marche.
+ */
+function StrengthNote({ plan }: { plan: PlanDto }) {
+  return (
+    <div className="mt-4 flex gap-2.5 rounded-button bg-surface-2 px-3 py-2.5">
+      <Dumbbell
+        aria-hidden="true"
+        strokeWidth={1.8}
+        className="mt-0.5 size-4 shrink-0 text-fg-faint"
+      />
+      <div className="min-w-0">
+        <p className="eyebrow">En complément du plan</p>
+        <p className="mt-1 text-[0.8rem] leading-relaxed text-fg-muted">
+          {INTENT_STRENGTH_NOTES[plan.intent]}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -68,9 +95,15 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
         )}
       </div>
 
+      {/* L'intention, et non plus le texte libre : c'est elle qui dit ce que ce
+          plan est. La note de l'athlète, quand elle en a écrit une, se lit en
+          dessous — une précision, pas un titre. */}
       <p className="mt-3 text-[1.15rem] leading-snug font-semibold text-balance text-fg">
-        {plan.goalText}
+        {INTENT_LABELS[plan.intent]}
       </p>
+      {plan.goalText.trim() === "" ? null : (
+        <p className="mt-1 text-[0.85rem] leading-snug text-fg-muted">{plan.goalText}</p>
+      )}
 
       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
         <Setting label="Séances / semaine" value={String(plan.sessionsPerWeek)} />
@@ -102,6 +135,8 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
           <MarkdownLite source={plan.summary} className="text-[0.87rem]" />
         </div>
       )}
+
+      <StrengthNote plan={plan} />
 
       {/*
         La dernière relecture automatique du plan. Rien ne s'affiche tant qu'il

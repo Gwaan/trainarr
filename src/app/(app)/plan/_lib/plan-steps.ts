@@ -27,13 +27,12 @@ import {
   DEFAULT_REFERENCE_DISTANCE,
   DEFAULT_SESSIONS_PER_WEEK,
   DEFAULT_WEEKS,
-  GOAL_TYPE_CHOICES,
   LEVEL_CHOICES,
   asReferenceDistance,
   parseRaceTimeSeconds,
-  type GoalType,
   type Level,
 } from "./form-options";
+import { DEFAULT_INTENT, INTENT_CHOICES, type PlanIntent } from "./plan-intent";
 
 /**
  * Les réponses de l'athlète, telles que la modale les tient en état.
@@ -42,10 +41,18 @@ import {
  * `FormData` portera, et les convertir ici ne ferait que déplacer la conversion.
  */
 export type PlanFormValues = {
-  goalType: GoalType;
+  /** Ce que l'athlète vient chercher : le sélecteur qui décide de tout le reste. */
+  intent: PlanIntent;
+  /** Note libre, facultative — l'ancien objectif en texte libre. */
   goalText: string;
   raceDate: string;
   weeks: string;
+  /**
+   * « J'ai eu une blessure ces derniers mois ». Une case, donc un booléen — les
+   * autres réponses sont des chaînes parce qu'elles partent telles quelles dans
+   * le `FormData` ; celle-ci n'y part que si elle est cochée.
+   */
+  returnInjuryHistory: boolean;
   level: Level;
   /** Distance du chrono de référence — toujours renseignée, c'est une liste. */
   referenceDistance: ReferenceDistance;
@@ -57,7 +64,13 @@ export type PlanFormValues = {
   startsOn: string;
 };
 
-export type PlanStepId = "goal" | "profile" | "race" | "constraints" | "summary";
+export type PlanStepId =
+  | "goal"
+  | "expectations"
+  | "profile"
+  | "race"
+  | "constraints"
+  | "summary";
 
 export type PlanStep = {
   id: PlanStepId;
@@ -73,8 +86,23 @@ export const PLAN_STEPS = [
   {
     id: "goal",
     title: "Ton objectif",
-    hint: "Ce que tu prépares, et l'échéance qui le borne.",
-    fields: ["goalType", "goalText", "raceDate", "weeks"],
+    hint: "Ce que tu viens chercher : c'est ce choix qui décide de la forme du plan.",
+    fields: ["intent", "raceDate", "weeks", "goalText"],
+  },
+  {
+    /*
+     * Ce que ce plan peut donner — et ce qu'il ne peut pas.
+     *
+     * Une étape à part entière, et placée **juste après le choix**, parce que
+     * c'est la conséquence directe de ce qui vient d'être coché : l'athlète lit
+     * ce que la littérature établit avant que le coach n'écrive quoi que ce
+     * soit, pas après. Rien à saisir, donc aucun champ — l'étape ne peut pas
+     * retenir l'avancement.
+     */
+    id: "expectations",
+    title: "Ce que ce plan peut te donner",
+    hint: "À lire avant de générer : ce qui est démontré, et ce qui ne se promet pas.",
+    fields: [],
   },
   {
     id: "profile",
@@ -118,10 +146,11 @@ const DECIMAL_SHAPE = /^\d+([.,]\d+)?$/;
  */
 export function initialPlanFormValues(defaultStartDate: string): PlanFormValues {
   return {
-    goalType: "race",
+    intent: DEFAULT_INTENT,
     goalText: "",
     raceDate: "",
     weeks: String(DEFAULT_WEEKS),
+    returnInjuryHistory: false,
     level: DEFAULT_LEVEL,
     referenceDistance: DEFAULT_REFERENCE_DISTANCE,
     referenceTime: "",
@@ -141,16 +170,18 @@ export function initialPlanFormValues(defaultStartDate: string): PlanFormValues 
  */
 function isFieldComplete(field: PlanFormField, values: PlanFormValues): boolean {
   switch (field) {
-    case "goalType":
-      return GOAL_TYPE_CHOICES.some((choice) => choice.value === values.goalType);
+    case "intent":
+      return INTENT_CHOICES.some((choice) => choice.value === values.intent);
     case "goalText":
-      return values.goalText.trim() !== "";
+      // Note libre : elle ne retient jamais l'avancement depuis que
+      // l'intention dit ce que le plan prépare.
+      return true;
     case "raceDate":
       // La date de course n'existe que pour une course datée.
-      return values.goalType !== "race" || CIVIL_DATE_SHAPE.test(values.raceDate);
+      return values.intent !== "race" || CIVIL_DATE_SHAPE.test(values.raceDate);
     case "weeks":
-      // La durée, elle, n'existe que pour un objectif libre.
-      return values.goalType !== "free" || values.weeks.trim() !== "";
+      // La durée, elle, n'existe que pour les intentions sans échéance.
+      return values.intent === "race" || values.weeks.trim() !== "";
     case "level":
       return LEVEL_CHOICES.some((choice) => choice.value === values.level);
     case "referenceDistance":

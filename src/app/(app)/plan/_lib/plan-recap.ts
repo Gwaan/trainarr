@@ -11,13 +11,12 @@
 
 import { formatCivilDay, formatIsoDay } from "./format-plan";
 import {
-  GOAL_TYPE_CHOICES,
   LEVEL_LABELS,
   REFERENCE_DISTANCE_LABELS,
   formatRaceTimeSeconds,
   parseRaceTimeSeconds,
-  type GoalType,
 } from "./form-options";
+import { INTENT_LABELS } from "./plan-intent";
 import type { PlanFormValues } from "./plan-steps";
 
 export type PlanRecapEntry = {
@@ -26,11 +25,6 @@ export type PlanRecapEntry = {
   /** Valeur chiffrée : elle s'affiche en mono, comme partout dans l'appli. */
   numeric: boolean;
 };
-
-/** Libellé français d'un type d'objectif. Le repli ne sert jamais : les deux types sont listés. */
-function goalTypeLabel(goalType: GoalType): string {
-  return GOAL_TYPE_CHOICES.find((choice) => choice.value === goalType)?.label ?? "Objectif";
-}
 
 /**
  * Le chrono relu **normalisé** : `1:5:30` saisi se relit `1:05:30`.
@@ -58,15 +52,10 @@ function civilDayOrRaw(civilDate: string): string {
  */
 export function planRecapEntries(values: PlanFormValues): readonly PlanRecapEntry[] {
   const entries: PlanRecapEntry[] = [
-    { label: "Type d'objectif", value: goalTypeLabel(values.goalType), numeric: false },
-    {
-      label: values.goalType === "race" ? "Ta course" : "Ton objectif",
-      value: values.goalText.trim(),
-      numeric: false,
-    },
+    { label: "Ton intention", value: INTENT_LABELS[values.intent], numeric: false },
   ];
 
-  if (values.goalType === "race") {
+  if (values.intent === "race") {
     entries.push({
       label: "Date de la course",
       value: civilDayOrRaw(values.raceDate),
@@ -75,6 +64,22 @@ export function planRecapEntries(values: PlanFormValues): readonly PlanRecapEntr
   } else {
     entries.push({ label: "Durée du plan", value: `${values.weeks} semaines`, numeric: true });
   }
+
+  // La case ne se relit que là où elle a un sens : hors reprise, l'antécédent ne
+  // déplace aucun paramètre du plan (cf. `plan-skeleton/intent.ts`).
+  if (values.intent === "return") {
+    entries.push({
+      label: "Blessure récente",
+      value: values.returnInjuryHistory ? "Oui" : "Non",
+      numeric: false,
+    });
+  }
+
+  entries.push({
+    label: "Note pour le coach",
+    value: values.goalText.trim() === "" ? "Aucune" : values.goalText.trim(),
+    numeric: false,
+  });
 
   const referenceTime = values.referenceTime.trim();
 
