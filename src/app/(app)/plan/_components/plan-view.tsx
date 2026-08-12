@@ -7,6 +7,7 @@ import { formatPlanProgress, groupPlanWeeks } from "../_lib/plan-weeks";
 import { PlanAdjustForm } from "./plan-adjust-form";
 import { PlanArchiveForm } from "./plan-archive-form";
 import { PlanOverview } from "./plan-overview";
+import { PlanSyncForm } from "./plan-sync-form";
 import { PlanWeekCard } from "./plan-week-card";
 
 /**
@@ -45,6 +46,15 @@ export function PlanView({ plan, sessions, today, unavailableReason }: PlanViewP
         meta={<span className="num">{formatPlanProgress(weeks)}</span>}
       >
         <PlanOverview plan={plan} />
+
+        {/*
+          En pied des métadonnées du plan, et pas dans `PlanOverview` : cette
+          carte est partagée avec la proposition du coach, qui n'a rien à
+          synchroniser tant qu'elle n'est pas adoptée.
+        */}
+        <div className="mt-4 border-t border-border pt-3">
+          <PlanSyncForm />
+        </div>
       </Panel>
 
       {/* Les semaines forment une section à part entière : elles méritent un

@@ -35,7 +35,10 @@ import {
   updatePlanFromInstruction,
   type PlanRequest,
 } from '@/lib/ai/plan-service';
-import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
+import {
+  resyncPlanToIntervalsOnDemand,
+  syncPlanToIntervalsSafely,
+} from '@/lib/intervals/push-plan';
 import {
   InvalidRacePerformanceError,
   REFERENCE_DISTANCES,
@@ -86,6 +89,12 @@ export type PlanUpdateState = {
 };
 
 export type PlanArchiveState = {
+  status: 'idle' | 'success' | 'error';
+  message?: string;
+};
+
+/** État de la republication manuelle du calendrier intervals.icu. */
+export type PlanSyncState = {
   status: 'idle' | 'success' | 'error';
   message?: string;
 };
@@ -714,4 +723,67 @@ export async function archivePlanAction(
   revalidatePath('/plan');
   revalidatePath('/');
   return { status: 'success', message: 'Plan archivé.' };
+}
+
+/** Ce que la synchronisation a écrit, en français et sans jargon. */
+function syncedMessage(pushed: number, deleted: number): string {
+  const published =
+    pushed === 0
+      ? 'aucune séance à pousser'
+      : pushed === 1
+        ? '1 séance poussée'
+        : `${pushed} séances poussées`;
+  const removed =
+    deleted === 0 ? '' : deleted === 1 ? ', 1 ancienne retirée' : `, ${deleted} anciennes retirées`;
+
+  return `Calendrier resynchronisé : ${published}${removed}.`;
+}
+
+/**
+ * Republie le calendrier intervals.icu à partir du plan actif, sur demande.
+ *
+ * Le seul déclencheur qui ne soit pas un changement de plan : il existe parce
+ * qu'un déploiement peut changer le **format** des events poussés sans que rien
+ * ne les réécrive (cf. l'en-tête de `resyncPlanToIntervalsOnDemand`).
+ *
+ * Aucun paramètre, et c'est un choix : l'action ne lit ni état précédent ni
+ * champ de formulaire, il n'y a donc rien à valider. `useActionState` l'appelle
+ * quand même avec les deux — JavaScript ignore les arguments en trop, et les
+ * déclarer pour ne pas s'en servir donnerait à croire qu'ils portent quelque
+ * chose. La garde qui compte est ailleurs : l'endpoint étant public, c'est le
+ * service qui refuse de tourner sans plan actif ou pendant une
+ * resynchronisation déjà en vol.
+ *
+ * Attendue dans le fil de la requête, contrairement aux synchronisations
+ * automatiques : ici l'attente **est** le geste, et un bouton qui rend la main
+ * sans rien dire ne vaudrait pas mieux que pas de bouton.
+ */
+export async function resyncIntervalsAction(): Promise<PlanSyncState> {
+  // TODO(auth) : cf. `createPlanAction`.
+
+  const outcome = await resyncPlanToIntervalsOnDemand();
+
+  switch (outcome.status) {
+    case 'synced':
+      return { status: 'success', message: syncedMessage(outcome.pushed, outcome.deleted) };
+    case 'no-plan':
+      return { status: 'error', message: NO_ACTIVE_PLAN };
+    case 'busy':
+      return {
+        status: 'error',
+        message: 'Une resynchronisation est déjà en cours : laisse-la finir.',
+      };
+    case 'unconfigured':
+      // Le motif exact est déjà journalisé côté serveur : il nomme des variables
+      // d'environnement, ce n'est pas ce qu'on met sous les yeux de l'athlète.
+      return {
+        status: 'error',
+        message: "Calendrier non synchronisé : la connexion à intervals.icu n'est pas configurée.",
+      };
+    case 'failed':
+      return {
+        status: 'error',
+        message: "Le calendrier n'a pas pu être resynchronisé — réessaie dans un instant.",
+      };
+  }
 }

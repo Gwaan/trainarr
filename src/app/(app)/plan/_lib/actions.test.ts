@@ -6,6 +6,7 @@ import {
   acceptPlanAction,
   createPlanAction,
   rejectPlanAction,
+  resyncIntervalsAction,
   type PlanDecisionState,
   type PlanFormState,
 } from './actions';
@@ -27,6 +28,7 @@ const { mocks } = vi.hoisted(() => ({
     discardDraftPlan: vi.fn(),
     reconcilePlanSessions: vi.fn(),
     syncPlanToIntervalsSafely: vi.fn(),
+    resyncPlanToIntervalsOnDemand: vi.fn(),
     /** `after` exige un contexte de requête Next : le doublon exécute tout de suite. */
     scheduleAfter: vi.fn(),
   },
@@ -36,6 +38,7 @@ vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock('next/server', () => ({ after: mocks.scheduleAfter }));
 vi.mock('@/lib/intervals/push-plan', () => ({
   syncPlanToIntervalsSafely: mocks.syncPlanToIntervalsSafely,
+  resyncPlanToIntervalsOnDemand: mocks.resyncPlanToIntervalsOnDemand,
 }));
 vi.mock('@/data/plan-reconciliation', () => ({
   reconcilePlanSessions: mocks.reconcilePlanSessions,
@@ -95,7 +98,12 @@ beforeEach(() => {
   mocks.acceptDraftPlan.mockResolvedValue({ id: 9 });
   mocks.discardDraftPlan.mockResolvedValue(undefined);
   mocks.reconcilePlanSessions.mockResolvedValue(0);
-  mocks.syncPlanToIntervalsSafely.mockResolvedValue(undefined);
+  mocks.syncPlanToIntervalsSafely.mockResolvedValue({ status: 'synced', pushed: 0, deleted: 0 });
+  mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({
+    status: 'synced',
+    pushed: 12,
+    deleted: 12,
+  });
   mocks.scheduleAfter.mockImplementation((task: () => unknown) => {
     void task();
   });
@@ -603,4 +611,93 @@ describe('createPlanAction — suivi de la progression', () => {
       expect(mocks.generatePlan).toHaveBeenCalledWith(expect.objectContaining({}), undefined);
     },
   );
+});
+
+/*
+ * Resynchronisation manuelle du calendrier.
+ *
+ * L'action ne lit aucun champ : tout ce qui lui appartient est la traduction du
+ * résultat du service en une phrase pour l'athlète — et le fait qu'aucune trace
+ * technique n'y passe.
+ */
+describe('resyncIntervalsAction', () => {
+  it('republie le calendrier et annonce ce qui est parti', async () => {
+    const state = await resyncIntervalsAction();
+
+    expect(mocks.resyncPlanToIntervalsOnDemand).toHaveBeenCalledOnce();
+    expect(state).toEqual({
+      status: 'success',
+      message: 'Calendrier resynchronisé : 12 séances poussées, 12 anciennes retirées.',
+    });
+  });
+
+  it('accorde le compte au singulier, et tait ce qui vaut zéro', async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({
+      status: 'synced',
+      pushed: 1,
+      deleted: 0,
+    });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state.message).toBe('Calendrier resynchronisé : 1 séance poussée.');
+  });
+
+  it("le dit sans mentir quand le plan n'a plus de séance à venir", async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({
+      status: 'synced',
+      pushed: 0,
+      deleted: 3,
+    });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state).toEqual({
+      status: 'success',
+      message: 'Calendrier resynchronisé : aucune séance à pousser, 3 anciennes retirées.',
+    });
+  });
+
+  it('renvoie sur la page quand aucun plan actif ne peut être republié', async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({ status: 'no-plan' });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state).toEqual({ status: 'error', message: 'Aucun plan actif : recharge la page.' });
+  });
+
+  it('refuse proprement un second clic pendant la synchronisation en vol', async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({ status: 'busy' });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state).toEqual({
+      status: 'error',
+      message: 'Une resynchronisation est déjà en cours : laisse-la finir.',
+    });
+  });
+
+  it("ne fait pas fuiter le motif technique d'une configuration absente", async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({
+      status: 'unconfigured',
+      reason: 'INTERVALS_API_KEY manquante',
+    });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state.status).toBe('error');
+    expect(state.message).not.toContain('INTERVALS_API_KEY');
+    expect(state.message).toContain('intervals.icu');
+  });
+
+  it('rend un échec lisible, sans trace, quand la synchronisation a échoué', async () => {
+    mocks.resyncPlanToIntervalsOnDemand.mockResolvedValue({ status: 'failed' });
+
+    const state = await resyncIntervalsAction();
+
+    expect(state).toEqual({
+      status: 'error',
+      message: "Le calendrier n'a pas pu être resynchronisé — réessaie dans un instant.",
+    });
+  });
 });

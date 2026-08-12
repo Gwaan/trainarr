@@ -10,6 +10,8 @@ import {
   buildWorkoutEvents,
   planCalendarReplacement,
   planSessionExternalId,
+  resetManualSyncLock,
+  resyncPlanToIntervalsOnDemand,
   syncPlanToIntervals,
   syncPlanToIntervalsSafely,
   syncWindow,
@@ -116,6 +118,8 @@ beforeEach(() => {
     async ({ ids }: { ids: readonly unknown[] }) => ids.length,
   );
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
+  // Le verrou vit sur `globalThis` : il survit d'un cas à l'autre.
+  resetManualSyncLock();
 });
 
 afterEach(() => {
@@ -701,7 +705,9 @@ describe('syncPlanToIntervalsSafely', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     api.listWorkoutEvents.mockRejectedValue(new Error('fetch failed'));
 
-    await expect(syncPlanToIntervalsSafely('plan 3')).resolves.toBeUndefined();
+    // Elle rend l'échec plutôt que de le lever : c'est ce que la
+    // resynchronisation manuelle affiche à l'athlète.
+    await expect(syncPlanToIntervalsSafely('plan 3')).resolves.toEqual({ status: 'failed' });
     expect(logged).toHaveBeenCalled();
   });
 
@@ -734,5 +740,78 @@ describe('syncPlanToIntervalsSafely', () => {
     await syncPlanToIntervalsSafely('plan 3');
 
     expect(logged).not.toHaveBeenCalled();
+  });
+});
+
+describe('resyncPlanToIntervalsOnDemand', () => {
+  it('republie le calendrier et rend ses comptes', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [session({ scheduledOn: '2026-08-18' }), session({ id: 2, scheduledOn: '2026-08-20' })],
+    });
+    api.listWorkoutEvents.mockResolvedValue([
+      event({ id: 4321, externalId: 'trainarr-p3-2026-08-18-0' }),
+    ]);
+
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({
+      status: 'synced',
+      pushed: 2,
+      deleted: 1,
+    });
+  });
+
+  it('refuse de tourner sans plan actif, sans rien supprimer', async () => {
+    // Sans plan, la synchronisation purgerait tout le calendrier : c'est ce que
+    // fait l'archivage, ce n'est pas ce que demande une resynchronisation.
+    dal.getActivePlanWithSessions.mockResolvedValue(null);
+
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({ status: 'no-plan' });
+    expect(api.listWorkoutEvents).not.toHaveBeenCalled();
+    expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
+  });
+
+  it('refuse un second appel tant que le premier est en vol', async () => {
+    // Le double-clic : deux remplacements concurrents publieraient chacun ce que
+    // l'autre vient de publier.
+    let release: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.listWorkoutEvents.mockImplementation(async () => {
+      await inFlight;
+      return [];
+    });
+
+    const first = resyncPlanToIntervalsOnDemand();
+    // Le verrou est pris dès l'entrée : le second appel repart aussitôt.
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({ status: 'busy' });
+
+    release?.();
+    await expect(first).resolves.toEqual({ status: 'synced', pushed: 0, deleted: 0 });
+    expect(api.listWorkoutEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('libère le verrou après une panne, et rend son échec', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.listWorkoutEvents.mockRejectedValueOnce(new Error('fetch failed'));
+
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({ status: 'failed' });
+    // Une panne ne condamne pas le bouton jusqu'au redémarrage.
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({
+      status: 'synced',
+      pushed: 0,
+      deleted: 0,
+    });
+  });
+
+  it("dit la non-configuration plutôt que de se taire", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubEnv('INTERVALS_API_KEY', '');
+    resetEnvCache();
+
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({
+      status: 'unconfigured',
+      reason: 'INTERVALS_API_KEY manquante',
+    });
   });
 });

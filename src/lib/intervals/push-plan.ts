@@ -407,6 +407,9 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
   return { status: 'synced', pushed: pushed.length, deleted };
 }
 
+/** Ce que rend une synchronisation best-effort : le rapport, ou l'échec absorbé. */
+export type SafeSyncOutcome = PushReport | { status: 'failed' };
+
 /**
  * La même synchronisation, en best-effort : elle ne lève jamais.
  *
@@ -422,22 +425,118 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
  * canal. Une ligne par synchronisation tentée, sans déduplication entre appels :
  * il n'y en a qu'à l'écriture d'un plan, et une ligne répétée reste préférable à
  * un service muet.
+ *
+ * Le résultat est **rendu** en plus d'être journalisé : les appels automatiques
+ * l'ignorent (ils partent en `after()`), la resynchronisation manuelle en a
+ * besoin pour dire à l'athlète ce qui vient de se passer.
  */
-export async function syncPlanToIntervalsSafely(context: string): Promise<void> {
+export async function syncPlanToIntervalsSafely(context: string): Promise<SafeSyncOutcome> {
   try {
     const report = await syncPlanToIntervals();
     if (report.status === 'unconfigured') {
       console.error(
         `[plan/intervals] ${context} : calendrier non synchronisé — ${report.reason}.`,
       );
-      return;
+      return report;
     }
     if (report.pushed > 0 || report.deleted > 0) {
       console.log(
         `[plan/intervals] ${context} : calendrier synchronisé (publiées : ${report.pushed}, supprimées : ${report.deleted}).`,
       );
     }
+    return report;
   } catch (error) {
     console.error(`[plan/intervals] ${context} : calendrier non synchronisé —`, error);
+    return { status: 'failed' };
+  }
+}
+
+/*
+ * Resynchronisation demandée à la main.
+ *
+ * Le calendrier n'est republié qu'aux changements de plan. Quand c'est le
+ * **format** des events poussés qui change (une correction livrée par un
+ * déploiement), le calendrier reste dans l'ancien format jusqu'au prochain
+ * changement de plan — qui peut n'arriver que des semaines plus tard. D'où ce
+ * déclencheur, qui ne fait rien d'autre que rejouer la synchronisation : elle
+ * est idempotente par construction (cf. l'en-tête).
+ */
+
+/** Ce que rend une resynchronisation manuelle. */
+export type ManualSyncOutcome =
+  | SafeSyncOutcome
+  /** Une resynchronisation manuelle est déjà en vol : celle-ci n'est pas partie. */
+  | { status: 'busy' }
+  /** Aucun plan actif : rien à republier, et surtout rien à purger. */
+  | { status: 'no-plan' };
+
+/**
+ * La clé du verrou de resynchronisation manuelle.
+ *
+ * Même raison que pour l'état de révision (`review-service.ts`) et le registre
+ * de progression : en build standalone, deux bundles peuvent embarquer deux
+ * instances de ce module, donc deux variables de module — donc aucun verrou.
+ * Posé sur `globalThis` via le registre global de symboles, il est unique au
+ * processus.
+ */
+const MANUAL_SYNC_KEY: unique symbol = Symbol.for('trainarr.plan-manual-sync');
+
+/** `globalThis` vu comme le porteur du verrou — la seule façon de le typer sans `any`. */
+type GlobalWithManualSync = typeof globalThis & {
+  [MANUAL_SYNC_KEY]?: { running: boolean };
+};
+
+/** Le verrou partagé, créé au premier accès quel que soit le bundle appelant. */
+function manualSyncLock(): { running: boolean } {
+  const store = globalThis as GlobalWithManualSync;
+
+  const existing = store[MANUAL_SYNC_KEY];
+  if (existing !== undefined) return existing;
+
+  const created = { running: false };
+  store[MANUAL_SYNC_KEY] = created;
+  return created;
+}
+
+/**
+ * Libère le verrou. Exporté **pour les tests uniquement** : il vit sur
+ * `globalThis` et survit donc au rechargement du module d'un cas à l'autre.
+ */
+export function resetManualSyncLock(): void {
+  manualSyncLock().running = false;
+}
+
+/**
+ * Republie le calendrier à la demande de l'athlète, et dit ce qui s'est passé.
+ *
+ * Deux gardes, dans cet ordre :
+ *
+ * 1. **Un seul appel à la fois.** Un double-clic lancerait deux remplacements
+ *    concurrents : chacun liste le calendrier avant que l'autre n'ait créé ses
+ *    events, et publie donc en double ce que l'autre vient de publier. Le second
+ *    appel est refusé net plutôt que mis en file — l'athlète attend devant son
+ *    bouton, et la synchronisation en vol fait déjà exactement ce qu'il demande.
+ *
+ *    Le verrou ne couvre **que** cette porte : les synchronisations automatiques
+ *    (adoption, ajustement, révision, archivage) ne le prennent pas. Les faire
+ *    renoncer parce qu'une resynchronisation manuelle est en vol perdrait une
+ *    republication — celle-ci a pu lister le calendrier avant que le plan ne
+ *    soit écrit, et rien ne repasserait derrière.
+ * 2. **Un plan actif.** Sans lui, `syncPlanToIntervals` supprime légitimement
+ *    toutes les séances Trainarr à venir : c'est ce que fait l'archivage. Ce
+ *    n'est pas ce que demande un bouton « resynchroniser », et l'action étant un
+ *    endpoint public, un POST direct ne doit pas pouvoir vider le calendrier
+ *    sous couvert de le rafraîchir.
+ */
+export async function resyncPlanToIntervalsOnDemand(): Promise<ManualSyncOutcome> {
+  const lock = manualSyncLock();
+  if (lock.running) return { status: 'busy' };
+  lock.running = true;
+
+  try {
+    if ((await getActivePlanWithSessions()) === null) return { status: 'no-plan' };
+    return await syncPlanToIntervalsSafely('resynchronisation manuelle');
+  } finally {
+    lock.running = false;
   }
 }
