@@ -94,11 +94,11 @@ import {
 /**
  * Nombre de tentatives, repli compris dans le raisonnement.
  *
- * Deux, là où une génération de plan en tente trois : la différence n'est pas
- * un dosage mais une conséquence du repli. `generateWithBusinessRules` n'a rien
- * derrière lui — s'il abandonne, l'athlète n'a pas de plan, et une troisième
- * tentative vaut ses trente secondes. Ici, une séance parfaitement acceptable
- * attend déjà dans {@link qualitySessionTemplate} : la troisième tentative ne
+ * Deux, et c'est une conséquence du repli plutôt qu'un dosage. Là où une
+ * génération de plan entier n'avait rien derrière elle — si elle abandonnait,
+ * l'athlète n'avait pas de plan, et une troisième tentative valait ses trente
+ * secondes —, une séance parfaitement acceptable attend ici déjà dans
+ * {@link qualitySessionTemplate} : la troisième tentative ne
  * s'achète plus qu'un peu de sur-mesure, au prix d'une attente que l'athlète
  * paie sur *chaque* créneau du plan — une trentaine sur seize semaines.
  */
@@ -386,9 +386,9 @@ const QUALITY_ZONE_BRIEFS: Record<QualityZone, string> = {
  *
  * ## Pourquoi cette ligne existe
  *
- * Elle remplace une règle qui a disparu avec le prompt du plan entier
- * (`LEVEL_RULES` dans `plan-service.ts` : « NIVEAU DÉBUTANT — au plus une séance
- * de qualité, courte et douce […] Jamais de bloc de seuil long » contre
+ * Elle remplace une règle qui vivait dans le prompt du plan entier, disparu
+ * avec la bascule sur squelette (« NIVEAU DÉBUTANT — au plus une séance de
+ * qualité, courte et douce […] Jamais de bloc de seuil long » contre
  * « CONFIRMÉ — blocs de seuil plus longs »). Sans elle, mesuré sur un semi en
  * 1 h 45 à 4 séances : une **débutante** recevait 9 séances de seuil à la
  * structure exacte d'une confirmée, et `advanced` produisait un plan strictement
@@ -756,9 +756,8 @@ function absorbBudget(steps: PlanSessionSteps, slot: QualitySlot): PlanSessionSt
 /**
  * Le message de reprise : ce qui ne va pas, puis quoi refaire.
  *
- * Même forme que `buildViolationsMessage` (`plan-service.ts`), à l'échelle d'une
- * séance — et sans jamais renvoyer la sortie fautive : la redonner doublerait la
- * facture de contexte pour une information que le modèle vient d'écrire.
+ * Sans jamais renvoyer la sortie fautive : la redonner doublerait la facture de
+ * contexte pour une information que le modèle vient d'écrire.
  */
 export function buildQualityViolationsMessage(violations: readonly string[]): string {
   return [
@@ -961,12 +960,12 @@ function errorReason(error: unknown): string {
  * pas savoir faire (de l'arithmétique), et lui redemander la même chose coûte
  * une génération pour un ajustement que l'appli fait exactement.
  *
- * Une **erreur** du socle IA, quelle qu'elle soit, va directement au repli —
- * c'est la différence délibérée avec `generateWithBusinessRules`, qui réessaie
- * sur sortie hors schéma. La grammaire encadre ici un objet de deux champs :
- * une sortie hors contrat n'y signale pas un modèle qui a mal lu une consigne
- * mais un provider qui n'applique pas le schéma du tout, et redemander la même
- * chose au même provider n'a aucune raison de mieux marcher.
+ * Une **erreur** du socle IA, quelle qu'elle soit, va directement au repli, et
+ * c'est délibéré : la grammaire encadre ici un objet de deux champs, donc une
+ * sortie hors contrat n'y signale pas un modèle qui a mal lu une consigne mais
+ * un provider qui n'applique pas le schéma du tout — et redemander la même
+ * chose au même provider n'a aucune raison de mieux marcher. Seules les
+ * violations *métier* d'une séance valent une reprise (cf. {@link MAX_ATTEMPTS}).
  */
 export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOutput> {
   const messages = buildQualitySessionMessages(slot);

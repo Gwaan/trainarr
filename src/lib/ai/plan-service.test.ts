@@ -4,26 +4,26 @@ import type { TrainingSnapshotDto } from '@/data/coach-context';
 import { InvalidPlanError, PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
-import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
-
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
-  buildPlanUpdateMessages,
-  buildSchemaIssuesMessage,
-  buildViolationsMessage,
-  estimatePlanChars,
   generatePlan,
   InvalidGeneratedPlanError,
-  planChunks,
-  planProgressPercent,
-  planSystemPrompt,
+  planWeeklyVolumeKm,
   planWindow,
   remainingPlanWindow,
+  remainingVolumeTargets,
+  rewriteRemainingPlan,
   updatePlanFromInstruction,
   type PlanRequest,
 } from './plan-service';
+import {
+  VOLUME_RULES,
+  validatePlanBusinessRules,
+  type PlanWeekOutput,
+  type WeeklyVolumeTarget,
+} from './plan-schema';
 // Le registre n'est pas mocké : ce qu'on éprouve, c'est ce que la route lira.
 import { getPlanProgress, type PlanProgress } from './progress';
 
@@ -110,6 +110,13 @@ const SNAPSHOT: TrainingSnapshotDto = {
   recentAvgPaceSecPerKm: 324,
 };
 
+/** Une date civile décalée de `days` jours — l'arithmétique des fixtures, sans dépendance. */
+function shiftDays(date: string, days: number): string {
+  const day = new Date(`${date}T00:00:00.000Z`);
+  day.setUTCDate(day.getUTCDate() + days);
+  return day.toISOString().slice(0, 10);
+}
+
 const PLAN: PlanDto = {
   id: 3,
   status: 'active',
@@ -163,19 +170,6 @@ function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
   };
 }
 
-/** Le déroulé d'une séance au seuil, tel qu'il est déjà en base. */
-const THRESHOLD_STEPS = [
-  { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
-  {
-    repeat: 4,
-    steps: [
-      step('run', { durationS: 480, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 }),
-      step('recover', { durationS: 120 }),
-    ],
-  },
-  { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
-];
-
 /** Un chrono de référence : 10 km en 48:30 → VDOT 41,5 (cf. `lib/metrics/vdot`). */
 const REFERENCE_RACE = { distance: '10k', timeS: 2_910 } as const;
 
@@ -186,32 +180,6 @@ const REQUEST: PlanRequest = {
   weeks: 2,
   sessionsPerWeek: 3,
   longRunDay: 7,
-};
-
-/**
- * Une semaine **pleine** conforme : 3 séances, la plus longue le dimanche, et la
- * séance de qualité livrée avec son déroulé — sans lui, elle violerait les
- * règles métier.
- *
- * Son volume n'est pas libre : il tient dans la cible que l'appli chiffre pour
- * `REQUEST` + `SNAPSHOT` (meilleure semaine récente 42,1 km → première semaine
- * pleine à 50,5 km au plus, cf. `weeklyVolumeTargets`). 50 km, donc, à ±10 % de
- * la cible.
- */
-const CONFORMING_WEEK = {
-  sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 12 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 15, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 23 },
-  ],
-};
-
-/** Une semaine qui viole les règles : deux séances, aucune le dimanche. */
-const BROKEN_WEEK = {
-  sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10 },
-  ],
 };
 
 /*
@@ -304,6 +272,25 @@ type WrittenSession = {
 
 function writtenSessions(): WrittenSession[] {
   return dal.createDraftPlanWithSessions.mock.calls[0][0].sessions as WrittenSession[];
+}
+
+/** Le volume total d'un jeu de séances écrites, en km. */
+function totalKm(sessions: readonly WrittenSession[]): number {
+  return sessions.reduce((total, session) => total + (session.volumeM ?? 0), 0) / 1_000;
+}
+
+/** Le temps planifié par semaine ISO, en secondes — la mesure du budget temps. */
+function secondsByWeek(sessions: readonly WrittenSession[]): Map<string, number> {
+  const byWeek = new Map<string, number>();
+  for (const session of sessions) {
+    // Les semaines du plan sont des semaines ISO à partir d'un lundi : le lundi
+    // de la semaine suffit à les distinguer.
+    const day = new Date(`${session.scheduledOn}T00:00:00.000Z`);
+    day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+    const week = day.toISOString().slice(0, 10);
+    byWeek.set(week, (byWeek.get(week) ?? 0) + (session.durationS ?? 0));
+  }
+  return byWeek;
 }
 
 /**
@@ -590,432 +577,12 @@ describe('remainingPlanWindow', () => {
 });
 
 /**
- * La méthodologie du coach, telle qu'elle part au modèle.
+ * La création, de bout en bout et sans réseau.
  *
- * Le prompt de **plan entier** a disparu avec la bascule sur squelette : une
- * création n'appelle plus le modèle que séance par séance
- * (`quality-fill.ts`), et l'appli écrit tout le reste. Ce message système, lui,
- * reste entier — c'est celui de l'ajustement (`buildPlanUpdateMessages`) et de
- * la révision automatique (`review-service.ts`), deux chemins qui font toujours
- * réécrire des semaines complètes. Les cas ci-dessous étaient portés par
- * `buildPlanMessages` ; ils jugent désormais leur source directement.
- */
-describe('planSystemPrompt', () => {
-  const system = planSystemPrompt('intermediate', 'race', null, undefined);
-
-  it('pose le rôle et les principes', () => {
-    expect(system).toContain('coach de course à pied');
-    expect(system).toContain('10 %');
-  });
-
-  it('encode la méthodologie : polarisation, typologie, progression, affûtage', () => {
-    // Distribution polarisée et espacement des séances dures.
-    expect(system).toContain('80 %');
-    expect(system).toContain('Jamais deux jours de suite');
-    // Typologie des séances, telle que le `kind` doit la nommer.
-    expect(system).toContain('« Seuil »');
-    expect(system).toContain('« VMA »');
-    expect(system).toContain('« Sortie longue »');
-    // Progression et affûtage.
-    expect(system).toContain('20 à 40 %');
-    expect(system).toContain('Affûtage');
-  });
-
-  /**
-   * Le modèle doit réussir du premier coup : la validation est le filet, pas la
-   * consigne. Ces chiffres sont donc exactement ceux que `plan-schema.ts`
-   * vérifie — s'ils divergent, le coach se fait refuser un plan qu'il croyait
-   * conforme, et une génération de plusieurs minutes est perdue.
-   */
-  it('donne les seuils de volume exacts que la validation vérifie', () => {
-    expect(system).toContain('PROGRESSION DU VOLUME');
-    expect(system).toContain("n'augmente jamais de plus de 12 %");
-    expect(system).toContain('TOUTE séance déclare sa distance');
-    expect(system).toContain('sur toute fenêtre de 4 semaines, au moins une redescend à 85 %');
-    expect(system).toContain("dépasse d'au moins 10 % la première semaine pleine");
-    expect(system).toContain(
-      'les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT',
-    );
-    expect(system).toContain('ne dépasse pas 65 % du volume de la semaine la plus chargée');
-    // La semaine entamée du départ : sa baisse n'en est pas une, et le modèle
-    // n'a pas à la compenser.
-    expect(system).toContain('amputée des jours passés');
-  });
-
-  /**
-   * Le budget temps : une limite dure, et dite comme telle.
-   *
-   * Constaté en production : 2 h par semaine déclarées, ~3 h 30 planifiées. La
-   * contrainte figurait bien dans la demande, mais rien ne disait au modèle
-   * qu'elle serait vérifiée — ni ce qui devait céder quand elle ne tenait pas.
-   */
-  it('annonce le temps hebdomadaire comme une limite dure vérifiée', () => {
-    expect(system).toContain('limite DURE, vérifiée semaine par semaine');
-    expect(system).toContain("la somme des `durationMin` d'une semaine");
-    expect(system).toContain("c'est le volume qui baisse");
-  });
-
-  it('impose une sortie compacte : chaque caractère se paie en contexte', () => {
-    // Un plan de 16 semaines indenté pèse ~40 k caractères et sature le contexte
-    // du serveur, qui coupe la sortie en plein objet.
-    expect(system).toContain(
-      '- Réponds en JSON compact, sans indentation ni retours à la ligne — chaque caractère compte.',
-    );
-  });
-
-  /**
-   * Le retour d'utilisation qui a imposé cette ligne : les sorties longues
-   * générées sortaient 100 % en endurance, quand les plans concurrents
-   * proposaient des passages à l'allure objectif dès la mi-préparation. « La
-   * spécificité croît vers l'objectif » ne suffit pas — un petit modèle applique
-   * une prescription chiffrée, pas une intention.
-   */
-  it('prescrit un bloc à allure objectif dans les sorties longues d’une préparation course', () => {
-    expect(system).toContain(
-      "- À partir de la moitié du plan, la sortie longue contient un bloc à allure objectif (étape `run` avec note « allure objectif », 10 à 25 % de la distance de la sortie), qui s'allonge de semaine en semaine. L'affûtage le raccourcit sans le supprimer.",
-    );
-    // La note est le pivot : c'est elle que `applyImposedPaces` reconnaît pour
-    // poser la plage M sur cette étape-là, au sein d'une séance rangée en E.
-    expect(system).toContain('« allure objectif »');
-  });
-
-  it('ne prescrit pas de bloc à allure objectif sur un objectif libre', () => {
-    // Sans échéance, il n'y a pas d'allure objectif à travailler : la prescrire
-    // ferait fabriquer une course au modèle.
-    const free = planSystemPrompt('intermediate', 'free', null, undefined);
-
-    expect(free).not.toContain('À partir de la moitié du plan');
-    // Le reste de la section PROGRESSION, lui, ne bouge pas.
-    expect(free).toContain("La spécificité croît vers l'objectif");
-  });
-
-  it('impose la structure des séances de qualité et le format des étapes', () => {
-    expect(system).toContain('`steps`');
-    expect(system).toContain('échauffement progressif de 10 à 20 min');
-    expect(system).toContain('retour au calme de 5 à 10 min');
-    expect(system).toContain("role: 'recover'");
-    // Une mesure, une cible : les invariants du contrat, dits au modèle.
-    expect(system).toContain('jamais les deux');
-    expect(system).toContain('Un bloc ne contient pas de bloc');
-  });
-
-  it('montre une étape de récupération plutôt que de la décrire une fois de plus', () => {
-    // La faute qui revient à chaque reprise en production : l'étape de
-    // récupération d'un bloc répété, écrite avec distance ET durée, alors que
-    // l'interdiction est déjà énoncée. Un petit modèle recopie un exemple.
-    expect(system).toContain('{ "role": "recover", "durationS": 120 }');
-    expect(system).toContain('une mesure, jamais les deux');
-  });
-
-  it('ancre les allures sur une référence dite pour ce qu’elle est : une allure d’endurance', () => {
-    expect(system).toContain('Allure moyenne des dernières sorties');
-    expect(system).toContain("Ce n'est pas une allure de tempo");
-    expect(system).toContain('endurance fondamentale et sortie longue : référence + 0 à 15 s/km');
-    expect(system).toContain('seuil : référence − 30 à 45 s/km');
-    expect(system).toContain('VMA : référence − 60 à 80 s/km');
-    expect(system).toContain('répétitions courtes : référence − 80 à 100 s/km');
-    expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
-  });
-
-  it('ne présente jamais le repos comme une séance', () => {
-    // Une séance est une sortie : « ou repos » poussait le modèle à écrire un
-    // jour de repos comme une séance, donc à lui inventer une distance.
-    expect(system).toContain('« Récupération » : footing court très souple.');
-    expect(system).not.toContain('ou repos');
-  });
-
-  it('confronte un objectif chiffré aux données, sans s’y soumettre', () => {
-    expect(system).toContain('« 10 km sous 50 min » vaut 5:00/km');
-    expect(system).toContain('le plan reste ancré sur les données');
-  });
-
-  it('dérive les allures des seules données du snapshot, et sait se taire', () => {
-    expect(system).toContain('maxima prudents');
-    // Donnée manquante : on cible par zone cardiaque, et on le dit.
-    expect(system).toContain("Si l'allure de référence est inconnue");
-    expect(system).toContain('`hrZone`');
-    expect(system).toContain("Tu n'inventes jamais une valeur");
-  });
-
-  it('interdit explicitement les miles : un modèle anglophone y glisse tout seul', () => {
-    // Une allure « 10:00 » pensée en min/mile devient un 10:00/km délirant une
-    // fois relue en métrique — le cas constaté en production.
-    expect(system).toContain(
-      "Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
-    );
-  });
-
-  it('exige la mesure de séance en plus du déroulé, pour que les volumes se comparent', () => {
-    expect(system).toContain(
-      'Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance',
-    );
-  });
-
-  it("n'envoie que la section de niveau correspondante", () => {
-    expect(system).toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
-    expect(system).toContain('1 à 2 séances de qualité par semaine');
-    // Les deux autres niveaux ne sont pas envoyés : le budget de contexte est
-    // compté, et deux méthodologies contradictoires ne s'appliquent pas.
-    expect(system).not.toContain("NIVEAU DE L'ATHLÈTE : DÉBUTANT");
-    expect(system).not.toContain("NIVEAU DE L'ATHLÈTE : CONFIRMÉ");
-  });
-
-  it('bride la qualité et la progression de volume pour un débutant', () => {
-    const beginner = planSystemPrompt('beginner', 'race', null, undefined);
-
-    expect(beginner).toContain('AU PLUS UNE séance de qualité par semaine');
-    expect(beginner).toContain("de 5 à 8 % d'une semaine à l'autre");
-    expect(beginner).toContain('marche/course');
-    expect(beginner).not.toContain('2 à 3 × 8 à 12 min');
-  });
-
-  it('ouvre les blocs longs et la troisième séance de qualité au confirmé', () => {
-    const advanced = planSystemPrompt('advanced', 'race', null, undefined);
-
-    expect(advanced).toContain('2 à 3 × 8 à 12 min');
-    expect(advanced).toContain('3 ponctuellement');
-    expect(advanced).not.toContain('AU PLUS UNE séance de qualité par semaine');
-    // La méthodologie générale, elle, ne bouge pas d'un niveau à l'autre.
-    expect(advanced).toContain('coach de course à pied');
-  });
-});
-
-/**
- * Le chrono change la nature du prompt : les allures ne sont plus dérivées d'une
- * moyenne d'entraînement, elles sont **calculées** — et, la prescription ayant
- * échoué trois déploiements de suite, plus demandées du tout au modèle. C'est
- * l'appli qui les pose (cf. `applyImposedPaces`), le prompt ne fait plus que
- * l'annoncer.
- */
-describe('planSystemPrompt — allures imposées', () => {
-  const paces = trainingPacesFromRace(REFERENCE_DISTANCES[REFERENCE_RACE.distance], REFERENCE_RACE.timeS);
-  const system = planSystemPrompt('intermediate', 'free', paces, REFERENCE_RACE);
-
-  it('donne la table calculée, chrono et VDOT à l’appui', () => {
-    expect(system).toContain("ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE");
-    expect(system).toContain('Chrono de référence : 10 km en 48:30 → VDOT 41,5.');
-    expect(system).toContain('- E (endurance fondamentale, sortie longue) : 5:56–6:32/km');
-    expect(system).toContain('- M (allure marathon, allure objectif) : 5:08–5:37/km');
-    expect(system).toContain('- T (seuil) : 4:57–5:11/km');
-    expect(system).toContain('- I (VMA) : 4:28–4:39/km');
-    expect(system).toContain('- R (répétitions courtes) : 4:08–4:17/km');
-  });
-
-  /**
-   * Le constat de production qui a imposé le renversement : même avec la table
-   * en unique section d'allures, le modèle local prescrivait 12:00/km en EF,
-   * 11:00 au seuil et 10:10 en VMA, à chaque tentative de chaque génération. Une
-   * consigne numérique ne s'applique pas à cette taille de modèle ; ce qu'on lui
-   * demande maintenant, c'est de n'écrire aucune allure.
-   */
-  it('interdit toute allure au modèle au lieu de lui en prescrire', () => {
-    expect(system).toContain(
-      "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes.",
-    );
-    expect(system).toContain('Concentre-toi sur la structure');
-    // Plus aucune injonction à ranger une allure dans un créneau : l'appli le
-    // fait, et le prompt ne fait que dire lequel ira où.
-    expect(system).not.toContain('Tes allures sont CALCULÉES, tu ne les choisis pas');
-    expect(system).toContain('endurance fondamentale et sortie longue en [E]');
-    expect(system).toContain('seuil en [T]');
-    expect(system).toContain('VMA en [I]');
-    expect(system).toContain('répétitions courtes en [R]');
-    expect(system).toContain('récupérations sans cible');
-  });
-
-  it('interdit aussi l’allure écrite en toutes lettres dans le texte libre', () => {
-    // Le champ n'est pas le seul chemin vers l'écran : « à 12:00/km » glissé dans
-    // un titre ou une note s'affiche à côté de l'allure que l'appli a posée.
-    expect(system).toContain(
-      "Tu n'écris pas non plus d'allure en toutes lettres dans les titres, les consignes, les notes ou le résumé — l'affichage les porte déjà.",
-    );
-  });
-
-  it('dit que le `kind` porte désormais l’allure, et rappelle son vocabulaire', () => {
-    // C'est le seul champ dont dépend l'allure posée : un `kind` fantaisiste
-    // n'est plus une coquetterie de rédaction, il change la séance courue.
-    expect(system).toContain("C'est le `kind` de la séance qui décide de son allure");
-    expect(system).toContain('« Endurance fondamentale »');
-    expect(system).toContain('« Répétitions »');
-    expect(system).toContain("un libellé hors vocabulaire fera poser une allure d'endurance");
-  });
-
-  /**
-   * Le défaut constaté en production : les deux sections d'allures partaient
-   * ensemble, avec une mention de préséance, et le modèle local suivait la
-   * mauvaise — EF à 12:00/km quand la table calculée disait 5:56–6:32/km. Une
-   * priorité entre consignes contradictoires ne se résout pas à cette taille de
-   * modèle : il n'en voit plus qu'une.
-   */
-  it('supprime entièrement la section de dérivation : une seule source d’allures', () => {
-    expect(system).not.toContain('ALLURES CIBLES');
-    expect(system).not.toContain('Référence = ');
-    expect(system).not.toContain('récupération trottée : référence + 60 à 120 s/km');
-    expect(system).not.toContain('seuil : référence − 30 à 45 s/km');
-    // Plus de section à départager, donc plus de préséance à annoncer.
-    expect(system).not.toContain('prime sur « ALLURES CIBLES »');
-    // La consigne de repli par zones cardiaques ne concerne que le chemin sans
-    // table : ici, toutes les allures sont calculées.
-    expect(system).not.toContain("Si l'allure de référence est inconnue");
-    // La table, elle, est bien là.
-    expect(system).toContain('- T (seuil) : 4:57–5:11/km');
-  });
-
-  it('garde la table, mais pour ce qu’elle dit du niveau de l’athlète', () => {
-    // Elle ne prescrit plus rien ; elle situe l'athlète, et c'est ce qui doit
-    // caler les distances et les durées des séances.
-    expect(system).toContain("Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.");
-    expect(system).toContain('allure course ou allure objectif en [M]');
-  });
-
-  it('garde hors des allures les consignes qui valent dans les deux régimes', () => {
-    // Elles vivaient dans la section de dérivation mais portent sur le volume et
-    // le format : les perdre avec elle changerait le plan produit.
-    expect(system).toContain("Tu n'inventes jamais une valeur");
-    expect(system).toContain('PROGRESSION DU VOLUME');
-  });
-
-  it('ne dit rien de tel sans chrono : les règles de dérivation restent le repli', () => {
-    const derived = planSystemPrompt('intermediate', 'free', null, undefined);
-
-    expect(derived).not.toContain("posées par l'application");
-    expect(derived).toContain('ALLURES CIBLES — dérivées des seules données fournies');
-    expect(derived).toContain('seuil : référence − 30 à 45 s/km');
-    expect(derived).toContain('récupération trottée : référence + 60 à 120 s/km');
-    expect(derived).toContain("Si l'allure de référence est inconnue");
-  });
-});
-
-describe('buildPlanUpdateMessages', () => {
-  const window = { firstWeekStart: '2026-08-10', weeks: 2, firstWeekFromDay: 3 };
-  const messages = buildPlanUpdateMessages(
-    PLAN,
-    [
-      planSession({
-        scheduledOn: '2026-08-13',
-        kind: 'Seuil',
-        title: '3 × 8 min',
-        volumeM: 10_400,
-        steps: THRESHOLD_STEPS,
-      }),
-      planSession({ scheduledOn: '2026-08-16', kind: 'Sortie longue', title: '16 km', durationS: 5_400 }),
-      planSession({ scheduledOn: '2026-08-20', kind: 'Endurance', title: 'Footing', targetPaceSecPerKm: 330 }),
-    ],
-    window,
-    '  je pars en déplacement la semaine prochaine  ',
-  );
-
-  it('annonce au modèle qu’il ne régénère que la suite', () => {
-    expect(messages[0].content).toContain('semaines restantes');
-    expect(messages[0].content).toContain('`settings`');
-  });
-
-  it('porte la même méthodologie que la génération, déroulés compris', () => {
-    const system = messages[0].content;
-
-    expect(system).toContain('coach de course à pied');
-    expect(system).toContain('endurance fondamentale et sortie longue : référence + 0 à 15 s/km');
-    expect(system).toContain('`steps` compris');
-  });
-
-  it('réaffiche le déroulé des séances à venir, pour qu’il se réécrive en connaissance de cause', () => {
-    const user = messages[1].content;
-
-    expect(user).toContain(
-      '  déroulé : échauffement 900 s @ Z2 + 4 × (480 s @ 5:00–5:10/km + récup 120 s) + retour au calme 600 s',
-    );
-    // Une séance sans déroulé n'en invente pas un.
-    expect(user).toContain('- dimanche : Sortie longue — 16 km (1 h 30)\n');
-  });
-
-  it('groupe les séances à venir par semaine et signale la semaine entamée', () => {
-    const user = messages[1].content;
-
-    expect(user).toContain('Semaine 1 (du lundi 10 août 2026, déjà entamée : à replanifier à partir du mercredi)');
-    expect(user).toContain('- jeudi : Seuil — 3 × 8 min (10,4 km)');
-    expect(user).toContain('- dimanche : Sortie longue — 16 km (1 h 30)');
-    expect(user).toContain('Semaine 2 (du lundi 17 août 2026)');
-    expect(user).toContain('- jeudi : Endurance — Footing (5:30/km)');
-  });
-
-  it('reprend l’instruction détourée', () => {
-    expect(messages[1].content).toContain('« je pars en déplacement la semaine prochaine »');
-  });
-
-  it('réaffiche le niveau du plan et garde sa méthodologie à l’ajustement', () => {
-    const advanced = buildPlanUpdateMessages({ ...PLAN, level: 'advanced' }, [], window, 'plus de seuil');
-
-    expect(advanced[1].content).toContain('Niveau déclaré : confirmé.');
-    expect(advanced[0].content).toContain("NIVEAU DE L'ATHLÈTE : CONFIRMÉ");
-    expect(advanced[0].content).not.toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
-  });
-
-  it('ne dit rien du niveau d’un plan qui n’en porte pas', () => {
-    // Plan antérieur au champ : on ne lui en suppose pas un, l'ajustement reste
-    // sur la seule méthodologie générale.
-    const legacy = buildPlanUpdateMessages({ ...PLAN, level: null }, [], window, 'plus de seuil');
-
-    expect(legacy[1].content).not.toContain('Niveau déclaré');
-    expect(legacy[0].content).not.toContain("NIVEAU DE L'ATHLÈTE");
-    expect(legacy[0].content).toContain('coach de course à pied');
-  });
-});
-
-describe('buildViolationsMessage', () => {
-  it('liste les violations et redemande le plan complet', () => {
-    const message = buildViolationsMessage(['Semaine 1 : trop de séances.']);
-
-    expect(message).toContain('- Semaine 1 : trop de séances.');
-    expect(message).toContain('Régénère le plan complet');
-  });
-});
-
-/** Une anomalie Zod, telle que `chatCompletionJson` la porte sur son erreur. */
-function issue(path: (string | number)[], message: string): AiOutputIssue {
-  return { code: 'custom', path, message, input: undefined };
-}
-
-/** L'échec type : une étape sur les deux cent cinquante viole un invariant. */
-const OFF_SCHEMA = new AiInvalidOutputError(
-  'Sortie du coach IA hors schéma « training_plan ».',
-  [
-    issue(
-      ['weeks', 0, 'sessions', 1, 'steps', 1, 'steps', 0],
-      'une étape se mesure soit en distance, soit en durée — exactement une des deux.',
-    ),
-  ],
-);
-
-describe('buildSchemaIssuesMessage', () => {
-  it('donne le chemin du champ fautif et son motif', () => {
-    const message = buildSchemaIssuesMessage(OFF_SCHEMA.issues);
-
-    expect(message).toContain('- weeks.0.sessions.1.steps.1.steps.0 : une étape se mesure');
-    expect(message).toContain('Régénère le plan complet');
-  });
-
-  it('borne la liste : un modèle égaré produirait des centaines d’anomalies', () => {
-    const message = buildSchemaIssuesMessage(
-      Array.from({ length: 14 }, (_, index) => issue(['weeks', index], 'hors bornes.')),
-    );
-
-    expect(message.split('\n').filter((line) => line.startsWith('- weeks.'))).toHaveLength(10);
-    expect(message).toContain('et 4 autres anomalies');
-  });
-
-  it("le dit autrement quand la réponse n'était même pas du JSON", () => {
-    expect(buildSchemaIssuesMessage([])).toContain("n'était pas du JSON exploitable");
-  });
-});
-
-/**
- * La création, de bout en bout et **sans réseau**.
- *
- * Ce que ces cas éprouvent n'est plus « le modèle a-t-il écrit un plan
- * conforme » : le plan est écrit par l'appli (`lib/plan-skeleton`), et le modèle
- * n'y ajoute que le déroulé des séances dures. La question devient donc « un
- * plan valide sort-il, quoi que fasse le coach » — et la réponse doit être oui
- * dans les deux régimes, coach compétent ou coach en panne.
+ * Le modèle n'y écrit plus que deux choses : le déroulé de chaque créneau de
+ * qualité (`quality-fill.ts`) et le résumé. Tout le reste — périodisation,
+ * volumes, jours, séances — est écrit par l'appli, et c'est ce que ces cas
+ * constatent sur les séances réellement enregistrées.
  */
 describe('generatePlan', () => {
   /** Une préparation marathon datée : 8 semaines, jour J le dimanche 11 octobre. */
@@ -1410,6 +977,27 @@ describe('generatePlan', () => {
       expect(writtenSessions().length).toBeGreaterThan(0);
     });
   });
+
+  it('tient le budget temps de la requête dans le plan qu’elle écrit', async () => {
+    // Une création ne demande plus rien au modèle en matière de volume : ses
+    // cibles sont calculées sous le budget déclaré (`weeklyVolumeTargets`) et le
+    // squelette les répartit sans les défaire. Le budget n'est donc plus une
+    // règle qu'on vérifie après coup, c'est une entrée du calcul — et ce test
+    // constate le résultat **semaine par semaine**, de bout en bout. C'est la
+    // seule assertion du fichier qui le fasse sur le chemin de création.
+    coachAnswers();
+
+    // Départ un lundi : deux semaines pleines, aucun prorata à démêler.
+    await generatePlan({ ...REQUEST, ...MONDAY, weeklyTimeMinutes: 120 });
+
+    const byWeek = secondsByWeek(writtenSessions());
+    expect([...byWeek.keys()]).toEqual(['2026-08-17', '2026-08-24']);
+    for (const [week, seconds] of byWeek) {
+      // 2 h déclarées, tolérance de 20 % comprise (cf. `VOLUME_RULES`).
+      expect(seconds, week).toBeLessThanOrEqual(120 * 60 * 1.2);
+    }
+    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('generatePlan — chrono de référence', () => {
@@ -1499,345 +1087,208 @@ describe('generatePlan — chrono de référence', () => {
   });
 });
 
-describe('updatePlanFromInstruction — chrono de référence', () => {
-  it('reprend le chrono du plan : un ajustement ne réinvente pas les allures', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: {
-        ...PLAN,
-        startsOn: '2026-08-10',
-        weeks: 2,
-        referenceDistance: '10k',
-        referenceTimeS: 2_910,
-      },
-      sessions: [],
-    });
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-        CONFORMING_WEEK,
-      ],
-    });
-
-    await updatePlanFromInstruction('rien de spécial');
-
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
-      "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
-    );
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
-      '- T (seuil) : 4:57–5:11/km',
-    );
-
-    // Et l'ajustement passe par le même post-traitement : la sortie longue
-    // écrite sans allure ressort au milieu de [E].
-    const [, { sessions }] = dal.applyPlanUpdate.mock.calls[0];
-    expect(sessions[0]).toMatchObject({ kind: 'Sortie longue', targetPaceSecPerKm: 374 });
-  });
-
-  it('s’en passe sur un plan qui n’en porte pas', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-      sessions: [],
-    });
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-        CONFORMING_WEEK,
-      ],
-    });
-
-    await updatePlanFromInstruction('rien de spécial');
-
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).not.toContain(
-      "posées par l'application",
-    );
-    // Rien n'est écrasé non plus : sans table, il n'y a rien à imposer.
-    const [, { sessions }] = dal.applyPlanUpdate.mock.calls[0];
-    expect(sessions[0].targetPaceSecPerKm).toBeNull();
-  });
-});
+/*
+ * ------------------------------------------------------------------------
+ * Ajustement du plan actif.
+ * ------------------------------------------------------------------------
+ *
+ * Depuis la bascule, un ajustement n'appelle plus le modèle que trois fois par
+ * nature : une pour **lire l'instruction** (`plan_instruction`), une par créneau
+ * de qualité (`quality_session`), une pour le **résumé** (`plan_summary`). Tout
+ * le calendrier est écrit par l'appli.
+ */
 
 /**
- * Une génération qui échoue ne laisse à l'utilisatrice qu'un message générique :
- * ces logs sont le seul moyen de savoir, en production, sur quoi le modèle local
- * a buté. Les taire serait un bug.
+ * Le plan actif de référence : seize semaines commencées le lundi 1er juin,
+ * course le dimanche 20 septembre. Aujourd'hui est le mardi 11 août, la reprise
+ * part donc de demain — **six semaines restantes**, la première déjà entamée.
  *
- * Le journal des rejets, éprouvé sur le chemin qui en produit encore.
- *
- * La **création** n'en produit plus : elle écrit son plan elle-même et ne
- * redemande rien au modèle (ses replis, eux, sont journalisés par
- * `quality-fill.ts` et par la dégradation en escalier). L'ajustement, lui,
- * rejoue toujours des semaines entières — c'est lui qui porte la boucle de
- * correction, et donc ces traces-là.
+ * Ce n'est pas une fixture décorative : c'est un plan qui a déjà consommé ses
+ * blocs de base et de développement, et c'est ce qui rend la conservation de la
+ * périodisation observable.
  */
-describe('journal des rejets', () => {
-  /** Un plan actif de deux semaines, la première entamée : la fenêtre d'un ajustement. */
-  beforeEach(() => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-      sessions: [],
-    });
+const ACTIVE_PLAN: PlanDto = {
+  ...PLAN,
+  startsOn: '2026-06-01',
+  weeks: 16,
+  raceDate: '2026-09-20',
+};
+
+const ACTIVE = {
+  plan: ACTIVE_PLAN,
+  sessions: [
+    // Déjà courue, et dans le passé : elle ne doit ni partir au modèle ni être
+    // réécrite.
+    planSession({ scheduledOn: '2026-08-10', id: 1, completedActivityId: 42 }),
+    planSession({ scheduledOn: '2026-08-16', id: 2 }),
+    planSession({ scheduledOn: '2026-09-06', id: 3 }),
+  ],
+};
+
+/** Ce que le coach répond sur le chemin d'un ajustement — et rien d'autre. */
+function coachAdjusts(settings?: Record<string, unknown>): void {
+  chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+    if (call.schemaName === 'plan_instruction') return settings === undefined ? {} : { settings };
+    if (call.schemaName === 'plan_summary') return { summary: COACH_SUMMARY };
+    if (call.schemaName === 'quality_session') return qualityOutputFor(slotBudgetKm(call));
+    throw new Error(`schéma inattendu sur le chemin d'ajustement : ${call.schemaName}`);
   });
+}
 
-  it('dit le rang de la tentative, la nature du rejet et les violations', async () => {
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
+/** Les séances écrites en base par le dernier ajustement. */
+function updatedSessions(): WrittenSession[] {
+  return dal.applyPlanUpdate.mock.calls[0][1].sessions as WrittenSession[];
+}
 
-    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
+/** Ce que l'ajustement a fait enregistrer comme réglages. */
+function updatedSettings(): Record<string, unknown> {
+  return dal.applyPlanUpdate.mock.calls[0][1].settings as Record<string, unknown>;
+}
 
-    const logged = loggedText();
-    expect(logged).toContain('[plan] tentative 1/3 (training_plan_update) rejetée — violations métier');
-    expect(logged).toContain('[plan] tentative 2/3 (training_plan_update) rejetée — violations métier');
-    expect(logged).toContain('[plan] tentative 3/3 (training_plan_update) rejetée — violations métier');
-    // Le détail exact renvoyé au modèle, pas un « erreur de validation ».
-    expect(logged).toContain('aucune séance le dimanche');
-    expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
-  });
+/** Le contenu du message utilisateur du n-ième appel au coach. */
+function userMessage(index: number): string {
+  return chatCompletionJson.mock.calls[index][0].messages[1].content as string;
+}
 
-  it('dit les champs en défaut quand la sortie est hors schéma', async () => {
-    chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
-
-    await expect(updatePlanFromInstruction('change tout')).rejects.toBe(OFF_SCHEMA);
-
-    const logged = loggedText();
-    expect(logged).toContain('[plan] tentative 1/3 (training_plan_update) rejetée — sortie hors schéma');
-    expect(logged).toContain('weeks.0.sessions.1.steps.1.steps.0');
-    expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
-    // Le schéma a bien été violé sur le fond : rien ne laisse penser à une coupure.
-    expect(logged).not.toContain('tronquée');
-  });
-
-  it('soupçonne une sortie tronquée quand la réponse n’était même pas du JSON', async () => {
-    // Aucune anomalie Zod : `chatCompletionJson` n'a pas pu parser le contenu.
-    chatCompletionJson.mockRejectedValue(
-      new AiInvalidOutputError("Le coach IA n'a pas produit du JSON pour « training_plan_update ».", []),
-    );
-
-    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
-
-    expect(loggedText()).toContain(
-      'sortie hors schéma — sortie probablement tronquée (plafond de génération ou contexte ?)',
-    );
-  });
-});
+/** Le message utilisateur de l'appel portant ce schéma — `null` s'il n'y en a pas. */
+function userMessageOf(schemaName: string): string | null {
+  const call = (chatCompletionJson.mock.calls as [CoachCall][]).find(
+    ([options]) => options.schemaName === schemaName,
+  );
+  return call === undefined ? null : call[0].messages[1].content;
+}
 
 describe('updatePlanFromInstruction', () => {
-  /** Plan démarré le lundi 10 août : reprise demain (mercredi 12), 1 semaine entamée + 1. */
-  const ACTIVE = {
-    plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-    sessions: [
-      planSession({ scheduledOn: '2026-08-10', id: 1, completedActivityId: 42 }),
-      planSession({ scheduledOn: '2026-08-16', id: 2 }),
-      planSession({ scheduledOn: '2026-08-20', id: 3 }),
-    ],
-  };
-
-  it('régénère les semaines restantes et met à jour les réglages', async () => {
+  beforeEach(() => {
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Semaine allégée.',
-      settings: { sessionsPerWeek: 3 },
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
+  });
 
-    const plan = await updatePlanFromInstruction('allège la semaine');
+  it('recalcule les semaines restantes et les écrit avec le résumé du coach', async () => {
+    coachAdjusts();
 
-    expect(plan).toBe(ACTIVE.plan);
-    expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan_update');
+    const plan = await updatePlanFromInstruction('je me sens un peu fatiguée');
 
+    expect(plan).toBe(ACTIVE_PLAN);
     // Séances et réglages partent en un seul appel : le DAL les écrit dans la
     // même transaction.
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
     const [planId, update] = dal.applyPlanUpdate.mock.calls[0];
-    expect(planId).toBe(3);
+    expect(planId).toBe(ACTIVE_PLAN.id);
     expect(update.fromDate).toBe('2026-08-12');
-    expect(update.sessions.map((session: { scheduledOn: string }) => session.scheduledOn)).toEqual([
-      '2026-08-16',
-      '2026-08-18',
-      '2026-08-20',
-      '2026-08-23',
-    ]);
-
-    // `sessionsPerWeek` est inchangé : seul le résumé part au DAL.
-    expect(update.settings).toEqual({ summary: 'Semaine allégée.' });
+    expect(update.settings).toEqual({ summary: COACH_SUMMARY });
+    // Six semaines couvertes, jusqu'au jour de la course incluse.
+    expect(updatedSessions().length).toBeGreaterThan(0);
   });
 
-  it('rapproche les séances régénérées des activités déjà courues', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
+  it('ne réécrit aucune journée déjà écoulée', async () => {
+    coachAdjusts();
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(ACTIVE.plan.id);
+    // La reprise est demain : la semaine en cours n'est replanifiée qu'à partir
+    // de là, et le DAL protège de toute façon les séances réalisées.
+    for (const session of updatedSessions()) {
+      expect(session.scheduledOn >= '2026-08-12').toBe(true);
+    }
+    expect(updatedSessions()[0].scheduledOn.startsWith('2026-08-1')).toBe(true);
   });
 
-  it('republie le plan ajusté au calendrier intervals.icu', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
+  it('conserve la position dans la périodisation : pas de retour en phase de base', async () => {
+    // Le défaut que ce test ferme : recalculer les phases sur la seule fenêtre
+    // restante rendrait « quelques semaines de base » à une athlète qui est dans
+    // son bloc spécifique — et la périodisation redémarrerait à chaque
+    // ajustement.
+    coachAdjusts();
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE.plan.id}`);
-    // Différée elle aussi : un ajustement rend la main dès que la base est écrite.
+    const summaryPrompt = userMessageOf('plan_summary');
+    expect(summaryPrompt).toContain(
+      'Périodisation : 1 × reprise, 3 × spécificité, 1 × affûtage, 1 × semaine de course.',
+    );
+    expect(summaryPrompt).not.toContain('base');
+  });
+
+  it('écrit la course le jour J, et rien après elle', async () => {
+    coachAdjusts();
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    const last = updatedSessions()[updatedSessions().length - 1];
+    expect(last).toMatchObject({ scheduledOn: '2026-09-20', kind: 'Course' });
+  });
+
+  it('applique les réglages durables que le modèle lit dans l’instruction', async () => {
+    coachAdjusts({ sessionsPerWeek: 4 });
+
+    await updatePlanFromInstruction('je peux passer à 4 séances par semaine');
+
+    expect(updatedSettings()).toMatchObject({ sessionsPerWeek: 4 });
+    // Et le calendrier suit : une semaine pleine porte bien quatre séances.
+    const week = updatedSessions().filter(
+      (session) => session.scheduledOn >= '2026-08-17' && session.scheduledOn <= '2026-08-23',
+    );
+    expect(week).toHaveLength(4);
+  });
+
+  it('ancre les volumes sur ce que l’athlète a réellement couru', async () => {
+    // La décision de conception : la progression repart du réel, pas du volume
+    // théorique du plan d'origine. Deux historiques, deux fenêtres de volumes.
+    coachAdjusts();
+    await updatePlanFromInstruction('rien de spécial');
+    const strong = totalKm(updatedSessions());
+
+    vi.resetAllMocks();
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
+    requireAi.mockResolvedValue(undefined);
+    dal.applyPlanUpdate.mockResolvedValue(undefined);
+    dal.reconcilePlanSessions.mockResolvedValue(0);
+    syncPlanToIntervalsSafely.mockResolvedValue(undefined);
+    scheduleAfter.mockImplementation((task: () => unknown) => void task());
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    dal.getTrainingSnapshot.mockResolvedValue({
+      ...SNAPSHOT,
+      // Un mois nettement plus creux : trois semaines à 15 km.
+      weeks: [{ startsOn: '2026-08-03', distanceKm: 15, movingTimeS: 5_400, sessions: 3 }],
+    });
+    coachAdjusts();
+    await updatePlanFromInstruction('rien de spécial');
+    const weak = totalKm(updatedSessions());
+
+    // Le plan d'origine est le même dans les deux cas : seul le réalisé change.
+    expect(weak).toBeLessThan(strong * 0.6);
+  });
+
+  it('rapproche les séances recalculées et republie le calendrier', async () => {
+    coachAdjusts();
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(ACTIVE_PLAN.id);
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE_PLAN.id}`);
+    // Différée : un ajustement rend la main dès que la base est écrite.
     expect(scheduleAfter).toHaveBeenCalledTimes(1);
   });
 
-  it("ajuste quand même le plan si le rapprochement échoue", async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
+  it('ajuste quand même le plan si le rapprochement échoue', async () => {
+    coachAdjusts();
     dal.reconcilePlanSessions.mockRejectedValue(new Error('deadlock detected'));
 
-    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
     expect(loggedText()).toContain('rapprochement des séances');
   });
 
-  it('ne soumet au modèle que les séances à venir non réalisées', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
+  it('ne montre au modèle que le plan et sa consigne — aucune séance à réécrire', async () => {
+    coachAdjusts();
 
-    await updatePlanFromInstruction('rien de spécial');
+    await updatePlanFromInstruction('plutôt 3 séances');
 
-    const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
-    expect(user).toContain('Semaine 1 (du lundi 10 août 2026, déjà entamée');
-    expect(user).toContain('- dimanche : Endurance — Footing');
-    expect(user).not.toContain('lundi : Endurance');
-  });
-
-  it('juge la sortie sur les réglages patchés par le modèle', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux séances désormais.',
-      settings: { sessionsPerWeek: 2 },
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-        {
-          sessions: [
-            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-            { day: 7, kind: 'Sortie longue', title: '16 km', distanceKm: 16 },
-          ],
-        },
-      ],
-    });
-
-    await updatePlanFromInstruction('plutôt 2 séances par semaine');
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(dal.applyPlanUpdate.mock.calls[0][1].settings).toEqual({
-      summary: 'Deux séances désormais.',
-      sessionsPerWeek: 2,
-    });
-  });
-
-  it('reprend aussi sur une sortie hors schéma, comme à la génération', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockRejectedValueOnce(OFF_SCHEMA).mockResolvedValueOnce({
-      summary: 'ok',
-      weeks: [{ sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] }, CONFORMING_WEEK],
-    });
-
-    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
-      'weeks.0.sessions.1.steps.1.steps.0',
-    );
-  });
-
-  it("juge les allures réécrites sur l'allure récente de l'athlète", async () => {
-    // Le prompt de modification ne porte pas le snapshot : le service le charge
-    // pour ce seul contrôle, sans quoi un ajustement pourrait réintroduire les
-    // allures aberrantes que la génération refuse.
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, targetPaceSecPerKm: 600 }] },
-        CONFORMING_WEEK,
-      ],
-    });
-
-    await expect(updatePlanFromInstruction('rien de spécial')).rejects.toThrow(AiInvalidOutputError);
-
-    expect(dal.getTrainingSnapshot).toHaveBeenCalled();
-    expect(loggedText()).toContain(
-      "allure 10:00/km hors de la fourchette plausible [3:34/km – 7:34/km] dérivée de l'allure récente de l'athlète (5:24/km).",
-    );
-    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-  });
-
-  it('renonce après trois échecs sans rien écrire', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
-
-    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(dal.reconcilePlanSessions).not.toHaveBeenCalled();
-  });
-
-  it('dérive les volumes du déroulé quand le plan ne porte pas de chrono', async () => {
-    // Le blocage éradiqué : sans table d'allures, rien ne dérivait `distanceKm`,
-    // que le modèle n'écrit jamais — « Volumes hebdomadaires invérifiables »
-    // condamnait les trois tentatives quoi que contienne le plan.
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [
-        {
-          sessions: [
-            {
-              day: 7,
-              kind: 'Sortie longue',
-              title: '1 h',
-              steps: [{ repeat: 1, steps: [step('run', { durationS: 3600 })] }],
-            },
-          ],
-        },
-        {
-          sessions: [
-            {
-              day: 2,
-              kind: 'Endurance',
-              title: 'Footing',
-              steps: [{ repeat: 1, steps: [step('run', { distanceM: 8000 })] }],
-            },
-            { day: 4, kind: 'Seuil', title: '4 × 8 min', steps: THRESHOLD_STEPS },
-            {
-              day: 7,
-              kind: 'Sortie longue',
-              title: 'Endurance',
-              steps: [{ repeat: 1, steps: [step('run', { distanceM: 16_000 })] }],
-            },
-          ],
-        },
-      ],
-    });
-
-    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE.plan);
-
-    // Une seule tentative, et les mesures arrivent en base : les durées sont
-    // celles du déroulé, les distances les mêmes converties à l'allure récente
-    // de l'athlète (5:24/km) — sauf les efforts, qui portent celle du modèle.
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    const { sessions } = dal.applyPlanUpdate.mock.calls[0][1];
-    expect(sessions.map((planned: { volumeM: number }) => planned.volumeM)).toEqual([
-      11_100, 8_000, 12_400, 16_000,
-    ]);
-    expect(sessions.map((planned: { durationS: number }) => planned.durationS)).toEqual([
-      3_600, 2_580, 3_900, 5_160,
-    ]);
+    const instruction = userMessage(0);
+    expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('plan_instruction');
+    expect(instruction).toContain('Plan en cours : « 10 km sous 50 min »');
+    expect(instruction).toContain('Semaines restantes : 6.');
+    expect(instruction).toContain("Consigne de l'athlète : « plutôt 3 séances »");
   });
 
   it("échoue proprement quand aucun plan n'est actif", async () => {
@@ -1856,332 +1307,507 @@ describe('updatePlanFromInstruction', () => {
 });
 
 /**
- * Le budget temps, jugé sur ce que la **sortie** déclare.
+ * Ce qu'un coach défaillant coûte à un ajustement : du sur-mesure, jamais le
+ * plan.
  *
- * La faille que ces tests ferment : « je peux courir 4 h par semaine
- * maintenant » fait patcher `settings.weeklyTimeMinutes` par le modèle, mais la
- * validation lisait le budget **stocké** — les semaines élargies étaient donc
- * déclarées en violation à chaque tentative, et l'ajustement condamné aux trois
- * échecs sans qu'aucune correction ne soit possible.
+ * Trois régimes, et le même verdict dans les trois : un plan **valide** est
+ * écrit. C'est tout l'objet de l'inversion — ce que le modèle ne produit pas, il
+ * ne peut pas le produire de travers.
  */
-describe('budget temps hebdomadaire', () => {
-  /** Un plan de 2 h par semaine, démarré le lundi 10 : reprise demain (mercredi 12). */
-  const ACTIVE_2H = {
-    plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2, weeklyTimeMinutes: 120 },
-    sessions: [planSession({ scheduledOn: '2026-08-16', id: 2 })],
-  };
-
-  /**
-   * La semaine entamée : une seule sortie, **dans** son budget au prorata.
-   *
-   * Le chiffre tient les deux fenêtres où cette fixture sert, et c'est
-   * délibéré — sans quoi les tests ci-dessous constateraient une violation de la
-   * semaine 2 pendant que la semaine 1 en produirait une autre, sans que rien ne
-   * le dise (d'où les `not.toContain` qui les accompagnent) :
-   *
-   * - ajustement, reprise le mercredi 12 → 5 jours restants, 2 h ramenées à
-   *   1 h 25 (1 h 34 tolérance comprise) ;
-   * - génération, départ le jeudi 13 → 4 jours restants, 2 h ramenées à 1 h 08
-   *   (1 h 15 tolérance comprise).
-   */
-  const PARTIAL_WEEK = {
-    sessions: [
-      { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 },
-    ],
-  };
-
-  /**
-   * Une semaine pleine conforme, durées déclarées.
-   *
-   * La séance de seuil porte un déroulé, et c'est lui qui décide de sa durée :
-   * `THRESHOLD_STEPS` totalise 900 + 4 × (480 + 120) + 600 = 3 900 s, soit
-   * **65 min** quoi qu'en déclare le modèle (cf. `applyDerivedMeasures`). La
-   * valeur passée pour cette séance n'est donc là que pour rester lisible.
-   */
-  function timedWeek(durationsMin: [number, number, number]) {
-    return {
-      sessions: [
-        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, durationMin: durationsMin[0] },
-        {
-          day: 4,
-          kind: 'Seuil',
-          title: '3 × 8 min',
-          distanceKm: 10,
-          durationMin: durationsMin[1],
-          steps: THRESHOLD_STEPS,
-        },
-        {
-          day: 7,
-          kind: 'Sortie longue',
-          title: 'Endurance',
-          distanceKm: 16,
-          durationMin: durationsMin[2],
-        },
-      ],
-    };
-  }
-
-  /** 3 h 00 sur la semaine pleine : au-dessus des 2 h du plan, sous 4 h. */
-  const THREE_HOURS_WEEK = timedWeek([45, 65, 70]);
-
-  it("juge l'ajustement sur le budget que la sortie déclare, pas sur celui du plan", async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Quatre heures par semaine désormais.',
-      settings: { weeklyTimeMinutes: 240 },
-      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
-    });
-
-    await updatePlanFromInstruction('je peux courir 4 h par semaine maintenant');
-
-    // Une seule tentative : 3 h tiennent dans les 4 h que l'instruction déclare.
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(dal.applyPlanUpdate.mock.calls[0][1].settings).toEqual({
-      summary: 'Quatre heures par semaine désormais.',
-      weeklyTimeMinutes: 240,
-    });
+describe('updatePlanFromInstruction — coach incohérent ou en panne', () => {
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
   });
 
-  it('retombe sur le budget du plan quand la sortie ne porte pas de réglages', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
-    });
+  it('écrit un plan entièrement déterministe quand le coach ne répond plus', async () => {
+    chatCompletionJson.mockRejectedValue(new AiResponseError('Service Unavailable', 503));
 
-    await expect(updatePlanFromInstruction('rien de spécial')).rejects.toThrow(
-      AiInvalidOutputError,
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
+
+    // Le calendrier est écrit, complet, et aucun titre ne vient du modèle.
+    const sessions = updatedSessions();
+    expect(sessions.length).toBeGreaterThan(0);
+    expect(sessions.map((session) => session.title)).not.toContain('Séance écrite par le coach');
+    // Réglages inchangés (l'instruction n'a pas pu être lue) et résumé de repli.
+    const settings = updatedSettings();
+    expect(Object.keys(settings)).toEqual(['summary']);
+    expect(settings.summary).toContain('recalculées');
+    expect(loggedText()).toContain('[plan] instruction non interprétée, réglages inchangés');
+  });
+
+  it('écrit un plan valide quand le coach rend n’importe quoi', async () => {
+    // Sortie hors schéma sur tous les appels : chacun a son repli, et aucun ne
+    // remonte.
+    chatCompletionJson.mockRejectedValue(
+      new AiInvalidOutputError('Sortie hors schéma.', [
+        { code: 'custom', path: ['settings'], message: 'inattendu' } as AiOutputIssue,
+      ]),
     );
 
-    expect(loggedText()).toContain(
-      "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00 — " +
-        'réduis distances ou séances (2 h 24 au plus, tolérance comprise).',
-    );
-    // La semaine entamée, elle, tient dans son prorata : une violation de plus
-    // passerait inaperçue d'un `toContain`, et ferait juger cette fixture sur un
-    // manquement qu'elle n'est pas censée porter.
-    expect(loggedText()).not.toContain('déjà entamée');
-    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
+
+    expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
+    expect(updatedSessions().every((session) => session.volumeM !== null)).toBe(true);
   });
 
-  it('ne contrôle plus rien quand la sortie efface le budget', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
-    chatCompletionJson.mockResolvedValue({
-      summary: "Plus de contrainte d'horaire.",
-      settings: { weeklyTimeMinutes: null },
-      weeks: [PARTIAL_WEEK, timedWeek([120, 120, 160])],
-    });
-
-    await updatePlanFromInstruction("je n'ai plus de contrainte de temps");
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    // Le budget effacé part en base : la sortie est jugée sur la contrainte
-    // qu'elle fait enregistrer, jamais sur une autre.
-    expect(dal.applyPlanUpdate.mock.calls[0][1].settings).toEqual({
-      summary: "Plus de contrainte d'horaire.",
-      weeklyTimeMinutes: null,
-    });
-  });
-
-  it('tient le budget de la requête dans le plan qu’elle écrit', async () => {
-    // Une création ne demande plus rien au modèle en matière de volume : ses
-    // cibles sont calculées sous le budget déclaré (`weeklyVolumeTargets`) et le
-    // squelette les répartit sans les défaire. Le budget n'est donc plus une
-    // règle qu'on vérifie après coup, c'est une entrée du calcul — et ce test
-    // constate le résultat, semaine par semaine.
-    coachAnswers();
-
-    // Départ un lundi : deux semaines pleines, aucun prorata à démêler.
-    await generatePlan({ ...REQUEST, ...MONDAY, weeklyTimeMinutes: 120 });
-
-    const byWeek = new Map<string, number>();
-    for (const session of writtenSessions()) {
-      // Semaine ISO du plan : lundi 17 puis lundi 24.
-      const week = session.scheduledOn < '2026-08-24' ? 'S1' : 'S2';
-      byWeek.set(week, (byWeek.get(week) ?? 0) + (session.durationS ?? 0));
-    }
-
-    expect(byWeek.size).toBe(2);
-    for (const [week, seconds] of byWeek) {
-      // 2 h déclarées, tolérance de 20 % comprise (cf. `VOLUME_RULES`).
-      expect(seconds, week).toBeLessThanOrEqual(120 * 60 * 1.2);
-    }
-    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
-  });
-
-  it('exempte du budget une semaine entamée de moins de quatre jours', async () => {
-    // Le défaut constaté : un ajustement lancé le samedi reprend le dimanche, et
-    // les 2 h se prorataient en 17 min — alors que la règle de sortie longue
-    // exige une sortie longue ce dimanche-là. Aucune semaine n'était
-    // satisfaisable, et les trois tentatives étaient perdues d'avance.
-    vi.setSystemTime(new Date('2026-08-15T09:00:00.000Z'));
-    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE_2H);
-    chatCompletionJson.mockResolvedValue({
-      summary: 'ok',
-      weeks: [
-        {
-          sessions: [
-            { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 85 },
-          ],
-        },
-        timedWeek([25, 65, 40]),
-      ],
+  it('garde le calendrier de l’appli même quand seul le résumé échoue', async () => {
+    chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+      if (call.schemaName === 'plan_summary') throw new AiResponseError('boom', 500);
+      if (call.schemaName === 'plan_instruction') return {};
+      return qualityOutputFor(slotBudgetKm(call));
     });
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(dal.applyPlanUpdate).toHaveBeenCalled();
+    expect(updatedSettings().summary).toContain('Périodisation :');
+    // Les créneaux, eux, viennent bien du coach.
+    expect(updatedSessions().map((session) => session.title)).toContain(
+      'Séance écrite par le coach',
+    );
   });
 });
 
-describe("estimatePlanChars — calibrage de l'estimation", () => {
-  /*
-   * La fixture qui étalonne `CHARS_PER_SESSION`.
-   *
-   * Ces séances ne servent aucune règle métier : elles ne sont là que pour être
-   * **pesées**. Elles suivent `COACH_RULES` au pied de la lettre — `steps`
-   * obligatoire sur une séance de qualité (échauffement, blocs répétés portant
-   * leur récupération, retour au calme), allures aux deux bornes, distance et
-   * durée déclarées au niveau de la séance — parce que c'est cette sortie-là que
-   * le modèle écrit, et donc celle dont le pourcentage mesure l'avancement.
-   */
+/**
+ * Aucun plan invalide ne sort de ce chemin non plus — ni par une fenêtre
+ * infaisable, ni par une règle métier qui casserait malgré le squelette.
+ */
+describe('updatePlanFromInstruction — refus et dégradation', () => {
+  it('traduit une fenêtre infaisable en erreur de formulaire actionnable', async () => {
+    // Six séances par semaine sur un volume réel de 3 km : le squelette refuse
+    // d'écrire des séances de moins de 500 m plutôt que de les approximer.
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      ...ACTIVE,
+      plan: { ...ACTIVE_PLAN, sessionsPerWeek: 6, weeklyTimeMinutes: null },
+    });
+    dal.getTrainingSnapshot.mockResolvedValue({
+      ...SNAPSHOT,
+      weeks: [{ startsOn: '2026-08-03', distanceKm: 1, movingTimeS: 400, sessions: 1 }],
+    });
+    coachAdjusts();
 
-  /** Séance de qualité au seuil : 3 blocs, dont un répété 3 fois. */
-  const THRESHOLD = {
-    day: 2,
-    kind: 'Seuil',
-    title: '3 × 10 min au seuil',
-    targetPaceSecPerKm: 255,
-    distanceKm: 13,
-    durationMin: 68,
-    steps: [
-      { steps: [{ role: 'warmup', durationS: 900, paceMinSecPerKm: 330, paceMaxSecPerKm: 345 }] },
-      {
-        repeat: 3,
-        steps: [
-          { role: 'run', durationS: 600, paceMinSecPerKm: 250, paceMaxSecPerKm: 260 },
-          { role: 'recover', durationS: 120, paceMinSecPerKm: 390, paceMaxSecPerKm: 420 },
-        ],
-      },
-      { steps: [{ role: 'cooldown', durationS: 600, paceMinSecPerKm: 345, paceMaxSecPerKm: 360 }] },
-    ],
+    const failure = await updatePlanFromInstruction('rien de spécial').catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(InvalidPlanError);
+    const error = failure as InstanceType<typeof InvalidPlanError>;
+    expect(error.field).toBe('sessionsPerWeek');
+    expect(error.message).toContain('6 séances par semaine ne tiennent pas');
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    // Le diagnostic chiffré, que le formulaire ne peut pas montrer.
+    expect(loggedText()).toContain('[plan] squelette infaisable : Semaine');
+  });
+
+  it('refuse de replanifier un plan dont la course a déjà eu lieu', async () => {
+    // Course le mercredi, semaine pas finie : il ne reste aucun jour
+    // d'entraînement à poser, et la cause n'a rien à voir avec le volume.
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...ACTIVE_PLAN, startsOn: '2026-08-10', weeks: 1, raceDate: '2026-08-12' },
+      sessions: [],
+    });
+    vi.setSystemTime(new Date('2026-08-13T09:00:00.000Z'));
+    coachAdjusts();
+
+    await expect(updatePlanFromInstruction('et maintenant ?')).rejects.toThrow(InvalidPlanError);
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+  });
+
+  it('réécrit tous les créneaux par l’appli avant d’abandonner', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    coachAdjusts();
+    businessRuleViolations.mockReturnValueOnce(['Semaine 1 : quelque chose ne va pas.']);
+
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
+
+    expect(updatedSessions().map((session) => session.title)).not.toContain(
+      'Séance écrite par le coach',
+    );
+    expect(loggedText()).toContain('réécriture de tous les créneaux');
+  });
+
+  it('lève plutôt que d’écrire un plan invalide, et dit de quoi le rejouer', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    coachAdjusts();
+    businessRuleViolations.mockReturnValue(['Semaine 1 : quelque chose ne va pas.']);
+
+    await expect(updatePlanFromInstruction('rien de spécial')).rejects.toThrow(
+      InvalidGeneratedPlanError,
+    );
+
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    const logged = loggedText();
+    expect(logged).toContain('plan tout-déterministe encore hors règles');
+    // La configuration exacte de la fenêtre, pour rejouer le cas.
+    expect(logged).toContain('6/16 semaines restantes à partir du 2026-08-10 (jour 3)');
+  });
+});
+
+/**
+ * Le budget temps est désormais une **entrée du calcul**, plus une règle vérifiée
+ * après coup : les cibles de la fenêtre sont chiffrées sous lui
+ * (`weeklyVolumeTargets`), et le squelette les répartit sans les défaire.
+ */
+describe('updatePlanFromInstruction — budget temps hebdomadaire', () => {
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      ...ACTIVE,
+      plan: { ...ACTIVE_PLAN, weeklyTimeMinutes: 120 },
+    });
+  });
+
+  it('tient le budget du plan dans les semaines qu’il recalcule', async () => {
+    coachAdjusts();
+
+    await updatePlanFromInstruction('rien de spécial');
+
+    for (const [week, seconds] of secondsByWeek(updatedSessions())) {
+      // 2 h déclarées, tolérance de 20 % comprise (cf. `VOLUME_RULES`).
+      expect(seconds, week).toBeLessThanOrEqual(120 * 60 * 1.2);
+    }
+  });
+
+  it('recalcule sous le budget élargi que l’instruction déclare', async () => {
+    coachAdjusts({ weeklyTimeMinutes: 300 });
+
+    await updatePlanFromInstruction('je peux courir 5 h par semaine maintenant');
+
+    expect(updatedSettings()).toMatchObject({ weeklyTimeMinutes: 300 });
+    const weekly = [...secondsByWeek(updatedSessions()).values()];
+    // Le budget élargi se voit : au moins une semaine dépasse les 2 h d'avant.
+    expect(Math.max(...weekly)).toBeGreaterThan(120 * 60);
+  });
+
+  it('lève toute contrainte quand l’instruction efface le budget', async () => {
+    coachAdjusts({ weeklyTimeMinutes: null });
+
+    await updatePlanFromInstruction("je n'ai plus de contrainte de temps");
+
+    // Le budget effacé part en base : la fenêtre est calculée sur la contrainte
+    // qu'elle fait enregistrer, jamais sur une autre.
+    expect(updatedSettings()).toMatchObject({ weeklyTimeMinutes: null });
+  });
+});
+
+/**
+ * L'ancrage d'une **continuation**, et les trois trajectoires qui l'ont décidé.
+ *
+ * Ces tests éprouvent le chemin complet ({@link rewriteRemainingPlan} : cibles,
+ * squelette, remplissage, validation), pas la seule arithmétique — c'est la
+ * composition qui était fausse, pas une formule. Le raisonnement et les chiffres
+ * mesurés sont en tête de `remainingVolumeTargets`.
+ *
+ * Le plan de ces tests n'a **ni course ni budget temps**, et c'est délibéré : un
+ * affûtage ferait redescendre les volumes de la fin de fenêtre, et un budget les
+ * plafonnerait — dans les deux cas, ce qu'on veut mesurer (d'où repart la
+ * progression) serait masqué par autre chose.
+ */
+describe('rewriteRemainingPlan — l’ancrage d’une continuation', () => {
+  /** Un bloc libre de douze semaines, sans plafond de temps : rien ne masque l'ancrage. */
+  const OPEN_PLAN: PlanDto = {
+    ...ACTIVE_PLAN,
+    goalType: 'free',
+    goalText: 'reprendre le volume',
+    raceDate: null,
+    weeks: 12,
+    sessionsPerWeek: 5,
+    weeklyTimeMinutes: null,
+    level: 'intermediate',
   };
 
-  /** Séance de VMA : même forme, 5 répétitions plus courtes. */
-  const INTERVALS = {
-    day: 4,
-    kind: 'VMA',
-    title: '5 × 3 min à VMA',
-    targetPaceSecPerKm: 240,
-    distanceKm: 12,
-    durationMin: 60,
-    steps: [
-      { steps: [{ role: 'warmup', durationS: 1200, paceMinSecPerKm: 330, paceMaxSecPerKm: 345 }] },
-      {
-        repeat: 5,
-        steps: [
-          { role: 'run', durationS: 180, paceMinSecPerKm: 225, paceMaxSecPerKm: 235 },
-          { role: 'recover', durationS: 180, paceMinSecPerKm: 400, paceMaxSecPerKm: 430 },
-        ],
-      },
-      { steps: [{ role: 'cooldown', durationS: 600, paceMinSecPerKm: 345, paceMaxSecPerKm: 360 }] },
-    ],
-  };
-
-  const EASY = {
-    day: 3,
-    kind: 'Endurance fondamentale',
-    title: 'Footing 10 km',
-    targetPaceSecPerKm: 335,
-    distanceKm: 10,
-    durationMin: 56,
-  };
-
-  const SECOND_EASY = {
-    day: 5,
-    kind: 'Endurance fondamentale',
-    title: 'Footing 8 km',
-    targetPaceSecPerKm: 335,
-    distanceKm: 8,
-    durationMin: 45,
-  };
-
-  const LONG_RUN = {
-    day: 7,
-    kind: 'Sortie longue',
-    title: '18 km en endurance',
-    targetPaceSecPerKm: 340,
-    distanceKm: 18,
-    durationMin: 102,
-  };
-
-  /** Un résumé de 4 phrases, au milieu des 3 à 5 que la méthodologie demande. */
-  const SUMMARY =
-    'Bloc de 12 semaines vers le semi-marathon : quatre séances par semaine, une ' +
-    'séance de seuil et une séance de VMA en alternance, la sortie longue le ' +
-    'dimanche. Le volume monte progressivement de 38 à 58 km, avec une semaine ' +
-    'allégée toutes les trois semaines. Les allures sont calées sur ton allure ' +
-    'moyenne récente, pas sur un modèle générique. Point de vigilance : ta charge ' +
-    'récente est basse, la première semaine reste volontairement conservatrice.';
-
-  /** Ce que le modèle écrit vraiment : le plan sérialisé en JSON compact. */
-  function serializedPlanChars(sessions: unknown[], weeks: number): number {
-    return JSON.stringify({
-      summary: SUMMARY,
-      weeks: Array.from({ length: weeks }, () => ({ sessions })),
-    }).length;
+  /** Une date civile décalée de `days` jours — l'arithmétique des fixtures, sans dépendance. */
+  function shiftDays(date: string, days: number): string {
+    const day = new Date(`${date}T00:00:00.000Z`);
+    day.setUTCDate(day.getUTCDate() + days);
+    return day.toISOString().slice(0, 10);
   }
 
-  // Au plus 2 séances de qualité par semaine, quel que soit le nombre de
-  // séances : c'est ce plafond méthodologique qui fait varier le poids moyen
-  // d'une séance d'une configuration à l'autre.
-  const WEEKS = [
-    { label: '3 séances, 1 qualité', sessions: [THRESHOLD, EASY, LONG_RUN] },
-    { label: '4 séances, 2 qualité', sessions: [THRESHOLD, INTERVALS, EASY, LONG_RUN] },
-    { label: '5 séances, 2 qualité', sessions: [THRESHOLD, INTERVALS, EASY, SECOND_EASY, LONG_RUN] },
-  ];
+  /**
+   * Un snapshot dont les semaines valent `weeklyKm`, de la plus ancienne à celle
+   * de `today` — l'ordre et le rôle exacts de `buildRecentWeeks`, la **dernière**
+   * entrée étant la semaine en cours, celle qui est encore partielle.
+   *
+   * `today` est toujours un lundi ou un dimanche ici, et le lundi de sa semaine
+   * se calcule donc sans ambiguïté.
+   */
+  function snapshotOf(today: string, weeklyKm: readonly number[]): TrainingSnapshotDto {
+    const isoDay = (new Date(`${today}T00:00:00.000Z`).getUTCDay() + 6) % 7;
+    const currentWeekStart = shiftDays(today, -isoDay);
 
-  it.each(WEEKS)('tient à un quart près de la sortie réelle — $label', ({ sessions }) => {
-    // La borne qui compte vraiment. En dessous, la barre saturerait à 99 % bien
-    // avant la fin ; au-dessus, elle terminerait loin du compte. ±25 % est le
-    // pire écart que le calibrage laisse passer, et il reste invisible à l'œil
-    // sur une barre.
-    const real = serializedPlanChars(sessions, 12);
-    const estimated = estimatePlanChars(12, sessions.length);
+    return {
+      ...SNAPSHOT,
+      today,
+      weeks: weeklyKm.map((distanceKm, index) => ({
+        startsOn: shiftDays(currentWeekStart, (index - (weeklyKm.length - 1)) * 7),
+        distanceKm,
+        // Cohérent avec l'allure du snapshot (5:24/km), pour que rien ne détonne.
+        movingTimeS: Math.round(distanceKm * 324),
+        sessions: distanceKm > 0 ? 4 : 0,
+      })),
+    };
+  }
 
-    expect(estimated / real).toBeGreaterThan(0.75);
-    expect(estimated / real).toBeLessThan(1.25);
+  /**
+   * Les cibles d'une fenêtre restante de douze semaines qui s'ouvre le `monday`.
+   *
+   * Fenêtre pleine (`firstWeekFromDay` à 1) → la révision s'est déclenchée le
+   * **dimanche** d'avant, et la semaine en cours du snapshot est celle qui
+   * précède la fenêtre. Fenêtre entamée → déclenchement le **lundi** même, la
+   * reprise est au mardi, et la semaine en cours est la première de la fenêtre.
+   */
+  async function rewriteFrom(
+    monday: string,
+    weeklyKm: readonly number[],
+    firstWeekFromDay = 1,
+  ): Promise<number[]> {
+    const today = firstWeekFromDay === 1 ? shiftDays(monday, -1) : monday;
+    const rewrite = await rewriteRemainingPlan({
+      plan: { ...OPEN_PLAN, startsOn: monday },
+      window: { firstWeekStart: monday, weeks: 12, firstWeekFromDay },
+      snapshot: snapshotOf(today, weeklyKm),
+      plannedWeeklyKm: new Map(),
+    });
+
+    return rewrite.targets.map((target) => target.targetKm);
+  }
+
+  beforeEach(() => {
+    // Seuls les créneaux de qualité passent par le modèle sur ce chemin.
+    chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+      if (call.schemaName === 'quality_session') return qualityOutputFor(slotBudgetKm(call));
+      throw new Error(`schéma inattendu sur le chemin de reconstruction : ${call.schemaName}`);
+    });
   });
 
-  it('croît avec les semaines et avec les séances', () => {
-    expect(estimatePlanChars(8, 4)).toBeGreaterThan(estimatePlanChars(4, 4));
-    expect(estimatePlanChars(8, 5)).toBeGreaterThan(estimatePlanChars(8, 4));
+  /**
+   * Le cliquet : c'est l'athlète **assidue** qui finançait la marche suivante.
+   *
+   * Chaque réadaptation repartait de `firstFullWeekMaxKm(meilleure semaine
+   * récente)`, soit +20 %. Or ce qu'on prescrit devient ce qu'elle court, donc sa
+   * meilleure semaine, donc le plafond du passage suivant. Mesuré avant
+   * correction, une réadaptation par semaine, l'athlète courant exactement son
+   * plan : 42 → 50,3 → 60,3 → 72,3 → 86,7 → 104,0 → 124,7 → 149,6 → 179,5 →
+   * 215,3 km, soit **×5,13 en neuf réadaptations** — quand `maxWeeklyGrowth`
+   * plafonne une hausse hebdomadaire à 12 %.
+   *
+   * La validation ne pouvait rien y voir : elle ne compare que des semaines *à
+   * l'intérieur* d'une fenêtre, et chaque réadaptation en ouvre une neuve. Ce
+   * test-ci compare donc **d'une fenêtre à l'autre**, ce que rien d'autre ne
+   * fait.
+   *
+   * Le plan y repart avec la fenêtre (`startsOn` suit le lundi de chaque
+   * passage), et c'est délibéré : la fenêtre rouvre toujours la même semaine de
+   * plan, donc la cadence des semaines allégées reste neutre et seul l'ancrage
+   * bouge. La cadence, elle, se mesure plus bas, sur un plan qui avance.
+   */
+  it('ne rejoue pas la marche de démarrage à chaque réadaptation', async () => {
+    const START_KM = 42;
+    let monday = '2026-06-01';
+    // La semaine en cours est finie (déclenchement le dimanche) : elle porte bien
+    // ce que le plan précédent lui avait prescrit.
+    let history = [0, 0, 0, START_KM];
+    const trajectory = [START_KM];
+
+    for (let round = 0; round < 9; round += 1) {
+      const [firstFullWeekKm] = await rewriteFrom(monday, history);
+      trajectory.push(firstFullWeekKm);
+      history = [...history.slice(1), firstFullWeekKm];
+      monday = shiftDays(monday, 7);
+    }
+
+    // Aucune marche au-dessus de ce que la règle de progression autorise, d'une
+    // reconstruction à la suivante — le raccord que la validation ne voit pas.
+    for (let index = 1; index < trajectory.length; index += 1) {
+      const growth = trajectory[index] / trajectory[index - 1];
+      expect(growth, `semaine ${index}`).toBeLessThanOrEqual(VOLUME_RULES.maxWeeklyGrowth);
+      // Et une vraie progression quand même : la fenêtre ne fait pas du surplace.
+      expect(growth, `semaine ${index}`).toBeGreaterThan(1);
+    }
+
+    // La trajectoire mesurée après correction, au dixième :
+    expect(trajectory).toEqual([42, 45.3, 48.9, 52.8, 57, 61.5, 66.4, 71.7, 77.4, 83.5]);
   });
 
-  it("compte chaque séance dans l'ordre de grandeur d'une séance écrite", () => {
-    // La marge d'une séance de plus reste bornée par les deux extrêmes mesurés :
-    // un footing sans déroulé, et une séance de qualité avec le sien.
-    const marginal = estimatePlanChars(1, 4) - estimatePlanChars(1, 3);
+  /*
+   * Les quatre dernières semaines réelles, et la première semaine **pleine** que
+   * la reconstruction en tire. La dernière valeur est la semaine en cours, encore
+   * partielle : elle ne peut que relever l'ancrage, jamais l'abaisser.
+   *
+   * Deux corrections successives se lisent dans ces chiffres.
+   *
+   * **Il y a deux rondes** : les quatre premières lignes rendaient toutes le même
+   * chiffre — 62,3 km, soit 1,2 × la meilleure des quatre semaines — parce qu'un
+   * maximum sur quatre semaines rend un arrêt invisible. C'est pourtant
+   * exactement la situation qui déclenche une révision `adjust`.
+   *
+   * **Cette ronde-ci**, et les deux mouvements sont indépendants :
+   *
+   * - le **régime nominal monte** (64,7 → 69,9 km) : la reprise est au mardi,
+   *   donc la première semaine pleine est **deux** semaines calendaires après la
+   *   dernière semaine complète, et elle reçoit donc deux marches de progression
+   *   au lieu d'une. C'est la propriété 1, et son absence faisait décroître le
+   *   plan d'une athlète assidue réadaptée en milieu de semaine (×0,66 sur 16
+   *   semaines) ;
+   * - les **reprises descendent** (45,3 → 41,9 ; 14 → 12,9) : le pont d'une
+   *   semaine sautée et le plancher démontré sont des **niveaux de reprise**, pas
+   *   des volumes à faire progresser. Leur appliquer la marche de la semaine —
+   *   pire, la baisse d'une semaine allégée — revenait à prescrire une reprise
+   *   qui n'en est pas une (propriété 3).
+   */
+  const RESUMPTIONS = [
+    { label: 'deux semaines d’arrêt', weeks: [52, 50, 0, 0], firstFullWeekKm: 34.9 },
+    { label: 'trois semaines d’arrêt', weeks: [52, 0, 0, 0], firstFullWeekKm: 12.9 },
+    { label: 'reprise de blessure', weeks: [52, 10, 6, 4], firstFullWeekKm: 12.9 },
+    { label: 'décrue installée', weeks: [30, 22, 14, 6], firstFullWeekKm: 16.3 },
+    { label: 'une semaine de vacances', weeks: [60, 60, 0, 0], firstFullWeekKm: 41.9 },
+    { label: 'régime nominal, lundi', weeks: [60, 60, 60, 0], firstFullWeekKm: 69.9 },
+  ] as const;
 
-    expect(marginal).toBeGreaterThanOrEqual(JSON.stringify(EASY).length);
-    expect(marginal).toBeLessThanOrEqual(JSON.stringify(THRESHOLD).length);
+  it.each(RESUMPTIONS)('suit le réel après $label', async ({ weeks, firstFullWeekKm }) => {
+    // Reprise au mardi : l'index 0 est la semaine entamée, l'index 1 la première
+    // semaine pleine — celle que l'ancrage décide.
+    const targets = await rewriteFrom('2026-06-01', weeks, 2);
+
+    expect(targets[1]).toBe(firstFullWeekKm);
   });
 
-  it('reste positif sur le plus petit plan possible', () => {
-    expect(estimatePlanChars(1, 1)).toBeGreaterThan(0);
-  });
-});
+  it('ne ramène pas à rien une athlète qu’un arrêt long a fait disparaître', async () => {
+    // Trois semaines sans courir après 52 km : la reconstruction repart bas, mais
+    // elle repart — le plancher démontré garde un quart de ce que l'athlète a
+    // montré (13 km, arrondi au dixième inférieur), largement au-dessus des 3 km
+    // qu'une semaine de 5 séances doit financer.
+    const rewrite = await rewriteRemainingPlan({
+      plan: { ...OPEN_PLAN, startsOn: '2026-06-01' },
+      window: { firstWeekStart: '2026-06-01', weeks: 12, firstWeekFromDay: 2 },
+      snapshot: snapshotOf('2026-06-01', [52, 0, 0, 0]),
+      plannedWeeklyKm: new Map(),
+    });
 
-describe('planProgressPercent', () => {
-  it('rend la part reçue de la sortie attendue', () => {
-    expect(planProgressPercent(0, 1_000)).toBe(0);
-    expect(planProgressPercent(425, 1_000)).toBe(43);
+    expect(rewrite.weeks).toHaveLength(12);
+    expect(rewrite.targets[1].targetKm).toBe(12.9);
+    // Chaque semaine porte bien ses séances : rien n'est tombé en route.
+    expect(rewrite.weeks[1].sessions).toHaveLength(OPEN_PLAN.sessionsPerWeek);
   });
 
-  it("ne dépasse jamais 99 % — la génération n'est finie qu'une fois validée", () => {
-    expect(planProgressPercent(1_000, 1_000)).toBe(99);
-    expect(planProgressPercent(9_000, 1_000)).toBe(99);
+  it('ne pose pas de jour J sur une fenêtre où la course ne tombe pas', async () => {
+    // Le jour J **ferme** la dernière semaine de la fenêtre et y déplace le plus
+    // gros effort. Le lire sans vérifier que la date y tombe ferait amputer une
+    // semaine ordinaire de ses derniers jours. La fenêtre restante se termine
+    // toujours avec le plan, donc le cas n'est pas atteignable par l'appli — mais
+    // c'est exactement lui qui rendait une fixture de test fausse sans que rien
+    // ne le dise.
+    const rewrite = await rewriteRemainingPlan({
+      // Course le 20 septembre ; la fenêtre, elle, s'arrête douze semaines après
+      // le 1er juin, soit le 23 août.
+      plan: { ...OPEN_PLAN, goalType: 'race', raceDate: '2026-09-20', startsOn: '2026-06-01' },
+      window: { firstWeekStart: '2026-06-01', weeks: 12, firstWeekFromDay: 1 },
+      snapshot: snapshotOf('2026-05-31', [42, 42, 42, 42]),
+      plannedWeeklyKm: new Map(),
+    });
+
+    expect(loggedText()).toContain('hors de la dernière semaine de la fenêtre reconstruite');
+    // La dernière semaine reste une semaine comme les autres : ses sept jours
+    // sont utilisables, donc elle porte bien son compte de séances.
+    expect(rewrite.weeks[11].sessions).toHaveLength(OPEN_PLAN.sessionsPerWeek);
+  });
+
+  it('repart du départ prudent du niveau quand rien n’ancre la reprise', async () => {
+    // Quatre semaines à zéro ne disent pas « démarre à zéro », elles disent qu'il
+    // n'y a rien à quoi s'ancrer — et surtout pas les +20 % d'un démarrage, qui
+    // n'ont rien à quoi s'appliquer non plus.
+    const targets = await rewriteFrom('2026-06-01', [0, 0, 0, 0], 2);
+
+    expect(targets[1]).toBe(23.9);
+  });
+
+  /**
+   * La **cadence des semaines allégées**, d'une reconstruction à la suivante — le
+   * même défaut de famille que le cliquet, mesuré de la même façon : en simulant
+   * la vie d'un plan plutôt qu'une exécution.
+   *
+   * ## Ce que la fenêtre neuve effaçait
+   *
+   * `weeklyVolumeTargets` pose une semaine allégée au quatrième rang de la
+   * **fenêtre qu'elle reçoit**. À la création, cette fenêtre est le plan entier :
+   * l'athlète souffle toutes les quatre semaines. Sur une reconstruction, la
+   * fenêtre est neuve et le rang repart de zéro — or la révision se déclenche
+   * toutes les quatre séances réalisées, soit environ chaque semaine à cinq
+   * séances. Chaque reconstruction replaçait donc l'athlète au premier rang d'une
+   * fenêtre neuve : **elle n'atteignait jamais le quatrième, donc ne recevait plus
+   * jamais de semaine allégée**. De la surcharge progressive sans récupération,
+   * indéfiniment — exactement ce qu'une périodisation existe pour éviter.
+   *
+   * Comme le cliquet, c'était invisible à tout test d'une exécution unique :
+   * chaque plan reconstruit satisfait la règle « pas quatre semaines de suite sans
+   * allégée » *dans sa fenêtre*. C'est la **suite** de plans qui ne la satisfait
+   * pas, et rien ne regardait la suite.
+   *
+   * ## Ce que ce test mesure
+   *
+   * Un plan de 24 semaines rouvert à chacune de ses douze premières semaines, et
+   * à deux jours de reprise. Le plan est long à dessein : toutes les fenêtres
+   * reconstruites y restent assez longues pour porter leur respiration (cf.
+   * `VOLUME_RULES.minWeeksForCutback`), donc ce qu'on mesure est bien la cadence
+   * et jamais le bord du plan.
+   */
+  describe('la cadence des semaines allégées', () => {
+    /** Le plan vécu : 24 semaines, ni course ni budget — rien ne masque la cadence. */
+    const CADENCE_PLAN: PlanDto = { ...OPEN_PLAN, weeks: 24, startsOn: '2026-06-01' };
+
+    /** Douze semaines de vie : trois cycles de quatre, la mesure demandée. */
+    const LIVED_WEEKS = 12;
+
+    /*
+     * La **trajectoire** de cette vie-là — sa forme, sa dérive, son
+     * indépendance à la fréquence et au jour de réadaptation — se mesure
+     * désormais un cran plus bas, sur `remainingVolumeTargets` directement (cf.
+     * « la vie d'un plan » en fin de fichier) : 84 vies simulées sur 16 semaines,
+     * là où passer par `rewriteRemainingPlan` en aurait fait un test de plusieurs
+     * secondes pour une couverture bien plus étroite.
+     *
+     * Ce qui reste ici est ce que seul le chemin complet peut dire : que la
+     * cadence tient **à travers le squelette et la validation**, d'où qu'on
+     * rouvre le plan.
+     */
+
+    it('retrouve les semaines allégées du plan quelle que soit la semaine de reprise', async () => {
+      // Un plan démarré un **mercredi** : sa première semaine est entamée, donc
+      // sa cadence ne commence qu'à sa semaine 2 et ses respirations tombent aux
+      // semaines 5, 9, 13, 17 et 21. Une reconstruction doit les retrouver aux
+      // mêmes dates, d'où qu'elle rouvre le plan — c'est là que se jouent les deux
+      // semaines entamées, celle du plan et celle de la fenêtre, et une seule
+      // oubliée décalerait toute la cadence d'un cran.
+      const plan: PlanDto = { ...CADENCE_PLAN, startsOn: '2026-06-03' };
+      const PLAN_CUTBACKS = [5, 9, 13, 17, 21];
+
+      for (let week = 0; week < LIVED_WEEKS; week += 1) {
+        // La semaine de départ d'un plan démarré un mercredi est entamée par
+        // construction : `remainingPlanWindow` ne la rend jamais pleine — avant le
+        // départ, elle rend la fenêtre du plan entier, jour de départ compris.
+        for (const firstWeekFromDay of week === 0 ? [4] : [1, 4]) {
+          const monday = shiftDays('2026-06-01', week * 7);
+          const { targets } = await rewriteRemainingPlan({
+            plan,
+            window: { firstWeekStart: monday, weeks: plan.weeks - week, firstWeekFromDay },
+            snapshot: snapshotOf(
+              firstWeekFromDay === 1 ? shiftDays(monday, -1) : monday,
+              [40, 42, 44, 46],
+            ),
+            plannedWeeklyKm: new Map(),
+          });
+
+          const label = `reprise semaine ${week + 1}, jour ${firstWeekFromDay}`;
+          const lived = targets.flatMap((target, index) =>
+            target.kind === 'cutback' ? [week + index + 1] : [],
+          );
+          // Une respiration qui tomberait sur la semaine **entamée** de la fenêtre
+          // n'en est plus une : cette semaine-là est déjà à moitié courue et son
+          // volume est proratisé (plus bas, de toute façon, qu'une allégée). La
+          // cadence reprend à la première semaine pleine.
+          const firstFullWeek = week + 1 + (firstWeekFromDay > 1 ? 1 : 0);
+          expect(lived, label).toEqual(PLAN_CUTBACKS.filter((cutback) => cutback >= firstFullWeek));
+        }
+      }
+    });
   });
 });
 
@@ -2264,29 +1890,24 @@ describe('progression de la génération', () => {
     expect(getPlanProgress(PROGRESS_ID)).toBeNull();
   });
 
-  it('suit aussi un ajustement de plan', async () => {
-    // Le plan actif du bloc « updatePlanFromInstruction » : deux semaines, dont
-    // la première est déjà entamée (reprise à partir de demain).
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-      sessions: [],
-    });
-    let during: PlanProgress | null = null;
-    chatCompletionJson.mockImplementation(async (options: JsonCall) => {
-      options.onProgress?.(1_000);
-      during = getPlanProgress(PROGRESS_ID);
-      return {
-        summary: 'Ajusté.',
-        weeks: [
-          { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-          CONFORMING_WEEK,
-        ],
-      };
+  it('suit aussi un ajustement, créneau par créneau', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    const percents: number[] = [];
+    chatCompletionJson.mockImplementation(async (call: JsonCall) => {
+      if (call.schemaName === 'plan_instruction') return {};
+      if (call.schemaName === 'plan_summary') return { summary: COACH_SUMMARY };
+      // Relevé **avant** de répondre : c'est l'avancement des créneaux déjà
+      // écrits, celui-ci n'en étant pas encore un.
+      percents.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
+      return qualityOutputFor(slotBudgetKm(call));
     });
 
     await updatePlanFromInstruction('allège la semaine prochaine', PROGRESS_ID);
 
-    expect(during).toMatchObject({ attempt: 1, maxAttempts: 3 });
+    // Quatre créneaux sur la fenêtre restante : la barre est posée à zéro avant
+    // le premier appel, puis monte d'un cran par créneau écrit.
+    expect(percents).toEqual([0, 25, 50, 75]);
+    // Un seul passage, comme à la création : plus rien ne se rejoue.
     expect(getPlanProgress(PROGRESS_ID)).toBeNull();
   });
 
@@ -2316,17 +1937,8 @@ describe('progression de la génération', () => {
   });
 
   it('journalise de la même façon un ajustement', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-      sessions: [],
-    });
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Ajusté.',
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-        CONFORMING_WEEK,
-      ],
-    });
+    dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
+    coachAdjusts();
 
     await updatePlanFromInstruction('allège la semaine prochaine', PROGRESS_ID);
 
@@ -2347,101 +1959,1237 @@ describe('progression de la génération', () => {
   });
 });
 
-/*
- * Ajustement par tranches — le seul chemin qui découpe encore : une création
- * écrit ses semaines elle-même, quelle que soit leur nombre.
- */
-
 /**
- * Une semaine de trois séances qui pèse exactement `km` : sortie longue le
- * dimanche à 38 % du volume, le reste en endurance. Aucune séance de qualité —
- * ces tests éprouvent le découpage, pas la méthodologie.
+ * **La vie d'un plan** — le balayage de trajectoires, et la preuve que ce
+ * chantier existe pour produire.
+ *
+ * ## Pourquoi un test de trajectoire, et pas un test de plus
+ *
+ * Neuf défauts ont été trouvés en quatre revues successives sur la même
+ * arithmétique, et ils ont tous la même signature : **invisibles sur une
+ * exécution, visibles sur la trajectoire d'un plan qu'on réadapte**. La
+ * validation métier ne compare que des semaines *à l'intérieur* d'une fenêtre,
+ * et chaque réadaptation en ouvre une neuve — le raccord entre deux fenêtres
+ * n'est regardé par rien. C'est là que vivaient les six.
+ *
+ * Ce balayage simule donc **la vie d'un plan** : l'athlète court ce qu'on lui
+ * prescrit (à son taux de réalisation près), la reconstruction repart de ce
+ * qu'elle a couru, et on lit la suite des volumes que l'athlète a réellement
+ * vécus, semaine calendaire après semaine calendaire, à travers les
+ * réadaptations. 168 vies, 16 semaines chacune :
+ *
+ * - **intervalle entre réadaptations** : 1, 2, 3, 4 semaines ;
+ * - **jour de déclenchement** : les sept jours ISO (c'est là que se cachaient
+ *   les défauts 1 et 4) ;
+ * - **taux de réalisation** : 0,9 · 1,0 · 1,05 · 5,0 (les défauts 5 et 9) ;
+ * - **deux plans** : un bloc libre de 24 semaines et une préparation de 16
+ *   semaines menant à une course.
+ *
+ * Il porte sur {@link remainingVolumeTargets} directement plutôt que sur
+ * {@link rewriteRemainingPlan} : la fonction est pure, et passer par la
+ * reconstruction complète (squelette, remplissage des créneaux, validation) pour
+ * 2 700 fenêtres ferait un test de plusieurs minutes. Ce que le chemin complet a
+ * à dire est éprouvé ailleurs dans ce fichier, et la conformité des cibles aux
+ * règles métier l'est par le balayage qui suit celui-ci.
+ *
+ * ## Le modèle d'athlète, et pourquoi il est fidèle
+ *
+ * Une semaine réadaptée en milieu de semaine n'est réécrite qu'à partir du
+ * lendemain : ses premiers jours gardent ce que la reconstruction précédente
+ * leur avait prescrit ({@link applyPlanUpdate} — le passé ne se réécrit pas). Le
+ * volume **réel** d'une telle semaine est donc un mélange des deux
+ * prescriptions, au prorata des jours, et c'est ce que la simulation compose.
+ * Sans ce détail, la semaine entamée paraîtrait courue à 40 % de sa valeur et
+ * l'ancrage du passage suivant s'effondrerait pour une raison qui n'existe pas.
+ *
+ * Et **la semaine en cours n'est courue qu'au prorata des jours écoulés**. C'est
+ * la correction qui a rendu ce harnais honnête : il lisait auparavant le volume
+ * *plein* de la semaine en cours, si bien qu'un lundi matin l'athlète simulée
+ * avait déjà cinquante kilomètres au compteur. Ce n'était pas une approximation
+ * bénigne — cela rendait dominante la branche
+ * `max(…, project(currentWeekStart, openWeekKm, …))`, qui en production ne mord
+ * presque jamais, et qui recalait la trajectoire à chaque tour. Le harnais
+ * validait donc le code par un modèle qui le sauvait, et c'est ce qui a laissé
+ * passer la dérive du dixième.
+ *
+ * La mémoire du plan (`plannedWeeklyKm`) est tenue de la même façon : c'est ce
+ * que les séances en base porteraient, et {@link planWeeklyVolumeKm} le relit
+ * exactement ainsi.
  */
-function weekOfKm(km: number) {
-  return {
-    sessions: [
-      { day: 2, kind: 'Endurance fondamentale', title: 'Footing', distanceKm: km * 0.31 },
-      { day: 4, kind: 'Endurance fondamentale', title: 'Footing', distanceKm: km * 0.31 },
-      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: km * 0.38 },
-    ],
+describe('remainingVolumeTargets — la vie d’un plan', () => {
+  /** Un bloc libre assez long pour que toutes ses fenêtres portent leur respiration. */
+  const LONG_PLAN: PlanDto = {
+    ...ACTIVE_PLAN,
+    goalType: 'free',
+    goalText: 'reprendre le volume',
+    raceDate: null,
+    startsOn: '2026-06-01',
+    weeks: 24,
+    sessionsPerWeek: 5,
+    weeklyTimeMinutes: null,
+    level: 'intermediate',
   };
-}
 
-describe('planChunks', () => {
-  it('ne découpe pas ce qui tient en un appel', () => {
-    expect(planChunks(6)).toEqual([{ index: 0, count: 1, fromWeek: 0, weeks: 6 }]);
+  /** La même vie, mais avec une échéance : 16 semaines jusqu'au dimanche de la course. */
+  const RACE_PLAN: PlanDto = {
+    ...LONG_PLAN,
+    goalType: 'race',
+    goalText: 'semi-marathon en 1 h 45',
+    raceDate: '2026-09-20',
+    weeks: 16,
+  };
+
+  /** Ce que l'athlète courait avant que le plan commence, en km par semaine. */
+  const BEFORE_PLAN_KM = 42;
+
+  /** Seize semaines de vie : quatre cycles de quatre, la mesure demandée. */
+  const LIVED_WEEKS = 16;
+
+  /** Le lundi de la semaine ISO d'une date civile. */
+  function mondayOf(date: string): string {
+    return shiftDays(date, -((new Date(`${date}T00:00:00.000Z`).getUTCDay() + 6) % 7));
+  }
+
+  /** Ce qu'une vie de plan laisse derrière elle, semaine calendaire par semaine calendaire. */
+  type Life = {
+    /** Le volume **plein** prescrit pour chaque semaine ISO, en km. */
+    planned: Map<string, number>;
+    /** Ce que la dernière prescription disait de la nature de chaque semaine. */
+    kinds: Map<string, WeeklyVolumeTarget['kind']>;
+  };
+
+  /**
+   * La vie d'un plan : réadaptation tous les `everyWeeks`, déclenchée le jour ISO
+   * `triggerDay`, l'athlète courant `realization` × ce qu'on lui prescrit.
+   *
+   * La boucle de rétroaction est complète et c'est tout l'intérêt : ce que le
+   * passage suivant lira dans le snapshot est ce que le passage précédent a
+   * écrit.
+   */
+  /**
+   * Une vie plus accidentée que la réalisation constante du balayage : un creux,
+   * puis une athlète qui **démontre** qu'elle est revenue.
+   *
+   * `capacityKm` est ce qu'elle court quoi que le plan dise, une fois le creux
+   * passé — c'est la seule façon de poser la question de la sortie de
+   * l'enfermement, puisque courir 100 % d'un plan effondré ne démontre rien.
+   */
+  type LifeShape = {
+    /** Rangs de semaine du plan (0 = première) où la réalisation chute. */
+    dipWeeks?: readonly [number, number];
+    /** Taux de réalisation pendant le creux. */
+    dipRealization?: number;
+    /** Taux de réalisation après le creux (défaut : celui du reste de la vie). */
+    afterRealization?: number;
+    /** Ce que l'athlète court au minimum après le creux, en km. */
+    capacityKm?: number;
+    /** Nombre de semaines vécues (défaut : {@link LIVED_WEEKS}). */
+    livedWeeks?: number;
+  };
+
+  function live(
+    plan: PlanDto,
+    everyWeeks: number,
+    triggerDay: number,
+    realization: number,
+    shape: LifeShape = {},
+  ): Life {
+    const planned = new Map<string, number>();
+    const kinds = new Map<string, WeeklyVolumeTarget['kind']>();
+    const lived = new Map<string, number>();
+    const planWeekStart = mondayOf(plan.startsOn);
+
+    // Les trois semaines qui précèdent le plan : l'athlète courait déjà, et c'est
+    // sur elles que la toute première reconstruction s'ancre.
+    for (let back = 1; back <= 3; back += 1) {
+      lived.set(shiftDays(plan.startsOn, -7 * back), BEFORE_PLAN_KM);
+    }
+
+    /** Ce que l'athlète court la semaine `weekStart`, pour un volume prescrit. */
+    const run = (weekStart: string, prescribedKm: number): number => {
+      const rank = Math.round(
+        (Date.parse(`${weekStart}T00:00:00.000Z`) - Date.parse(`${planWeekStart}T00:00:00.000Z`)) /
+          (7 * 24 * 3_600_000),
+      );
+      const [from, to] = shape.dipWeeks ?? [-1, -1];
+      if (rank >= from && rank < to) return prescribedKm * (shape.dipRealization ?? realization);
+      const after = rank >= to ? (shape.afterRealization ?? realization) : realization;
+      const floorRun = rank >= to && shape.capacityKm !== undefined ? shape.capacityKm : 0;
+      return Math.max(prescribedKm * after, floorRun);
+    };
+
+    // Le plan ne se réadapte pas au-delà de son terme : `remainingPlanWindow`
+    // refuse une fenêtre vide, et un déclenchement le dimanche de l'avant-dernière
+    // semaine ouvre déjà sur la dernière.
+    const lastRebuildWeek = Math.min((shape.livedWeeks ?? LIVED_WEEKS) + 1, plan.weeks - 2);
+    for (let week = 0; week <= lastRebuildWeek; week += everyWeeks) {
+      const today = shiftDays(plan.startsOn, week * 7 + triggerDay - 1);
+      const window = remainingPlanWindow(plan, shiftDays(today, 1));
+      const currentWeekStart = mondayOf(today);
+
+      // Les quatre dernières semaines ISO, exactement ce que `buildRecentWeeks`
+      // remonte : la plus ancienne d'abord, la semaine en cours en dernier.
+      const weeks = [3, 2, 1, 0].map((age) => {
+        const full = lived.get(shiftDays(currentWeekStart, -7 * age)) ?? 0;
+        const start = shiftDays(currentWeekStart, -7 * age);
+        // **La semaine en cours n'est courue qu'au prorata des jours écoulés.**
+        //
+        // Le modèle précédent lui donnait son volume **plein** dès la
+        // reconstruction qui l'avait prescrite : dans la simulation, un lundi
+        // matin, l'athlète avait déjà 52 km au compteur. Ce n'était pas un détail
+        // de fixture — cela rendait dominante la branche
+        // `max(…, project(currentWeekStart, openWeekKm, …))`, qui en production ne
+        // mord presque jamais, et qui recalait la trajectoire à chaque tour. Le
+        // harnais sauvait donc le code qu'il était censé éprouver, et c'est ce qui
+        // a laissé passer la dérive du dixième (cf. `promisedKm`).
+        const distanceKm = age === 0 ? (full * triggerDay) / 7 : full;
+        return {
+          startsOn: start,
+          distanceKm,
+          movingTimeS: Math.round(distanceKm * 324),
+          sessions: distanceKm > 0 ? 4 : 0,
+        };
+      });
+
+      const targets = remainingVolumeTargets(
+        plan,
+        window,
+        { ...SNAPSHOT, today, weeks },
+        { sessionsPerWeek: 5, longRunDay: 7, weeklyTimeMinutes: plan.weeklyTimeMinutes },
+        null,
+        planned,
+      );
+
+      const elapsedDays = window.firstWeekFromDay - 1;
+      targets.forEach((target, index) => {
+        const start = shiftDays(window.firstWeekStart, index * 7);
+        // La semaine entamée garde les jours déjà prescrits : son volume réel est
+        // la somme des deux prescriptions, au prorata des jours.
+        const kept = index === 0 ? ((planned.get(start) ?? 0) * elapsedDays) / 7 : 0;
+        planned.set(start, kept + target.targetKm);
+        // La nature d'une semaine se lit de la prescription qui la couvre
+        // **entière** : l'étiquette `partial` d'une semaine déjà entamée ne dit
+        // rien de sa place dans la périodisation, elle dit qu'on l'a rouverte en
+        // cours de route. La laisser écraser la précédente effacerait toutes les
+        // respirations dès que la réadaptation est hebdomadaire.
+        if (index > 0 || elapsedDays === 0) kinds.set(start, target.kind);
+        lived.set(start, run(start, kept + target.targetKm));
+      });
+    }
+
+    return { planned, kinds };
+  }
+
+  /**
+   * Les volumes prescrits, de la deuxième semaine à la dernière du plan
+   * (au plus la 17ᵉ) — **affûtage compris**.
+   *
+   * Une seule exclusion, et c'est un artefact de mesure : la **semaine 1** est
+   * celle du tout premier déclenchement, donc entamée et amputée d'autant de jours
+   * que le déclenchement est tardif.
+   *
+   * Les semaines d'affûtage en faisaient partie jusqu'à la ronde précédente, au
+   * motif que leurs deux chemins de calcul — base recalculée dans la fenêtre, ou
+   * base relue dans la mémoire du plan — « s'accordent à 2 % près ». Mesuré, ils
+   * s'accordaient à **7,2 %** sur cette préparation de 16 semaines, à **×1,295**
+   * sur un marathon de 20 semaines, et le test qui les couvrait à part ne vérifie
+   * que des inégalités (`affûtage < développement`, `course < affûtage`) — il
+   * passait intégralement avec l'affûtage cassé. C'est cette exclusion qui a laissé
+   * passer le défaut de la fenêtre ouverte en milieu de semaine sur la dernière
+   * semaine de développement : **−25 % sur la semaine de course** selon le jour de
+   * déclenchement. Les semaines d'affûtage rentrent donc dans la comparaison, où
+   * elles s'accordent comme les autres.
+   */
+  function series(life: Life, plan: PlanDto): number[] {
+    const last = Math.min(LIVED_WEEKS + 1, plan.weeks);
+    return Array.from({ length: last - 1 }, (_, offset) => {
+      const km = life.planned.get(shiftDays(plan.startsOn, (offset + 1) * 7)) ?? 0;
+      return Math.round(km * 10) / 10;
+    });
+  }
+
+  /** Les volumes prescrits des semaines de **développement** seules. */
+  function buildSeries(life: Life, plan: PlanDto): number[] {
+    const taper = plan.goalType === 'race' ? 2 : 0;
+    return series(life, plan).slice(0, Math.min(LIVED_WEEKS + 1, plan.weeks - taper) - 1);
+  }
+
+  /** Les volumes prescrits des semaines d'affûtage, la semaine de course comprise. */
+  function taperSeries(life: Life, plan: PlanDto): number[] {
+    return Array.from({ length: 2 }, (_, offset) => {
+      const week = plan.weeks - 2 + offset;
+      const km = life.planned.get(shiftDays(plan.startsOn, week * 7)) ?? 0;
+      return Math.round(km * 10) / 10;
+    });
+  }
+
+  /** Les rangs (1 = première semaine du plan) des semaines allégées reçues. */
+  function cutbackWeeks(life: Life, plan: PlanDto, weeks: number): number[] {
+    return Array.from({ length: weeks }, (_, index) => index)
+      .filter((index) => life.kinds.get(shiftDays(plan.startsOn, index * 7)) === 'cutback')
+      .map((index) => index + 1);
+  }
+
+  /**
+   * Toutes les vies du balayage, calculées une fois.
+   *
+   * La **semaine 1 est exclue** de toutes les mesures : elle est la semaine du
+   * tout premier déclenchement, donc entamée et amputée d'autant de jours que le
+   * déclenchement est tardif — un artefact du protocole de mesure, pas du plan.
+   * Ce sont les semaines 2 à 17 qu'on lit.
+   */
+  const INTERVALS = [1, 2, 3, 4] as const;
+  const TRIGGER_DAYS = [1, 2, 3, 4, 5, 6, 7] as const;
+
+  describe.each([
+    { label: 'bloc libre de 24 semaines', plan: LONG_PLAN },
+    { label: 'préparation de 16 semaines vers une course', plan: RACE_PLAN },
+  ])('$label', ({ plan }) => {
+    /**
+     * **Le raccord entre deux fenêtres ne fabrique jamais une marche que la règle
+     * refuse.**
+     *
+     * C'est la propriété que rien ne regardait : chaque plan reconstruit satisfait
+     * `maxWeeklyGrowth` *dans sa fenêtre*, et c'est la suite des fenêtres qui ne la
+     * satisfaisait pas. Mesuré avant correction, à réalisation 1,05 : une hausse
+     * hebdomadaire de **1,134**, au-dessus du plafond de 1,12, et un plan à ×2,50
+     * sur 16 semaines.
+     */
+    it.each(INTERVALS)(
+      'ne fait jamais monter le volume au-delà du plafond, réadaptation toutes les %i semaines',
+      (everyWeeks) => {
+        for (const triggerDay of TRIGGER_DAYS) {
+          for (const realization of [0.9, 1, 1.05]) {
+            const km = series(live(plan, everyWeeks, triggerDay, realization), plan);
+            for (let index = 1; index < km.length; index += 1) {
+              const growth = km[index] / km[index - 1];
+              expect(
+                growth,
+                `${everyWeeks} sem · jour ${triggerDay} · réalisation ${realization} · semaine ${index + 2}`,
+              ).toBeLessThanOrEqual(VOLUME_RULES.maxWeeklyGrowth);
+            }
+          }
+        }
+      },
+    );
+
+    /**
+     * **Pour une athlète assidue, la trajectoire ne dépend ni de la fréquence ni
+     * du jour de réadaptation.**
+     *
+     * C'est le critère qui a démasqué les défauts 1 et 2, et c'est le plus
+     * exigeant du fichier : il dit que réadapter n'est pas un événement. Une
+     * athlète qui court son plan doit vivre le même plan, qu'on le recalcule
+     * chaque semaine ou une fois par mois, un mercredi ou un dimanche.
+     *
+     * Avant correction, réadaptation toutes les 2 semaines en milieu de semaine :
+     * **45,3 → 29,4 km, ×0,66 sur 16 semaines** — un plan qui décroît pour
+     * quelqu'un d'assidu, parce que la première semaine pleine était deux semaines
+     * calendaires après l'ancre et ne recevait qu'une marche.
+     *
+     * L'égalité est à **3 pour mille** près et non au dixième : la semaine entamée
+     * d'une réadaptation en milieu de semaine porte un mélange de deux
+     * prescriptions, dont l'une est arrondie au dixième **inférieur**
+     * ({@link floorKm}) sur une fraction de semaine. C'est un résidu d'arrondi et
+     * non une dérive — il ne croît pas avec le nombre de reconstructions : sur 23
+     * semaines vécues d'un bloc de 24, il vaut encore ×0,998 au pire, et les
+     * dernières semaines retombent au dixième près sur la référence.
+     *
+     * La tolérance valait 1 % tant que `floorKm` rabotait un dixième à chaque
+     * reconstruction : avec le modèle d'athlète honnête, la dérive mesurée était
+     * de **×0,968 sur 16 semaines** et croissait. Elle est fermée (cf.
+     * `promisedKm`), et la tolérance a été resserrée d'autant.
+     */
+    it('rend la même trajectoire quelle que soit la fréquence et le jour de réadaptation', () => {
+      const reference = series(live(plan, 4, 7, 1), plan);
+
+      for (const everyWeeks of INTERVALS) {
+        for (const triggerDay of TRIGGER_DAYS) {
+          const km = series(live(plan, everyWeeks, triggerDay, 1), plan);
+          km.forEach((value, index) => {
+            const label = `${everyWeeks} sem · jour ${triggerDay} · semaine ${index + 2}`;
+            expect(value, label).toBeGreaterThan(reference[index] * 0.997);
+            expect(value, label).toBeLessThan(reference[index] * 1.003);
+          });
+        }
+      }
+    });
+
+    /**
+     * **Courir plus que prescrit ne relève pas le plan d'un dixième.**
+     *
+     * La moitié haute de la propriété 5, et l'assertion la plus nette qu'on
+     * puisse écrire : à réalisation 1,05 **comme à 5,0**, la trajectoire est
+     * *exactement* celle d'une athlète à 1,0. Avant correction, une seule sortie
+     * non planifiée dans une semaine allégée l'annulait et relevait tout l'avenir
+     * de 18 % ; sur 16 semaines, 5 % d'excédent hebdomadaire faisaient ×2,50.
+     *
+     * Le facteur 5 est là depuis que le crédit peut dépasser 1 pour sortir de
+     * l'enfermement : il éprouve que ce cran est **borné**, et pas proportionnel à
+     * l'excédent. Un décapuchonnage naïf de `bestKm` rendait 205 km/semaine sur ce
+     * même protocole.
+     */
+    it('ne relève rien quand l’athlète en fait plus que prescrit', () => {
+      for (const everyWeeks of INTERVALS) {
+        for (const triggerDay of TRIGGER_DAYS) {
+          const label = `${everyWeeks} sem · jour ${triggerDay}`;
+          const reference = series(live(plan, everyWeeks, triggerDay, 1), plan);
+          expect(series(live(plan, everyWeeks, triggerDay, 1.05), plan), label).toEqual(reference);
+          expect(series(live(plan, everyWeeks, triggerDay, 5), plan), label).toEqual(reference);
+        }
+      }
+    });
+
+    /**
+     * **À 90 % de réalisation, le plan descend — et il ne s'effondre pas.**
+     *
+     * Les deux moitiés comptent. Avant correction, la boucle avait un gain égal au
+     * taux de réalisation et le plan faisait **×0,24 sur 16 semaines** : une
+     * athlète à 90 % se retrouvait avec un quart de son plan. Après, chaque
+     * reconstruction ne retient que 5 points de l'écart
+     * ({@link CONTINUATION_RULES.realizationRelief}), et la dérive est bornée par
+     * le nombre de reconstructions : mesuré sur ce balayage, **×0,51 à
+     * réadaptation hebdomadaire, ×1,04 à quatre semaines d'écart** — le nominal
+     * étant lui-même de ×1,20 sur seize semaines.
+     *
+     * Les bornes retenues, et pourquoi celles-là :
+     *
+     * - **plancher 0,45** : la pire dérive possible du balayage est
+     *   `0,95¹⁶ = 0,44` du nominal, et le nominal d'un bloc de 16 semaines vaut
+     *   ×1,20. La borne laisse donc la dérive mesurée passer, et refuse tout ce
+     *   qui irait plus vite — c'est-à-dire tout retour du gain non amorti ;
+     * - **plafond 1,25** : à peine au-dessus du nominal. Une athlète qui ne court
+     *   que 90 % de son plan ne doit surtout pas progresser plus qu'une assidue.
+     *
+     * La dérive résiduelle est assumée, et le modèle d'athlète qui la produit
+     * suppose une coureuse dont la production est *proportionnelle* à la
+     * prescription, donc sans capacité propre. Une athlète réelle, à capacité fixe,
+     * voit le plan descendre jusqu'à elle — et là sa réalisation revient à 1, où le
+     * cran de remontée la ramène vers la promesse du plan (cf. « la sortie de
+     * l'enfermement » plus bas).
+     */
+    it('ne s’effondre pas et ne s’emballe pas à 90 % de réalisation', () => {
+      for (const everyWeeks of INTERVALS) {
+        for (const triggerDay of TRIGGER_DAYS) {
+          // Sur les semaines de **développement** seules : un affûtage descend par
+          // construction, et son rapport à la première semaine ne dit rien de la
+          // dérive qu'on mesure ici.
+          const km = buildSeries(live(plan, everyWeeks, triggerDay, 0.9), plan);
+          const ratio = km[km.length - 1] / km[0];
+          const label = `${everyWeeks} sem · jour ${triggerDay}`;
+          expect(ratio, label).toBeGreaterThan(0.45);
+          expect(ratio, label).toBeLessThan(1.25);
+        }
+      }
+    });
   });
 
-  it('équilibre les tranches plutôt que de les remplir à ras bord', () => {
-    // 6 + 5 + 5, et non 6 + 6 + 4 : un dernier appel famélique paie le même
-    // prompt qu'un appel plein.
-    expect(planChunks(16).map((chunk) => chunk.weeks)).toEqual([6, 5, 5]);
-    expect(planChunks(52).map((chunk) => chunk.weeks)).toEqual([6, 6, 6, 6, 6, 6, 6, 5, 5]);
-    expect(planChunks(16).map((chunk) => chunk.fromWeek)).toEqual([0, 6, 11]);
+  /**
+   * **L'affûtage descend, et la semaine de course reste sous les deux tiers du
+   * pic** — quelle que soit la réadaptation qui l'a écrit.
+   *
+   * C'est la propriété qui compte d'un affûtage, et elle se juge à part de la
+   * trajectoire : sa base est la dernière semaine de développement, relue dans la
+   * mémoire du plan quand la fenêtre ne contient plus que de l'affûtage. Sans
+   * cette lecture, la base était le point de départ de la fenêtre — une
+   * projection de développement, une marche **au-dessus** du pic réel — et la
+   * semaine de course valait 44,7 km ou 41,4 km selon que la dernière
+   * réadaptation tombait en semaine 14 ou en semaine 12.
+   */
+  it('descend jusqu’à la course, d’où que la dernière réadaptation soit partie', () => {
+    for (const everyWeeks of INTERVALS) {
+      for (const triggerDay of TRIGGER_DAYS) {
+        const life = live(RACE_PLAN, everyWeeks, triggerDay, 1);
+        const build = buildSeries(life, RACE_PLAN);
+        const [taperKm, raceKm] = taperSeries(life, RACE_PLAN);
+        const label = `${everyWeeks} sem · jour ${triggerDay}`;
+
+        const peak = Math.max(...build);
+        expect(taperKm, label).toBeLessThan(build[build.length - 1]);
+        expect(raceKm, label).toBeLessThan(taperKm);
+        expect(raceKm, label).toBeLessThan(peak * VOLUME_RULES.raceWeekMaxRatio);
+      }
+    }
+  });
+
+  /**
+   * **Les semaines allégées tombent aux semaines du plan d'origine, dans tous les
+   * cas.**
+   *
+   * Mesuré sur le plan long, qui garde des fenêtres assez longues pour porter
+   * leur respiration jusqu'au bout (`VOLUME_RULES.minBuildWeeksForCutback`). Le
+   * plan démarre un lundi : sa première semaine pleine est sa semaine 1, et ses
+   * respirations tombent donc aux semaines 4, 8, 12 et 16.
+   *
+   * Avant correction, la cadence se comptait depuis la **fenêtre** : la révision
+   * se déclenchant toutes les quatre séances, l'athlète repartait indéfiniment du
+   * premier rang d'un bloc neuf et n'atteignait jamais le quatrième —
+   * `45,3 → 48,9 → 52,8 → 57,0 → 61,5 → 66,4 → 71,7 → 77,4 → 83,5 → 90,1 → 97,3 → 105,0`,
+   * soit douze semaines de montée sans une seule récupération.
+   */
+  it('rend les semaines allégées du plan, à toutes les fréquences et tous les jours', () => {
+    for (const everyWeeks of INTERVALS) {
+      for (const triggerDay of TRIGGER_DAYS) {
+        for (const realization of [0.9, 1, 1.05]) {
+          const life = live(LONG_PLAN, everyWeeks, triggerDay, realization);
+          expect(
+            cutbackWeeks(life, LONG_PLAN, LIVED_WEEKS + 1).filter((week) => week > 1),
+            `${everyWeeks} sem · jour ${triggerDay} · réalisation ${realization}`,
+          ).toEqual([4, 8, 12, 16]);
+        }
+      }
+    }
+  });
+
+  /**
+   * La trajectoire elle-même, au dixième — pour qu'une régression se lise, et pas
+   * seulement se constate.
+   *
+   * Semaines 2 à 17 d'un plan de 24 semaines, athlète assidue, réadaptation
+   * toutes les quatre semaines déclenchée le dimanche. On y lit le bloc de
+   * développement (+8 % par semaine), la respiration à 85 % toutes les quatre
+   * semaines, et un rythme **net** de +1,7 % par semaine — le vrai rythme d'une
+   * périodisation, quatre fois plus lent que la montée qu'elle enchaîne.
+   */
+  it('suit la progression que le plan a promise, respirations comprises', () => {
+    const life = live(LONG_PLAN, 4, 7, 1);
+
+    expect(series(life, LONG_PLAN)).toEqual([
+      48.9, 52.8, 44.8, 48.3, 52.1, 56.2, 47.7, 51.5, 55.6, 60, 50.9, 54.9, 59.2, 63.9, 54.3, 58.6,
+    ]);
+  });
+
+  /**
+   * **Le plan sort de son creux quand l'athlète démontre qu'elle est revenue — et
+   * il ne dépasse jamais ce qu'il avait promis.**
+   *
+   * ## Le piège produit que cela ferme
+   *
+   * `counted` plafonnait le réel par la prescription **courante**, y compris pour
+   * les deux garde-fous de reprise. Le plancher ne mesurait donc plus ce que
+   * l'athlète avait *démontré* mais ce que le plan lui avait *permis*, et la boucle
+   * se refermait sur elle-même. Mesuré sur ce protocole exact, réadaptation
+   * hebdomadaire : un creux de quatre semaines à 80 % coûtait **−39 %** du plan à
+   * la semaine 24, à 50 % **−77 %**, et faire courir l'athlète **cinq fois le
+   * prescrit pendant seize semaines** laissait la trajectoire identique au dixième.
+   * Le seul remède était de créer un plan neuf, et ce n'était écrit nulle part.
+   *
+   * ## Ce que le test mesure
+   *
+   * Une athlète à **capacité fixe** : elle décroche quatre semaines, puis reprend
+   * le volume qu'elle tenait juste avant. C'est le seul modèle qui pose la
+   * question — courir 100 % d'un plan effondré ne démontre rien.
+   *
+   * Deux assertions, et elles vont ensemble : la trajectoire **rejoint** celle du
+   * plan nominal, et elle ne la **dépasse jamais** — la promesse du plan est un
+   * plafond, pas un objectif mobile.
+   */
+  describe('la sortie de l’enfermement', () => {
+    /** Les volumes prescrits des semaines 2 à `weeks + 1` du plan. */
+    function plannedKm(life: Life, plan: PlanDto, weeks: number): number[] {
+      return Array.from({ length: weeks }, (_, offset) => {
+        const km = life.planned.get(shiftDays(plan.startsOn, (offset + 1) * 7)) ?? 0;
+        return Math.round(km * 10) / 10;
+      });
+    }
+
+    /** Vingt-trois semaines vécues d'un plan de 24 : la place de se relever. */
+    const LIVED = 22;
+    const WEEKS = 23;
+    /** Quatre semaines à moitié courues, de la 5ᵉ à la 8ᵉ. */
+    const DIP = { dipWeeks: [4, 8] as const, dipRealization: 0.5, livedWeeks: LIVED };
+
+    /**
+     * Les réadaptations assez fréquentes pour que le creux **morde**.
+     *
+     * À trois ou quatre semaines d'écart, un creux de quatre semaines peut tomber
+     * entièrement entre deux reconstructions : le plan ne le voit pas, il n'y a
+     * rien à rattraper, et mesurer une remontée n'aurait aucun sens. Les
+     * invariants, eux, se vérifient sur tout le balayage.
+     */
+    const BITING_INTERVALS = [1, 2] as const;
+
+    /**
+     * **Rien ne dépasse jamais ce que le plan avait promis.**
+     *
+     * C'est la borne, et c'est elle qui autorise la remontée sans rouvrir le
+     * cliquet : la promesse est un point fixe, une prescription vaut au plus la
+     * promesse, donc la reprojeter rend au plus la promesse. Un décapuchonnage
+     * naïf de `bestKm`, lui, rendait 205 km/semaine à réalisation 5.
+     */
+    it.each(INTERVALS)(
+      'ne dépasse jamais la promesse du plan, réadaptation toutes les %i semaines',
+      (everyWeeks) => {
+        for (const triggerDay of TRIGGER_DAYS) {
+          const label = `${everyWeeks} sem · jour ${triggerDay}`;
+          const nominal = plannedKm(
+            live(LONG_PLAN, everyWeeks, triggerDay, 1, { livedWeeks: LIVED }),
+            LONG_PLAN,
+            WEEKS,
+          );
+          for (const afterRealization of [1, 1.05, 5]) {
+            const km = plannedKm(
+              live(LONG_PLAN, everyWeeks, triggerDay, 1, { ...DIP, afterRealization }),
+              LONG_PLAN,
+              WEEKS,
+            );
+            km.forEach((value, index) => {
+              expect(
+                value,
+                `${label} · après ${afterRealization} · semaine ${index + 2}`,
+              ).toBeLessThanOrEqual(nominal[index]);
+            });
+          }
+        }
+      },
+    );
+
+    /**
+     * **Le plan revient sur sa trajectoire quand l'athlète démontre qu'elle est
+     * revenue.**
+     *
+     * Le piège que cela ferme : `counted` plafonnait le réel par la prescription
+     * **courante**, y compris pour les deux garde-fous de reprise. Le plancher ne
+     * mesurait donc plus ce que l'athlète avait *démontré* mais ce que le plan lui
+     * avait *permis*, et la boucle se refermait sur elle-même. Mesuré sur ce
+     * protocole exact, réadaptation hebdomadaire : un creux de quatre semaines à
+     * 50 % coûtait **−77 %** du plan à la semaine 24, et faire courir l'athlète
+     * **cinq fois le prescrit** pendant les seize semaines suivantes laissait la
+     * trajectoire *identique au dixième*. Le seul remède était de créer un plan
+     * neuf, et ce n'était écrit nulle part.
+     *
+     * Mesuré après correction, semaine 24 : la vie qui démontre rend **61,7 km —
+     * la trajectoire nominale exactement** à toutes les fréquences sauf un
+     * déclenchement du lundi espacé (48,5 à 53,8 km, soit 79 à 87 % du nominal),
+     * quand la vie qui se contente d'obéir reste entre 13,1 et 42,9 km.
+     */
+    it.each(BITING_INTERVALS)(
+      'ramène le plan sur sa promesse quand l’athlète la démontre, réadaptation toutes les %i semaines',
+      (everyWeeks) => {
+        for (const triggerDay of TRIGGER_DAYS) {
+          const label = `${everyWeeks} sem · jour ${triggerDay}`;
+          const nominal = plannedKm(
+            live(LONG_PLAN, everyWeeks, triggerDay, 1, { livedWeeks: LIVED }),
+            LONG_PLAN,
+            WEEKS,
+          );
+          const stuck = plannedKm(live(LONG_PLAN, everyWeeks, triggerDay, 1, DIP), LONG_PLAN, WEEKS);
+          const back = plannedKm(
+            live(LONG_PLAN, everyWeeks, triggerDay, 1, { ...DIP, afterRealization: 5 }),
+            LONG_PLAN,
+            WEEKS,
+          );
+
+          expect(back[WEEKS - 1], label).toBeGreaterThan(nominal[WEEKS - 1] * 0.75);
+          // Avant correction, ces deux vies étaient identiques au dixième.
+          expect(back[WEEKS - 1], label).toBeGreaterThan(stuck[WEEKS - 1] * 1.2);
+        }
+      },
+    );
+
+    /**
+     * **Une athlète à capacité fixe remonte au rythme d'un entraîneur.**
+     *
+     * Le protocole précédent (cinq fois le prescrit) mesure la borne ; celui-ci
+     * mesure la vie : l'athlète décroche quatre semaines, puis reprend le volume
+     * qu'elle tenait juste avant — c'est le seul modèle qui pose la question,
+     * puisque courir 100 % d'un plan effondré ne démontre rien.
+     *
+     * Le plan la rejoint sans jamais lui demander, d'une semaine sur l'autre, plus
+     * que la hausse que la règle autorise au-dessus de ce qu'elle court réellement.
+     * C'est ce qui distingue ce cran de remontée d'un décapuchonnage : le crédit
+     * est borné par `maxWeeklyGrowth` divisé par la progression du niveau, si bien
+     * qu'un raccord entre deux fenêtres vaut au plus `marche × crédit`, soit
+     * `maxWeeklyGrowth` sur une semaine de développement et moins sur une semaine
+     * allégée. Une
+     * projection du réel depuis la semaine révolue rouvrait au contraire les deux
+     * suites paire et impaire : **37,2 → 42,1 km, +13,2 %**, au-dessus du plafond
+     * de 12 %.
+     *
+     * Mesuré, réadaptation hebdomadaire du dimanche : trou à **35 %** du nominal en
+     * semaine 9, retour à **94 %** en semaine 10, **100 %** en semaine 12 — deux
+     * reconstructions. Un déclenchement du lundi, où la semaine en cours ne
+     * témoigne que d'un septième, remonte plus lentement : 47 % en semaine 11,
+     * 100 % en semaine 24. Avant correction, la trajectoire restait à **23 %**.
+     */
+    it.each(INTERVALS)(
+      'remonte sans jamais demander plus d’une marche au-dessus du réel, réadaptation toutes les %i semaines',
+      (everyWeeks) => {
+        for (const triggerDay of TRIGGER_DAYS) {
+          const label = `${everyWeeks} sem · jour ${triggerDay}`;
+          const nominal = plannedKm(
+            live(LONG_PLAN, everyWeeks, triggerDay, 1, { livedWeeks: LIVED }),
+            LONG_PLAN,
+            WEEKS,
+          );
+          // La capacité retrouvée : ce que le plan lui demandait avant le creux.
+          const capacityKm = nominal[3];
+          const km = plannedKm(
+            live(LONG_PLAN, everyWeeks, triggerDay, 1, { ...DIP, capacityKm }),
+            LONG_PLAN,
+            WEEKS,
+          );
+
+          km.forEach((value, index) => {
+            expect(value, `${label} · semaine ${index + 2}`).toBeLessThanOrEqual(nominal[index]);
+            if (index < 4) return;
+            // Le `+ 0,1` est la granularité de `floorKm` : sur les volumes
+            // effondrés du creux (9 km), un dixième vaut près d'un point.
+            expect(value, `${label} · semaine ${index + 2}`).toBeLessThanOrEqual(
+              Math.max(km[index - 1], capacityKm) * VOLUME_RULES.maxWeeklyGrowth + 0.1,
+            );
+          });
+
+          if (!BITING_INTERVALS.includes(everyWeeks as 1 | 2)) continue;
+          expect(km[WEEKS - 1], label).toBeGreaterThan(Math.min(...km.slice(4)) * 1.5);
+        }
+      },
+    );
   });
 });
 
-describe('updatePlanFromInstruction — par tranches', () => {
-  /** Le plan actif du chantier long : douze semaines à ajuster, reprises demain. */
-  const LONG_PLAN = { ...PLAN, startsOn: '2026-08-10', weeks: 12, raceDate: '2026-11-01' };
-
-  /** Douze semaines conformes : montée par palier, semaine allégée, affûtage. */
-  const LONG_WEEKS = [
-    { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-    ...[30, 32, 34, 28, 30, 32, 34, 28, 30, 24, 18].map(weekOfKm),
-  ];
-
-  beforeEach(() => {
-    dal.getActivePlanWithSessions.mockResolvedValue({ plan: LONG_PLAN, sessions: [] });
+/**
+ * Le balayage de conformité : **une fenêtre restante chiffrée par l'appli n'est
+ * jamais refusée par l'appli**.
+ *
+ * C'est la condition de non-régression de l'architecture « le modèle structure,
+ * l'appli chiffre ». Une cible que la validation refuse est le pire des états :
+ * l'appli se contredit elle-même, et la reconstruction sort en
+ * `InvalidGeneratedPlanError` — une « incohérence interne » que l'athlète ne
+ * peut rien faire pour corriger.
+ *
+ * La couture la plus dangereuse est celle de la semaine allégée d'ouverture :
+ * quand la cadence du plan désigne la première semaine pleine de la fenêtre
+ * comme la respiration du bloc, c'est la seule semaine dont la validation ne
+ * peut pas constater la baisse — sa référence est le volume réellement couru
+ * avant la fenêtre, que la règle ne connaît pas. Elle lit alors l'étiquette
+ * (`kind: 'cutback'`), et ce balayage éprouve que l'étiquette et le chiffre
+ * disent la même chose, dans les deux sens.
+ *
+ * Il remplace celui qui vivait dans `plan-schema.test.ts` du temps où une
+ * continuation passait par `weeklyVolumeTargets`.
+ */
+describe('planWeeklyVolumeKm', () => {
+  it('somme les séances par semaine ISO', () => {
+    expect(
+      planWeeklyVolumeKm([
+        planSession({ scheduledOn: '2026-06-03', volumeM: 8_000 }),
+        planSession({ scheduledOn: '2026-06-07', volumeM: 14_500 }),
+        planSession({ scheduledOn: '2026-06-08', volumeM: 10_000 }),
+      ]),
+    ).toEqual(
+      new Map([
+        ['2026-06-01', 22.5],
+        ['2026-06-08', 10],
+      ]),
+    );
   });
 
-  it('tient les réglages du premier appel et assemble les tranches suivantes', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({
-        summary: 'Ajusté sur douze semaines.',
-        settings: { sessionsPerWeek: 3 },
-        weeks: LONG_WEEKS.slice(0, 6),
-      })
-      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
-
-    await updatePlanFromInstruction('plutôt 3 séances');
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan_update');
-    expect(chatCompletionJson.mock.calls[1][0].schemaName).toBe('training_plan_update_chunk');
-
-    const [, update] = dal.applyPlanUpdate.mock.calls[0];
-    expect(update.sessions).toHaveLength(34);
-    // Le résumé vient de l'enveloppe, écrite au premier appel avec l'instruction.
-    expect(update.settings.summary).toBe('Ajusté sur douze semaines.');
+  it('écarte une semaine dont une séance ne déclare pas sa distance', () => {
+    // La même prudence que `weekVolumeKm` : une somme partielle ferait croire que
+    // l'athlète a dépassé sa prescription, et l'ancrage de la reconstruction s'y
+    // fierait. Mieux vaut ne rien savoir de cette semaine que d'en savoir la
+    // moitié.
+    expect(
+      planWeeklyVolumeKm([
+        planSession({ scheduledOn: '2026-06-03', volumeM: 8_000 }),
+        planSession({ scheduledOn: '2026-06-07', volumeM: null }),
+      ]),
+    ).toEqual(new Map());
   });
+});
 
-  it('ne montre à chaque tranche que les semaines qu’elle réécrit', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: LONG_PLAN,
-      sessions: [
-        planSession({ scheduledOn: '2026-08-16', kind: 'Sortie longue', title: 'Sortie du début' }),
-        planSession({ scheduledOn: '2026-10-04', kind: 'Sortie longue', title: 'Sortie de la fin' }),
-      ],
+describe('remainingVolumeTargets × validatePlanBusinessRules', () => {
+  /** L'allure d'endurance que le snapshot du balayage impose, en s/km. */
+  const PACE_SEC_PER_KM = SNAPSHOT.recentAvgPaceSecPerKm ?? 0;
+
+  /**
+   * Une semaine qui **réalise exactement sa cible** : le volume et le temps
+   * visés, répartis sur les jours encore ouverts, sortie longue comprise.
+   *
+   * C'est le plan qu'un modèle parfaitement obéissant écrirait — celui sur lequel
+   * les règles métier doivent n'avoir rien à redire.
+   */
+  function weekForTarget(
+    target: WeeklyVolumeTarget,
+    sessionsPerWeek: number,
+    longRunDay: number,
+    fromDay: number,
+  ): PlanWeekOutput {
+    const days = [longRunDay, ...[1, 2, 3, 4, 5, 6, 7].filter((day) => day !== longRunDay)]
+      .filter((day) => day >= fromDay)
+      .slice(0, sessionsPerWeek)
+      .sort((left, right) => left - right);
+
+    const hasLongRun = days.includes(longRunDay);
+    const shares = days.map((day) => {
+      if (!hasLongRun || days.length === 1) return 1 / days.length;
+      if (days.length === 2) return 0.5;
+      return day === longRunDay ? 0.38 : 0.62 / (days.length - 1);
     });
-    chatCompletionJson
-      .mockResolvedValueOnce({ summary: 'ok', weeks: LONG_WEEKS.slice(0, 6) })
-      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
 
-    await updatePlanFromInstruction('rien de spécial');
+    // La dernière séance absorbe les restes : la semaine doit totaliser sa cible
+    // exactement, sans quoi un cheveu de flottant ferait constater une hausse que
+    // la cible ne porte pas.
+    let restKm = target.targetKm;
+    let restMin = target.targetMinutes;
 
-    const [first, second] = chatCompletionJson.mock.calls.map(
-      (call: { messages: { content: string }[] }[]) => call[0].messages[1].content,
+    return {
+      sessions: days.map((day, index) => {
+        const last = index === days.length - 1;
+        const distanceKm = last ? restKm : target.targetKm * shares[index];
+        const durationMin = last ? restMin : target.targetMinutes * shares[index];
+        restKm -= distanceKm;
+        restMin -= durationMin;
+
+        return {
+          day,
+          kind: day === longRunDay ? 'Sortie longue' : 'Endurance fondamentale',
+          title: 'Footing',
+          distanceKm,
+          durationMin,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Ce que le plan porte en mémoire, à hauteur de `peakKm` sur la semaine qui
+   * précède la fenêtre puis la cadence du niveau intermédiaire.
+   *
+   * **Le quadrant « mémoire du plan × budget temps » était le trou de ce
+   * balayage** : il passait `new Map()`, si bien que les deux branches qui lisent
+   * `plannedWeeklyKm` — la promesse et la base d'affûtage — n'étaient jamais
+   * confrontées à la validation. Un affûtage relu de la mémoire et non replafonné
+   * par le budget produisait **44,3 km annoncés en 114 min** et une fenêtre
+   * refusée par l'appli elle-même.
+   */
+  function planMemory(firstWeekStart: string, weeks: number, peakKm: number): Map<string, number> {
+    const memory = new Map<string, number>();
+    let km = peakKm;
+    for (let index = -2; index < weeks; index += 1) {
+      memory.set(shiftDays(firstWeekStart, index * 7), Math.round(km * 10) / 10);
+      km *= 1.08;
+    }
+    return memory;
+  }
+
+  it('produit des cibles qu’aucune règle ne refuse, d’où que la fenêtre s’ouvre', () => {
+    const failures: string[] = [];
+
+    // Le lundi 1ᵉʳ juin 2026 ouvre la fenêtre ; le plan, lui, démarre `planOffset`
+    // semaines plus tôt, ce qui fait varier le rang de cadence de l'ouverture sur
+    // les quatre valeurs possibles.
+    for (const weeks of [1, 2, 4, 6, 8, 12, 16, 24]) {
+      for (const goal of ['free', 'race', 'marathon'] as const) {
+        for (const firstWeekFromDay of [1, 4, 7]) {
+          for (const planOffset of [0, 1, 2, 3]) {
+            for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+              for (const weeklyTimeMinutes of [null, 300]) {
+               for (const memory of [null, 42, 90]) {
+                const firstWeekStart = '2026-06-01';
+                const startsOn = shiftDays(firstWeekStart, -7 * planOffset);
+                const window = { firstWeekStart, weeks, firstWeekFromDay };
+                const plan: PlanDto = {
+                  ...ACTIVE_PLAN,
+                  level,
+                  startsOn,
+                  weeks: weeks + planOffset,
+                  weeklyTimeMinutes,
+                  goalType: goal === 'free' ? 'free' : 'race',
+                  goalText: goal === 'marathon' ? 'marathon de Paris' : '10 km sous 50 min',
+                  raceDate:
+                    goal === 'free' ? null : shiftDays(firstWeekStart, weeks * 7 - 1),
+                };
+
+                const targets = remainingVolumeTargets(
+                  plan,
+                  window,
+                  {
+                    ...SNAPSHOT,
+                    today: '2026-05-31',
+                    weeks: [
+                      { startsOn: '2026-05-25', distanceKm: 42, movingTimeS: 13_608, sessions: 4 },
+                    ],
+                  },
+                  { sessionsPerWeek: 5, longRunDay: 7, weeklyTimeMinutes },
+                  null,
+                  memory === null
+                    ? new Map()
+                    : planMemory(firstWeekStart, weeks + planOffset, memory),
+                );
+
+                // **La cible en km et la cible en minutes doivent dire la même
+                // chose.** `targetMinutes` est systématiquement ramené au budget ;
+                // si le volume, lui, ne l'a pas été, la fenêtre se contredit — elle
+                // annonce 44,3 km en 114 min, soit 2:34/km — et le squelette, qui
+                // ne lit que `targetKm` (`skeleton.ts`), écrit une semaine que la
+                // validation refuse. Le modèle de semaine ci-dessous honore
+                // `targetMinutes`, donc il ne peut pas voir cette contradiction :
+                // elle se lit sur les cibles elles-mêmes.
+                targets.forEach((target, index) => {
+                  const minutesForKm = Math.round((target.targetKm * PACE_SEC_PER_KM) / 60);
+                  // Une minute de battement : le budget d'une semaine entamée est
+                  // proratisé au jour, et les deux arrondis ne tombent pas ensemble.
+                  if (target.targetMinutes < minutesForKm - 1) {
+                    failures.push(
+                      `${weeks} sem · ${goal} · jour ${firstWeekFromDay} · décalage ${planOffset} · ` +
+                        `${level} · budget ${weeklyTimeMinutes} · mémoire ${memory} · ` +
+                        `semaine ${index + 1} : ${target.targetKm} km annoncés en ` +
+                        `${target.targetMinutes} min, soit ${minutesForKm} min d'allure`,
+                    );
+                  }
+                });
+
+                const written = targets.map((target, index) =>
+                  weekForTarget(target, 5, 7, index === 0 ? firstWeekFromDay : 1),
+                );
+                const violations = validatePlanBusinessRules(
+                  written,
+                  {
+                    // Une fenêtre restante n'est pas un plan neuf : ni anti-plat,
+                    // ni ancrage de départ (cf. `rewriteRemainingPlan`).
+                    scope: 'adjustment',
+                    weeks,
+                    sessionsPerWeek: 5,
+                    longRunDay: 7,
+                    firstWeekFromDay,
+                    race:
+                      goal === 'free' ? null : { isMarathon: goal === 'marathon' },
+                    weeklyTargets: targets,
+                  },
+                  { weeklyTimeMinutes },
+                );
+
+                if (violations.length > 0) {
+                  failures.push(
+                    `${weeks} sem · ${goal} · jour ${firstWeekFromDay} · décalage ${planOffset} · ` +
+                      `${level} · budget ${weeklyTimeMinutes} · mémoire ${memory} → ` +
+                      violations.join(' | '),
+                  );
+                }
+               }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+  });
+});
+
+/**
+ * Les quatre défauts de la troisième ronde, un test chacun — et chacun **échoue
+ * sur le code d'avant**, vérifié en rejouant l'arithmétique précédente. Ceux de la
+ * quatrième ronde vivent plus bas (« l'affûtage d'une fenêtre ouverte en milieu de
+ * semaine ») et dans « la sortie de l'enfermement ».
+ *
+ * Ils tiennent en une fenêtre, là où le balayage ci-dessus en simule des
+ * milliers : ce sont des sondes, pas des propriétés. Elles disent *où* ça casse
+ * quand le balayage dit *que* ça casse.
+ */
+describe('remainingVolumeTargets — les défauts mesurés', () => {
+  const PLAN: PlanDto = {
+    ...ACTIVE_PLAN,
+    goalType: 'free',
+    goalText: 'reprendre le volume',
+    raceDate: null,
+    startsOn: '2026-06-01',
+    weeks: 12,
+    sessionsPerWeek: 5,
+    weeklyTimeMinutes: null,
+    level: 'intermediate',
+  };
+
+  /** Les cibles d'une fenêtre, en km — l'appel réduit à ce que ces sondes lisent. */
+  function targetsFor(
+    plan: PlanDto,
+    today: string,
+    weeklyKm: readonly { startsOn: string; distanceKm: number }[],
+    window: { firstWeekStart: string; weeks: number; firstWeekFromDay: number },
+  ): WeeklyVolumeTarget[] {
+    return remainingVolumeTargets(
+      plan,
+      window,
+      {
+        ...SNAPSHOT,
+        today,
+        weeks: weeklyKm.map((week) => ({
+          ...week,
+          movingTimeS: Math.round(week.distanceKm * 324),
+          sessions: week.distanceKm > 0 ? 4 : 0,
+        })),
+      },
+      { sessionsPerWeek: 5, longRunDay: 7, weeklyTimeMinutes: null },
+      null,
+      new Map(),
+    );
+  }
+
+  it('défaut 1 — donne une marche par semaine calendaire franchie, pas une par fenêtre', () => {
+    // Réadaptation le mercredi 10 juin : la fenêtre s'ouvre sur la semaine du
+    // 8 juin, entamée, et sa première semaine **pleine** est celle du 15 juin —
+    // soit **deux** semaines calendaires après la dernière semaine complète
+    // (celle du 1ᵉʳ juin, courue à 60 km). Elle reçoit donc deux marches.
+    //
+    // Avant correction, elle n'en recevait qu'une (64,7 km) : la progression
+    // marquait le pas à chaque réadaptation en milieu de semaine, et une athlète
+    // assidue réadaptée toutes les deux semaines voyait son plan **décroître**
+    // (45,3 → 29,4 km, ×0,66 sur 16 semaines).
+    const targets = targetsFor(
+      PLAN,
+      '2026-06-10',
+      [
+        { startsOn: '2026-05-25', distanceKm: 55 },
+        { startsOn: '2026-06-01', distanceKm: 60 },
+        { startsOn: '2026-06-08', distanceKm: 25 },
+      ],
+      { firstWeekStart: '2026-06-08', weeks: 12, firstWeekFromDay: 4 },
     );
 
-    // Les séances de la seconde moitié ne partent pas avec la première tranche :
-    // c'est le contexte que le découpage libère.
-    expect(first).toContain('Sortie du début');
-    expect(first).not.toContain('Sortie de la fin');
-    expect(second).toContain('Sortie de la fin');
-    expect(second).not.toContain('Sortie du début');
-    expect(second).toContain(
-      'Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 des semaines restantes',
+    expect(targets[1].targetKm).toBe(69.9);
+    // Et la semaine entamée porte bien **une** marche, proratisée sur ses quatre
+    // jours restants : 69,98 / 1,08 = 64,8, dont 4/7.
+    //
+    // Le calcul part du volume visé pour la première semaine pleine **avant**
+    // arrondi (69,98) et non de sa cible arrondie (69,9) : diviser la cible
+    // reviendrait à replancher une valeur déjà planchée, et cette troncature-là
+    // se paie à chaque reconstruction (cf. `promisedKm`).
+    expect(targets[0].targetKm).toBe(37);
+    expect(targets[0].kind).toBe('partial');
+  });
+
+  it('défaut 3 — n’étiquette pas « allégée » une semaine qui monte', () => {
+    // Semaines réelles 58, 60, 60 puis 20 : une interruption franche. Le pont
+    // d'une semaine sautée rattrape la reprise à 70 % des 60 km d'avant.
+    //
+    // La fenêtre s'ouvre là où la cadence du plan pose sa respiration (semaine 4
+    // d'un plan démarré le 1ᵉʳ juin). Avant correction, la marche 0,85
+    // s'appliquait quand même au pont : cible de 35,6 km **étiquetée `cutback`**,
+    // soit +78 % après une semaine à 20 km — et la validation, lisant
+    // l'étiquette, considérait la respiration consommée et acceptait quatre
+    // hausses derrière.
+    const targets = targetsFor(
+      // Plan démarré le lundi 15 juin : sa semaine 8 (celle du 3 août) est la
+      // respiration du deuxième bloc, et c'est la première semaine pleine de la
+      // fenêtre.
+      { ...PLAN, startsOn: '2026-06-15', weeks: 16 },
+      '2026-07-29',
+      [
+        { startsOn: '2026-06-29', distanceKm: 58 },
+        { startsOn: '2026-07-06', distanceKm: 60 },
+        { startsOn: '2026-07-13', distanceKm: 60 },
+        { startsOn: '2026-07-20', distanceKm: 20 },
+      ],
+      { firstWeekStart: '2026-07-27', weeks: 10, firstWeekFromDay: 4 },
     );
+
+    // Une reprise **est déjà** une décharge : elle ne descend pas d'un cran de
+    // plus (70 % des 60 km d'avant l'interruption, et pas 85 % de ces 70 %), et
+    // elle ne prétend pas être la respiration du bloc.
+    expect(targets[1].kind).toBe('build');
+    expect(targets[1].targetKm).toBe(41.9);
+
+    // Et la respiration reste due : la reprise rouvre un bloc, dont la quatrième
+    // semaine allège pour de bon.
+    const cutbacks = targets.flatMap((target, index) => (target.kind === 'cutback' ? [index] : []));
+    expect(cutbacks[0]).toBe(4);
+    expect(targets[4].targetKm).toBeLessThan(targets[3].targetKm);
+  });
+
+  it('défaut 4 — lit la complétude d’une semaine du calendrier, pas de la fenêtre', () => {
+    // Un plan **actif mais pas encore démarré** : il commence le lundi 8 juin,
+    // on est le mardi 2 juin. C'est un état normal — `acceptDraftPlan` ne vérifie
+    // pas `startsOn` — et `remainingPlanWindow` rend alors la fenêtre du plan
+    // entier, sans passer par la branche qui découpe.
+    //
+    // La semaine en cours (celle du 1ᵉʳ juin) est **partielle** : deux jours,
+    // 12 km. Avant correction, la complétude se déduisait de la géométrie de la
+    // fenêtre (`firstWeekStart > isoWeekStart(today)`), vraie ici, et cette
+    // semaine de deux jours était comptée comme la dernière semaine complète —
+    // l'ancrage tombait de 42 à 12 km.
+    const targets = targetsFor(
+      { ...PLAN, startsOn: '2026-06-08' },
+      '2026-06-02',
+      [
+        { startsOn: '2026-05-25', distanceKm: 42 },
+        { startsOn: '2026-06-01', distanceKm: 12 },
+      ],
+      { firstWeekStart: '2026-06-08', weeks: 12, firstWeekFromDay: 1 },
+    );
+
+    // L'ancrage reste la semaine du 25 mai, la dernière **révolue** : 42 km, et
+    // une seule marche — la semaine du 1ᵉʳ juin est antérieure au plan, elle ne
+    // fait franchir aucune marche.
+    expect(targets[0].targetKm).toBe(45.3);
+  });
+
+  it('ne laisse pas une grosse semaine partielle relever l’ancrage', () => {
+    // Le symétrique du défaut 4, et la raison pour laquelle la semaine en cours ne
+    // peut que relever *dans la limite de ce que le plan demandait* : sans
+    // mémoire du plan, elle relève librement — ce qui reste le comportement voulu
+    // quand rien ne dit ce qui était prescrit —, mais elle ne se substitue jamais
+    // à la dernière semaine complète quand elle est plus basse.
+    const targets = targetsFor(
+      PLAN,
+      '2026-06-09',
+      [
+        { startsOn: '2026-06-01', distanceKm: 50 },
+        { startsOn: '2026-06-08', distanceKm: 8 },
+      ],
+      { firstWeekStart: '2026-06-08', weeks: 12, firstWeekFromDay: 3 },
+    );
+
+    // 8 km courus lundi et mardi ne disent pas que l'athlète est retombée à 8 km :
+    // l'ancrage reste la semaine du 1ᵉʳ juin (50 km), deux marches plus loin.
+    expect(targets[1].targetKm).toBe(58.3);
+  });
+});
+
+/**
+ * **L'affûtage part de la dernière semaine de développement du plan, quel que soit
+ * le jour où la révision se déclenche.**
+ *
+ * Une sonde, et le défaut qu'elle ferme est un bloquant : `lastBuild < firstFull`
+ * couvre **deux** géométries de fenêtre, et la première rédaction n'en traitait
+ * qu'une.
+ *
+ * - `firstFull = 0`, `taperFrom ≤ 0` : la fenêtre entière est de l'affûtage ;
+ * - `firstFull = 1`, `taperFrom = 1` : la fenêtre s'ouvre **en milieu de semaine
+ *   sur la dernière semaine de développement**, et l'affûtage occupe le reste.
+ *
+ * La seconde retombait sur le point de départ de la fenêtre, qui est ici le volume
+ * relu d'une semaine **d'affûtage** : les facteurs s'y appliquaient une seconde
+ * fois. Sur cette préparation de 16 semaines (mémoire du plan S14 = 59,2 ·
+ * S15 = 44,3 · S16 = 32,5), le dimanche rendait 44,3 / 32,5 et le lundi au jeudi
+ * 33,1 / 24,3 — **−25 %, soit un facteur 1,44 sur la semaine de course** pour le
+ * même plan et la même athlète. En silence : `peakBuildVolume` étant nul sur cette
+ * fenêtre, `raceWeekMaxRatio` et la décroissance de l'affûtage étaient toutes deux
+ * court-circuitées.
+ *
+ * Le cas n'a rien d'exotique : la révision partant toutes les quatre séances, elle
+ * tombe un autre jour que le dimanche six fois sur sept.
+ */
+describe('remainingVolumeTargets — l’affûtage d’une fenêtre ouverte en milieu de semaine', () => {
+  /** Une préparation de 16 semaines démarrée le lundi 1ᵉʳ juin, course le 20 septembre. */
+  const RACE_PLAN: PlanDto = {
+    ...ACTIVE_PLAN,
+    goalType: 'race',
+    goalText: 'semi-marathon en 1 h 45',
+    raceDate: '2026-09-20',
+    startsOn: '2026-06-01',
+    weeks: 16,
+    sessionsPerWeek: 5,
+    weeklyTimeMinutes: null,
+    level: 'intermediate',
+  };
+
+  /** La semaine 14 du plan — sa dernière semaine de développement. */
+  const LAST_BUILD_WEEK = '2026-08-31';
+
+  /**
+   * Ce que le plan porte en mémoire : les quatre dernières semaines chiffrées,
+   * dont l'affûtage déjà écrit par la reconstruction précédente.
+   */
+  const PLANNED = new Map([
+    ['2026-08-17', 54.3],
+    ['2026-08-24', 58.6],
+    [LAST_BUILD_WEEK, 59.2],
+    ['2026-09-07', 44.3],
+    ['2026-09-14', 32.5],
+  ]);
+
+  /** Les cibles d'une révision déclenchée le jour ISO `triggerDay` de la semaine 14. */
+  function targetsOn(triggerDay: number): WeeklyVolumeTarget[] {
+    const today = shiftDays(LAST_BUILD_WEEK, triggerDay - 1);
+    const window = remainingPlanWindow(RACE_PLAN, shiftDays(today, 1));
+    // L'athlète a couru son plan ; la semaine en cours l'est au prorata des jours.
+    const weeks = [3, 2, 1, 0].map((age) => {
+      const startsOn = shiftDays(LAST_BUILD_WEEK, -7 * age);
+      const full = PLANNED.get(startsOn) ?? 0;
+      const distanceKm = age === 0 ? (full * triggerDay) / 7 : full;
+      return { startsOn, distanceKm, movingTimeS: Math.round(distanceKm * 324), sessions: 4 };
+    });
+
+    return remainingVolumeTargets(
+      RACE_PLAN,
+      window,
+      { ...SNAPSHOT, today, weeks },
+      { sessionsPerWeek: 5, longRunDay: 7, weeklyTimeMinutes: null },
+      null,
+      PLANNED,
+    );
+  }
+
+  it.each([1, 2, 3, 4, 5, 6])(
+    'rend l’affûtage du plan quand la révision part le jour %i',
+    (triggerDay) => {
+      const targets = targetsOn(triggerDay);
+
+      // Trois semaines : la 14 entamée, puis l'affûtage et la course.
+      expect(targets.map((target) => target.kind)).toEqual(['partial', 'taper', 'race']);
+      expect(targets[1].targetKm).toBe(44.3);
+      expect(targets[2].targetKm).toBe(32.5);
+    },
+  );
+
+  it('rend le même affûtage qu’un déclenchement du dimanche', () => {
+    // Le dimanche, la fenêtre s'ouvre sur la semaine d'affûtage : `firstFull = 0`
+    // et `taperFrom = 0`, la géométrie que le code traitait déjà.
+    const sunday = targetsOn(7);
+
+    expect(sunday.map((target) => target.targetKm)).toEqual([44.3, 32.5]);
+  });
+
+  it('sans course, laisse l’ancrage réel décider de la dernière semaine', () => {
+    // La borne de la branche : `lastBuild < firstFull` est aussi vrai d'un plan
+    // **sans course** dont on révise la dernière semaine en milieu de semaine
+    // (`planTaperWeeks = 0`, donc `lastBuild = weeks - 1 = 0` quand la fenêtre ne
+    // fait qu'une semaine). La mémoire du plan n'a là aucun titre à se substituer
+    // à ce que l'athlète a réellement couru : sans le garde-fou, une athlète à
+    // l'arrêt depuis un mois recevait **34,2 km sur quatre jours** — les 60 km que
+    // le plan avait prescrits, proratisés — au lieu du repli prudent du niveau.
+    const plan: PlanDto = {
+      ...ACTIVE_PLAN,
+      goalType: 'free',
+      goalText: 'reprendre le volume',
+      raceDate: null,
+      startsOn: '2026-06-01',
+      weeks: 12,
+      weeklyTimeMinutes: null,
+      level: 'intermediate',
+    };
+
+    const targets = remainingVolumeTargets(
+      plan,
+      { firstWeekStart: '2026-08-17', weeks: 1, firstWeekFromDay: 4 },
+      {
+        ...SNAPSHOT,
+        today: '2026-08-19',
+        weeks: ['2026-07-27', '2026-08-03', '2026-08-10', '2026-08-17'].map((startsOn) => ({
+          startsOn,
+          distanceKm: 0,
+          movingTimeS: 0,
+          sessions: 0,
+        })),
+      },
+      { sessionsPerWeek: 5, longRunDay: 7, weeklyTimeMinutes: null },
+      null,
+      new Map([['2026-08-17', 60]]),
+    );
+
+    // Le départ prudent du niveau (24 km), une marche en dessous parce que la
+    // semaine entamée précède la première semaine pleine, sur quatre jours.
+    expect(targets).toEqual([{ targetKm: 12.6, targetMinutes: 68, kind: 'partial' }]);
+  });
+
+  it('proratise la semaine 14 sur son propre volume, pas sur celui de l’affûtage', () => {
+    // Elle **est** la dernière semaine de développement du plan : sa valeur pleine
+    // est 59,2 km, dont les six jours qui restent au lendemain d'un lundi —
+    // 50,7 km. Avant correction, elle partait de 44,3 (le volume d'affûtage relu)
+    // divisé par la marche de la cadence, soit 41,0 km.
+    expect(targetsOn(1)[0].targetKm).toBe(50.7);
   });
 });

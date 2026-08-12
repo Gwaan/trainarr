@@ -19,6 +19,7 @@ import { trainingPacesFromRace, type TrainingPaces } from '@/lib/metrics/vdot';
 import { flattenSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import { PlanSkeletonInfeasibleError } from './feasibility';
+import type { PlanPhase } from './phases';
 import { buildPlanSkeleton, type QualitySlot, type SkeletonWeek } from './skeleton';
 
 /*
@@ -1148,6 +1149,72 @@ describe('buildPlanSkeleton', () => {
           }),
         ).toThrow(PlanSkeletonInfeasibleError);
       }
+    });
+  });
+  /**
+   * La périodisation imposée par l'appelant.
+   *
+   * Le chemin qu'emprunte la reconstruction de la fin d'un plan en cours
+   * (`rewriteRemainingPlan`) : les phases y sont calculées sur le plan **entier**
+   * puis tranchées, sans quoi une fenêtre de six semaines redeviendrait un plan
+   * de six semaines — base comprise — à chaque ajustement.
+   */
+  describe('périodisation imposée', () => {
+    /** Six semaines, comme la fin d'un plan long : spécificité, affûtage, course. */
+    const combination: Combination = {
+      weeks: 6,
+      sessionsPerWeek: 4,
+      longRunDay: 7,
+      firstWeekFromDay: 1,
+      raceDay: 7,
+      level: 'intermediate',
+      goal: MARATHON_GOAL,
+      athlete: ATHLETES[0],
+    };
+
+    const imposed: PlanPhase[] = [
+      'specific',
+      'specific',
+      'specific',
+      'specific',
+      'taper',
+      'race',
+    ];
+
+    it('reprend les phases de l’appelant plutôt que de les recalculer', () => {
+      const targets = targetsFor(combination);
+      const skeleton = buildPlanSkeleton({
+        weeks: combination.weeks,
+        firstWeekFromDay: combination.firstWeekFromDay,
+        sessionsPerWeek: combination.sessionsPerWeek,
+        longRunDay: combination.longRunDay,
+        level: combination.level,
+        race: combination.goal.race,
+        raceDay: combination.raceDay,
+        goalDistanceKm: combination.goal.goalDistanceKm,
+        targets,
+        phases: imposed,
+      });
+
+      expect(skeleton.map((week) => week.phase)).toEqual(imposed);
+      // Et les phases décident bien de la qualité : la phase de base est la
+      // seule à prescrire des répétitions courtes, elle ne peut donc pas
+      // reparaître ici.
+      const kinds = skeleton.flatMap((week) => week.qualitySlots.map((slot) => slot.kind));
+      expect(kinds.length).toBeGreaterThan(0);
+      expect(kinds).not.toContain('Répétitions');
+    });
+
+    it('retombe sur la périodisation de la fenêtre quand l’appelant n’en impose aucune', () => {
+      const targets = targetsFor(combination);
+      const own = skeletonFor(combination, targets);
+
+      // Sans consigne, six semaines forment un plan de six semaines : une base,
+      // et donc des répétitions courtes.
+      expect(own.map((week) => week.phase)).toContain('base');
+      expect(own.flatMap((week) => week.qualitySlots.map((slot) => slot.kind))).toContain(
+        'Répétitions',
+      );
     });
   });
 });

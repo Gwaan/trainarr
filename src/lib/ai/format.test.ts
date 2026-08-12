@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
-import { trainingPacesFromRace } from '@/lib/metrics/vdot';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import {
   formatCivilDate,
-  formatClockTime,
   formatDaysAgo,
   formatDistanceKm,
   formatDuration,
@@ -16,7 +14,6 @@ import {
   formatPaceRange,
   formatPlanSteps,
   formatSignedPercent,
-  formatTrainingPaces,
   formatTrainingSnapshot,
 } from './format';
 
@@ -232,43 +229,6 @@ describe('formatTrainingSnapshot', () => {
     expect(formatTrainingSnapshot(SNAPSHOT, {})).toContain(
       'Allure moyenne des dernières sorties : 5:24/km.',
     );
-  });
-});
-
-describe('formatClockTime', () => {
-  it('écrit un chrono comme une montre : mm:ss, hh:mm:ss au-delà de l’heure', () => {
-    expect(formatClockTime(2_910)).toBe('48:30');
-    expect(formatClockTime(90)).toBe('1:30');
-    expect(formatClockTime(6_720)).toBe('1:52:00');
-    expect(formatClockTime(14_112)).toBe('3:55:12');
-  });
-});
-
-describe('formatTrainingPaces', () => {
-  /** 10 km en 48:30 — la table que `lib/metrics/vdot` calcule pour ce chrono. */
-  const paces = trainingPacesFromRace(10_000, 2_910);
-
-  it('donne la table complète, chrono et VDOT en tête', () => {
-    expect(formatTrainingPaces(paces, { distance: '10k', timeS: 2_910 })).toBe(
-      [
-        'Chrono de référence : 10 km en 48:30 → VDOT 41,5.',
-        '- E (endurance fondamentale, sortie longue) : 5:56–6:32/km',
-        '- M (allure marathon, allure objectif) : 5:08–5:37/km',
-        '- T (seuil) : 4:57–5:11/km',
-        '- I (VMA) : 4:28–4:39/km',
-        '- R (répétitions courtes) : 4:08–4:17/km',
-      ].join('\n'),
-    );
-  });
-
-  it('nomme la distance en toutes lettres, pas par sa clé', () => {
-    const semi = formatTrainingPaces(trainingPacesFromRace(21_097.5, 6_720), {
-      distance: 'half',
-      timeS: 6_720,
-    });
-
-    expect(semi).toContain('Chrono de référence : semi-marathon en 1:52:00');
-    expect(semi).not.toContain('half');
   });
 });
 

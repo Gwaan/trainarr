@@ -19,7 +19,7 @@
  */
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
-import type { PaceZone, ReferenceDistance, TrainingPaces } from '@/lib/metrics/vdot';
+import type { PaceZone } from '@/lib/metrics/vdot';
 import type { PlanSessionSteps, PlanStep, PlanStepBlock, PlanStepRole } from '@/lib/plan-steps/schema';
 
 /** Jours ISO en toutes lettres : `day` vaut 1 pour lundi … 7 pour dimanche. */
@@ -76,16 +76,6 @@ export function formatDuration(seconds: number): string {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return hours > 0 ? `${hours} h ${String(rest).padStart(2, '0')}` : `${rest} min`;
-}
-
-/** Chrono de course : `48:30`, `1:52:04` — le format qu'un coureur lit sur sa montre. */
-export function formatClockTime(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const rest = total % 60;
-  const tail = `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
-  return hours > 0 ? `${hours}:${tail}` : `${minutes}:${String(rest).padStart(2, '0')}`;
 }
 
 /** Jour ISO en toutes lettres — `1` → `lundi`. Hors bornes : le numéro brut. */
@@ -189,54 +179,12 @@ export function formatPlanSteps(steps: PlanSessionSteps): string {
   return steps.map(formatStepBlock).join(' + ');
 }
 
-/*
- * Table d'allures VDOT, pour les prompts.
- */
-
 /**
- * Distances de référence en toutes lettres.
- *
- * Volontairement distinctes des libellés du formulaire (`plan/_lib/form-options`)
- * pour la raison donnée en tête de fichier : là-bas c'est une option de liste
- * déroulante (« Semi »), ici une phrase que le modèle relit (« un semi-marathon »).
- */
-const REFERENCE_DISTANCE_LABELS: Record<ReferenceDistance, string> = {
-  '5k': '5 km',
-  '10k': '10 km',
-  half: 'semi-marathon',
-  marathon: 'marathon',
-};
-
-/** Une plage d'allure, ex. `5:35–6:10/km` — l'unité une seule fois, comme dans un déroulé. */
+ * Une plage d'allure, ex. `5:35–6:10/km` — l'unité une seule fois, comme dans un déroulé. */
 export function formatPaceRange(zone: PaceZone): string {
   const fast = formatPace(zone.minSecPerKm);
   const slow = formatPace(zone.maxSecPerKm);
   return fast === slow ? fast : `${fast.replace('/km', '')}–${slow}`;
-}
-
-/**
- * La table d'allures d'entraînement, telle que le prompt la **prescrit**.
- *
- * Comptez ~110 tokens : c'est le prix d'un plan dont les allures sont calculées
- * (Daniels, méthode VDOT) plutôt que devinées par le modèle à partir d'une allure
- * d'entraînement moyenne — la cause des « allures délirantes » constatées.
- *
- * Les cinq créneaux sont nommés par leur lettre **et** par leur usage : un petit
- * modèle qui lit « T » sans glose ne fait pas le lien avec le mot « seuil » qu'il
- * écrira dans `kind`.
- */
-export function formatTrainingPaces(
-  paces: TrainingPaces,
-  race: { distance: ReferenceDistance; timeS: number },
-): string {
-  return [
-    `Chrono de référence : ${REFERENCE_DISTANCE_LABELS[race.distance]} en ${formatClockTime(race.timeS)} → VDOT ${formatNumber(paces.vdot, 1)}.`,
-    `- E (endurance fondamentale, sortie longue) : ${formatPaceRange(paces.easy)}`,
-    `- M (allure marathon, allure objectif) : ${formatPaceRange(paces.marathon)}`,
-    `- T (seuil) : ${formatPaceRange(paces.threshold)}`,
-    `- I (VMA) : ${formatPaceRange(paces.interval)}`,
-    `- R (répétitions courtes) : ${formatPaceRange(paces.repetition)}`,
-  ].join('\n');
 }
 
 /*

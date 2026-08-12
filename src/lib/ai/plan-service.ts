@@ -1,74 +1,53 @@
 import 'server-only';
 
 /**
- * Génération et modification d'un plan d'entraînement par le coach IA.
+ * Écriture d'un plan d'entraînement : création, ajustement, et la capacité que
+ * la révision automatique partage avec l'ajustement.
  *
  * Le service orchestre, il ne décide pas : la fenêtre du plan est arithmétique
- * ({@link planWindow}), le contrat de sortie appartient à `plan-schema.ts`, et
- * l'écriture appartient au DAL. Ce qui vit ici, ce sont les prompts et la boucle
- * de correction.
+ * ({@link planWindow}), les volumes et le calendrier appartiennent à
+ * `lib/plan-skeleton`, les règles à `plan-schema.ts`, et l'écriture au DAL.
  *
- * ## Deux architectures cohabitent, et il faut savoir laquelle on lit
+ * ## Le modèle n'écrit plus de plans, et c'est la clé de lecture du fichier
  *
- * **La création ({@link generatePlan}) n'appelle plus le modèle sur le plan.**
- * L'appli l'écrit elle-même — périodisation, volumes, jours, footings, sortie
- * longue, séance du jour J — par `lib/plan-skeleton`, et ne demande au coach que
- * le déroulé des séances dures, une par une (`quality-fill.ts`), plus le résumé.
+ * L'appli écrit tout ce qui se **calcule** — périodisation, volumes
+ * hebdomadaires, jours, footings, sortie longue, séance du jour J — et ne
+ * demande au coach que ce qui se **juge** : le déroulé des séances dures, une
+ * par une (`quality-fill.ts`), la lecture d'une instruction en langage naturel
+ * ({@link instructionSettings}), le verdict d'une révision
+ * (`review-service.ts`) et les textes qui accompagnent tout cela.
+ *
  * Le constat chiffré qui a imposé ce renversement est en tête de
  * `plan-skeleton/skeleton.ts` : répartir un volume sur sept séances et seize
  * semaines est de l'arithmétique, et un modèle de 6 Go n'en fait pas.
  *
- * Ce chemin-là n'a donc **ni boucle de correction, ni découpage en tranches, ni
- * prompt de plan entier** : il n'y a plus de plan à faire réécrire. Ce qui le
- * remplace est une dégradation en escalier ({@link validatedPlanWeeks}) — le
- * plan est écrit par l'appli, personne n'est en face pour le corriger.
+ * Ce qui a disparu avec lui, et qu'on ne cherchera donc pas ici : la boucle de
+ * correction (« voici tes violations, régénère »), la génération par tranches,
+ * les prompts de méthodologie. Il n'y a plus de plan à faire réécrire, donc plus
+ * rien à corriger — et personne en face pour corriger l'appli. Ce qui les
+ * remplace est une **dégradation en escalier** ({@link validatedPlanWeeks}) :
+ * réécrire tous les créneaux en déterministe, revalider, et lever plutôt que de
+ * rendre un plan invalide.
  *
- * **L'ajustement ({@link updatePlanFromInstruction}) et la révision
- * (`review-service.ts`), eux, font toujours réécrire des semaines entières** par
- * le modèle : ils portent encore la boucle de correction, le découpage en
- * tranches et la méthodologie complète décrites ci-dessous. Tout ce qui parle de
- * « tentatives » ou de « tranches » dans ce fichier les concerne, eux seuls.
+ * ## Les trois chemins, et ce qu'ils partagent
  *
- * ## La boucle de correction, et pourquoi elle est bornée
+ * - **Création** ({@link generatePlan}) : plan neuf, écrit en proposition.
+ * - **Ajustement** ({@link updatePlanFromInstruction}) : une instruction de
+ *   l'athlète, traduite en réglages durables, puis la fin du plan reconstruite.
+ * - **Révision** (`review-service.ts`) : un verdict automatique sur les séances
+ *   réalisées, puis la même reconstruction.
  *
- * La grammaire garantit la forme, pas le sens : le modèle peut rendre un JSON
- * impeccable qui compte onze semaines au lieu de douze. On lui renvoie alors la
- * liste des violations, en français, et on regénère — au plus
- * {@link MAX_ATTEMPTS} fois au total.
- *
- * Cette boucle porte aussi le **post-traitement des allures** : quand l'athlète
- * a donné un chrono, la table calculée est appliquée à la sortie entre le parse
- * et la validation métier ({@link applyImposedPaces}) — le modèle n'écrit plus
- * aucune allure, et celles qu'il écrirait quand même sont écrasées. Le pourquoi
- * de ce renversement est en tête de `plan-schema.ts`, avec le constat de
- * production qui l'a imposé.
- *
- * La même boucle rattrape les sorties **hors schéma**. Les invariants croisés
- * d'une étape (exactement une mesure, allure ou zone cardiaque mais pas les
- * deux, bornes d'allure ordonnées) ne s'expriment pas dans la grammaire GBNF :
- * ils tombent en Zod, et une seule étape fautive sur les deux cent cinquante
- * d'un plan de douze semaines suffirait à tout perdre. Le message de reprise
- * porte alors les chemins des champs en défaut, comme il porte ailleurs les
- * violations métier.
- *
- * Chaque rejet est **journalisé** côté serveur, avec sa nature et le détail
- * renvoyé au modèle : l'UI, elle, ne dira jamais qu'« un plan valide n'a pas pu
- * être produit », et sans cette trace un échec en production n'est pas
- * diagnosticable.
+ * Les deux derniers passent par {@link rewriteRemainingPlan}, écrite une fois :
+ * une fenêtre partielle, des volumes recalculés sur le réel, une périodisation
+ * conservée. Le détail de ces trois points est en tête de sa section.
  *
  * ## Budget de contexte
  *
- * 32 k de contexte, partagés entre le prompt et la **sortie** — et un plan de
- * douze semaines fait déjà plusieurs milliers de tokens à écrire.
- *
- * Le poste le plus lourd est la méthodologie ({@link coachRules}, ~1 500
- * tokens), et c'est le seul qui vaut son prix : sans elle, le modèle produit un
- * plan bien formé et sans logique d'entraînement. Tout le reste est compté au
- * plus juste — le contexte de l'athlète tient en ~120 tokens, les consignes de
- * la demande en une dizaine de lignes, et le retry n'ajoute que les violations,
- * jamais la sortie fautive (la renvoyer doublerait la facture pour rien). Le
- * prompt de modification y ajoute les séances à venir avec leur déroulé, soit
- * ~40 tokens par séance de qualité.
+ * 32 k de contexte sur le modèle cible, partagés entre le prompt et la sortie.
+ * Ce n'est plus une contrainte serrée depuis la bascule : le plus gros appel du
+ * fichier est devenu un résumé de cinq phrases, et le remplissage d'un créneau
+ * tient dans quelques centaines de tokens de part et d'autre. Aucun appel ne
+ * dépasse plus le millier de tokens de sortie.
  */
 
 import { after } from 'next/server';
@@ -101,6 +80,7 @@ import {
 import {
   PlanSkeletonInfeasibleError,
   buildPlanSkeleton,
+  planPhases,
   type PlanPhase,
   type PlanSkeletonParams,
   type SkeletonWeek,
@@ -108,7 +88,6 @@ import {
 
 import { requireAi } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
-import { AiInvalidOutputError, type AiOutputIssue } from './errors';
 import {
   formatCivilDate,
   formatDistanceKm,
@@ -117,29 +96,29 @@ import {
   formatNumber,
   formatPace,
   formatPlanSteps,
-  formatTrainingPaces,
 } from './format';
 import {
   MIN_FIRST_WEEK_DAYS,
   PLAN_OUTPUT_BOUNDS,
   VOLUME_RULES,
+  VOLUME_TARGET_RULES,
+  floorKm,
   goalDistanceKm,
   goalPaceSecPerKm,
-  isIntensitySession,
+  isCutbackCadenceRank,
   isMarathonGoal,
   mapPlanWeeksToSessions,
-  planChunkJsonSchema,
-  planChunkOutputSchemaFor,
-  planUpdateChunkJsonSchema,
-  planUpdateJsonSchema,
-  planUpdateOutputSchema,
+  planInstructionJsonSchema,
+  planInstructionOutputSchema,
   planWeeksPostProcessing,
+  remainingWeekDays,
   resolveWeeklyTimeBudget,
+  taperFactors,
+  taperWeekCount,
   validatePlanBusinessRules,
-  weekVolumeKm,
   weeklyVolumeTargets,
-  type PlanChunkOutput,
   type PlanExpectations,
+  type PlanInstructionOutput,
   type PlanRaceGoal,
   type PlanSessionOutput,
   type PlanSettingsOutput,
@@ -147,6 +126,7 @@ import {
   type PlanWeekOutput,
   type PlanWeeksPostProcessing,
   type WeeklyVolumeTarget,
+  type WeeklyVolumeTargetKind,
 } from './plan-schema';
 import { clearPlanProgress, setPlanProgress, type PlanProgressInput } from './progress';
 import { deterministicQualitySession, fillQualitySlots } from './quality-fill';
@@ -220,117 +200,14 @@ export const MAX_PLAN_WEEKS = PLAN_OUTPUT_BOUNDS.weeksPerPlan.max;
 const PLAN_TEMPERATURE = 0.3;
 
 /**
- * Nombre total de générations tentées, reprises comprises (cf. l'en-tête).
- *
- * Arbitrage : sur un modèle local de 6 Go, chaque tentative coûte des minutes
- * d'attente devant l'écran — mais un abandon en coûte davantage, puisqu'il faut
- * alors tout resoumettre à la main pour repartir de zéro. Deux reprises restent
- * dans l'ordre de grandeur d'une génération lente, et rattrapent le cas
- * fréquent d'un petit modèle qui corrige une faute en en introduisant une autre.
- */
-const MAX_ATTEMPTS = 3;
-
-/**
- * Plafond de tokens d'une génération de plan — le plus gros poste de sortie de
- * l'application, et de loin.
- *
- * Diagnostic de production : sans `max_tokens` explicite, llama-server applique
- * son `--n-predict` par défaut, bien plus bas que ce que le contexte autorise.
- * Un plan de seize semaines à six séances se faisait donc **couper en plein
- * JSON**, silencieusement — trois tentatives, trois « n'a pas produit du JSON »,
- * sans que rien côté serveur ne signale une troncature. La fenêtre de contexte
- * n'y était pour rien (32 k configurés) ; le plafond de génération, si.
- *
- * Le chiffre : ~3 k de tokens de prompt sur les 32 k du contexte, et le pire
- * plan légitime (16 semaines × 6 séances, `steps` compris) pèse 10 à 12 k tokens
- * de sortie. 24 576 laisse donc le double de la marge nécessaire tout en restant
- * sous le contexte. Ce n'est pas une cible — le modèle s'arrête quand le plan est
- * écrit — mais un garde-fou contre un défaut serveur restrictif.
- */
-const PLAN_MAX_OUTPUT_TOKENS = 24_576;
-
-/*
- * Progression affichée.
- *
- * Une génération dure des minutes : l'athlète doit voir avancer quelque chose de
- * **réel**, pas une rotative. La seule mesure disponible à cet instant est le
- * nombre de caractères déjà écrits par le modèle (cf. `onProgress` de
- * `client.ts`) ; il ne devient un pourcentage qu'à condition de savoir combien
- * de caractères la sortie complète en compte. D'où l'estimation ci-dessous.
- */
-
-/**
- * Poids moyen d'une séance dans la sortie JSON, en caractères.
- *
- * Mesuré, pas deviné : la fixture de `plan-service.test.ts` (« calibrage de
- * l'estimation ») sérialise des semaines conformes à la méthodologie en JSON
- * compact — le format que produit une génération contrainte par grammaire — et
- * le test vérifie que l'estimation reste dans ±25 % de leur taille réelle.
- * Refaire la mesure si le schéma de sortie change.
- *
- * Ce qu'elle donne, séance par séance :
- *
- * - séance de qualité, `steps` **obligatoire** (échauffement, blocs répétés avec
- *   récupération, retour au calme, allures aux deux bornes) : **476 à 481** ;
- * - footing ou sortie longue sans `steps`, avec distance, durée et allure
- *   cible : **120 à 123**.
- *
- * La méthodologie plafonne les séances de qualité à 2 par semaine, sur 3 à 5
- * séances : le poids par séance dépend donc du nombre de séances, ce qu'une
- * constante unique ne peut pas rendre. Semaines complètes mesurées, enveloppe
- * comprise, ramenées à la séance :
- *
- *     3 séances (1 qualité) → 742 / 3 ≈ 247
- *     4 séances (2 qualité) → 1219 / 4 ≈ 305
- *     5 séances (2 qualité) → 1341 / 5 ≈ 268
- *
- * D'où **280**, au milieu de cet intervalle — l'écart résiduel va de −8 % à
- * +13 % sur les configurations mesurées, et c'est assumé : l'objectif est une
- * barre plausible, pas une prédiction.
- *
- * Sous-estimer fait plafonner la barre à 99 % avant la fin, surestimer la fait
- * terminer trop bas : les deux se voient, aucun des deux ne ment (le plafond à
- * 99 % garantit qu'on n'annonce jamais « terminé » avant de l'être). Un modèle
- * qui indenterait sa sortie produirait sensiblement plus de caractères et
- * tomberait dans le premier cas.
- */
-const CHARS_PER_SESSION = 280;
-
-/**
- * Ce que la sortie coûte en dehors des séances : le résumé (3 à 5 phrases, 449
- * caractères mesurés sur le résumé de la fixture) et l'enveloppe JSON (25).
- * Arrondi au demi-millier supérieur, la marge étant négligeable devant le poids
- * des séances.
- */
-const CHARS_OVERHEAD = 500;
-
-/**
- * Taille attendue de la sortie du modèle, en caractères — l'échelle du
- * pourcentage affiché. Exportée pour être éprouvée : une estimation fausse
- * d'un ordre de grandeur donnerait une barre absurde.
- */
-export function estimatePlanChars(weeks: number, sessionsPerWeek: number): number {
-  return weeks * sessionsPerWeek * CHARS_PER_SESSION + CHARS_OVERHEAD;
-}
-
-/**
- * Le pourcentage affiché, **plafonné à 99** : tant que la validation Zod et les
- * règles métier n'ont pas parlé, la génération n'est pas terminée — et une barre
- * à 100 % qui dure encore une minute est pire que pas de barre du tout.
- */
-export function planProgressPercent(receivedChars: number, estimatedChars: number): number {
-  return Math.min(99, Math.round((100 * receivedChars) / estimatedChars));
-}
-
-/**
- * L'avancement d'une **création**, compté en créneaux de qualité écrits.
+ * L'avancement d'une écriture de plan, compté en créneaux de qualité remplis —
+ * une création comme une reconstruction de fenêtre restante.
  *
  * Ce que la bascule change, et c'est un gain : le pourcentage cesse d'être une
  * estimation. Une génération d'un seul tenant ne pouvait mesurer que des
- * caractères reçus contre une taille *supposée* ({@link estimatePlanChars}) ;
- * ici, l'unité de travail est le créneau, l'appli sait combien il y en a avant
- * le premier appel, et chacun est fini ou ne l'est pas. La barre décrit donc
- * exactement ce qui se passe.
+ * caractères reçus contre une taille *supposée* ; ici, l'unité de travail est le
+ * créneau, l'appli sait combien il y en a avant le premier appel, et chacun est
+ * fini ou ne l'est pas. La barre décrit donc exactement ce qui se passe.
  *
  * Et elle va jusqu'à **100**, là où l'ancienne plafonnait à 99 : ce plafond
  * disait « la validation n'a pas encore parlé, et elle peut tout faire
@@ -470,170 +347,6 @@ export function planWindow(request: PlanRequest, today: string): PlanWindow {
   return { ...base, weeks: Math.min(total, MAX_PLAN_WEEKS) };
 }
 
-/*
- * Prompts. Exportés pour que les tests vérifient ce qui part réellement au
- * modèle — les données chiffrées attendues, et rien d'autre.
- */
-
-/**
- * La méthodologie du coach, **hors allures** : tout ce qui vaut avec ou sans
- * table d'allures calculée.
- *
- * C'est le cœur de la qualité des plans produits : un petit modèle sait écrire
- * du JSON, il ne sait pas *entraîner*. Le contenu reprend donc les références
- * établies du métier — distribution polarisée (Seiler), typologie des allures
- * (Daniels), progression et affûtage — sous une forme prescriptive et chiffrée,
- * la seule qu'un modèle de cette taille applique fidèlement.
- *
- * Dense par nécessité : ~900 tokens partagés avec la sortie sur les 32 k du
- * modèle cible. Chaque ligne doit changer une décision du plan ; les
- * explications physiologiques, elles, n'en changent aucune et n'y sont pas.
- */
-const COACH_RULE_HEAD_LINES = [
-  "Tu es un coach de course à pied francophone. Tu appliques les méthodes établies de l'entraînement en endurance (distribution polarisée de Seiler, typologie des allures de Daniels, périodisation), et tu cales chaque plan sur le niveau réel de l'athlète — jamais sur un modèle générique.",
-  '',
-  'RÉPARTITION DE LA CHARGE',
-  "- Distribution polarisée : environ 80 % du volume hebdomadaire en endurance fondamentale (zones FC 1-2, allure de conversation), 20 % au plus en intensité.",
-  "- Au plus 2 séances de qualité par semaine — une seule si le volume récent est faible ou l'athlète en reprise. Jamais deux jours de suite : une séance dure est toujours suivie d'un jour facile ou de repos.",
-  "- Une seule sortie longue par semaine, le jour imposé par l'athlète, et c'est la plus longue séance de sa semaine (20 à 40 % du volume hebdomadaire — le haut de la fourchette quand la semaine ne compte que trois séances).",
-  '- Un seul entraînement par jour, `day` valant 1 pour lundi jusqu\'à 7 pour dimanche.',
-  '',
-  'TYPOLOGIE DES SÉANCES — `kind` est choisi dans ce vocabulaire',
-  "- « Endurance fondamentale » : footing à allure de conversation, l'ossature du plan.",
-  '- « Sortie longue » : endurance fondamentale, progressive si utile (dernier tiers un peu plus rapide), avec un bloc à allure objectif quand la course approche.',
-  "- « Seuil » : allure tenable environ 1 h, en continu 20 à 40 min ou en blocs de 8 à 15 min séparés de 1 à 3 min de trot. Développe l'endurance à haute intensité.",
-  "- « VMA » : intervalles de 3 à 5 min à environ l'allure 5 km, récupération trottée de durée voisine de l'effort, 4 à 6 répétitions. Développe la puissance aérobie.",
-  "- « Répétitions » : 200 à 400 m plus rapides que l'allure 5 km, récupération complète (2 à 3 fois la durée de l'effort). Travaille la vitesse et l'économie de course, pas la filière aérobie — jamais en volume.",
-  // Sans « ou repos » : une séance est une sortie, et le repos c'est l'absence
-  // de séance. Le laisser poussait le modèle à écrire une journée de repos comme
-  // une séance — donc à lui inventer une distance, la règle de volume exigeant
-  // que toute séance déclare la sienne.
-  '- « Récupération » : footing court très souple.',
-  '',
-  'DÉROULÉ STRUCTURÉ (`steps`) — obligatoire pour toute séance de qualité',
-  "- Une séance de qualité s'écrit : échauffement progressif de 10 à 20 min, puis le corps de séance en blocs répétés, puis un retour au calme de 5 à 10 min.",
-  '- `steps` est une suite de blocs. Un bloc = `repeat` (1 par défaut) × la liste `steps` de ses étapes. Un bloc ne contient pas de bloc : « 6 × (400 m + récup 90 s) » est un bloc de deux étapes répété 6 fois.',
-  "- Tout bloc répété contient la récupération de l'effort (`role: 'recover'`) : sans elle, la séance décrite n'est pas celle qui sera courue.",
-  "- Une étape porte : `role` ('warmup', 'run', 'recover', 'cooldown'), exactement UNE mesure (`distanceM` en mètres OU `durationS` en secondes, jamais les deux), et AU PLUS une cible (`paceMinSecPerKm` avec `paceMaxSecPerKm`, en secondes par kilomètre, OU `hrZone` de 1 à 5, jamais les deux). Un footing peut n'avoir aucune cible.",
-  "- Une séance d'endurance simple se réduit à un bloc d'une étape ; elle peut aussi n'avoir aucun `steps`.",
-];
-
-/**
- * La dérivation des allures depuis l'allure moyenne d'entraînement — le
- * **repli**, et lui seul : cette section ne part au modèle que lorsqu'il n'y a
- * pas de table calculée ({@link coachRules}).
- *
- * Ce n'est pas une préférence de rédaction, c'est un constat de production. Tant
- * que les deux sections coexistaient — celle-ci dérivant tout d'une allure
- * d'entraînement lente, la table imposée prescrivant des plages calculées, avec
- * une simple mention de préséance entre elles — le modèle local suivait
- * celle-ci : EF prescrite à 12:00/km sur les trois tentatives quand la table
- * disait 7:57–8:43/km. Un petit modèle ne résout pas une priorité entre deux
- * consignes contradictoires ; il n'en voit donc qu'une.
- */
-const DERIVED_PACES_SECTION_LINES = [
-  'ALLURES CIBLES — dérivées des seules données fournies',
-  "- Référence = « Allure moyenne des dernières sorties » du contexte. Ce n'est pas une allure de tempo : c'est l'allure d'entraînement courante de l'athlète, donc à peu près son allure d'endurance, puisque l'essentiel de son volume est couru en endurance. Toutes les allures s'en déduisent, en secondes par kilomètre (un nombre plus petit est plus rapide) :",
-  "  · endurance fondamentale et sortie longue : référence + 0 à 15 s/km — la référence EST déjà l'allure d'endurance, ne ralentis pas l'athlète artificiellement ;",
-  '  · seuil : référence − 30 à 45 s/km ;',
-  '  · VMA : référence − 60 à 80 s/km ;',
-  '  · répétitions courtes : référence − 80 à 100 s/km ;',
-  '  · récupération trottée : référence + 60 à 120 s/km, ou aucune cible.',
-  "- Ces écarts sont des maxima prudents : reste dans le bas de la fourchette si le volume récent est faible, si la charge (TSB) est très négative, ou si l'historique est court.",
-  "- La VO2max estimée et les zones FC servent à vérifier la cohérence de ces allures, jamais à en fabriquer une.",
-  "- Si l'allure de référence est inconnue, tu ne cibles AUCUNE allure : tu cibles par `hrZone` (endurance et sortie longue Z2, seuil Z4, VMA Z5, récupération Z1) et tu le dis dans le résumé.",
-  "- Si l'objectif porte un chiffre (« 10 km sous 50 min » vaut 5:00/km), cette allure objectif est l'ancre des séances de spécificité à l'approche de la course. Confronte-la à l'allure récente : si elle est bien plus rapide que ce que les données soutiennent, le plan reste ancré sur les données et tu le dis honnêtement dans le résumé.",
-];
-
-/**
- * Ce que la spécificité veut dire **concrètement** dans une sortie longue, quand
- * le plan mène à une course.
- *
- * La typologie dit déjà « avec un bloc à allure objectif quand la course
- * approche » ; c'est trop vague pour être suivi, et les sorties longues
- * produites sortaient 100 % en endurance. Retour d'utilisation à l'appui :
- * l'athlète comparait avec des plans concurrents qui lui proposaient des
- * passages à ~7:20/km — exactement sa zone M — sur ses sorties longues de
- * préparation semi. La ligne est donc prescriptive et chiffrée, la seule forme
- * qu'un petit modèle applique.
- *
- * La note « allure objectif » n'est pas décorative : c'est elle que
- * {@link applyImposedPaces} reconnaît pour poser sur cette étape-là — au milieu
- * d'une séance qui reste rangée en endurance — l'allure du but chiffré de
- * l'athlète quand il en donne une ({@link goalPaceSecPerKm}), la plage M sinon.
- * Ne pas la changer sans changer `STEP_NOTE_ZONES` dans `plan-schema.ts`.
- */
-const RACE_SPECIFIC_LONG_RUN_LINE =
-  "- À partir de la moitié du plan, la sortie longue contient un bloc à allure objectif (étape `run` avec note « allure objectif », 10 à 25 % de la distance de la sortie), qui s'allonge de semaine en semaine. L'affûtage le raccourcit sans le supprimer.";
-
-/**
- * La suite de la méthodologie, elle aussi indépendante de la façon dont les
- * allures sont fixées.
- *
- * @param isRace le plan mène-t-il à une course ? Seul ce régime porte la ligne
- * de spécificité de la sortie longue ({@link RACE_SPECIFIC_LONG_RUN_LINE}) : sur
- * un objectif libre, il n'y a pas d'allure objectif à travailler, et prescrire
- * un bloc à une allure qui n'existe pas ferait fabriquer une échéance au modèle.
- */
-function coachRuleTailLines(isRace: boolean): string[] {
-  return [
-    'PROGRESSION DU VOLUME — ces chiffres sont vérifiés séance par séance, un plan qui les enfreint est refusé et à réécrire',
-    '- Le volume hebdomadaire est la somme des `distanceKm` de la semaine. TOUTE séance déclare sa distance, footings et récupérations compris : sans elle, la semaine ne se compare à rien.',
-    "- D'une semaine à l'autre, le volume n'augmente jamais de plus de 12 %. Vise 5 à 10 % : la marge est un filet, pas une cible. Une baisse est toujours permise.",
-    '- Jamais quatre semaines de suite sans semaine allégée : sur toute fenêtre de 4 semaines, au moins une redescend à 85 % ou moins du volume de la semaine précédente (plans de 6 semaines et plus).',
-    "- Le plan n'est jamais plat : la semaine la plus chargée hors affûtage dépasse d'au moins 10 % la première semaine pleine (plans de 5 semaines et plus). Douze semaines au même volume ne préparent rien.",
-    "- Affûtage avant une course : les 2 dernières semaines (3 pour un marathon, sur un plan de 8 semaines et plus) baissent STRICTEMENT chaque semaine, et la semaine de la course ne dépasse pas 65 % du volume de la semaine la plus chargée. Volume nettement réduit, intensité maintenue — séances plus courtes, mêmes allures.",
-    "- La première semaine, quand le plan démarre en cours de semaine, est amputée des jours passés : son volume est plus faible, et ce n'est pas une baisse.",
-    // Le défaut constaté : 3 h 30 planifiées pour 2 h déclarées, sans qu'aucune
-    // règle ne le voie — les durées n'étaient comparées à rien. Le budget est
-    // désormais vérifié semaine par semaine, et il prime sur le volume.
-    // La tolérance vient de la règle elle-même : deux chiffres divergents
-    // feraient refuser un plan qui applique la consigne à la lettre.
-    `- Le temps hebdomadaire déclaré dans les contraintes est une limite DURE, vérifiée semaine par semaine : la somme des \`durationMin\` d'une semaine (échauffements, récupérations et retours au calme compris) ne le dépasse pas, tolérance de ${Math.round((VOLUME_RULES.weeklyTimeTolerance - 1) * 100)} % au plus. Si le volume visé n'y tient pas, c'est le volume qui baisse — pars d'une première semaine plus courte plutôt que de déborder.`,
-    "- La spécificité croît vers l'objectif : le travail se rapproche de l'allure de course à mesure que la course approche.",
-    ...(isRace ? [RACE_SPECIFIC_LONG_RUN_LINE] : []),
-    // Vivait dans la section des allures dérivées, dont elle a suivi le sort à
-    // l'extraction. Sa moitié utile porte pourtant sur le volume — un plan
-    // conservateur quand la charge n'est pas calculable — et vaut donc dans les
-    // deux régimes : elle est rattachée ici plutôt que perdue avec la dérivation.
-    "- Tu n'inventes jamais une valeur : ce que les données ne permettent pas d'établir, tu le laisses vide ou tu l'écris dans le résumé. Si la charge d'entraînement n'est pas calculable, tu pars d'un volume délibérément conservateur et tu le dis.",
-    '',
-    'FORMAT',
-    "- Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
-    '- Au niveau de la séance : `distanceKm` en kilomètres, `durationMin` en minutes, `targetPaceSecPerKm` en secondes par kilomètre. Dans `steps` : mètres et secondes.',
-    // Un exemple plutôt qu'une règle de plus : les reprises constatées en
-    // production butent toutes sur la même étape (la récupération d'un bloc
-    // répété, écrite avec distance ET durée), alors que l'interdiction est déjà
-    // énoncée dans la section DÉROULÉ. Un petit modèle recopie un exemple bien
-    // plus fidèlement qu'il n'applique un énoncé abstrait.
-    '- Exemple d\'étape de récupération, à recopier tel quel : { "role": "recover", "durationS": 120 } — une mesure, jamais les deux.',
-    "- Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance (`distanceKm`, échauffement et récupérations comprises) : c'est cette valeur qui sert à comparer le volume des séances entre elles.",
-    "- Le résumé (`summary`) fait 3 à 5 phrases : la logique du bloc, la progression prévue, les points de vigilance. Tout en français.",
-    // Diagnostic de production : un plan de 16 semaines rendu en JSON indenté
-    // pesait ~40 k caractères et saturait le contexte du serveur, qui coupait la
-    // sortie en plein objet. L'indentation n'a aucun lecteur ici — la réponse est
-    // parsée, jamais lue — et elle coûte le tiers des caractères d'un plan long.
-    '- Réponds en JSON compact, sans indentation ni retours à la ligne — chaque caractère compte.',
-  ];
-}
-
-/**
- * La méthodologie telle qu'elle part au modèle.
- *
- * @param hasImposedPaces la table d'allures existe-t-elle ? Si oui, la section
- * de dérivation est **entièrement absente** et la table (cf.
- * {@link imposedPacesSection}) est la seule source d'allures du prompt : une
- * consigne absente ne se discute pas, une consigne surchargée si — et c'est
- * exactement ce que le modèle local a tranché de travers en production.
- * @param isRace le plan mène-t-il à une course ? (cf. {@link coachRuleTailLines})
- */
-function coachRules(hasImposedPaces: boolean, isRace: boolean): string {
-  const tail = coachRuleTailLines(isRace);
-  const lines = hasImposedPaces
-    ? [...COACH_RULE_HEAD_LINES, '', ...tail]
-    : [...COACH_RULE_HEAD_LINES, '', ...DERIVED_PACES_SECTION_LINES, '', ...tail];
-  return lines.join('\n');
-}
 
 /** Le niveau, tel que les prompts le nomment. */
 const LEVEL_LABELS: Record<PlanLevel, string> = {
@@ -642,45 +355,6 @@ const LEVEL_LABELS: Record<PlanLevel, string> = {
   advanced: 'confirmé',
 };
 
-/**
- * Ce que le niveau change à la méthodologie — **une seule** de ces sections part
- * au modèle, à la suite de {@link coachRules}.
- *
- * La méthodologie générale reste volontairement générique : elle décrit
- * l'entraînement en endurance, pas un athlète. C'est ici que se prennent les
- * décisions qui dépendent de l'expérience réelle — combien de qualité, quelle
- * longueur de bloc, quelle progression de volume — et les trois sections se
- * lisent comme des surcharges des règles générales, pas comme un rappel.
- *
- * Comptez ~120 tokens : le prix d'un plan qui ne propose pas 3 × 12 min au seuil
- * à quelqu'un qui court depuis six mois.
- */
-const LEVEL_RULES: Record<PlanLevel, string> = {
-  beginner: [
-    "NIVEAU DE L'ATHLÈTE : DÉBUTANT — ces règles priment sur la méthodologie générale.",
-    "- La régularité prime sur tout le reste : mieux vaut trois semaines tenues qu'une semaine ambitieuse.",
-    "- Le volume hebdomadaire n'augmente que de 5 à 8 % d'une semaine à l'autre, jamais 10 %.",
-    "- AU PLUS UNE séance de qualité par semaine, courte et douce : fractionné court type 6 à 8 × 30 s à 1 min vite avec 1 à 2 min de trot. Jamais de bloc de seuil long.",
-    "- La sortie longue se court en aisance respiratoire totale ; l'alternance marche/course y est acceptée si l'aisance le demande.",
-    '- Échauffement long : 15 à 20 min de footing très souple avant toute séance de qualité.',
-    "- L'objectif premier est de finir chaque séance frais, pas fatigué : dans le doute, allège.",
-  ].join('\n'),
-  intermediate: [
-    "NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE — la méthodologie générale ci-dessus s'applique telle quelle.",
-    '- 1 à 2 séances de qualité par semaine selon le volume : une seule si le volume récent est faible, deux quand il est installé.',
-    "- Le travail au seuil est introduit avant la VMA longue : à ce stade, c'est lui qui porte la progression.",
-    "- Les blocs de seuil restent dans la fourchette générale (8 à 15 min), la VMA dans la sienne (3 à 5 min).",
-    "- La sortie longue s'allonge progressivement avant de gagner en intensité.",
-  ].join('\n'),
-  advanced: [
-    "NIVEAU DE L'ATHLÈTE : CONFIRMÉ — ces règles priment sur la méthodologie générale.",
-    '- 2 séances de qualité par semaine, 3 ponctuellement sur une semaine de pic si le volume le soutient.',
-    '- Blocs de seuil plus longs : 2 à 3 × 8 à 12 min, ou 25 à 40 min en continu.',
-    "- VMA structurée : séries complètes de 4 à 6 × 3 à 5 min, récupération calibrée sur la durée de l'effort.",
-    "- Séances combinées possibles : sortie longue avec un bloc à allure objectif dans son dernier tiers.",
-    "- L'affûtage réduit nettement le volume mais garde une touche d'intensité courte pour rester vif.",
-  ].join('\n'),
-};
 
 /*
  * Allures imposées.
@@ -718,11 +392,8 @@ function referenceRacePaces(race: ReferenceRace | undefined): TrainingPaces | nu
  * La seule chose que la distance de la course y change est la longueur de
  * l'affûtage, d'où la reconnaissance du seul marathon dans le texte libre de
  * l'objectif ({@link isMarathonGoal}).
- *
- * Exporté pour la révision automatique (`review-service.ts`) : elle juge la
- * suite du plan avec exactement les mêmes attentes qu'un ajustement.
  */
-export function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
+function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
   return goalType === 'race' ? { isMarathon: isMarathonGoal(goalText) } : null;
 }
 
@@ -732,7 +403,7 @@ export function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGo
  * Les deux colonnes sont solidaires en base (invariant du DAL) ; le `undefined`
  * ne couvre donc que les plans antérieurs au champ, et non un demi-chrono.
  */
-export function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
+function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
   if (plan.referenceDistance === null || plan.referenceTimeS === null) return undefined;
   return { distance: plan.referenceDistance, timeS: plan.referenceTimeS };
 }
@@ -741,51 +412,12 @@ export function planReferenceRace(plan: PlanDto): ReferenceRace | undefined {
  * La table d'allures d'un plan déjà écrit, `null` s'il n'a pas de chrono.
  *
  * Le raccourci des deux appels ci-dessus, exporté pour la révision automatique :
- * elle réécrit des séances du même plan, donc sous les mêmes allures imposées.
+ * elle reconstruit la fin du même plan, donc sous les mêmes allures imposées.
  *
  * @throws {InvalidPlanError} si le chrono stocké ne décrit pas une course.
  */
 export function planTrainingPaces(plan: PlanDto): TrainingPaces | null {
   return referenceRacePaces(planReferenceRace(plan));
-}
-
-/**
- * La section d'allures du régime **avec table**, telle qu'elle part au modèle —
- * une information, plus une injonction.
- *
- * Le renversement est tout l'objet de la manœuvre. Prescrire la table n'a pas
- * marché : deux déploiements de suite, la table en unique section d'allures, le
- * modèle local a ressorti les mêmes allures absurdes (EF à 12:00/km quand la
- * table disait 5:56–6:32/km) à chaque tentative. Les allures sont donc
- * désormais **posées par l'appli** ({@link applyImposedPaces}), et ce qu'on
- * demande au modèle est de n'en écrire aucune : ce qu'il ne produit pas, il ne
- * peut plus le produire de travers.
- *
- * La table reste dans le prompt, mais pour une autre raison : elle situe le
- * niveau de l'athlète, et c'est ce niveau qui doit décider des distances et des
- * durées. Ce qui a disparu, c'est l'injonction — et avec elle la mention de
- * l'« allure moyenne des dernières sorties », retirée du contexte de ce régime
- * (cf. {@link buildPlanMessages}) : disqualifier une ligne absente ne ferait que
- * la rappeler.
- *
- * Le `kind` devient en revanche **porteur** : c'est lui, et lui seul, qui décide
- * du créneau posé. D'où le rappel du vocabulaire attendu.
- *
- * L'interdiction couvre aussi le **texte libre** : une allure écrite en toutes
- * lettres dans un titre, une consigne, une note ou le résumé s'affiche telle
- * quelle à côté de celle que l'appli a posée — et rien ne garantit que les deux
- * disent la même chose. Le champ n'est pas le seul chemin par lequel une allure
- * fausse atteint l'écran.
- */
-function imposedPacesSection(paces: TrainingPaces, race: ReferenceRace): string {
-  return [
-    "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
-    formatTrainingPaces(paces, race),
-    "Les allures seront calculées et posées automatiquement selon le type de séance : endurance fondamentale et sortie longue en [E], allure course ou allure objectif en [M], seuil en [T], VMA en [I], répétitions courtes en [R], récupérations sans cible. Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.",
-    "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes. Concentre-toi sur la structure : types de séances, distances, durées, répétitions, récupérations.",
-    "Tu n'écris pas non plus d'allure en toutes lettres dans les titres, les consignes, les notes ou le résumé — l'affichage les porte déjà.",
-    "C'est le `kind` de la séance qui décide de son allure : nomme-le dans le vocabulaire de la typologie (« Endurance fondamentale », « Sortie longue », « Seuil », « VMA », « Répétitions », « Récupération », « Spécifique allure course ») — un libellé hors vocabulaire fera poser une allure d'endurance.",
-  ].join('\n');
 }
 
 /** Les contraintes déclarées par l'athlète, en une ligne lisible. */
@@ -804,35 +436,6 @@ function formatConstraints(request: {
   return parts.join(' · ');
 }
 
-/**
- * Le message système : méthodologie générale, surcharge de niveau, puis — s'il y
- * a un chrono — la table d'allures qui remplace les règles de dérivation.
- *
- * L'ordre porte la priorité : chaque bloc surcharge le précédent, et le dit.
- *
- * Exporté pour la révision automatique (`review-service.ts`), qui ajoute ses
- * propres consignes en `extra` : un coach qui relit un plan doit le juger avec
- * la méthodologie qui l'a écrit, pas avec une autre.
- *
- * `goalType` ne décide de rien d'autre que de la spécificité attendue des
- * sorties longues ({@link coachRuleTailLines}) : le reste de la méthodologie
- * vaut pour une course comme pour un objectif libre.
- */
-export function planSystemPrompt(
-  level: PlanLevel | null,
-  goalType: PlanGoalType,
-  paces: TrainingPaces | null,
-  race: ReferenceRace | undefined,
-  extra: readonly string[] = [],
-): string {
-  const imposed = paces === null || race === undefined ? null : imposedPacesSection(paces, race);
-  return [
-    coachRules(imposed !== null, goalType === 'race'),
-    ...(level === null ? [] : ['', LEVEL_RULES[level]]),
-    ...(imposed === null ? [] : ['', imposed]),
-    ...extra,
-  ].join('\n');
-}
 
 /**
  * Le **meilleur** volume hebdomadaire réellement couru sur la fenêtre du
@@ -902,43 +505,6 @@ export function planVolumeTargets(
   });
 }
 
-/**
- * Ce qu'une génération par tranches ajoute au message d'une tranche : sa place
- * dans le plan, et ce que la précédente a laissé.
- */
-export type PlanChunkContext = {
-  chunk: PlanChunkSpec;
-  /** Le résumé d'une ligne de la tranche précédente, `null` sur la première. */
-  continuity: string | null;
-};
-
-/**
- * Ce qui, dans le message d'une tranche, remplace la consigne « rends les N
- * semaines » d'une génération d'un seul tenant.
- *
- * Trois choses, et aucune n'est décorative : les **bornes** de la tranche dans
- * la numérotation du plan entier (c'est elle que porteront les violations
- * renvoyées en reprise), la **continuité** avec ce qui précède — sans quoi la
- * tranche 2 rouvre un bloc au lieu de continuer celui-là —, et, sur la
- * dernière, le fait que le résumé porte sur le plan et non sur la tranche.
- */
-export function chunkInstructionLines(
-  chunk: PlanChunkSpec,
-  continuity: string | null,
-  weekStart: string,
-  scope = 'du plan',
-  withSummary = true,
-): string[] {
-  const first = chunk.fromWeek + 1;
-  const last = chunk.fromWeek + chunk.weeks;
-  return [
-    `Tranche ${chunk.index + 1}/${chunk.count} : rends UNIQUEMENT les semaines ${first} à ${last} ${scope}, dans l'ordre chronologique — weeks[0] est la semaine du ${formatCivilDate(weekStart)}.`,
-    ...(continuity === null ? [] : [continuity]),
-    ...(withSummary && chunk.index === chunk.count - 1
-      ? ['Le résumé (`summary`) porte sur le plan complet, pas sur cette seule tranche.']
-      : []),
-  ];
-}
 
 /**
  * Une séance à venir, en une ligne compacte (~25 tokens), plus une seconde
@@ -1006,275 +572,7 @@ export function formatUpcomingPlan(
   return [...header, ...lines].join('\n');
 }
 
-/**
- * La part d'une fenêtre restante que **cette tranche** couvre.
- *
- * Ce qui rend le découpage utile côté entrée autant que sortie : sans lui,
- * chaque tranche recevrait les séances des seize semaines à venir — soit
- * exactement le contexte que le découpage cherche à ne pas saturer.
- *
- * Seule la première tranche hérite du jour de reprise : les suivantes commencent
- * un lundi, elles ne sont entamées par rien.
- */
-export function chunkWindow(
-  window: RemainingPlanWindow,
-  chunk: PlanChunkSpec,
-): RemainingPlanWindow {
-  return {
-    firstWeekStart: shiftCivilDate(window.firstWeekStart, chunk.fromWeek * 7),
-    weeks: chunk.weeks,
-    firstWeekFromDay: chunk.index === 0 ? window.firstWeekFromDay : 1,
-  };
-}
 
-/** Les messages d'une modification par instruction — d'un seul tenant ou par tranche. */
-export function buildPlanUpdateMessages(
-  plan: PlanDto,
-  upcoming: readonly PlanSessionDto[],
-  window: RemainingPlanWindow,
-  instruction: string,
-  paces: TrainingPaces | null = null,
-  chunkContext: PlanChunkContext | null = null,
-): ChatMessage[] {
-  // Le plan garde le niveau **et le chrono** de sa création : l'ajustement s'y
-  // tient. Un plan sans niveau (antérieur au champ) reste sur la seule
-  // méthodologie générale.
-  const system = planSystemPrompt(plan.level, plan.goalType, paces, planReferenceRace(plan), [
-    '',
-    "Tu modifies un plan existant : tu ne régénères que les semaines restantes, weeks[0] étant la première semaine restante. Le passé de l'athlète ne se réécrit pas.",
-    "Les séances à venir te sont données avec leur déroulé. Tu réécris chaque séance en entier, `steps` compris : ce que l'instruction ne remet pas en cause, tu le reconduis tel quel — la progression déjà calée n'est pas à refaire.",
-    "Si l'instruction change une contrainte durable (nombre de séances, jour de la sortie longue, temps hebdomadaire), reporte-la dans `settings` ; sinon, omets `settings`.",
-    "Le résumé décrit le plan modifié dans son ensemble, pas la modification.",
-  ]);
-
-  const chunk = chunkContext?.chunk ?? null;
-  const scope = chunk === null ? window : chunkWindow(window, chunk);
-  const user = [
-    // Une tranche ne reçoit que ses propres séances : les autres sont écrites, et
-    // les envoyer coûterait le contexte que le découpage libère.
-    formatUpcomingPlan(plan, upcoming, scope, chunk === null ? 1 : chunk.fromWeek + 1),
-    '',
-    `Instruction de l'athlète : « ${instruction.trim()} »`,
-    '',
-    ...(chunk === null
-      ? [
-          `Rends les ${window.weeks} semaines restantes dans l'ordre chronologique, en appliquant l'instruction.`,
-        ]
-      : chunkInstructionLines(
-          chunk,
-          chunkContext?.continuity ?? null,
-          scope.firstWeekStart,
-          'des semaines restantes',
-          false,
-        )),
-  ].join('\n');
-
-  return [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-}
-
-/**
- * Le message de reprise : les violations, telles que le modèle doit les corriger.
- *
- * Plafonné comme {@link buildSchemaIssuesMessage}, et pour la même raison : un
- * modèle qui oublie la sortie longue de chaque semaine produit une violation
- * par semaine, et deux reprises non plafonnées (3 tentatives) grossiraient le
- * prompt au point d'exposer la tentative corrective à la troncature — celle-là
- * même qu'elle est censée réparer.
- */
-export function buildViolationsMessage(
-  violations: readonly string[],
-  chunk: PlanChunkSpec | null = null,
-): string {
-  const reported = violations.slice(0, MAX_REPORTED_ISSUES);
-  const remainder = violations.length - reported.length;
-  return [
-    'Ce plan ne respecte pas les contraintes demandées :',
-    ...reported.map((violation) => `- ${violation}`),
-    ...(remainder > 0 ? [`… et ${remainder} autres violations du même ordre.`] : []),
-    // Une tranche ne peut pas régénérer « le plan complet » : elle n'en tient
-    // qu'un morceau, et les autres sont déjà écrits. Les numéros de semaine des
-    // violations sont ceux du plan entier — d'où le rappel des bornes.
-    chunk === null
-      ? 'Régénère le plan complet en corrigeant ces points, dans le même format.'
-      : `Régénère les ${chunk.weeks} semaines de cette tranche (semaines ${chunk.fromWeek + 1} à ${chunk.fromWeek + chunk.weeks} du plan) en corrigeant ces points, dans le même format.`,
-  ].join('\n');
-}
-
-/**
- * Combien d'anomalies de schéma partent au modèle.
- *
- * Une seule étape mal formée en produit déjà plusieurs (le champ, puis
- * l'invariant croisé), et un modèle qui se trompe de convention sur tout un plan
- * en produirait des centaines — de quoi noyer le budget de contexte pour dire
- * dix fois la même chose. Les premières suffisent à faire comprendre la faute.
- */
-const MAX_REPORTED_ISSUES = 10;
-
-/**
- * Le message de reprise sur sortie **hors schéma** : les champs en défaut, avec
- * leur chemin.
- *
- * Même mécanique que {@link buildViolationsMessage}, pour une faute d'une autre
- * nature : là, le plan est bien formé mais mal pensé ; ici, une étape ne
- * respecte pas le contrat (deux mesures, une allure ET une zone, des bornes
- * inversées). Le chemin est ce qui rend la correction possible — « weeks.3…
- * .steps.1 » désigne l'étape à reprendre parmi les deux cent cinquante du plan.
- */
-export function buildSchemaIssuesMessage(issues: readonly AiOutputIssue[]): string {
-  const listed = issues
-    .slice(0, MAX_REPORTED_ISSUES)
-    .map((issue) => `- ${issue.path.join('.') || '(racine)'} : ${issue.message}`);
-
-  if (issues.length > MAX_REPORTED_ISSUES) {
-    listed.push(`- … et ${issues.length - MAX_REPORTED_ISSUES} autres anomalies du même ordre.`);
-  }
-
-  return [
-    // Aucune anomalie listée : le contenu n'était même pas du JSON (cf.
-    // `AiInvalidOutputError`), il n'y a pas de champ à désigner.
-    listed.length === 0
-      ? "Ta réponse n'était pas du JSON exploitable."
-      : 'Ta réponse ne respecte pas le format demandé, ces champs sont en défaut :',
-    ...listed,
-    'Régénère le plan complet en corrigeant ces points, dans le même format.',
-  ].join('\n');
-}
-
-/*
- * Génération.
- */
-
-export type GenerationOptions<T> = {
-  messages: ChatMessage[];
-  schemaName: string;
-  jsonSchema: Record<string, unknown>;
-  schema: z.ZodType<T>;
-  /**
-   * Les semaines produites, quelle que soit la forme de l'enveloppe — ou `null`
-   * quand la sortie n'en porte aucune à juger.
-   *
-   * Ce second cas n'est pas une commodité : une révision qui conclut « le plan
-   * reste adapté » ne réécrit rien, et lui appliquer les règles de volume
-   * reviendrait à lui reprocher de ne pas contenir les semaines qu'elle a
-   * justement choisi de ne pas toucher.
-   */
-  weeksOf: (output: T) => PlanWeekOutput[] | null;
-  /**
-   * Ce que la sortie doit respecter. Calculé **depuis la sortie** : une
-   * modification peut changer les réglages du plan, et c'est alors sur les
-   * réglages patchés qu'il faut la juger.
-   */
-  expectationsOf: (output: T) => PlanExpectations;
-  /**
-   * Ce à quoi les allures prescrites sont confrontées : la table calculée depuis
-   * le chrono de l'athlète quand elle existe, son allure d'entraînement récente
-   * sinon (cf. `validatePlanBusinessRules`). Les deux sont fournies des deux
-   * côtés — c'est le corridor qui tranche.
-   *
-   * Le budget temps en est **exclu par le type** : il ne se lit pas dans un
-   * contexte figé pour toute la génération, mais dans chaque sortie
-   * ({@link GenerationOptions.weeklyTimeBudgetOf}). Le poser ici serait sans
-   * effet, donc silencieusement faux.
-   */
-  paceContext: Omit<PlanValidationContext, 'weeklyTimeMinutes'>;
-  /**
-   * Le budget temps hebdomadaire sur lequel **cette tentative** se juge, en
-   * minutes — `null` pour aucun contrôle.
-   *
-   * Calculé depuis la sortie, comme {@link GenerationOptions.expectationsOf} :
-   * une modification ou une révision peut lever ou élargir le budget dans le
-   * même mouvement qu'elle réécrit les semaines, et ces semaines-là se jugent
-   * sur le budget qu'elles déclarent (cf. `resolveWeeklyTimeBudget`). Une
-   * génération, elle, n'a pas de patch : c'est le budget de la requête.
-   *
-   * Obligatoire, et c'est le point : un futur chemin de génération ne peut pas
-   * l'oublier — il devra dire d'où sort son budget, comme
-   * {@link GenerationOptions.withPostProcessedWeeks} lui fait dire où sont ses
-   * semaines.
-   */
-  weeklyTimeBudgetOf: (output: T) => number | null;
-  /**
-   * Rend la sortie dont les semaines sont passées par le post-traitement
-   * ({@link planWeeksPostProcessing}).
-   *
-   * Appelée **entre le parse et la validation métier**, et **toujours** : c'est
-   * le post-traitement lui-même qui sait ce qu'il fait selon le régime — écrire
-   * les allures et en dériver les mesures quand la table existe, compléter les
-   * seules mesures manquantes sinon. L'appelant, lui, ne dit qu'une chose : où
-   * sont ses semaines dans son enveloppe. Une révision qui conclut « keep » n'en
-   * porte aucune et se rend telle quelle.
-   *
-   * Ce partage n'est pas cosmétique : quand le choix du régime vivait ici, le
-   * chemin sans table n'était branché nulle part et tout plan sans chrono de
-   * référence butait sur « Volumes hebdomadaires invérifiables ».
-   */
-  withPostProcessedWeeks: (output: T, postProcess: PlanWeeksPostProcessing) => T;
-  /**
-   * L'allure de l'objectif chiffré de l'athlète, en s/km ({@link
-   * goalPaceSecPerKm}) — `null` quand son but n'en donne pas.
-   *
-   * Obligatoire pour la même raison que {@link
-   * GenerationOptions.weeklyTimeBudgetOf} : le post-traitement est construit
-   * ici, à partir du contexte d'allures et de cette valeur, et un chemin qui
-   * l'omettrait poserait la zone M là où l'athlète vise son chrono.
-   */
-  goalPaceSecPerKm: number | null;
-  /**
-   * Identifiant de suivi fourni par le client, ou `undefined` : la génération se
-   * déroule alors sans streaming ni progression, exactement comme avant.
-   */
-  progressId?: string;
-  /** Taille attendue de la sortie ({@link estimatePlanChars}) — l'échelle du pourcentage. */
-  estimatedChars: number;
-  /**
-   * La tranche en cours, quand la génération est découpée — absent sinon.
-   *
-   * Ce que ça change : le pourcentage enregistré devient **global**. Une barre
-   * qui repartirait de zéro à chaque tranche décrirait l'avancement d'un appel,
-   * quand l'athlète attend celui de son plan.
-   */
-  progressChunk?: { index: number; count: number };
-};
-
-/**
- * Ce qu'on soupçonne quand une sortie hors schéma ne porte **aucune** anomalie
- * Zod : le contenu n'était même pas du JSON (cf. {@link AiInvalidOutputError}).
- *
- * Sur llama.cpp, ce n'est presque jamais un modèle qui répond en texte libre —
- * la grammaire GBNF le lui interdit token par token — mais une génération
- * **coupée en plein JSON**. Les deux causes constatées, toutes deux traitées
- * depuis : le plafond de génération du serveur, quand la requête n'en portait
- * pas ({@link PLAN_MAX_OUTPUT_TOKENS}), et le contexte saturé par des milliers
- * de tokens de raisonnement (cf. `client.ts`, « Le mode “thinking” n'est pas
- * demandé »).
- *
- * Le soupçon ne se vérifie plus par déduction : la ligne `[ai] contenu non-JSON
- * reçu` que `client.ts` journalise juste avant celle-ci porte la taille et les
- * deux extrémités du contenu fautif — une sortie coupée net en plein objet ne
- * ressemble ni à un raisonnement fuité ni à un refus en texte libre.
- */
-const TRUNCATION_HINT = 'sortie probablement tronquée (plafond de génération ou contexte ?)';
-
-/**
- * Journalise une tentative rejetée, avec ce qui est renvoyé au modèle.
- *
- * L'utilisatrice, elle, ne verra qu'un message générique : sans cette trace, un
- * échec de génération en production n'est rattachable à rien — ni au schéma, ni
- * aux règles d'entraînement, ni à un contexte saturé.
- */
-function logRejectedAttempt(
-  attempt: number,
-  schemaName: string,
-  nature: string,
-  detail: string,
-): void {
-  console.error(
-    `[plan] tentative ${attempt}/${MAX_ATTEMPTS} (${schemaName}) rejetée — ${nature} :\n${detail}`,
-  );
-}
 
 /**
  * Journalise si la génération qui démarre est **suivie** ou non.
@@ -1297,417 +595,6 @@ function logProgressTracking(progressId: string | undefined): void {
   );
 }
 
-/**
- * Génère, vérifie le contrat **et** les règles métier, et reprend en cas de
- * manquement — quel qu'en soit le genre — dans la limite de
- * {@link MAX_ATTEMPTS} tentatives.
- *
- * Les deux échecs se rattrapent de la même façon parce qu'ils ont la même
- * cause : un petit modèle qui a mal lu une consigne. Seul le message de reprise
- * diffère, selon qu'on lui reproche un champ ou une décision d'entraîneur.
- *
- * Les autres erreurs du socle IA remontent immédiatement : un coach injoignable
- * ({@link AiUnavailableError}) ou une réponse HTTP cassée
- * ({@link AiResponseError}) ne s'arrangeront pas en redemandant.
- *
- * @throws {AiInvalidOutputError} si la dernière tentative reste hors schéma (
- * l'erreur d'origine, avec ses anomalies) ou viole encore les règles métier —
- * le message porte alors la liste, pour que l'UI dise ce qui n'a pas pu être
- * respecté plutôt qu'« erreur ».
- */
-export async function generateWithBusinessRules<T>(options: GenerationOptions<T>): Promise<T> {
-  const messages = [...options.messages];
-  let violations: string[] = [];
-
-  const postProcess = planWeeksPostProcessing(options.paceContext, options.goalPaceSecPerKm);
-
-  const { progressId, progressChunk } = options;
-  /** L'avancement de cet appel, ramené à celui du plan quand il y a des tranches. */
-  const globalPercent = (percent: number): number =>
-    progressChunk === undefined
-      ? percent
-      : Math.min(99, Math.round((progressChunk.index * 100 + percent) / progressChunk.count));
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    // Chaque tentative repart de zéro : une reprise réécrit le plan complet,
-    // donc le pourcentage recommence — et le front dit « tentative 2/3 » plutôt
-    // que de laisser une barre reculer sans explication.
-    if (progressId !== undefined) {
-      setPlanProgress(progressId, { percent: globalPercent(0), attempt, maxAttempts: MAX_ATTEMPTS });
-    }
-
-    let output: T;
-    try {
-      output = await chatCompletionJson<T>({
-        messages,
-        schemaName: options.schemaName,
-        jsonSchema: options.jsonSchema,
-        schema: options.schema,
-        temperature: PLAN_TEMPERATURE,
-        // Explicite, sinon le serveur coupe la sortie à son propre défaut
-        // (cf. {@link PLAN_MAX_OUTPUT_TOKENS}).
-        maxTokens: PLAN_MAX_OUTPUT_TOKENS,
-        // Sa seule présence bascule l'appel en streaming (cf. `client.ts`).
-        onProgress:
-          progressId === undefined
-            ? undefined
-            : (receivedChars) => {
-                setPlanProgress(progressId, {
-                  percent: globalPercent(
-                    planProgressPercent(receivedChars, options.estimatedChars),
-                  ),
-                  attempt,
-                  maxAttempts: MAX_ATTEMPTS,
-                });
-              },
-      });
-    } catch (error) {
-      if (!(error instanceof AiInvalidOutputError)) throw error;
-
-      const reprise = buildSchemaIssuesMessage(error.issues);
-      logRejectedAttempt(
-        attempt,
-        options.schemaName,
-        error.issues.length === 0 ? `sortie hors schéma — ${TRUNCATION_HINT}` : 'sortie hors schéma',
-        reprise,
-      );
-
-      if (attempt === MAX_ATTEMPTS) {
-        console.error(
-          `[plan] génération abandonnée après ${MAX_ATTEMPTS} tentatives (${options.schemaName}) : ${error.message}`,
-        );
-        throw error;
-      }
-      messages.push({ role: 'user', content: reprise });
-      continue;
-    }
-
-    // Post-traitement, avant toute validation et dans les deux régimes : avec
-    // table, l'appli écrit les allures elle-même — le corridor qui suit devient
-    // alors trivialement satisfait, c'est voulu ; sans table, elle ne complète
-    // que les mesures manquantes, et le corridor juge les allures du modèle.
-    output = options.withPostProcessedWeeks(output, postProcess);
-
-    const weeks = options.weeksOf(output);
-    // Rien à juger : la sortie ne réécrit aucune semaine (cf. `weeksOf`).
-    if (weeks === null) return output;
-
-    violations = validatePlanBusinessRules(weeks, options.expectationsOf(output), {
-      ...options.paceContext,
-      // Le budget de la sortie, pas celui du contexte : cf. `weeklyTimeBudgetOf`.
-      weeklyTimeMinutes: options.weeklyTimeBudgetOf(output),
-    });
-    if (violations.length === 0) return output;
-
-    const reprise = buildViolationsMessage(violations);
-    logRejectedAttempt(attempt, options.schemaName, 'violations métier', reprise);
-
-    if (attempt < MAX_ATTEMPTS) {
-      messages.push({ role: 'user', content: reprise });
-    }
-  }
-
-  console.error(
-    `[plan] génération abandonnée après ${MAX_ATTEMPTS} tentatives (${options.schemaName}) : violations métier non corrigées.`,
-  );
-  throw new AiInvalidOutputError(
-    `Le coach n'est pas parvenu à respecter les contraintes du plan : ${violations.join(' ')}`,
-  );
-}
-
-/*
- * Génération par tranches.
- *
- * ## Le constat
- *
- * Un plan de 16 semaines à 6 séances pèse ~13 k tokens de JSON, le prompt ~3 k :
- * le contexte de 16 384 du serveur local est saturé, et la sortie se fait couper
- * en plein objet — trois tentatives, trois échecs, rien d'exploitable. Un plafond
- * de génération plus haut n'y peut rien : ce qui manque, c'est du contexte.
- *
- * ## Le découpage
- *
- * Au-delà de {@link CHUNK_WEEKS} semaines, le plan se génère en appels
- * successifs d'au plus six semaines. Chaque appel reçoit le système habituel,
- * **ses** volumes cibles, et un résumé d'une ligne de la tranche précédente pour
- * la continuité. Les semaines sont ensuite assemblées, post-traitées (allures,
- * durées, distances), puis jugées **globalement** : les règles de progression
- * parlent du plan entier, une tranche prise isolément n'a ni pic ni affûtage.
- *
- * Une violation désigne une semaine ; une semaine appartient à une tranche.
- * Seules les tranches fautives sont donc régénérées, dans la même limite de
- * {@link MAX_ATTEMPTS} tentatives chacune — régénérer les seize semaines parce
- * que la neuvième déborde coûterait tout ce que le découpage fait gagner.
- */
-
-/**
- * Au-delà de ce nombre de semaines, un plan ne se génère plus d'un seul tenant.
- *
- * Six : c'est le plus grand nombre qui laisse la sortie (~6 × 6 × 280 = 10 k
- * caractères, soit ~3 k tokens) et le prompt (~3 k tokens) tenir confortablement
- * dans les 16 k de contexte du serveur cible, marge de reprise comprise. C'est
- * aussi un bloc d'entraînement cohérent : trois semaines de montée, une allégée.
- */
-export const CHUNK_WEEKS = 6;
-
-/** Une tranche de génération : sa place dans le plan, et ce qu'elle doit rendre. */
-export type PlanChunkSpec = {
-  /** Rang de la tranche, à partir de 0. */
-  index: number;
-  /** Nombre total de tranches du plan. */
-  count: number;
-  /** Index de la première semaine couverte, à partir de 0. */
-  fromWeek: number;
-  /** Nombre de semaines de la tranche. */
-  weeks: number;
-};
-
-/**
- * Le découpage d'une fenêtre de `weeks` semaines en tranches d'au plus
- * {@link CHUNK_WEEKS}.
- *
- * Tranches **équilibrées** plutôt que remplies à ras bord : seize semaines font
- * 6 + 5 + 5, pas 6 + 6 + 4. Le nombre d'appels est le même, mais aucune tranche
- * ne se retrouve à décrire une semaine et demie de plan — un dernier appel
- * famélique paie le même prix de prompt qu'un appel plein pour bien moins de
- * plan écrit.
- */
-export function planChunks(weeks: number): PlanChunkSpec[] {
-  const count = Math.max(1, Math.ceil(weeks / CHUNK_WEEKS));
-  const base = Math.floor(weeks / count);
-  const remainder = weeks % count;
-
-  const chunks: PlanChunkSpec[] = [];
-  let fromWeek = 0;
-  for (let index = 0; index < count; index += 1) {
-    const size = base + (index < remainder ? 1 : 0);
-    chunks.push({ index, count, fromWeek, weeks: size });
-    fromWeek += size;
-  }
-  return chunks;
-}
-
-/** La tranche à laquelle appartient la semaine `weekNumber` (numérotée à partir de 1). */
-function chunkOfWeek(chunks: readonly PlanChunkSpec[], weekNumber: number): PlanChunkSpec | null {
-  return (
-    chunks.find(
-      (chunk) => weekNumber > chunk.fromWeek && weekNumber <= chunk.fromWeek + chunk.weeks,
-    ) ?? null
-  );
-}
-
-/**
- * Les semaines qu'une violation désigne — vide quand elle n'en nomme aucune.
- *
- * Les violations sont écrites pour le modèle, en français, et c'est leur seul
- * format : « Semaine 9 : … », « Semaines 5 à 8 : … », « il en manque semaine 3,
- * semaine 7 ». On y relit donc les numéros plutôt que de les faire remonter
- * séparément — le prix à payer pour que ces messages restent des phrases.
- *
- * Une violation qui ne nomme rien (« Plan trop plat », « le plan doit compter
- * exactement N semaines ») parle du plan entier : elle est renvoyée à toutes les
- * tranches, faute de savoir laquelle est en cause.
- */
-const VIOLATION_WEEK_PATTERN = /semaines?\s+(\d+)(?:\s*à\s*(\d+))?/gi;
-
-function violationWeeks(violation: string): number[] {
-  const weeks: number[] = [];
-  for (const match of violation.matchAll(VIOLATION_WEEK_PATTERN)) {
-    const from = Number(match[1]);
-    const to = match[2] === undefined ? from : Number(match[2]);
-    for (let week = from; week <= to; week += 1) weeks.push(week);
-  }
-  return weeks;
-}
-
-/** Les violations à renvoyer, tranche par tranche — les tranches saines n'y figurent pas. */
-function violationsByChunk(
-  violations: readonly string[],
-  chunks: readonly PlanChunkSpec[],
-): Map<number, string[]> {
-  const byChunk = new Map<number, string[]>();
-  const add = (index: number, violation: string): void => {
-    const own = byChunk.get(index);
-    if (own === undefined) byChunk.set(index, [violation]);
-    else if (!own.includes(violation)) own.push(violation);
-  };
-
-  for (const violation of violations) {
-    const weeks = violationWeeks(violation);
-    const targets = new Set(
-      weeks
-        .map((week) => chunkOfWeek(chunks, week)?.index)
-        .filter((index): index is number => index !== undefined),
-    );
-    if (targets.size === 0) {
-      for (const chunk of chunks) add(chunk.index, violation);
-      continue;
-    }
-    for (const index of targets) add(index, violation);
-  }
-
-  return byChunk;
-}
-
-/**
- * Le résumé d'une ligne que la tranche suivante reçoit de la précédente.
- *
- * Deux informations, et pas une de plus : le **volume** de la dernière semaine —
- * sans lui, la tranche suivante repart du volume qu'elle imagine, et la marche
- * entre deux tranches ne respecte plus rien — et les **séances de qualité** qui
- * s'y trouvaient, sans lesquelles le modèle enchaîne trois blocs de seuil
- * identiques d'une tranche à l'autre. Le reste du plan écrit ne remonte pas :
- * c'est précisément ce que le découpage cherche à ne pas repayer en contexte.
- */
-function chunkContinuityLine(weeks: readonly PlanWeekOutput[], weekNumber: number): string {
-  const last = weeks[weeks.length - 1];
-  const volume = weekVolumeKm(last);
-  const quality = last.sessions.filter(isIntensitySession).map((session) => session.kind.trim());
-
-  return [
-    `Fin de la tranche précédente — semaine ${weekNumber} :`,
-    volume === null ? 'volume non déclaré,' : `${formatNumber(volume, 1)} km,`,
-    quality.length === 0
-      ? 'aucune séance de qualité.'
-      : `séances de qualité : ${quality.join(', ')}.`,
-  ].join(' ');
-}
-
-/** Ce qu'une génération par tranches produit : le plan assemblé, et son résumé. */
-export type ChunkedWeeks = { weeks: PlanWeekOutput[]; summary: string | null };
-
-export type ChunkedGenerationOptions = {
-  chunks: PlanChunkSpec[];
-  /** Les messages d'une tranche, continuité comprise. */
-  messagesFor: (chunk: PlanChunkSpec, continuity: string | null) => ChatMessage[];
-  /**
-   * Les semaines de la **première** tranche, quand l'appelant les a déjà
-   * obtenues — un ajustement et une révision les tirent d'une enveloppe qui
-   * porte aussi leurs réglages et leur décision, que la tranche suivante n'a
-   * plus à produire. Absentes, la première tranche se génère comme les autres.
-   */
-  firstChunkWeeks?: PlanWeekOutput[] | null;
-  /** La dernière tranche porte-t-elle le résumé du plan ? */
-  withSummary: boolean;
-  /** Nom du schéma, pour la grammaire et les journaux. */
-  schemaName: string;
-  /** Ce que le plan **assemblé** doit respecter. */
-  expectations: PlanExpectations;
-  paceContext: Omit<PlanValidationContext, 'weeklyTimeMinutes'>;
-  weeklyTimeMinutes: number | null;
-  /** L'allure objectif à poser sur les blocs spécifiques ({@link applyImposedPaces}). */
-  goalPaceSecPerKm: number | null;
-  sessionsPerWeek: number;
-  progressId?: string;
-};
-
-/**
- * Génère un plan long **tranche par tranche**, l'assemble, le juge en entier, et
- * ne régénère que ce qui cloche.
- *
- * @throws {AiInvalidOutputError} si des violations subsistent alors qu'aucune
- * tranche fautive n'a plus de tentative — l'erreur porte la liste, comme une
- * génération d'un seul tenant.
- */
-export async function generateWeeksInChunks(
-  options: ChunkedGenerationOptions,
-): Promise<ChunkedWeeks> {
-  const { chunks } = options;
-  const weeksByChunk: PlanWeekOutput[][] = [];
-  const attempts = chunks.map(() => 0);
-  const lastIndex = chunks.length - 1;
-  let summary: string | null = null;
-
-  const generateChunk = async (chunk: PlanChunkSpec, reprise: string | null): Promise<void> => {
-    const continuity =
-      chunk.index === 0
-        ? null
-        : chunkContinuityLine(weeksByChunk[chunk.index - 1], chunk.fromWeek);
-    const withSummary = options.withSummary && chunk.index === lastIndex;
-    const messages = options.messagesFor(chunk, continuity);
-    // Le compte de séances devient une contrainte de grammaire dès que la
-    // tranche ne porte que des semaines pleines — seule la première peut porter
-    // la semaine entamée, qui en compte légitimement moins (cf.
-    // `ChunkSessionBounds`).
-    const sessionBounds = {
-      sessionsPerWeek: options.sessionsPerWeek,
-      hasStartedWeek: chunk.index === 0 && (options.expectations.firstWeekFromDay ?? 1) > 1,
-    };
-
-    const output = await generateWithBusinessRules<PlanChunkOutput>({
-      messages: reprise === null ? messages : [...messages, { role: 'user', content: reprise }],
-      schemaName: options.schemaName,
-      jsonSchema: planChunkJsonSchema(chunk.weeks, withSummary, sessionBounds),
-      schema: planChunkOutputSchemaFor(sessionBounds),
-      // Rien à juger ici : les règles de progression parlent du plan entier, et
-      // une tranche n'en est qu'un morceau. La validation a lieu à l'assemblage.
-      weeksOf: () => null,
-      expectationsOf: () => options.expectations,
-      weeklyTimeBudgetOf: () => options.weeklyTimeMinutes,
-      withPostProcessedWeeks: (chunkOutput, postProcess) => ({
-        ...chunkOutput,
-        weeks: postProcess(chunkOutput.weeks),
-      }),
-      goalPaceSecPerKm: options.goalPaceSecPerKm,
-      paceContext: options.paceContext,
-      progressId: options.progressId,
-      estimatedChars: estimatePlanChars(chunk.weeks, options.sessionsPerWeek),
-      progressChunk: { index: chunk.index, count: chunks.length },
-    });
-
-    attempts[chunk.index] += 1;
-    weeksByChunk[chunk.index] = output.weeks;
-    if (withSummary && output.summary !== undefined) summary = output.summary;
-  };
-
-  const seeded = options.firstChunkWeeks ?? null;
-  if (seeded !== null) {
-    weeksByChunk[0] = seeded;
-    attempts[0] = 1;
-  }
-
-  for (const chunk of chunks) {
-    if (chunk.index === 0 && seeded !== null) continue;
-    await generateChunk(chunk, null);
-  }
-
-  for (;;) {
-    const weeks = weeksByChunk.flat();
-    const violations = validatePlanBusinessRules(weeks, options.expectations, {
-      ...options.paceContext,
-      weeklyTimeMinutes: options.weeklyTimeMinutes,
-    });
-    if (violations.length === 0) return { weeks, summary };
-
-    // Par index croissant, jamais dans l'ordre d'apparition des violations :
-    // une tranche tire sa ligne de continuité de la précédente
-    // ({@link chunkContinuityLine}), donc régénérer la tranche 2 avant la 1 la
-    // calerait sur des semaines qui vont être remplacées dans la foulée.
-    const byChunk = [...violationsByChunk(violations, chunks)]
-      .filter(([index]) => attempts[index] < MAX_ATTEMPTS)
-      .sort(([left], [right]) => left - right);
-    if (byChunk.length === 0) {
-      console.error(
-        `[plan] génération par tranches abandonnée (${options.schemaName}) : violations métier non corrigées.`,
-      );
-      throw new AiInvalidOutputError(
-        `Le coach n'est pas parvenu à respecter les contraintes du plan : ${violations.join(' ')}`,
-      );
-    }
-
-    for (const [index, own] of byChunk) {
-      const chunk = chunks[index];
-      const reprise = buildViolationsMessage(own, chunk);
-      logRejectedAttempt(
-        attempts[index],
-        `${options.schemaName} (tranche ${index + 1}/${chunks.length})`,
-        'violations métier',
-        reprise,
-      );
-      await generateChunk(chunk, reprise);
-    }
-  }
-}
 
 /*
  * Le résumé d'un plan déjà écrit.
@@ -1763,14 +650,25 @@ const planSummaryJsonSchema: Record<string, unknown> = {
   },
 };
 
-const SUMMARY_SYSTEM_PROMPT = [
-  "Tu es coach de course à pied francophone. On te décrit un plan d'entraînement DÉJÀ ÉCRIT, et tu en rédiges le résumé pour l'athlète qui va le suivre.",
-  '',
-  '3 à 5 phrases, en français : la logique de la préparation, la progression prévue, les points de vigilance.',
-  '',
-  "Tu ne proposes rien et tu ne corriges rien — le plan est écrit, il n'est pas à discuter.",
-  "Tu n'écris aucune allure : l'application les calcule et les affiche elle-même, et un chiffre de plus contredirait le sien.",
-].join('\n');
+/**
+ * Le système du résumé, avec ses consignes supplémentaires s'il y en a.
+ *
+ * `extra` sert à l'ajustement, qui a une chose de plus à dire au modèle : que le
+ * plan qu'il résume vient d'être **recalculé** à la demande de l'athlète, et que
+ * son résumé doit le rattacher à ce qu'elle a demandé. Le reste — un plan écrit
+ * qui n'est pas à discuter, aucune allure — vaut dans les deux cas.
+ */
+function summarySystemPrompt(extra: readonly string[] = []): string {
+  return [
+    "Tu es coach de course à pied francophone. On te décrit un plan d'entraînement DÉJÀ ÉCRIT, et tu en rédiges le résumé pour l'athlète qui va le suivre.",
+    '',
+    '3 à 5 phrases, en français : la logique de la préparation, la progression prévue, les points de vigilance.',
+    '',
+    "Tu ne proposes rien et tu ne corriges rien — le plan est écrit, il n'est pas à discuter.",
+    "Tu n'écris aucune allure : l'application les calcule et les affiche elle-même, et un chiffre de plus contredirait le sien.",
+    ...extra,
+  ].join('\n');
+}
 
 /** Ce qu'une phase pèse dans le résumé : son nom en français. */
 const PHASE_LABELS: Record<PlanPhase, string> = {
@@ -1792,15 +690,71 @@ function phaseBreakdown(skeleton: readonly SkeletonWeek[]): string {
 }
 
 /**
- * Ce que le modèle reçoit du plan : ce qu'il doit résumer, et **rien qu'il
- * puisse contredire**.
+ * Les chiffres d'un plan **déjà écrit**, tels que le résumé les reçoit : la
+ * périodisation, l'amplitude des volumes, le nombre de créneaux de qualité.
  *
- * Aucune séance, aucune allure, aucun déroulé : le résumé parle de la forme de
- * la préparation, et lui donner deux cents séances lui ferait recopier des
- * chiffres que l'affichage porte déjà — le défaut que tout ce module passe son
- * temps à éviter.
+ * Trois lignes, et rien d'autre : ce sont les seuls faits que le modèle ne peut
+ * pas contredire, puisqu'ils sont calculés. Lui donner les séances lui ferait
+ * recopier des chiffres que l'affichage porte déjà — le défaut que tout ce
+ * module passe son temps à éviter.
+ */
+function writtenPlanFacts(
+  targets: readonly WeeklyVolumeTarget[],
+  skeleton: readonly SkeletonWeek[],
+): string[] {
+  const volumes = targets.map((target) => target.targetKm);
+  return [
+    `Périodisation : ${phaseBreakdown(skeleton)}.`,
+    `Volume hebdomadaire : de ${formatNumber(Math.min(...volumes), 1)} à ${formatNumber(Math.max(...volumes), 1)} km, ${formatNumber(volumes[volumes.length - 1], 1)} km la dernière semaine.`,
+    `Séances de qualité : ${qualitySlotCount(skeleton)} au total, le reste en endurance.`,
+  ];
+}
+
+/** Le nombre de créneaux de qualité d'un squelette, toutes semaines confondues. */
+function qualitySlotCount(skeleton: readonly SkeletonWeek[]): number {
+  return skeleton.reduce((total, week) => total + week.qualitySlots.length, 0);
+}
+
+/**
+ * Le paragraphe du coach : celui du modèle, ou celui de l'appli.
  *
- * Exportée pour que le prompt se juge sur pièce dans les tests.
+ * Ne lève jamais — c'est tout l'objet de la fonction. Le repli est **journalisé**
+ * avec sa cause : sans cette trace, un coach en panne depuis des semaines est
+ * indiscernable d'un coach qui écrit bien, les deux rendant un plan complet.
+ *
+ * @param fallback le texte que l'appli écrit à sa place. Évalué paresseusement :
+ * il n'a pas de raison d'être composé quand le modèle répond.
+ */
+async function coachParagraph(
+  messages: ChatMessage[],
+  fallback: () => string,
+): Promise<string> {
+  try {
+    const output = await chatCompletionJson<z.infer<typeof planSummaryOutputSchema>>({
+      messages,
+      schemaName: SUMMARY_SCHEMA_NAME,
+      jsonSchema: planSummaryJsonSchema,
+      schema: planSummaryOutputSchema,
+      temperature: PLAN_TEMPERATURE,
+      maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
+      timeoutMs: SUMMARY_REQUEST_TIMEOUT_MS,
+    });
+    return output.summary;
+  } catch (error) {
+    console.error(
+      `[plan] résumé écrit par l'appli — ${error instanceof Error ? `${error.name} : ${error.message}` : String(error)}`,
+    );
+    return fallback();
+  }
+}
+
+/*
+ * Le résumé d'une création.
+ */
+
+/**
+ * Ce que le modèle reçoit du plan créé : ce qu'il doit résumer, et **rien qu'il
+ * puisse contredire** (cf. {@link writtenPlanFacts}).
  */
 function buildPlanSummaryMessages(
   request: PlanRequest,
@@ -1809,11 +763,9 @@ function buildPlanSummaryMessages(
   skeleton: readonly SkeletonWeek[],
 ): ChatMessage[] {
   const endsOn = shiftCivilDate(window.anchor, window.weeks * 7 - 1);
-  const volumes = targets.map((target) => target.targetKm);
-  const slots = skeleton.reduce((total, week) => total + week.qualitySlots.length, 0);
 
   return [
-    { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+    { role: 'system', content: summarySystemPrompt() },
     {
       role: 'user',
       content: [
@@ -1823,9 +775,7 @@ function buildPlanSummaryMessages(
         `Niveau déclaré : ${LEVEL_LABELS[request.level]}.`,
         `Plan écrit : ${window.weeks} semaines, du ${formatCivilDate(window.startsOn)} au ${formatCivilDate(endsOn)}.`,
         `Contraintes : ${formatConstraints(request)}.`,
-        `Périodisation : ${phaseBreakdown(skeleton)}.`,
-        `Volume hebdomadaire : de ${formatNumber(Math.min(...volumes), 1)} à ${formatNumber(Math.max(...volumes), 1)} km, ${formatNumber(volumes[volumes.length - 1], 1)} km la dernière semaine.`,
-        `Séances de qualité : ${slots} au total sur le plan, le reste en endurance.`,
+        ...writtenPlanFacts(targets, skeleton),
       ].join('\n'),
     },
   ];
@@ -1846,7 +796,7 @@ function fallbackPlanSummary(
   skeleton: readonly SkeletonWeek[],
 ): string {
   const volumes = targets.map((target) => target.targetKm);
-  const slots = skeleton.reduce((total, week) => total + week.qualitySlots.length, 0);
+  const slots = qualitySlotCount(skeleton);
 
   return [
     `Plan de ${window.weeks} semaines à partir du ${formatCivilDate(window.startsOn)}, ` +
@@ -1861,36 +811,16 @@ function fallbackPlanSummary(
   ].join(' ');
 }
 
-/**
- * Le résumé du plan : celui du modèle, ou celui de l'appli.
- *
- * Ne lève jamais — c'est tout l'objet de la fonction. Le repli est **journalisé**
- * avec sa cause : sans cette trace, un coach en panne depuis des semaines est
- * indiscernable d'un coach qui écrit bien, les deux rendant un plan complet.
- */
+/** Le résumé d'une création : celui du modèle, ou celui de l'appli. */
 async function planSummary(
   request: PlanRequest,
   window: PlanWindow,
   targets: readonly WeeklyVolumeTarget[],
   skeleton: readonly SkeletonWeek[],
 ): Promise<string> {
-  try {
-    const output = await chatCompletionJson<z.infer<typeof planSummaryOutputSchema>>({
-      messages: buildPlanSummaryMessages(request, window, targets, skeleton),
-      schemaName: SUMMARY_SCHEMA_NAME,
-      jsonSchema: planSummaryJsonSchema,
-      schema: planSummaryOutputSchema,
-      temperature: PLAN_TEMPERATURE,
-      maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
-      timeoutMs: SUMMARY_REQUEST_TIMEOUT_MS,
-    });
-    return output.summary;
-  } catch (error) {
-    console.error(
-      `[plan] résumé écrit par l'appli — ${error instanceof Error ? `${error.name} : ${error.message}` : String(error)}`,
-    );
-    return fallbackPlanSummary(request, window, targets, skeleton);
-  }
+  return coachParagraph(buildPlanSummaryMessages(request, window, targets, skeleton), () =>
+    fallbackPlanSummary(request, window, targets, skeleton),
+  );
 }
 
 /**
@@ -2088,7 +1018,16 @@ function validatedPlanWeeks(params: {
   postProcess: PlanWeeksPostProcessing;
   expectations: PlanExpectations;
   context: PlanValidationContext;
-  request: PlanRequest;
+  /**
+   * La configuration en une ligne, telle qu'elle part au journal si même le
+   * plan tout-déterministe échoue — de quoi rejouer le cas à l'identique.
+   *
+   * Une chaîne, et pas la demande d'origine : cet escalier sert désormais deux
+   * chemins qui n'ont pas la même entrée (une création part d'un
+   * {@link PlanRequest}, une reconstruction part d'un plan en base), et seule
+   * la trace les distingue.
+   */
+  describe: string;
 }): PlanWeekOutput[] {
   const { skeleton, postProcess, expectations, context } = params;
 
@@ -2112,7 +1051,7 @@ function validatedPlanWeeks(params: {
   if (deterministic.violations.length === 0) return deterministic.weeks;
 
   console.error(
-    `[plan] plan tout-déterministe encore hors règles — ${describePlanRequest(params.request)} :\n${deterministic.violations.join('\n')}`,
+    `[plan] plan tout-déterministe encore hors règles — ${params.describe} :\n${deterministic.violations.join('\n')}`,
   );
   throw new InvalidGeneratedPlanError(deterministic.violations);
 }
@@ -2233,7 +1172,7 @@ async function writeGeneratedPlan(
     postProcess: planWeeksPostProcessing(context, goalPaceSecPerKm(request.goalText)),
     expectations,
     context,
-    request,
+    describe: describePlanRequest(request),
   });
 
   // 4. Le résumé, seul texte libre du plan — et le seul endroit où l'écriture du
@@ -2344,23 +1283,1430 @@ export function planSettingsPatch(
   return patch;
 }
 
+/*
+ * ------------------------------------------------------------------------
+ * Reconstruction de la fenêtre restante — la capacité commune à l'ajustement
+ * et à la révision.
+ * ------------------------------------------------------------------------
+ *
+ * ## Ce qu'elle fait, et pourquoi elle existe une seule fois
+ *
+ * Exactement ce que fait une création ({@link writeGeneratedPlan}) — chiffrer
+ * les volumes, écrire le squelette, ne faire remplir que les créneaux de
+ * qualité, assembler, poser les allures, valider avec dégradation — mais sur la
+ * **fin** d'un plan en cours au lieu d'un plan neuf.
+ *
+ * Les deux chemins qui en ont besoin (l'ajustement par instruction et la
+ * révision automatique) ne diffèrent que par ce qui les déclenche et par le
+ * texte qu'ils écrivent ; ce qu'ils font au calendrier est identique au geste
+ * près. Les écrire deux fois, c'était garantir qu'ils divergeraient — et c'est
+ * exactement ce qui s'était passé : la création est passée au squelette pendant
+ * qu'ils continuaient à faire réécrire des semaines entières par le modèle.
+ *
+ * ## Les trois choses qu'une fenêtre partielle change
+ *
+ * **1. Le passé ne se réécrit pas.** La fenêtre commence demain
+ * ({@link remainingPlanWindow}) : sa première semaine est entamée, et le
+ * squelette n'y pose de séances qu'à partir du jour de reprise. Le DAL, lui,
+ * protège de toute façon les séances déjà réalisées ({@link applyPlanUpdate}).
+ *
+ * **2. D'où repart la progression : du réel, pas du plan.** C'est la décision
+ * de conception de ce chantier, et elle mérite d'être écrite (cf.
+ * {@link remainingVolumeTargets}).
+ *
+ * **3. La périodisation ne redémarre pas.** Une fenêtre restante n'est pas un
+ * plan neuf : les phases sont calculées sur le plan **entier** puis tranchées
+ * (cf. {@link remainingPhases}).
+ */
+
+/** Ce qu'il faut pour reconstruire la fin d'un plan en cours. */
+export type RemainingPlanRewriteParams = {
+  /** Le plan en cours, tel que le DAL le rend. */
+  plan: PlanDto;
+  /** La fenêtre restante ({@link remainingPlanWindow}). */
+  window: RemainingPlanWindow;
+  /** L'état d'entraînement réel de l'athlète — l'ancrage des volumes. */
+  snapshot: TrainingSnapshotDto;
+  /**
+   * Ce que le plan **prescrit** par semaine ISO, en km ({@link planWeeklyVolumeKm})
+   * — la mémoire de ce qu'il visait.
+   *
+   * Sans elle, la reconstruction repart du seul réel, et la boucle « je prescris
+   * → elle court → je m'ancre sur ce qu'elle a couru » a un gain égal au taux de
+   * réalisation : ×2,50 sur 16 semaines à réalisation 1,05, ×0,24 à 0,9 (cf.
+   * {@link CONTINUATION_RULES.realizationRelief}). Une carte vide reste
+   * acceptable — la reconstruction retombe alors sur le réel nu — et c'est ce qui
+   * arrive sur un plan dont aucune séance ne porte de volume.
+   */
+  plannedWeeklyKm: ReadonlyMap<string, number>;
+  /**
+   * Les réglages durables que l'appelant fait bouger — `undefined` quand il n'en
+   * change aucun. C'est la seule chose que le modèle décide encore du
+   * calendrier : le nombre de séances, le jour de sortie longue, le budget temps.
+   */
+  settings?: PlanSettingsOutput;
+  /**
+   * Appelé après chaque créneau rempli, pour la barre de progression — absent
+   * quand personne ne regarde (la révision tourne à l'import).
+   */
+  onSlotFilled?: (filled: number, total: number) => void;
+};
+
+/** Ce que la reconstruction rend : les semaines, et de quoi en parler. */
+export type RemainingPlanRewrite = {
+  /** Les semaines de la fenêtre, validées — prêtes pour {@link mapPlanWeeksToSessions}. */
+  weeks: PlanWeekOutput[];
+  /** Les cibles chiffrées de la fenêtre, dans l'ordre. */
+  targets: WeeklyVolumeTarget[];
+  /** Le squelette, pour ce que le résumé en dit (périodisation, créneaux). */
+  skeleton: SkeletonWeek[];
+  /** Les réglages effectifs de la fenêtre, patch appliqué. */
+  effectiveSettings: EffectivePlanSettings;
+};
+
+/** Les réglages d'un plan une fois le patch de l'appelant appliqué. */
+export type EffectivePlanSettings = {
+  sessionsPerWeek: number;
+  longRunDay: number;
+  weeklyTimeMinutes: number | null;
+};
+
 /**
- * Applique une instruction en langage naturel au plan actif (« je pars en
- * déplacement la semaine prochaine », « plutôt 3 séances »).
+ * Les réglages du plan, patchés par ce que l'appelant a décidé.
+ *
+ * `resolveWeeklyTimeBudget` porte les trois états du budget temps (absent,
+ * `null`, valeur) : c'est la même fonction qui décide ici de ce que le
+ * planificateur vise et là de ce que la validation vérifie, donc les deux ne
+ * peuvent pas diverger.
+ */
+function effectiveSettingsOf(
+  plan: PlanDto,
+  settings: PlanSettingsOutput | undefined,
+): EffectivePlanSettings {
+  return {
+    sessionsPerWeek: settings?.sessionsPerWeek ?? plan.sessionsPerWeek,
+    longRunDay: settings?.longRunDay ?? plan.longRunDay,
+    weeklyTimeMinutes: resolveWeeklyTimeBudget(settings, plan.weeklyTimeMinutes),
+  };
+}
+
+/**
+ * Le jour ISO du jour J d'un plan en cours, `null` quand il n'y en a pas.
+ *
+ * Il compte ici pour les mêmes raisons qu'à la création, et il comptait déjà
+ * avant qu'on sache s'en servir : sans lui, la dernière semaine reçoit une
+ * « Sortie longue » posée le jour de sortie longue habituel — y compris quand ce
+ * jour-là *est* celui de la course — et des séances **après** l'épreuve. La
+ * différence est qu'une reconstruction réécrit désormais cette semaine-là, donc
+ * qu'elle doit la traiter comme la création la traite.
+ *
+ * ## Pourquoi la date est vérifiée, et pas seulement lue
+ *
+ * Ce jour ISO est **posé sur la dernière semaine de la fenêtre** par
+ * {@link PlanExpectations.raceDay} et par le squelette : dire « jour J = mardi »
+ * ferme cette semaine-là au mardi et y déplace le plus gros effort. Se contenter
+ * de lire le jour de la semaine de `raceDate`, sans vérifier que cette date
+ * tombe bien dans la dernière semaine, c'est faire ce ravage sur une semaine qui
+ * n'est pas celle de la course — et amputer une semaine ordinaire de ses cinq
+ * derniers jours.
+ *
+ * La fenêtre restante se termine avec le plan, donc l'incohérence n'est pas
+ * atteignable aujourd'hui. Elle a pourtant déjà coûté : c'est exactement elle
+ * qui rendait une fixture de test fausse sans que rien ne le dise. Le repli est
+ * de **ne pas déclarer de jour J** — la dernière semaine redevient une semaine
+ * comme les autres, ce qui est faux mais inoffensif — et de le journaliser, sans
+ * quoi une fenêtre mal découpée resterait indiscernable d'un plan sans course.
+ */
+function planRaceIsoDay(plan: PlanDto, window: RemainingPlanWindow): number | null {
+  if (plan.goalType !== 'race' || plan.raceDate === null || !isCivilDate(plan.raceDate)) return null;
+
+  const lastWeekStart = shiftCivilDate(window.firstWeekStart, (window.weeks - 1) * 7);
+  const offset = civilDaysBetween(lastWeekStart, plan.raceDate);
+  if (offset < 0 || offset >= 7) {
+    console.error(
+      `[plan] plan ${plan.id} : course le ${plan.raceDate}, hors de la dernière semaine de la ` +
+        `fenêtre reconstruite (${lastWeekStart} + 7 jours) — jour J non déclaré.`,
+    );
+    return null;
+  }
+
+  return isoDayIndex(plan.raceDate) + 1;
+}
+
+/**
+ * La périodisation de la fenêtre restante : celle du **plan entier**, tranchée.
+ *
+ * ## Pourquoi elle ne se recalcule pas sur la fenêtre
+ *
+ * Parce que {@link planPhases} déduit les phases d'une **durée** : quelques
+ * semaines de base, du développement, de la spécificité, l'affûtage. Appliquée
+ * aux dix semaines restantes d'un plan de seize, elle rendrait « quelques
+ * semaines de base » — et renverrait en phase de base une athlète qui entre dans
+ * son bloc spécifique. Pire : la périodisation redémarrerait à **chaque**
+ * ajustement, et comme la révision se déclenche toutes les quatre séances, le
+ * plan ne quitterait jamais sa base.
+ *
+ * On calcule donc les phases sur le plan entier — la seule fenêtre où
+ * « 30 % de base, 40 % de développement, 30 % de spécificité » veut dire quelque
+ * chose — et on n'en garde que la queue. La position dans la préparation est
+ * ainsi **conservée par construction**, sans qu'on ait à l'inventer.
+ *
+ * ## L'exception de la semaine entamée
+ *
+ * La première semaine restante est entamée : des séances y ont déjà eu lieu,
+ * dont peut-être une séance de qualité, et rien de ce qui remonte ici ne le dit.
+ * Elle est donc ramenée à `partial`, exactement comme la semaine de départ d'une
+ * création, et pour la même raison — poser une séance dure derrière des jours
+ * inconnus est un pari qu'aucun entraîneur ne prend. La semaine de **course**,
+ * elle, garde sa phase : elle ne porte de toute façon aucune qualité, et lui
+ * retirer son étiquette lui retirerait sa course.
+ */
+function remainingPhases(plan: PlanDto, window: RemainingPlanWindow): PlanPhase[] {
+  const race = raceGoalOf(plan.goalType, plan.goalText);
+  const full = planPhases({
+    weeks: plan.weeks,
+    // La périodisation d'origine : celle qu'a connue le plan quand il a été
+    // écrit, jour de départ compris.
+    firstWeekFromDay: isoDayIndex(plan.startsOn) + 1,
+    race,
+  });
+
+  // La fenêtre se termine avec le plan : ses semaines sont donc les dernières.
+  const phases = full.slice(Math.max(0, full.length - window.weeks));
+  if (window.firstWeekFromDay > 1 && phases.length > 0 && phases[0] !== 'race') {
+    phases[0] = 'partial';
+  }
+  return phases;
+}
+
+/**
+ * Ce que le plan **prescrit** par semaine ISO, en kilomètres — la mémoire de ce
+ * qu'il visait, dont la reconstruction a besoin pour ne pas repartir du seul
+ * réel (cf. {@link CONTINUATION_RULES.realizationRelief}).
+ *
+ * Les séances du plan sont la seule trace de ses volumes : rien ne stocke les
+ * cibles hebdomadaires, et une reconstruction en réécrit une partie à chaque
+ * passage. Ce qui reste vrai, et c'est ce qui compte ici, c'est que les semaines
+ * **révolues** portent ce que la dernière reconstruction leur avait prescrit —
+ * le passé ne se réécrit pas (`applyPlanUpdate`).
+ *
+ * Une semaine dont **une seule** séance ne déclare pas sa distance est écartée
+ * plutôt que sous-estimée : la même prudence que `weekVolumeKm` dans
+ * `plan-schema.ts`, et pour la même raison — une somme partielle ferait constater
+ * un manquement qui n'existe pas, ici en faisant croire que l'athlète a dépassé
+ * sa prescription.
+ *
+ * Fonction pure, exportée pour être éprouvée et appelée par les deux chemins de
+ * reconstruction (l'ajustement par instruction et la révision automatique).
+ */
+export function planWeeklyVolumeKm(
+  sessions: readonly PlanSessionDto[],
+): ReadonlyMap<string, number> {
+  const byWeek = new Map<string, number>();
+  const incomplete = new Set<string>();
+
+  for (const session of sessions) {
+    const week = isoWeekStart(session.scheduledOn);
+    if (session.volumeM === null) {
+      incomplete.add(week);
+      continue;
+    }
+    byWeek.set(week, (byWeek.get(week) ?? 0) + session.volumeM / 1_000);
+  }
+
+  for (const week of incomplete) byWeek.delete(week);
+  return byWeek;
+}
+
+/*
+ * ------------------------------------------------------------------------
+ * L'arithmétique d'une **continuation** — explicite, autonome, et séparée de
+ * celle d'un démarrage.
+ * ------------------------------------------------------------------------
+ *
+ * ## Le constat qui a fait écrire cette section
+ *
+ * Quatre revues successives ont trouvé neuf défauts, tous ici, tous de la même
+ * famille : **invisibles sur une exécution, visibles sur la trajectoire d'un
+ * plan qu'on réadapte**. À chaque ronde, la correction ajoutait un paramètre
+ * optionnel à `weeklyVolumeTargets` (`firstFullWeekCapKm`, puis
+ * `firstFullWeekCadenceRank`) et créait une couture, qui produisait le défaut
+ * suivant.
+ *
+ * La cause racine était là : `weeklyVolumeTargets` est une fonction de
+ * **création** — elle sait démarrer : choisir un point de départ à partir du
+ * réel récent, monter, alléger, affûter — et on lui faisait faire de la
+ * **continuation** — reprendre un plan en cours à sa semaine N — par surcharges
+ * successives. Démarrer et continuer n'obéissent pas aux mêmes règles, et les
+ * mélanger dans une fonction paramétrée produit des cas limites sans fin.
+ *
+ * D'où cette section : la continuation calcule ses cibles avec sa propre
+ * logique, lisible d'un bout à l'autre. Elle réutilise de `plan-schema.ts` les
+ * briques partagées — `taperWeekCount`, `taperFactors`, `floorKm`, `VOLUME_RULES.maxWeeklyGrowth`,
+ * `remainingWeekDays`, `isCutbackCadenceRank`, les constantes de
+ * {@link VOLUME_RULES} et {@link VOLUME_TARGET_RULES} — parce que deux arrondis
+ * ou deux cadences divergents produiraient des cibles que la validation refuse.
+ * Elle n'emprunte plus **jamais** le chemin de démarrage. Les deux paramètres
+ * optionnels ont été retirés de `weeklyVolumeTargets`, et c'est le signe que la
+ * séparation est propre : la création ne connaît plus la continuation.
+ *
+ * ## Le principe, en une phrase
+ *
+ * **Une marche par semaine calendaire franchie depuis la dernière semaine
+ * complète, jamais plus, jamais moins** — la marche étant celle que la cadence
+ * du plan d'origine assigne à cette semaine-là (la progression du niveau, ou la
+ * baisse d'une semaine allégée).
+ *
+ * Tout le reste en découle : c'est ce qui rend la trajectoire **indépendante de
+ * la fréquence et du jour de réadaptation** pour une athlète qui court son plan.
+ * Réadapter un mercredi ou un dimanche, chaque semaine ou toutes les quatre, ne
+ * change rien : les mêmes semaines calendaires sont franchies, donc les mêmes
+ * marches sont appliquées.
+ *
+ * ## Les neuf propriétés, et les trajectoires qui les ont fait écrire
+ *
+ * Chacune est un défaut mesuré, retourné en spécification. Elles sont éprouvées
+ * dans `plan-service.test.ts`, section « la vie d'un plan » — un balayage
+ * complet (1 à 4 semaines entre réadaptations × 7 jours de déclenchement ×
+ * réalisation 0,9 / 1,0 / 1,05 / 5,0, sur 16 semaines de vie), et le modèle
+ * d'athlète y est **honnête** : la semaine en cours n'est courue qu'au prorata
+ * des jours écoulés. Ce détail-là n'en est pas un — tant que la simulation lui
+ * donnait son volume plein dès le premier jour, une branche que la production
+ * n'emprunte presque jamais recalait la trajectoire à chaque tour, et le harnais
+ * sauvait le code qu'il devait éprouver (défauts 7 et 8 ci-dessous).
+ *
+ * **1. Une marche par semaine calendaire franchie.** Avant : quand la fenêtre
+ * s'ouvrait en milieu de semaine, la première semaine *pleine* était deux
+ * semaines calendaires après l'ancre mais ne recevait qu'une marche — la
+ * progression marquait le pas, et chaque réadaptation en perdait une. Mesuré,
+ * athlète courant **exactement** son plan, réadaptée toutes les 2 semaines en
+ * milieu de semaine : `45,3 → 29,4 km, ×0,66 sur 16 semaines`. Un plan qui
+ * **décroît** pour quelqu'un d'assidu.
+ *
+ * **2. La cadence des semaines allégées est celle du plan d'origine**, en
+ * semaines calendaires, quelle que soit la fréquence des reconstructions. Elle
+ * se lit de la position de chaque semaine dans le plan
+ * ({@link planCadenceRank}), jamais de sa position dans la fenêtre : la révision
+ * se déclenchant toutes les quatre séances, une cadence comptée depuis la
+ * fenêtre remettait l'athlète au premier rang d'un bloc neuf à chaque passage,
+ * et elle n'atteignait donc **jamais** le quatrième — plus une seule semaine de
+ * récupération, jamais. Mesuré sur le code d'il y a deux rondes, plan de 24
+ * semaines, réadaptation hebdomadaire :
+ * `45,3 → 48,9 → 52,8 → 57,0 → 61,5 → 66,4 → 71,7 → 77,4 → 83,5 → 90,1 → 97,3 → 105,0`,
+ * soit +8 % par semaine pendant douze semaines quand un bloc de développement
+ * ne progresse que de 1,08³ × 0,85 = +1,7 % par semaine.
+ *
+ * **3. Une semaine n'est étiquetée `cutback` que si son volume baisse
+ * réellement** par rapport à ce que l'athlète a couru. Avant : la marche 0,85
+ * s'appliquait à l'ancre, y compris quand l'ancre venait du pont
+ * ({@link CONTINUATION_RULES.pauseBridgeShare}) ou du plancher
+ * ({@link CONTINUATION_RULES.demonstratedFloorShare}) — la cible étiquetée
+ * « allégée » était alors **au-dessus** du réel. Mesuré, semaines réelles
+ * `58, 60, 60, 20` : cible de **35,6 km étiquetée `cutback`, soit +78 % après
+ * une semaine à 20 km**, suivie de quatre hausses parce que la validation lisait
+ * l'étiquette et considérait la respiration consommée. Une reprise après
+ * interruption **est déjà** une décharge : lui appliquer 0,85 et déclarer la
+ * respiration consommée est faux des deux côtés. D'où le mode *reprise*
+ * ci-dessous, qui ne descend pas et rouvre un bloc.
+ *
+ * **4. La complétude d'une semaine se lit du calendrier**, pas de la géométrie
+ * de la fenêtre. Avant, la complétude se déduisait de
+ * `window.firstWeekStart > isoWeekStart(today)`, ce qui n'est vrai que sur une
+ * des deux branches de {@link remainingPlanWindow} : sur un plan **actif mais
+ * pas encore démarré** — l'état normal, `acceptDraftPlan` ne vérifie pas
+ * `startsOn` —, la semaine en cours, partielle, était comptée comme complète.
+ * Mesuré : **−30 %** sur la première semaine prescrite, et symétriquement une
+ * grosse semaine partielle relevait l'ancrage à tort. Ici, la semaine de `today`
+ * est **toujours** ouverte, et elle ne peut donc que **relever** l'ancrage.
+ *
+ * **5. Pas de cliquet montant, et une descente amortie.** Avant, l'ancre n'était bornée par
+ * rien vers le haut : à réalisation 1,05 la hausse hebdomadaire atteignait
+ * **1,134 > `maxWeeklyGrowth`** et le plan faisait **×2,50 sur 16 semaines** ;
+ * une seule sortie non planifiée dans une semaine allégée l'annulait et relevait
+ * **tout l'avenir de 18 %**. Symétriquement, à réalisation 0,9 le plan
+ * s'effondrait (**×0,24**). La boucle avait un gain `réalisation` par
+ * reconstruction, sans amortissement ni mémoire de ce que le plan visait. Elle
+ * en a une désormais : la reconstruction connaît **ce que le plan prescrivait**
+ * pour la semaine d'ancrage (`plannedWeeklyKm`), et le réel ne fait que la
+ * corriger, dans une bande ({@link CONTINUATION_RULES.realizationRelief}).
+ *
+ * **6. Aucune `InvalidGeneratedPlanError` là où un refus lisible est possible.**
+ * Corrigé à la source, dans `weeklySessionBudgets` (`plan-schema.ts`) : le
+ * budget de sortie longue est borné par le plus gros footing de la semaine.
+ *
+ * **7. L'affûtage se lit du plan, et sur toutes les géométries de fenêtre.**
+ * `lastBuild < firstFull` en couvre deux, pas une : la fenêtre entièrement
+ * d'affûtage, et celle qui s'ouvre **en milieu de semaine sur la dernière semaine
+ * de développement** — c'est-à-dire toute révision déclenchée un autre jour que
+ * le dimanche pendant cette semaine-là. La seconde repliait sur le point de
+ * départ de la fenêtre, un volume d'affûtage relu, et lui réappliquait les
+ * facteurs : **44,3 / 32,5 km le dimanche, 33,1 / 24,3 du lundi au jeudi, −25 %**,
+ * soit un facteur 1,44 sur la semaine de course pour le même plan et la même
+ * athlète (cf. le plafond de l'affûtage dans {@link remainingVolumeTargets}). Le
+ * **compte** des semaines d'affûtage se lit lui aussi du plan et non de la
+ * fenêtre, du même mouvement que la cadence de la propriété 2 : une fenêtre de 4
+ * à 7 semaines n'affûtait que deux semaines là où un marathon en affûte trois.
+ *
+ * **8. Aucun dixième ne se perd d'une reconstruction à l'autre.** {@link floorKm}
+ * est un plancher *strictement* inférieur : il retire un dixième à toute valeur
+ * déjà posée sur la grille. Appliqué à une cible relue — et une reconstruction
+ * relit toujours ce que la précédente a écrit —, il rabotait le plan de 0,1 km par
+ * passage : **56,7 km en semaine 17 au lieu de 58,6, ×0,968** sur seize
+ * réadaptations hebdomadaires. La chaîne de promesses garde donc la valeur brute
+ * à côté de la valeur planchée (cf. `promisedKm`).
+ *
+ * **9. Le plan peut remonter, et il ne peut pas s'emballer.** Le plafond du réel
+ * était la prescription *courante* : le plancher ne mesurait plus ce que l'athlète
+ * avait démontré mais ce que le plan lui avait permis, et la boucle se refermait
+ * sur elle-même — un creux de quatre semaines à 50 % coûtait **−77 %** du plan à
+ * la semaine 24, et courir cinq fois le prescrit pendant seize semaines n'y
+ * changeait *rien*. Le plafond est désormais ce que le plan **promettait**, et le
+ * crédit peut dépasser 1 d'un cran borné par la règle de hausse.
+ */
+
+/**
+ * Ce qu'une **continuation** retient du passé récent, là où un démarrage
+ * n'aurait retenu qu'un plafond ({@link firstFullWeekMaxKm}).
+ *
+ * Quatre chiffres, quatre dimensions distinctes, et aucun n'est une règle de
+ * progression — celle-là reste {@link VOLUME_TARGET_RULES.weeklyGrowth}, sous le
+ * plafond {@link VOLUME_RULES.maxWeeklyGrowth}. Ces chiffres-ci ne disent pas
+ * *de combien on monte*, ils disent *depuis quoi*.
+ */
+const CONTINUATION_RULES = {
+  /**
+   * Le **pont d'une semaine sautée** : ce qu'il reste de l'avant-dernière
+   * semaine complète quand la dernière est vide ou effondrée.
+   *
+   * Une semaine à zéro dans un bloc — vacances, grippe, déplacement — ne remet
+   * pas une athlète au niveau de sa semaine à zéro : elle lui coûte une marche,
+   * pas sa condition. 70 %, soit une reprise à un peu moins des trois quarts du
+   * volume d'avant l'interruption, ce qui est la fourchette d'usage après une
+   * semaine d'arrêt.
+   *
+   * Le pont ne franchit **qu'une** semaine, et c'est ce qui le distingue d'un
+   * lissage : deux semaines consécutives en baisse ne sont plus un accident,
+   * c'est une tendance, et une tendance se suit.
+   */
+  pauseBridgeShare: 0.7,
+  /**
+   * Le **plancher démontré** : la reconstruction ne descend jamais sous ce quart
+   * du meilleur volume vu dans la fenêtre du snapshot.
+   *
+   * Sans lui, trois semaines à zéro rendent un ancrage nul, et une athlète à
+   * 52 km/semaine repart soit au départ par défaut de son niveau, soit — pire —
+   * sur un volume que le squelette refuse de financer
+   * (`PlanSkeletonInfeasibleError` : 5 km minimum à 6 séances). Un quart, c'est
+   * la reprise très prudente qu'on propose après un arrêt long, et c'est surtout
+   * un chiffre qui garde la fenêtre **écrivable** : 13 km pour une athlète de
+   * 52 km, largement au-dessus du minimum finançable.
+   */
+  demonstratedFloorShare: 0.25,
+  /**
+   * Ce que le plan **pardonne** d'écart à sa propre prescription, en part de
+   * cette prescription — l'amortisseur de la boucle de rétroaction.
+   *
+   * ## Le défaut qu'il ferme : le gain de boucle
+   *
+   * Chaque reconstruction s'ancre sur ce que l'athlète a couru ; ce qu'elle
+   * prescrit devient ce que l'athlète courra. C'est une boucle fermée, et son
+   * gain valait exactement le taux de réalisation. Mesuré sur 16 semaines de vie
+   * à réadaptation hebdomadaire : **×2,50 à réalisation 1,05** (avec une hausse
+   * hebdomadaire à 1,134, au-dessus du plafond de 1,12 que la validation
+   * applique *à l'intérieur* d'une fenêtre et ne peut donc pas voir), et
+   * **×0,24 à réalisation 0,9**. Un plan qui s'emballe et un plan qui s'effondre,
+   * pour ±5 à 10 % d'écart à sa propre prescription.
+   *
+   * ## Ce que la mémoire du plan change
+   *
+   * La reconstruction sait ce que le plan prescrivait pour la semaine
+   * d'ancrage : le réel n'est plus la source, il est la **correction**. Deux
+   * bornes, asymétriques à dessein :
+   *
+   * - **vers le haut, un cran, et un seul** : `min(recoveryCap, …)`, où le cran
+   *   vaut tout ce que `maxWeeklyGrowth` laisse au-dessus de la progression du
+   *   niveau, `VOLUME_TARGET_RULES.weeklyGrowth` (cf. la sortie de l'enfermement
+   *   dans {@link remainingVolumeTargets}).
+   *   Il ne dépend pas de *combien* l'athlète a dépassé sa prescription : le
+   *   cliquet montant entrait par là — une sortie non planifiée dans une semaine
+   *   allégée annulait la respiration et relevait tout l'avenir de 18 % —, et la
+   *   doctrine reste que le plan est un projet, pas un enregistreur. Ce cran-ci ne
+   *   sert qu'à laisser un plan **rejoindre sa propre promesse** quand il en a
+   *   décroché, et la promesse le plafonne ;
+   * - **vers le bas, ces 5 points** : `réel + 5 % du prescrit`, plafonné au
+   *   prescrit. Un écart de 5 % à la prescription est du bruit — une séance
+   *   écourtée, un GPS qui coupe — et le plan l'absorbe. Au-delà, c'est un
+   *   signal, et un signal se suit : l'écart au-delà des 5 points passe
+   *   intégralement dans l'ancrage.
+   *
+   * ## Ce que cela borne, et ce que cela ne borne pas
+   *
+   * À réalisation ≥ 0,95, la trajectoire est celle que le plan avait promise : le
+   * crédit sature son cran, et la promesse plafonne. Elle ne dépend alors de la
+   * fréquence de réadaptation qu'à **3 pour mille** près — le résidu d'arrondi des
+   * semaines entamées, éprouvé et borné dans « la vie d'un plan » ; le mot
+   * « exactement » qui figurait ici promettait plus que l'arithmétique ne tient.
+   * À réalisation 0,9, chaque reconstruction retient 0,95 —
+   * la trajectoire descend donc, ce qui est le comportement voulu, mais d'au plus
+   * 0,95 par reconstruction au lieu de 0,9. Sur 16 semaines à réadaptation
+   * hebdomadaire, `0,95¹⁶ = 0,44` du nominal au lieu de `0,9¹⁶ = 0,19`.
+   *
+   * Une dérive résiduelle vers le bas subsiste donc, et c'est **assumé** : une
+   * athlète qui ne court durablement que 90 % de ce qu'on lui prescrit doit voir
+   * son plan descendre. Le modèle de test qui la simule suppose une athlète dont
+   * la production est *proportionnelle* à la prescription, donc sans capacité
+   * propre ; une vraie athlète à capacité fixe voit le plan descendre jusqu'à sa
+   * capacité, où la réalisation revient à 1 — et le cran de remontée la ramène
+   * alors vers la promesse du plan, ce qui n'était pas le cas avant cette ronde.
+   */
+  realizationRelief: 0.05,
+} as const;
+
+/**
+ * Le lundi de la première semaine **pleine** du plan — le rang 0 de sa cadence.
+ *
+ * Une semaine entamée porte quelques jours et un volume proratisé : elle n'ouvre
+ * pas un bloc d'entraînement, et la création ne la compte pas non plus (cf.
+ * `firstFull` dans `weeklyVolumeTargets`). C'est la conserver ici qui fait qu'un
+ * plan démarré un mercredi retrouve ses respirations aux mêmes semaines, d'où
+ * qu'on le rouvre.
+ */
+function planFirstFullWeekStart(plan: { startsOn: string }): string {
+  const anchor = isoWeekStart(plan.startsOn);
+  return isoDayIndex(plan.startsOn) > 0 ? shiftCivilDate(anchor, 7) : anchor;
+}
+
+/**
+ * Le rang d'une semaine **calendaire** dans la cadence des semaines allégées du
+ * plan : 0 pour sa première semaine pleine, 3 pour la respiration qui referme le
+ * premier bloc, et ainsi de suite.
+ *
+ * Négatif pour une semaine antérieure au plan — la cadence n'a pas d'objet
+ * avant lui, et l'appelant le vérifie.
+ *
+ * C'est **la** correction de la propriété 2 : le rang se déduit des dates, donc
+ * de la position dans la préparation, et jamais de la position dans la fenêtre
+ * reconstruite. Une fenêtre neuve à chaque réadaptation ne déplace plus rien.
+ */
+function planCadenceRank(plan: { startsOn: string }, weekStart: string): number {
+  return Math.round(civilDaysBetween(planFirstFullWeekStart(plan), weekStart) / 7);
+}
+
+/**
+ * D'où la fenêtre repart, et dans quel régime.
+ *
+ * Le volume est celui de la **première semaine pleine** de la fenêtre, déjà
+ * projeté : toutes les marches calendaires qui séparent l'ancrage réel de cette
+ * semaine-là y sont appliquées.
+ */
+type ContinuationSeed = {
+  /** Volume plein visé pour la première semaine **pleine** de la fenêtre, en km. */
+  firstFullWeekKm: number;
+  /**
+   * Vrai quand ce volume ne prolonge pas un bloc en cours mais **rouvre** un
+   * bloc : le pont d'une semaine sautée, le plancher démontré, ou le repli du
+   * niveau quand rien n'ancre la reprise.
+   *
+   * Deux conséquences, et elles vont ensemble (propriété 3) : la cadence repart
+   * du rang 0 — une reprise n'hérite pas de la respiration du bloc qu'elle
+   * interrompt —, et la première semaine pleine n'est donc jamais étiquetée
+   * `cutback`, ce qui serait mentir à la validation sur une cible qui monte.
+   */
+  resumption: boolean;
+};
+
+/**
+ * Les volumes cibles d'une fenêtre restante, semaine par semaine.
+ *
+ * L'algorithme, dans l'ordre — et il se lit d'un bout à l'autre, c'est le point
+ * de ce chantier :
+ *
+ * 1. **La cadence.** Chaque semaine calendaire de la fenêtre reçoit son rang
+ *    dans le plan d'origine ({@link planCadenceRank}), et donc sa marche : la
+ *    progression du niveau, ou la baisse d'une semaine allégée.
+ * 2. **L'ancrage.** La dernière semaine ISO **révolue** du snapshot, corrigée
+ *    par ce que le plan prescrivait pour elle
+ *    ({@link CONTINUATION_RULES.realizationRelief}), puis projetée jusqu'à la
+ *    première semaine pleine de la fenêtre — une marche par semaine franchie.
+ *    La semaine en cours, elle, ne peut que **relever** cet ancrage : elle est
+ *    partielle par construction. Et deux garde-fous rouvrent un bloc plutôt que
+ *    de prolonger un effondrement : le pont d'une semaine sautée et le plancher
+ *    démontré.
+ * 3. **La montée**, marche après marche, plafonnée au budget temps.
+ * 4. **L'affûtage** ({@link taperFactors}), quand le plan mène à une course.
+ * 5. **La semaine entamée**, au prorata de ses jours restants — une marche en
+ *    dessous de la première semaine pleine parce qu'elle est une semaine
+ *    calendaire plus tôt, sauf quand l'affûtage la couvre déjà ou qu'elle **est**
+ *    la dernière semaine de développement du plan : la marche ne s'applique alors
+ *    à rien, le volume de cette semaine-là étant lu directement.
+ *
+ * Ce que cette fonction ne fait **pas**, et c'est délibéré : elle ne garde pas
+ * de réserve de montée sous le budget temps ({@link VOLUME_TARGET_RULES.peakHeadroom}).
+ * Cette réserve existe à la création pour rendre l'anti-plat satisfaisable ; une
+ * fenêtre restante est jugée en `scope: 'adjustment'`, où l'anti-plat ne
+ * s'applique pas (cf. `volumeViolations`). La garder amputerait le volume de
+ * 13 % pour une contrainte qui n'existe pas ici.
+ *
+ * Fonction **pure**, exportée pour être éprouvée directement : c'est cette
+ * arithmétique-là qui a coûté neuf défauts, et les éprouver à travers
+ * {@link rewriteRemainingPlan} — qui remplit des créneaux de qualité — rendrait
+ * le balayage de trajectoires trop lent pour être écrit.
+ */
+export function remainingVolumeTargets(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  snapshot: TrainingSnapshotDto,
+  settings: EffectivePlanSettings,
+  paces: TrainingPaces | null,
+  plannedWeeklyKm: ReadonlyMap<string, number>,
+): WeeklyVolumeTarget[] {
+  const weeks = window.weeks;
+  if (weeks <= 0) return [];
+
+  // Les plans antérieurs au champ n'en portent pas : `intermediate` est le
+  // régime médian, celui qui ne durcit ni n'allège la progression.
+  const level = plan.level ?? 'intermediate';
+  const race = raceGoalOf(plan.goalType, plan.goalText);
+  const growth = VOLUME_TARGET_RULES.weeklyGrowth[level];
+  const paceMinPerKm =
+    (easyPaceSecPerKm(snapshot, paces) ?? VOLUME_TARGET_RULES.fallbackEasyPaceSecPerKm) / 60;
+
+  const firstFull = window.firstWeekFromDay > 1 ? 1 : 0;
+
+  // Le plan s'offre-t-il des semaines allégées ? **La question se pose du plan,
+  // pas de la fenêtre**, et c'est la propriété 2 jusqu'au bout.
+  //
+  // La création pose cette condition sur le plan qu'elle écrit, ce qui est la
+  // même chose. La poser sur la fenêtre reconstruite ferait dépendre la cadence
+  // de la fréquence des réadaptations : mesuré sur une préparation de 16 semaines
+  // menant à une course, la respiration de la semaine 12 tombait bien quand on
+  // réadaptait toutes les 4 semaines (la fenêtre ouverte en semaine 9 est encore
+  // longue) et disparaissait en réadaptation hebdomadaire (la fenêtre ouverte en
+  // semaine 12 ne compte plus que deux semaines de développement avant
+  // l'affûtage). Deux athlètes, le même plan, deux périodisations.
+  //
+  // Rien ne s'y oppose côté validation : la règle des quatre semaines n'exige une
+  // respiration que sur une fenêtre assez longue, elle n'en interdit jamais une.
+  const planTaperWeeks = taperWeekCount(plan.weeks, race);
+  const planFirstFull = isoDayIndex(plan.startsOn) > 0 ? 1 : 0;
+  const planBuildWeeks = plan.weeks - planTaperWeeks - planFirstFull;
+  const eases =
+    plan.weeks >= VOLUME_RULES.minWeeksForCutback &&
+    planBuildWeeks >= VOLUME_RULES.minBuildWeeksForCutback;
+
+  // **L'affûtage se compte lui aussi du plan, pas de la fenêtre.** Une fenêtre
+  // restante finit toujours avec le plan : ses semaines d'affûtage sont donc les
+  // `planTaperWeeks` dernières du plan, tronquées par la longueur de la fenêtre.
+  //
+  // Le compter sur la fenêtre (`taperWeekCount(weeks, race)`) faisait dépendre
+  // l'affûtage de la date de la dernière réadaptation, du même mouvement que la
+  // cadence juste au-dessus : `taperWeekCount` n'ouvre la troisième semaine
+  // d'affûtage d'un marathon qu'à partir de huit semaines, si bien qu'une fenêtre
+  // de 4 à 7 semaines n'affûtait que deux semaines là où le plan en affûte trois.
+  // Mesuré sur un marathon de 20 semaines : la semaine 18 valait 46,6 km ou
+  // 63,2 km selon la réadaptation qui l'avait écrite.
+  const taper = Math.min(weeks, planTaperWeeks);
+  const taperFrom = weeks - taper;
+  const lastBuild = taperFrom - 1;
+
+  const budgetKm =
+    settings.weeklyTimeMinutes === null || settings.weeklyTimeMinutes <= 0
+      ? null
+      : (settings.weeklyTimeMinutes * VOLUME_TARGET_RULES.timeBudgetShare) / paceMinPerKm;
+
+  const planWeekStart = isoWeekStart(plan.startsOn);
+  const firstFullWeekStart = shiftCivilDate(window.firstWeekStart, firstFull * 7);
+
+  /**
+   * La marche que fait franchir la semaine calendaire `weekStart` — la seule
+   * définition de « une marche », et elle ne dépend que du calendrier.
+   *
+   * `1` (aucune marche) pour une semaine **antérieure au plan** : rien n'y était
+   * prescrit, et composer une progression sur des semaines que l'athlète n'a pas
+   * courues au titre du plan reviendrait à lui facturer un entraînement qui n'a
+   * pas eu lieu. Le cas se présente sur un plan actif dont la date de départ est
+   * encore devant (`acceptDraftPlan` ne vérifie pas `startsOn`).
+   */
+  const stepInto = (weekStart: string): number => {
+    if (weekStart < planWeekStart) return 1;
+    const rank = planCadenceRank(plan, weekStart);
+    return eases && rank >= 0 && isCutbackCadenceRank(rank) ? VOLUME_RULES.cutbackRatio : growth;
+  };
+
+  /**
+   * Un volume attribué à la semaine `fromWeek`, projeté jusqu'à `toWeek` : une
+   * marche par semaine calendaire franchie, jamais plus, jamais moins.
+   *
+   * C'est la propriété 1, et elle tient ici en trois lignes.
+   */
+  const project = (fromWeek: string, km: number, toWeek: string): number => {
+    let value = km;
+    for (let week = shiftCivilDate(fromWeek, 7); week <= toWeek; week = shiftCivilDate(week, 7)) {
+      value *= stepInto(week);
+    }
+    return value;
+  };
+
+  // La complétude d'une semaine se lit du **calendrier** (propriété 4) : la
+  // semaine de `today` est toujours en cours, donc toujours partielle, et les
+  // deux qui la précèdent sont toujours révolues. Aucune géométrie de fenêtre
+  // n'entre là-dedans.
+  const currentWeekStart = isoWeekStart(snapshot.today);
+  const lastCompleteWeekStart = shiftCivilDate(currentWeekStart, -7);
+  const previousCompleteWeekStart = shiftCivilDate(currentWeekStart, -14);
+
+  /**
+   * Ce que le plan **promettait** pour chaque semaine calendaire, en km : sa
+   * trajectoire d'origine, reconstruite de sa propre mémoire.
+   *
+   * ## Le défaut que cela ferme : le plan s'enfermait, et rien ne l'en sortait
+   *
+   * Le plafond de {@link counted} était la prescription **courante** de la
+   * semaine. Or cette prescription descend quand l'athlète décroche : le plancher
+   * ne mesurait donc plus ce qu'elle a *démontré*, mais ce que le plan lui avait
+   * *permis*, et la boucle se refermait sur elle-même. Mesuré sur un bloc libre
+   * de 24 semaines, réadaptation hebdomadaire, l'athlète revenant à 100 % après le
+   * creux : un creux de quatre semaines à 80 % coûtait **−39 %** du plan à la
+   * semaine 24 ; à 50 %, **−77 %**. Et après le creux à 50 %, la faire courir
+   * **cinq fois le prescrit pendant seize semaines** laissait la trajectoire
+   * identique au dixième — aucun chemin de sortie, sinon créer un plan neuf.
+   *
+   * ## La borne, et pourquoi elle tient les deux bouts
+   *
+   * La promesse d'une semaine, c'est le plus haut volume que le plan ait chiffré
+   * *avant* elle, mené jusqu'à elle par sa propre cadence — exactement la chaîne
+   * qu'une fenêtre écrit, `floorKm` compris, pour que les deux se recouvrent au
+   * dixième. Les semaines révolues ne sont jamais réécrites : leur prescription
+   * d'avant le décrochage est encore là, et c'est elle qui porte la promesse.
+   *
+   * - **elle autorise la remontée** : ce que l'athlète a démontré compte jusqu'à
+   *   cette promesse, même quand le plan courant est tombé bien plus bas ;
+   * - **elle ne rouvre pas le cliquet** : rien ne peut la franchir, et elle ne
+   *   peut pas monter d'elle-même. Une prescription vaut au plus la promesse, donc
+   *   la reprojeter rend au plus la promesse — c'est un point fixe, pas une
+   *   spirale. Un simple décapuchonnage de `bestKm`, lui, rouvrait le cliquet :
+   *   à réalisation 5, le plan atteignait 205 km/semaine.
+   *
+   * ## La promesse est **brute**, et c'est ce qui ferme la dérive du dixième
+   *
+   * {@link floorKm} est un plancher *strictement* inférieur : il retire un
+   * dixième à toute valeur déjà posée sur la grille — `floorKm(52,8)` vaut `52,7`,
+   * et c'est vrai des 900 dixièmes de 10 à 100 km. C'est exactement ce qu'on veut
+   * d'un produit qu'on vient de calculer, parce qu'une cible ne doit jamais se
+   * poser pile sur le plafond qu'elle respecte ; c'est un poison sur une valeur
+   * relue, parce qu'une reconstruction relit toujours ce que la précédente a
+   * écrit. Mesuré sur un bloc libre de 24 semaines, athlète assidue, réadaptation
+   * hebdomadaire du lundi, avec un modèle d'athlète honnête — la semaine en cours
+   * n'est courue qu'au prorata des jours écoulés : **56,7 km en semaine 17 au lieu
+   * de 58,6, ×0,968**, et la dérive croissait avec le nombre de reconstructions.
+   * Elle restait invisible tant que la simulation faisait courir la semaine en
+   * cours *entière* : la branche `project(currentWeekStart, …)` reprenait alors la
+   * main à chaque tour et recalait la trajectoire.
+   *
+   * La chaîne garde donc **deux lectures** de chaque promesse : le produit
+   * `raw`, que `floorKm` posera sur la grille une seule fois, en aval, et qui
+   * plafonne la *cible* ; et `written`, ce même produit tel qu'une fenêtre
+   * l'écrirait, qui plafonne ce qu'on porte au *crédit de l'athlète*. Les
+   * confondre coûte un dixième dans un sens ou dans l'autre : plafonner le réel
+   * par `raw` rend une athlète à réalisation 1,05 très légèrement au-dessus d'une
+   * athlète à 1,0 (mesuré : 59,9 contre 59,7 km en semaine 11), alors qu'elles
+   * doivent être identiques au dixième. Une prescription relue, elle, est déjà sur
+   * la grille : elle passe telle quelle dans les deux lectures.
+   *
+   * La carte est construite en une passe, de la première semaine chiffrée du plan
+   * jusqu'à la dernière dont on a besoin.
+   */
+  const promisedKm = new Map<string, { raw: number; written: number }>();
+  {
+    let firstPlannedWeek: string | null = null;
+    for (const [week, km] of plannedWeeklyKm) {
+      if (km > 0 && (firstPlannedWeek === null || week < firstPlannedWeek)) firstPlannedWeek = week;
+    }
+    if (firstPlannedWeek !== null) {
+      const last = firstFullWeekStart > currentWeekStart ? firstFullWeekStart : currentWeekStart;
+      let written = 0;
+      for (let week = firstPlannedWeek; week <= last; week = shiftCivilDate(week, 7)) {
+        const raised = written * stepInto(week);
+        const planned = plannedWeeklyKm.get(week) ?? 0;
+        written = planned >= raised ? planned : floorKm(raised);
+        promisedKm.set(week, { raw: Math.max(raised, planned), written });
+      }
+    }
+  }
+
+  /**
+   * Ce qu'une semaine réelle **compte** : ce que l'athlète y a couru, à la
+   * tolérance de {@link CONTINUATION_RULES.realizationRelief} près, et jamais plus
+   * que ce que le plan lui **promettait** ({@link promisedKm}).
+   *
+   * Le plafond est la moitié haute de la propriété 5 : courir plus que ce que le
+   * plan visait ne relève jamais le plan. C'est la **promesse** qui borne, et non
+   * la prescription courante : sans quoi les garde-fous de reprise ne mesurent
+   * plus ce que l'athlète a démontré mais ce que le plan lui a permis, et la
+   * boucle se referme sur elle-même.
+   *
+   * Sans promesse pour cette semaine-là — un plan sans séance chiffrée, une semaine
+   * d'avant le plan —, le réel nu fait foi, et c'est le seul régime que l'appli
+   * connaissait jusqu'ici.
+   */
+  const counted = (realizedKm: number, weekStart: string): number => {
+    const promised = promisedKm.get(weekStart);
+    return promised === undefined || promised.written <= 0
+      ? realizedKm
+      : Math.min(realizedKm, promised.written);
+  };
+
+  let openWeekKm = 0;
+  let lastCompleteKm = 0;
+  let previousCompleteKm = 0;
+  let bestKm = 0;
+
+  for (const week of snapshot.weeks) {
+    // Une semaine à venir n'a rien démontré. Le snapshot n'en produit pas, mais
+    // rien dans son type ne l'interdit, et une semaine future ferait ici un
+    // ancrage sur des kilomètres qui n'ont pas été courus.
+    if (week.startsOn > currentWeekStart) continue;
+
+    const km = counted(week.distanceKm, week.startsOn);
+    bestKm = Math.max(bestKm, km);
+    if (week.startsOn === currentWeekStart) openWeekKm = Math.max(openWeekKm, km);
+    if (week.startsOn === lastCompleteWeekStart) lastCompleteKm = Math.max(lastCompleteKm, km);
+    if (week.startsOn === previousCompleteWeekStart) {
+      previousCompleteKm = Math.max(previousCompleteKm, km);
+    }
+  }
+
+  /*
+   * Ce qui **prolonge** le bloc, en deux régimes et un garde-fou.
+   *
+   * ## Le régime nominal : le plan corrigé par le réel
+   *
+   * `credit` est ce que le réel vaut comme **correction** de la prescription :
+   * 1 quand l'athlète a couru son plan (à {@link CONTINUATION_RULES.realizationRelief}
+   * près), son taux de réalisation en dessous. La cible de la première semaine
+   * pleine est alors **ce que le plan visait déjà pour elle**, multiplié par ce
+   * crédit.
+   *
+   * C'est la forme qui ferme la propriété 5, et le détour par la prescription
+   * compte autant que le crédit. La version qui projetait le réel de semaine en
+   * semaine (le régime de repli ci-dessous) a un défaut que seule la trajectoire
+   * révèle : sur un déclenchement du dimanche, l'ancre est la semaine **révolue**
+   * et la cible porte sur la semaine d'après la semaine en cours — deux semaines
+   * plus loin. Chaque cible se calcule donc depuis celle d'il y a deux semaines,
+   * et les semaines paires et impaires forment deux suites indépendantes. Tant
+   * que la réalisation vaut 1, elles coïncident ; dès qu'elle s'en écarte, elles
+   * divergent autour des semaines allégées, et le vécu de l'athlète y prend des
+   * marches que rien n'autorise. Mesuré à réalisation 0,9, réadaptation
+   * hebdomadaire le dimanche : `41,4 → 47,2 km, +14 %`, au-dessus du plafond de
+   * 12 %. S'ancrer sur ce que le plan prescrivait pour **la semaine visée**
+   * rétablit une suite à un terme : chaque cible vaut la précédente × la marche
+   * de la semaine × le crédit, soit au plus `1,08 × recoveryCap = maxWeeklyGrowth`
+   * — le plafond lui-même, jamais au-dessus.
+   *
+   * ## Le régime de repli : le réel projeté
+   *
+   * Quand le plan ne prescrit rien pour la semaine d'ancrage ou pour la première
+   * semaine pleine — aucune séance chiffrée, ou une fenêtre qui déborde de ce que
+   * le plan couvre —, le réel est tout ce qu'il y a, et il se projette : une
+   * marche par semaine calendaire franchie.
+   *
+   * ## La sortie de l'enfermement : le crédit peut dépasser 1, d'un cran borné
+   *
+   * Le crédit ne remontait jamais au-dessus de 1. C'est ce qui tuait le cliquet —
+   * et c'est aussi ce qui enfermait le plan : une fois descendu, il ne pouvait plus
+   * que suivre sa propre descente, et l'athlète avait beau courir cinq fois le
+   * prescrit, rien ne bougeait (cf. {@link promisedKm}).
+   *
+   * Il monte désormais jusqu'à `recoveryCap` — `maxWeeklyGrowth` divisé par la
+   * progression du niveau, soit `1,12 / 1,08 = 1,037` pour un niveau
+   * intermédiaire —, et la cible
+   * reste plafonnée par la **promesse** du plan. Trois choses en découlent, et les
+   * trois comptent :
+   *
+   * - **le cliquet reste mort** : au-delà de la réalisation qui sature ce cran,
+   *   tout se vaut. À réalisation 1,0 comme à 1,05 comme à 5, le crédit vaut le
+   *   cran, la cible vaut la promesse, et la trajectoire est la même au dixième ;
+   * - **la remontée existe et ne peut pas s'emballer** : elle ne dépasse jamais la
+   *   promesse, qui est un point fixe (cf. {@link promisedKm}) ;
+   * - **la suite reste à un terme** : la cible vaut la précédente × la marche de la
+   *   semaine × le crédit, donc la hausse d'un raccord reste bornée par
+   *   `maxWeeklyGrowth` — ce qu'une projection du réel depuis la semaine révolue ne
+   *   garantit pas, puisqu'elle rouvre les deux suites paire et impaire décrites
+   *   plus haut. Mesuré avec une projection du réel : 37,2 → 42,1 km, **+13,2 %**,
+   *   au-dessus du plafond de 12 %.
+   *
+   * ## Le garde-fou : la semaine en cours ne peut que **relever**
+   *
+   * Elle est partielle par construction (propriété 4), donc elle sous-estime
+   * toujours : la compter comme une semaine complète ferait reculer le plan d'une
+   * athlète simplement parce qu'on est mardi. Un maximum lui laisse le seul rôle
+   * qu'elle peut tenir honnêtement — témoigner d'un volume déjà atteint —, et
+   * `counted` l'empêche de dépasser ce que le plan lui promettait, sans quoi une
+   * sortie non planifiée relèverait tout l'avenir.
+   */
+  const plannedAnchorKm = plannedWeeklyKm.get(lastCompleteWeekStart);
+  const plannedFirstFullKm = plannedWeeklyKm.get(firstFullWeekStart);
+  // Le cran de remontée se déduit de la règle de hausse, il ne se choisit pas :
+  // c'est tout ce que `maxWeeklyGrowth` laisse au-dessus de la **progression du
+  // niveau**, de sorte qu'un raccord `marche × crédit` reste sous le plafond que
+  // la validation applique à l'intérieur d'une fenêtre. La marche d'une semaine
+  // allégée est plus basse encore (0,85) : le cran y est donc, a fortiori, sans
+  // effet sur le plafond.
+  const recoveryCap = VOLUME_RULES.maxWeeklyGrowth / growth;
+  const credit =
+    plannedAnchorKm === undefined || plannedAnchorKm <= 0
+      ? null
+      : Math.min(
+          recoveryCap,
+          lastCompleteKm / plannedAnchorKm + CONTINUATION_RULES.realizationRelief,
+        );
+
+  // Le plafond de la promesse s'applique **sur la cible**, et pas seulement sur ce
+  // qui l'alimente : c'est lui qui borne la remontée, et c'est aussi lui qui fait
+  // que l'ancrage d'une athlète assidue vaut **exactement** la promesse — quelle
+  // que soit la fréquence des réadaptations, et sans qu'aucun dixième se perde en
+  // route.
+  const promisedFirstFullKm = promisedKm.get(firstFullWeekStart)?.raw ?? Number.POSITIVE_INFINITY;
+  const continuityKm = Math.min(
+    promisedFirstFullKm,
+    Math.max(
+      credit !== null && plannedFirstFullKm !== undefined && plannedFirstFullKm > 0
+        ? plannedFirstFullKm * credit
+        : project(lastCompleteWeekStart, lastCompleteKm, firstFullWeekStart),
+      project(currentWeekStart, openWeekKm, firstFullWeekStart),
+    ),
+  );
+
+  // Deux garde-fous qui **rouvrent** un bloc. Ce sont des niveaux de reprise, pas
+  // des volumes à faire progresser : ils s'appliquent tels quels à la première
+  // semaine pleine, sans marche et sans baisse (propriété 3).
+  const resumptionKm = Math.max(
+    previousCompleteKm * CONTINUATION_RULES.pauseBridgeShare,
+    bestKm * CONTINUATION_RULES.demonstratedFloorShare,
+  );
+
+  const seed: ContinuationSeed =
+    continuityKm > 0 && continuityKm >= resumptionKm
+      ? { firstFullWeekKm: continuityKm, resumption: false }
+      : resumptionKm > 0
+        ? { firstFullWeekKm: resumptionKm, resumption: true }
+        : // Rien n'ancre la reprise : pas un kilomètre dans le snapshot. Le repli
+          // est le départ prudent du niveau — et surtout **pas** les +20 % de
+          // `firstFullWeekMaxKm`, qui n'ont de toute façon rien à quoi
+          // s'appliquer. C'est un début de bloc, donc une reprise.
+          { firstFullWeekKm: VOLUME_TARGET_RULES.defaultStartKm[level], resumption: true };
+
+  // La cadence de la fenêtre : celle du plan quand on prolonge son bloc, un bloc
+  // neuf quand on reprend. Le `max(0, …)` couvre une fenêtre qui s'ouvrirait
+  // avant la première semaine pleine du plan — un rang négatif se lirait comme un
+  // rang 3 (la cadence est périodique) et poserait une respiration avant le
+  // premier effort.
+  const baseRank = seed.resumption ? 0 : Math.max(0, planCadenceRank(plan, firstFullWeekStart));
+
+  const start = floorKm(
+    budgetKm === null ? seed.firstFullWeekKm : Math.min(seed.firstFullWeekKm, budgetKm),
+  );
+  const kilometers = new Array<number>(weeks).fill(start);
+  const kinds = new Array<WeeklyVolumeTargetKind>(weeks).fill('build');
+
+  // La fenêtre s'ouvre-t-elle **sur** la respiration du bloc ? Alors la marche
+  // qui l'a chiffrée était la baisse, et son volume descend bien par rapport à ce
+  // que l'athlète a couru. Il ne reste qu'à l'étiqueter : c'est ce que la
+  // validation relit pour accepter que les trois semaines suivantes montent (cf.
+  // `volumeViolations`).
+  //
+  // En mode reprise, `baseRank` vaut 0 et cette étiquette ne peut pas tomber :
+  // c'est exactement la propriété 3.
+  const opensOnCutback = eases && isCutbackCadenceRank(baseRank);
+  if (opensOnCutback && firstFull < weeks) kinds[firstFull] = 'cutback';
+
+  // La marche que franchit la première semaine pleine, telle que **cette
+  // fenêtre-ci** la compte — la cadence du plan quand elle prolonge son bloc,
+  // celle d'un bloc neuf quand elle reprend. C'est la même valeur que celle qui
+  // vient de décider l'étiquette, et ce n'est pas un hasard : c'est elle qui
+  // relie la semaine entamée à la première semaine pleine, plus bas.
+  const stepIntoFirstFull = opensOnCutback ? VOLUME_RULES.cutbackRatio : growth;
+
+  for (let index = firstFull + 1; index <= lastBuild; index += 1) {
+    const previous = kilometers[index - 1];
+    if (eases && isCutbackCadenceRank(baseRank + index - firstFull)) {
+      kilometers[index] = floorKm(previous * VOLUME_RULES.cutbackRatio);
+      kinds[index] = 'cutback';
+      continue;
+    }
+    const raised = previous * growth;
+    kilometers[index] = floorKm(budgetKm === null ? raised : Math.min(raised, budgetKm));
+  }
+
+  // L'affûtage se cale sur la dernière semaine de développement de la fenêtre.
+  //
+  // Quand la fenêtre n'en compte aucune — cas rare à la création, courant ici —,
+  // ses semaines sont la *queue* de l'affûtage du plan : sa base est la dernière
+  // semaine de développement du **plan**, que la mémoire de celui-ci porte encore.
+  //
+  // Sans cette lecture, la base était le point de départ de la fenêtre — une
+  // projection de développement, une marche **au-dessus** du pic réel — et
+  // l'affûtage dépendait de la date de la dernière réadaptation. Mesuré sur une
+  // préparation de 16 semaines, semaine de course : **44,7 km quand la dernière
+  // réadaptation tombe en semaine 14, 41,4 km quand elle tombe en semaine 12**,
+  // pour le même plan et la même athlète.
+  //
+  // **`lastBuild < firstFull` couvre deux géométries, pas une**, et c'est le
+  // défaut que la première rédaction laissait ouvert :
+  //
+  // - `firstFull = 0` et `taperFrom ≤ 0` : la fenêtre entière, semaine d'ouverture
+  //   comprise, est de l'affûtage ;
+  // - `firstFull = 1` et `taperFrom = 1` : la fenêtre s'ouvre **en milieu de
+  //   semaine sur la dernière semaine de développement du plan**, et l'affûtage
+  //   occupe tout le reste. C'est le cas de toute révision déclenchée un autre
+  //   jour que le dimanche pendant cette semaine-là — la révision partant toutes
+  //   les quatre séances, il est courant.
+  //
+  // La seconde géométrie retombait sur `start`, qui est ici le volume relu d'une
+  // semaine **d'affûtage** : les facteurs s'y appliquaient une seconde fois.
+  // Mesuré sur une préparation de 16 semaines (mémoire du plan S14 = 59,2 ·
+  // S15 = 44,3 · S16 = 32,5), athlète assidue, révision en semaine 14 :
+  // **44,3 / 32,5 le dimanche, 33,1 / 24,3 du lundi au jeudi — −25 %**, soit un
+  // facteur 1,44 sur la semaine de course pour le même plan et la même athlète.
+  // Écrit en silence : `peakBuildVolume` étant nul sur cette fenêtre,
+  // `raceWeekMaxRatio` et la décroissance de l'affûtage étaient toutes deux
+  // court-circuitées.
+  const planLastBuildWeekStart = shiftCivilDate(
+    window.firstWeekStart,
+    (weeks - 1 - planTaperWeeks) * 7,
+  );
+  const plannedLastBuildKm = plannedWeeklyKm.get(planLastBuildWeekStart);
+  // **Le budget temps s'applique à la mémoire du plan comme au reste.** Une base
+  // relue n'a pas été chiffrée sous le budget d'aujourd'hui : celui-ci a pu être
+  // abaissé depuis, et l'ajustement ne transporte justement que trois réglages,
+  // dont celui-là. Sans ce plafond, la fenêtre se contredit elle-même —
+  // `targetMinutes` est ramené au budget quelques lignes plus bas, mais pas
+  // `targetKm`. Mesuré sur le balayage de conformité, fenêtre d'une semaine menant
+  // à une course, budget de 300 min : **53,4 km annoncés en 285 min**, quand ces
+  // 53,4 km en demandent 288. Le squelette ne lit que `targetKm` : il écrivait donc
+  // une semaine que `validatePlanBusinessRules` refuse, soit une
+  // `InvalidGeneratedPlanError` que l'athlète ne peut rien faire pour corriger — et
+  // que la révision automatique classe non transitoire, marqueur avancé compris.
+  const budgeted = (km: number): number => (budgetKm === null ? km : Math.min(km, budgetKm));
+  const taperBase =
+    lastBuild >= firstFull
+      ? kilometers[lastBuild]
+      : plannedLastBuildKm !== undefined && plannedLastBuildKm > 0
+        ? budgeted(plannedLastBuildKm)
+        : start;
+  // Les semaines d'affûtage de la fenêtre sont les **dernières** de celles du
+  // plan : leurs facteurs sont donc la queue de la série du plan.
+  const factors = taperFactors(planTaperWeeks).slice(planTaperWeeks - taper);
+  for (let index = taperFrom; index < weeks; index += 1) {
+    kilometers[index] = floorKm(taperBase * factors[index - taperFrom]);
+    kinds[index] = index === weeks - 1 ? 'race' : 'taper';
+  }
+
+  const remainingDays = remainingWeekDays(window.firstWeekFromDay);
+  if (firstFull === 1) {
+    // La semaine entamée vaut **une marche de moins** que la première semaine
+    // pleine : elle est une semaine calendaire plus tôt, et la propriété 1 ne
+    // souffre pas d'exception. C'est ce qui empêche la réadaptation en milieu de
+    // semaine de dériver — la semaine entamée devient, au passage suivant, la
+    // dernière semaine révolue, donc l'ancrage.
+    //
+    // Sa valeur **pleine** se prend avant tout arrondi, et jamais en divisant la
+    // cible de la première semaine pleine par la marche qui l'a produite. Deux
+    // raisons, mesurées toutes les deux :
+    //
+    // - `kilometers[firstFull]` est déjà passé par {@link floorKm} ; le rediviser
+    //   puis re-plancher retire un second dixième, et la semaine entamée devient
+    //   au tour suivant l'ancrage — la troncature ne se compense jamais ;
+    // - sous plafond de budget temps, cette cible **est** le plafond : la division
+    //   inverse rend alors une semaine entamée systématiquement trop basse
+    //   (49,2 km au lieu de 52,0 pour un budget de 300 min à 8:00/km), alors que
+    //   la semaine précédente était, elle aussi, au plafond.
+    //
+    // Trois cas, et ils suivent la géométrie de l'affûtage ci-dessus : la semaine
+    // entamée est déjà chiffrée par l'affûtage (`taperFrom` vaut alors 0, puisque
+    // l'affûtage de la fenêtre est celui du plan tronqué par sa longueur), ou elle
+    // **est** la dernière semaine de développement d'un plan qui mène à une
+    // course, ou elle précède d'une marche la première semaine pleine.
+    //
+    // Le `taper > 0` du deuxième cas n'est pas décoratif : sans course,
+    // `lastBuild < firstFull` se réduit à « dernière semaine du plan, révisée en
+    // milieu de semaine », et la mémoire du plan n'y a aucun titre à se substituer
+    // à l'ancrage réel. Mesuré sur un plan libre de 12 semaines, athlète à l'arrêt
+    // depuis un mois, mémoire du plan à 60 km : **34,2 km sur quatre jours** au
+    // lieu des 13,6 km que le repli du niveau prescrit.
+    const openWeekFullKm =
+      taperFrom === 0
+        ? taperBase * factors[0]
+        : lastBuild < firstFull && taper > 0
+          ? taperBase
+          : budgeted(seed.firstFullWeekKm / stepIntoFirstFull);
+    kilometers[0] = floorKm((openWeekFullKm * remainingDays) / 7);
+    // Le `kinds[0]` que la boucle d'affûtage vient peut-être de poser est écrasé,
+    // et c'est voulu : une semaine entamée est d'abord une semaine entamée.
+    kinds[0] = 'partial';
+  }
+
+  return kilometers.map((targetKm, index) => {
+    // Le budget d'une semaine entamée est celui de ses jours restants — la même
+    // arithmétique que la règle qui le vérifiera (`partialWeekTimeBudget`).
+    const share = index === 0 && firstFull === 1 ? remainingDays / 7 : 1;
+    const budgetMinutes =
+      settings.weeklyTimeMinutes === null
+        ? null
+        : Math.floor(settings.weeklyTimeMinutes * VOLUME_TARGET_RULES.timeBudgetShare * share);
+    const minutes = Math.round(targetKm * paceMinPerKm);
+
+    return {
+      targetKm,
+      targetMinutes: budgetMinutes === null ? minutes : Math.min(minutes, budgetMinutes),
+      kind: kinds[index],
+    };
+  });
+}
+
+/** Le plan en cours, en une ligne — la trace d'une reconstruction fautive. */
+function describeRemainingPlan(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  settings: EffectivePlanSettings,
+): string {
+  return [
+    `plan ${plan.id} « ${plan.goalText} »`,
+    plan.raceDate === null ? null : `course le ${plan.raceDate}`,
+    `${window.weeks}/${plan.weeks} semaines restantes à partir du ${window.firstWeekStart} (jour ${window.firstWeekFromDay})`,
+    `niveau ${plan.level ?? 'inconnu'}`,
+    `${settings.sessionsPerWeek} séances/semaine`,
+    `sortie longue jour ${settings.longRunDay}`,
+    settings.weeklyTimeMinutes === null ? null : `${settings.weeklyTimeMinutes} min/semaine`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(' · ');
+}
+
+/**
+ * Reconstruit les semaines restantes d'un plan en cours : squelette
+ * déterministe, créneaux de qualité remplis par le coach, validation avec
+ * dégradation en escalier.
+ *
+ * Le pipeline est celui de {@link writeGeneratedPlan}, aux trois différences
+ * décrites en tête de section — et cette fonction n'écrit **rien** en base :
+ * l'appelant décide de ce qu'il fait des semaines (les proposer, les écrire, les
+ * accompagner d'un texte).
+ *
+ * @throws {InvalidPlanError} quand le volume que la fenêtre vise ne finance pas
+ * les séances demandées ({@link planSkeletonOrInvalid}), ou quand il ne reste
+ * plus un seul jour à planifier.
+ * @throws {InvalidGeneratedPlanError} quand même la fenêtre tout-déterministe
+ * viole une règle métier — jamais une faute du modèle, une incohérence interne.
+ */
+export async function rewriteRemainingPlan(
+  params: RemainingPlanRewriteParams,
+): Promise<RemainingPlanRewrite> {
+  const { plan, window, snapshot } = params;
+  const effectiveSettings = effectiveSettingsOf(plan, params.settings);
+  const paces = planTrainingPaces(plan);
+  const race = raceGoalOf(plan.goalType, plan.goalText);
+  const raceDay = planRaceIsoDay(plan, window);
+
+  // La course est déjà courue mais sa semaine n'est pas finie : il ne reste
+  // aucun jour d'entraînement à poser. Le dire ici, plutôt que de laisser le
+  // squelette refuser une semaine de zéro séance avec un message qui parlerait
+  // de volume — la cause n'a rien à voir.
+  if (raceDay !== null && window.weeks === 1 && raceDay < window.firstWeekFromDay) {
+    throw new InvalidPlanError(
+      'weeks',
+      "Ce plan est arrivé à son terme : la course a eu lieu, il n'y a plus rien à replanifier.",
+    );
+  }
+
+  const targets = remainingVolumeTargets(
+    plan,
+    window,
+    snapshot,
+    effectiveSettings,
+    paces,
+    params.plannedWeeklyKm,
+  );
+
+  const expectations: PlanExpectations = {
+    // Fenêtre restante, pas plan complet : la règle anti-plat n'y a pas d'objet —
+    // exiger un pic supérieur à la première semaine restante réclamerait de
+    // monter le volume à quelques semaines de la course.
+    scope: 'adjustment',
+    weeks: window.weeks,
+    sessionsPerWeek: effectiveSettings.sessionsPerWeek,
+    longRunDay: effectiveSettings.longRunDay,
+    firstWeekFromDay: window.firstWeekFromDay,
+    // La fenêtre restante se termine avec le plan, donc avec la course : ses
+    // dernières semaines sont bien celles de l'affûtage.
+    race,
+    // Et sa dernière semaine est bien celle de la course — désormais réécrite
+    // ici, donc jugée comme telle (cf. {@link planRaceIsoDay}).
+    raceDay,
+    weeklyTargets: targets,
+  };
+  const context: PlanValidationContext = {
+    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
+    paces,
+    // Pas de `recentWeeklyKm` : cette règle-là plafonne la **première semaine
+    // pleine d'une création**, et la fenêtre reconstruite n'en est pas une. Son
+    // ancrage sur le réel est déjà fait, une fois, par les cibles ci-dessus.
+    weeklyTimeMinutes: effectiveSettings.weeklyTimeMinutes,
+  };
+
+  // 1. Le squelette de la fenêtre — périodisation conservée, volumes recalculés.
+  const skeleton = planSkeletonOrInvalid({
+    weeks: window.weeks,
+    firstWeekFromDay: window.firstWeekFromDay,
+    sessionsPerWeek: effectiveSettings.sessionsPerWeek,
+    longRunDay: effectiveSettings.longRunDay,
+    level: plan.level ?? 'intermediate',
+    race,
+    raceDay,
+    // Même filtre qu'à la création : `goalDistanceKm` cherche un motif de
+    // distance dans du texte libre, et sans ce garde-fou un objectif libre
+    // « me remettre après mon semi » recevrait des sorties longues spécifiques
+    // pour une échéance qui n'existe pas.
+    goalDistanceKm: plan.goalType === 'race' ? goalDistanceKm(plan.goalText) : null,
+    targets,
+    phases: remainingPhases(plan, window),
+  });
+
+  // 2. Le seul travail du modèle : le déroulé des séances dures. Ne lève jamais
+  //    — un créneau qui échoue se replie sur un déroulé déterministe.
+  const slots = skeleton.flatMap((week) => week.qualitySlots);
+  params.onSlotFilled?.(0, slots.length);
+  const filled = await fillQualitySlots(slots, params.onSlotFilled);
+
+  // 3. Assemblage, allures, validation — avec la dégradation en escalier.
+  const weeks = validatedPlanWeeks({
+    skeleton,
+    filled,
+    postProcess: planWeeksPostProcessing(context, goalPaceSecPerKm(plan.goalText)),
+    expectations,
+    context,
+    describe: describeRemainingPlan(plan, window, effectiveSettings),
+  });
+
+  return { weeks, targets, skeleton, effectiveSettings };
+}
+
+/*
+ * ------------------------------------------------------------------------
+ * Ajustement par instruction.
+ * ------------------------------------------------------------------------
+ */
+
+/** Nom du schéma transmis au serveur — identifiant libre, exigé par le format. */
+const INSTRUCTION_SCHEMA_NAME = 'plan_instruction';
+
+/**
+ * Le plafond de génération d'une lecture d'instruction, en tokens.
+ *
+ * Trois entiers en sortie : 256 est déjà dix fois trop. Explicite quand même,
+ * comme partout ailleurs — un `max_tokens` absent laisse le serveur trancher, et
+ * un JSON coupé ne rend pas un JSON incomplet, il ne rend pas de JSON du tout.
+ */
+const INSTRUCTION_MAX_OUTPUT_TOKENS = 256;
+
+/**
+ * Délai de garde de la lecture d'instruction : 60 secondes.
+ *
+ * Le même que le résumé, et pour la même raison : la sortie est minuscule, et le
+ * dépassement ne coûte rien de plus qu'un repli — ici, un plan recalculé sans
+ * changement de réglage.
+ */
+const INSTRUCTION_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Ce qu'on demande au modèle d'une instruction : la traduire en réglages
+ * durables, et rien d'autre.
+ *
+ * ## Ce que ce prompt ne demande plus, et ce que ça coûte
+ *
+ * Il ne demande plus de réécrire des semaines — c'est tout l'objet de
+ * l'inversion. La conséquence se dit franchement : une instruction **ponctuelle**
+ * (« je pars en déplacement la semaine prochaine ») n'a plus de champ où
+ * atterrir, puisque le calendrier est recalculé par l'appli à partir de réglages
+ * *durables*. Elle ne fait donc plus déplacer trois séances ; elle fait
+ * recalculer la fin du plan sur le volume réellement couru, ce qui est déjà
+ * quelque chose, et le résumé le dit à l'athlète plutôt que de le taire.
+ *
+ * Ce qu'on y gagne est ce que le modèle ne peut plus casser : la progression des
+ * volumes, le compte de séances, l'affûtage, la position dans la périodisation.
+ */
+const INSTRUCTION_SYSTEM_PROMPT = [
+  "Tu es coach de course à pied francophone. L'athlète te donne une consigne sur son plan en cours, et ton seul travail est de la traduire en RÉGLAGES DURABLES.",
+  '',
+  'Trois réglages existent, et rien d\'autre :',
+  '- `sessionsPerWeek` : le nombre de séances par semaine ;',
+  '- `longRunDay` : le jour de la sortie longue (1 = lundi … 7 = dimanche) ;',
+  '- `weeklyTimeMinutes` : le temps d\'entraînement hebdomadaire disponible, en minutes.',
+  '',
+  "Tu ne renseignes QUE ce que la consigne change explicitement, et tu omets le reste : un réglage absent est un réglage inchangé. Si la consigne ne change aucun de ces trois réglages (une gêne passagère, un déplacement, une remarque sur la forme), tu omets `settings` entièrement.",
+  "Tu n'écris aucune séance, aucune allure, aucun volume : l'application recalcule elle-même le calendrier à partir de ces réglages et de ce que l'athlète a réellement couru.",
+].join('\n');
+
+/** Ce que le modèle reçoit pour lire une instruction : le plan en une poignée de lignes. */
+export function buildPlanInstructionMessages(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  instruction: string,
+): ChatMessage[] {
+  return [
+    { role: 'system', content: INSTRUCTION_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: [
+        `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+        ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
+        `Réglages actuels : ${formatConstraints(plan)}.`,
+        `Semaines restantes : ${window.weeks}.`,
+        '',
+        `Consigne de l'athlète : « ${instruction.trim()} »`,
+      ].join('\n'),
+    },
+  ];
+}
+
+/**
+ * Les réglages que l'instruction change, `undefined` si elle n'en change aucun.
+ *
+ * **Ne lève jamais.** Un coach injoignable ou une sortie hors schéma ne doivent
+ * pas coûter l'ajustement entier : la fenêtre restante est de toute façon
+ * recalculée sur le réel, et c'est déjà l'essentiel de ce que l'athlète a
+ * demandé. Le repli est journalisé — sans cette trace, un modèle qui aurait
+ * cessé de lire les instructions serait indiscernable d'une instruction qui ne
+ * change effectivement rien.
+ */
+async function instructionSettings(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  instruction: string,
+): Promise<PlanSettingsOutput | undefined> {
+  try {
+    const output = await chatCompletionJson<PlanInstructionOutput>({
+      messages: buildPlanInstructionMessages(plan, window, instruction),
+      schemaName: INSTRUCTION_SCHEMA_NAME,
+      jsonSchema: planInstructionJsonSchema,
+      schema: planInstructionOutputSchema,
+      temperature: PLAN_TEMPERATURE,
+      maxTokens: INSTRUCTION_MAX_OUTPUT_TOKENS,
+      timeoutMs: INSTRUCTION_REQUEST_TIMEOUT_MS,
+    });
+    return output.settings;
+  } catch (error) {
+    console.error(
+      `[plan] instruction non interprétée, réglages inchangés — ${error instanceof Error ? `${error.name} : ${error.message}` : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
+/** Ce qui, dans les réglages, a réellement changé — en français, pour le résumé. */
+function settingsChangeLines(
+  plan: PlanDto,
+  settings: EffectivePlanSettings,
+): string[] {
+  const changes: string[] = [];
+  if (settings.sessionsPerWeek !== plan.sessionsPerWeek) {
+    changes.push(`${plan.sessionsPerWeek} → ${settings.sessionsPerWeek} séances par semaine`);
+  }
+  if (settings.longRunDay !== plan.longRunDay) {
+    changes.push(
+      `sortie longue déplacée du ${formatIsoDay(plan.longRunDay)} au ${formatIsoDay(settings.longRunDay)}`,
+    );
+  }
+  if (settings.weeklyTimeMinutes !== plan.weeklyTimeMinutes) {
+    changes.push(
+      settings.weeklyTimeMinutes === null
+        ? 'plus de limite de temps hebdomadaire'
+        : `${formatDuration(settings.weeklyTimeMinutes * 60)} d'entraînement par semaine au plus`,
+    );
+  }
+  return changes;
+}
+
+/** Les messages du résumé d'un plan ajusté : les faits, plus ce qui a été demandé. */
+function buildAdjustedSummaryMessages(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  instruction: string,
+  rewrite: RemainingPlanRewrite,
+): ChatMessage[] {
+  const changes = settingsChangeLines(plan, rewrite.effectiveSettings);
+  const endsOn = shiftCivilDate(window.firstWeekStart, window.weeks * 7 - 1);
+
+  return [
+    {
+      role: 'system',
+      content: summarySystemPrompt([
+        '',
+        "Ce plan vient d'être RECALCULÉ à la demande de l'athlète : ton résumé décrit la suite du plan telle qu'elle est maintenant, et dit en une phrase ce que sa demande y a changé.",
+        "Si sa demande ne se traduit par aucun changement de réglage — un déplacement, une gêne passagère —, dis-le honnêtement : la suite du plan a été recalée sur ce qu'elle court réellement, mais son cas particulier n'est pas inscrit au calendrier.",
+      ]),
+    },
+    {
+      role: 'user',
+      content: [
+        `Plan en cours : « ${plan.goalText} »${plan.raceDate === null ? '' : `, course le ${formatCivilDate(plan.raceDate)}`}.`,
+        ...(plan.level === null ? [] : [`Niveau déclaré : ${LEVEL_LABELS[plan.level]}.`]),
+        `Semaines recalculées : ${window.weeks}, du ${formatCivilDate(window.firstWeekStart)} au ${formatCivilDate(endsOn)}.`,
+        `Contraintes : ${formatConstraints(rewrite.effectiveSettings)}.`,
+        ...writtenPlanFacts(rewrite.targets, rewrite.skeleton),
+        changes.length === 0
+          ? 'Réglages durables : inchangés.'
+          : `Réglages modifiés : ${changes.join(', ')}.`,
+        '',
+        `Demande de l'athlète : « ${instruction.trim()} »`,
+      ].join('\n'),
+    },
+  ];
+}
+
+/** Le résumé d'un plan ajusté, écrit par l'appli — factuel, et suffisant. */
+function fallbackAdjustedSummary(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+  rewrite: RemainingPlanRewrite,
+): string {
+  const changes = settingsChangeLines(plan, rewrite.effectiveSettings);
+  const volumes = rewrite.targets.map((target) => target.targetKm);
+
+  return [
+    `Les ${window.weeks} semaines restantes ont été recalculées à partir du ${formatCivilDate(window.firstWeekStart)}, ` +
+      `sur le volume réellement couru ces dernières semaines.`,
+    `Périodisation : ${phaseBreakdown(rewrite.skeleton)}.`,
+    `Le volume hebdomadaire va de ${formatNumber(Math.min(...volumes), 1)} à ` +
+      `${formatNumber(Math.max(...volumes), 1)} km, pour ${rewrite.effectiveSettings.sessionsPerWeek} séances par semaine ` +
+      `et une sortie longue le ${formatIsoDay(rewrite.effectiveSettings.longRunDay)}.`,
+    changes.length === 0
+      ? "Aucun réglage durable n'a changé."
+      : `Réglages modifiés : ${changes.join(', ')}.`,
+  ].join(' ');
+}
+
+/**
+ * Applique une instruction en langage naturel au plan actif (« plutôt 3
+ * séances », « ma sortie longue passe au samedi »).
  *
  * La reprise part de **demain** : la séance du jour est en cours ou déjà faite,
  * la déplacer serait au mieux inutile. Les séances déjà réalisées, elles, sont
- * protégées par le DAL ({@link applyPlanUpdate}) — quoi que dise le modèle, il
- * ne réécrit pas le passé.
+ * protégées par le DAL ({@link applyPlanUpdate}).
+ *
+ * Ce que le modèle décide ici tient en trois entiers ({@link instructionSettings})
+ * et un paragraphe ; tout le reste — volumes, périodisation, jours, séances — est
+ * calculé par l'appli ({@link rewriteRemainingPlan}).
  *
  * @param progressId identifiant de suivi (UUID) généré par le formulaire — même
  * rôle et même cycle de vie qu'à la génération (cf. {@link generatePlan}).
  *
  * @throws {AiUnavailableError} si le coach n'est pas joignable.
  * @throws {PlanNotFoundError} s'il n'y a pas de plan actif.
- * @throws {InvalidPlanError} si le plan est terminé, ou si les séances produites
- * sortent de sa fenêtre.
- * @throws {AiInvalidOutputError} si la sortie reste hors contraintes après reprise.
+ * @throws {InvalidPlanError} si le plan est terminé, ou si les réglages demandés
+ * ne tiennent pas dans le volume que la fenêtre vise.
+ * @throws {InvalidGeneratedPlanError} si le plan que l'appli a écrit viole ses
+ * propres règles.
  */
 export async function updatePlanFromInstruction(
   instruction: string,
@@ -2386,121 +2732,36 @@ async function writeUpdatedPlan(
 
   const fromDate = shiftCivilDate(todayCivilDate(), 1);
   const window = remainingPlanWindow(active.plan, fromDate);
-  const upcoming = active.sessions.filter(
-    (session) => session.scheduledOn >= fromDate && session.completedActivityId === null,
-  );
-
-  // Le prompt de modification ne porte pas le snapshot (le plan à ajuster suffit
-  // au modèle), mais les allures qu'il réécrit se jugent sur les mêmes données
-  // que celles d'une génération : le snapshot est chargé pour cette seule
-  // référence.
   const snapshot = await getTrainingSnapshot();
-  // Le chrono déclaré à la création reste l'ancre : un ajustement ne réécrit pas
-  // les allures que la table impose, il réécrit des séances.
-  const paces = referenceRacePaces(planReferenceRace(active.plan));
 
-  const chunks = planChunks(window.weeks);
-  const chunked = chunks.length > 1;
-  // Fenêtre restante, pas plan complet : la règle anti-plat n'y a pas d'objet —
-  // exiger un pic supérieur à la première semaine restante réclamerait de monter
-  // le volume à quelques semaines de la course.
-  const expectationsOf = (settings: PlanSettingsOutput | undefined): PlanExpectations => ({
-    scope: 'adjustment',
-    weeks: window.weeks,
-    sessionsPerWeek: settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
-    longRunDay: settings?.longRunDay ?? active.plan.longRunDay,
-    firstWeekFromDay: window.firstWeekFromDay,
-    // La fenêtre restante se termine avec le plan, donc avec la course : ses
-    // dernières semaines sont bien celles de l'affûtage. Un ajustement demandé
-    // à moins de 8 semaines d'un marathon n'en exigera que deux au lieu de
-    // trois — la fenêtre est courte, et c'est le sens conservateur.
-    race: raceGoalOf(active.plan.goalType, active.plan.goalText),
-    // Pas de cibles de volume : elles s'ancrent sur l'historique d'avant-plan et
-    // sur un départ à chiffrer, deux choses qu'un plan en cours a déjà tranchées.
-  });
-  const paceContext = {
-    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
-    paces,
-    // Pas de `recentWeeklyKm` : c'est le plan en cours qui fait foi, pas le
-    // volume d'avant-plan.
-  };
-  // L'objectif du plan porte l'allure objectif, comme à la génération : un
-  // ajustement réécrit des séances, pas le but qu'elles préparent.
-  const goalPace = goalPaceSecPerKm(active.plan.goalText);
+  // 1. La seule chose que le modèle décide du calendrier : les réglages durables.
+  const settings = await instructionSettings(active.plan, window, instruction);
 
-  // L'enveloppe — réglages et résumé — vient toujours du premier appel : c'est
-  // l'instruction qui la décide, et elle est connue dès la première tranche.
-  const output = await generateWithBusinessRules({
-    messages: buildPlanUpdateMessages(
-      active.plan,
-      upcoming,
-      window,
-      instruction,
-      paces,
-      chunked ? { chunk: chunks[0], continuity: null } : null,
-    ),
-    schemaName: 'training_plan_update',
-    jsonSchema: chunked ? planUpdateChunkJsonSchema(chunks[0].weeks) : planUpdateJsonSchema,
-    schema: planUpdateOutputSchema,
-    // Découpé, le premier appel ne rend qu'une tranche : la juger contre les
-    // attentes du plan entier la déclarerait fautive sur son seul compte de
-    // semaines. La validation a lieu à l'assemblage.
-    weeksOf: (plan) => (chunked ? null : plan.weeks),
-    expectationsOf: (plan) => expectationsOf(plan.settings),
-    withPostProcessedWeeks: (plan, postProcess) => ({
-      ...plan,
-      weeks: postProcess(plan.weeks),
-    }),
-    goalPaceSecPerKm: goalPace,
-    // Le budget que la sortie déclare, à défaut celui du plan stocké : une
-    // instruction qui élargit ou lève la contrainte de temps produit des
-    // semaines qui se jugent sur cette contrainte-là, pas sur l'ancienne.
-    weeklyTimeBudgetOf: (plan) =>
-      resolveWeeklyTimeBudget(plan.settings, active.plan.weeklyTimeMinutes),
-    paceContext,
-    progressId,
-    // Les réglages du plan peuvent changer en cours d'ajustement ; l'échelle,
-    // elle, se cale sur ceux d'aujourd'hui — c'est une estimation, pas un
-    // contrat.
-    estimatedChars: estimatePlanChars(
-      chunked ? chunks[0].weeks : window.weeks,
-      active.plan.sessionsPerWeek,
-    ),
-    ...(chunked ? { progressChunk: { index: 0, count: chunks.length } } : {}),
+  // 2. La fenêtre restante, recalculée par l'appli sous ces réglages.
+  const rewrite = await rewriteRemainingPlan({
+    plan: active.plan,
+    window,
+    snapshot,
+    plannedWeeklyKm: planWeeklyVolumeKm(active.sessions),
+    settings,
+    onSlotFilled:
+      progressId === undefined
+        ? undefined
+        : (done, total) => setPlanProgress(progressId, slotProgress(done, total)),
   });
 
-  const weeks = chunked
-    ? (
-        await generateWeeksInChunks({
-          chunks,
-          messagesFor: (chunk, continuity) =>
-            buildPlanUpdateMessages(active.plan, upcoming, window, instruction, paces, {
-              chunk,
-              continuity,
-            }),
-          firstChunkWeeks: output.weeks,
-          // Le résumé est déjà écrit : il accompagne l'enveloppe du premier appel.
-          withSummary: false,
-          schemaName: 'training_plan_update_chunk',
-          expectations: expectationsOf(output.settings),
-          paceContext,
-          weeklyTimeMinutes: resolveWeeklyTimeBudget(
-            output.settings,
-            active.plan.weeklyTimeMinutes,
-          ),
-          goalPaceSecPerKm: goalPace,
-          sessionsPerWeek: output.settings?.sessionsPerWeek ?? active.plan.sessionsPerWeek,
-          progressId,
-        })
-      ).weeks
-    : output.weeks;
+  // 3. Le résumé, seul texte libre de l'ajustement.
+  const summary = await coachParagraph(
+    buildAdjustedSummaryMessages(active.plan, window, instruction, rewrite),
+    () => fallbackAdjustedSummary(active.plan, window, rewrite),
+  );
 
   // Séances et réglages en une seule transaction : un plan ne doit jamais
   // annoncer des contraintes que son calendrier ne suit pas.
   await applyPlanUpdate(active.plan.id, {
     fromDate,
-    sessions: mapPlanWeeksToSessions(weeks, window.firstWeekStart),
-    settings: planSettingsPatch(active.plan, output.settings, output.summary),
+    sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
+    settings: planSettingsPatch(active.plan, settings, summary),
   });
   await afterActivePlanChanged(active.plan.id);
 

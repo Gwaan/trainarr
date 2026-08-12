@@ -182,7 +182,7 @@ describe('buildQualitySessionMessages', () => {
    * dire au modèle.
    *
    * Régression mesurée après la bascule sur squelette, où cette règle vivait
-   * dans le prompt du plan entier (`LEVEL_RULES`) et a disparu avec lui : sur un
+   * dans le prompt du plan entier et a disparu avec lui : sur un
    * semi en 1 h 45 à 4 séances, une **débutante** recevait 9 séances de seuil à
    * la structure exacte d'une confirmée, et `advanced` produisait un plan
    * strictement identique à `intermediate`. Seul le *nombre* de créneaux

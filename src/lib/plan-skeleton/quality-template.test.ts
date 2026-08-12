@@ -483,12 +483,21 @@ describe('qualitySessionTemplate — le format des séances', () => {
    * Le plus gros budget qui puisse encore se rabattre sur l'effort continu, en
    * km.
    *
-   * Mesuré sur le balayage : 2,2 km au seuil, 0,8 km en VMA, jamais en
-   * répétitions, 3,9 km en spécifique — la zone dont la répétition minimale est
-   * la plus longue (2 km) est aussi celle qui se rabat le plus tard. Au-delà,
-   * un repli signalerait que le format ne tient plus là où il devrait.
+   * Mesuré sur le balayage, par zone et par niveau : 2,1 à 2,2 km au seuil,
+   * 0,8 km en VMA, jamais en répétitions, 3,9 km en spécifique — 4,4 km pour une
+   * **débutante** en spécifique. La zone dont la répétition minimale est la plus
+   * longue (2 km) est aussi celle qui se rabat le plus tard. Au-delà, un repli
+   * signalerait que le format ne tient plus là où il devrait.
+   *
+   * Ces 4,4 km sont le prix, mesuré, du plancher d'échauffement des débutantes
+   * (`LEVEL_WARMUP_FLOOR_M`, 2 000 m contre 1 200) : 3,9 km avant lui, 4,4 après,
+   * et le seul cas qui déplace la borne est `marathon · beginner`. Un demi-
+   * kilomètre de budget de plus bascule alors sur l'effort continu — ce qui est
+   * la bonne réponse pour une débutante à qui il ne resterait de toute façon que
+   * 2 km de travail — contre cinq minutes d'échauffement gagnées partout
+   * ailleurs.
    */
-  const CONTINUOUS_MAX_BUDGET_KM = 4;
+  const CONTINUOUS_MAX_BUDGET_KM = 4.4;
 
   it('ne se rabat sur l’effort continu que faute de place pour une répétition', () => {
     for (const swept of SWEEP) {

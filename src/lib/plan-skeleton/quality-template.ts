@@ -83,22 +83,75 @@ const WARMUP_SHARE = 0.25;
 const COOLDOWN_SHARE = 0.2;
 
 /**
- * Ce qu'échauffement et retour au calme coûtent au minimum, en mètres, quel que
- * soit le budget.
+ * Ce que le retour au calme coûte au minimum, en mètres, quel que soit le
+ * budget — l'échauffement a le sien, par niveau ({@link LEVEL_WARMUP_FLOOR_M}).
  *
- * **C'est ce qui fait croître la part de l'enveloppe sur les petites séances**,
- * et l'argument est physiologique : le coût de la mise en route est quasi fixe.
- * Il faut une dizaine de minutes de course pour élever la température
- * musculaire et ouvrir la filière aérobie — ce délai ne se réduit pas parce que
- * la séance est courte. Sur une séance de 4 km, l'enveloppe pèse donc la moitié
- * du budget au lieu de 45 %, et c'est la bonne réponse : on n'y fait pas 3 km de
- * travail.
+ * **Ces planchers sont ce qui fait croître la part de l'enveloppe sur les
+ * petites séances**, et l'argument est physiologique : le coût de la mise en
+ * route et celui du retour au repos sont quasi fixes. Il faut une dizaine de
+ * minutes de course pour élever la température musculaire et ouvrir la filière
+ * aérobie — ce délai ne se réduit pas parce que la séance est courte. Sur une
+ * séance de 4 km, l'enveloppe pèse donc la moitié du budget au lieu de 45 %, et
+ * c'est la bonne réponse : on n'y fait pas 3 km de travail.
  *
- * 1 200 m et 800 m : environ 10 et 7 minutes à allure d'endurance, le minimum
- * que tout entraîneur écrit.
+ * 800 m : environ 7 minutes à allure d'endurance, le minimum que tout entraîneur
+ * écrit. Il ne dépend pas du niveau — ramener au repos prend le même temps pour
+ * tout le monde, là où se préparer à l'effort n'en prend pas.
  */
-const WARMUP_FLOOR_M = 1_200;
 const COOLDOWN_FLOOR_M = 800;
+
+/**
+ * Le plancher d'échauffement, **par niveau** — et la troisième prescription que
+ * la bascule sur squelette avait perdue.
+ *
+ * ## Ce qu'elle disait, et ce qui l'avait remplacée
+ *
+ * Le prompt du plan entier portait, pour une débutante : « échauffement long,
+ * 15 à 20 min de footing très souple avant toute séance de qualité ». Il a
+ * disparu avec le plan entier, et l'enveloppe s'est mise à appliquer le même
+ * plancher de 1 200 m à tout le monde — soit, sur un créneau débutant de 6 km,
+ * 1 500 m d'échauffement, environ 11 minutes à l'allure d'endurance d'une
+ * débutante : la moitié basse de ce que la règle demandait, et pas ce qu'elle
+ * demandait.
+ *
+ * ## Pourquoi ce n'est pas un second bouton sur le même effet
+ *
+ * {@link LEVEL_RECOVERY_FACTOR} pose que le niveau n'agit **que** sur la
+ * récupération, pour ne pas empiler deux réglages tirant vers « plus facile »
+ * sans savoir lequel produit quoi. Cette règle vaut toujours, et elle porte sur
+ * le **corps** de séance : le rapport effort/récupération, donc la difficulté du
+ * travail. L'échauffement est une autre dimension — il ne rend pas le travail
+ * plus facile, il rend l'athlète prête à le faire, et une débutante met plus
+ * longtemps à l'être. Les deux se lisent séparément dans le déroulé écrit
+ * (l'étape `warmup` d'un côté, les `recover` de l'autre), donc l'objection
+ * « personne ne saura lequel a produit quoi » ne tient pas ici.
+ *
+ * ## Le chiffre
+ *
+ * 2 000 m pour une débutante : environ 15 minutes à l'allure d'endurance qu'on
+ * lui suppose (7:30/km), soit le bas de la fourchette prescrite. En mètres et
+ * non en minutes parce que tout ce module compte en mètres — le budget d'un
+ * créneau est une distance, et convertir ici demanderait une allure que le
+ * squelette n'a pas.
+ *
+ * 1 200 m pour les deux autres niveaux : la valeur d'avant, inchangée au mètre
+ * près. Le déroulé d'une intermédiaire ou d'une confirmée ne bouge pas.
+ *
+ * Le plafond d'enveloppe ({@link ENVELOPE_MAX_SHARE}) continue de s'appliquer
+ * par-dessus : sur un créneau minuscule, l'échauffement long est ramené au
+ * prorata comme le reste, sans quoi il ne resterait plus de séance. La
+ * conséquence mesurée sur le balayage : le budget au-delà duquel un format à
+ * répétitions tient toujours passe de 3,9 à 4,4 km pour une débutante en zone
+ * `marathon`, et ne bouge nulle part ailleurs. Un demi-kilomètre de budget
+ * bascule donc sur l'effort continu — soit exactement les cas où il ne restait
+ * plus que 2 km de travail après l'enveloppe, et où un bloc continu vaut mieux
+ * que deux fragments.
+ */
+const LEVEL_WARMUP_FLOOR_M = {
+  beginner: 2_000,
+  intermediate: 1_200,
+  advanced: 1_200,
+} as const satisfies Record<PlanLevel, number>;
 
 /**
  * Part maximale du budget que l'enveloppe peut prendre.
@@ -271,9 +324,9 @@ const PHASE_RECOVERY_FACTOR = {
  * ## Ce que ce facteur répare
  *
  * Avant la bascule sur squelette, le niveau décidait du contenu des séances
- * dures par le prompt du plan entier (`LEVEL_RULES` : « NIVEAU DÉBUTANT — au
- * plus une séance de qualité, courte et douce, fractionné court. Jamais de bloc
- * de seuil long » contre « CONFIRMÉ — blocs de seuil plus longs »). Ce prompt a
+ * dures par le prompt du plan entier (« NIVEAU DÉBUTANT — au plus une séance de
+ * qualité, courte et douce, fractionné court. Jamais de bloc de seuil long »
+ * contre « CONFIRMÉ — blocs de seuil plus longs »). Ce prompt a
  * disparu avec le plan entier, et la règle avec lui : **mesuré sur un semi en
  * 1 h 45 à 4 séances, une débutante recevait 9 séances de seuil à la structure
  * exacte d'une confirmée, et `advanced` produisait un plan strictement identique
@@ -295,13 +348,18 @@ const PHASE_RECOVERY_FACTOR = {
  * (1 400–4 200 m) rendent **le même déroulé**, `3 × 1 300 m` : la longueur
  * retenue vient du budget, pas de la borne. Le défaut qu'on répare serait resté.
  *
- * ## Un seul bouton, et pas deux
+ * ## Un seul bouton sur la difficulté du travail, et pas deux
  *
- * Le niveau n'agit donc **que** sur ce facteur — ni sur les bornes de longueur,
- * ni sur l'enveloppe, ni sur le nombre de répétitions préféré. Deux réglages
+ * Sur le **corps** de séance, le niveau n'agit que sur ce facteur — ni sur les
+ * bornes de longueur, ni sur le nombre de répétitions préféré. Deux réglages
  * tirant tous les deux vers « plus facile » se composeraient sans que personne
  * ne sache lequel a produit quoi, et le module a déjà tranché la question pour
  * la phase : un seul levier, la récupération.
+ *
+ * Le plancher d'échauffement ({@link LEVEL_WARMUP_FLOOR_M}) est la seule
+ * exception, et il n'en est pas vraiment une : il ne touche pas au travail, il
+ * touche à la préparation du travail. Le pourquoi de cette frontière est écrit
+ * là-bas.
  *
  * Le facteur du niveau et celui de la phase se **multiplient**, et les bornes en
  * mètres de chaque zone ({@link ZONE_SHAPES}) bornent le produit : une base pour
@@ -422,9 +480,13 @@ function distanceStep(role: PlanStep['role'], distanceM: number, note: string): 
  * Ce que l'enveloppe **vise**, avant que le reliquat du corps de séance ne s'y
  * ajoute : sa part nominale du budget, jamais moins que son plancher, le tout
  * ramené sous le plafond quand le budget ne paye pas les deux planchers.
+ *
+ * Le plancher d'échauffement dépend du niveau ({@link LEVEL_WARMUP_FLOOR_M}) —
+ * c'est la seule chose que le niveau change en dehors du corps de séance, et le
+ * pourquoi est écrit là-bas.
  */
-function envelopeTargets(totalM: number): { warmupM: number; cooldownM: number } {
-  const warmupIdealM = Math.max(WARMUP_FLOOR_M, totalM * WARMUP_SHARE);
+function envelopeTargets(totalM: number, level: PlanLevel): { warmupM: number; cooldownM: number } {
+  const warmupIdealM = Math.max(LEVEL_WARMUP_FLOOR_M[level], totalM * WARMUP_SHARE);
   const cooldownIdealM = Math.max(COOLDOWN_FLOOR_M, totalM * COOLDOWN_SHARE);
   // Au prorata, pour que le rapport échauffement/retour au calme survive au
   // rabotage : sur une séance minuscule, c'est encore l'échauffement qui prime.
@@ -559,7 +621,7 @@ export function qualitySessionTemplate(params: {
   // Tout se calcule en mètres entiers : c'est la seule façon de faire retomber
   // une somme sur un total sans traîner d'erreur de flottant.
   const totalM = Math.round(budgetKm * 1_000);
-  const targets = envelopeTargets(totalM);
+  const targets = envelopeTargets(totalM, level);
   const workTargetM = totalM - targets.warmupM - targets.cooldownM;
 
   const format = chooseFormat(zone, phase, level, workTargetM);

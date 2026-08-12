@@ -234,6 +234,30 @@ export type PlanSkeletonParams = {
    * seraient deux occasions de diverger.
    */
   targets: readonly WeeklyVolumeTarget[];
+  /**
+   * La périodisation, **imposée par l'appelant** — une phase par semaine, dans
+   * l'ordre. Absente, elle est calculée depuis la fenêtre ({@link planPhases}),
+   * ce qui est le cas nominal d'une création.
+   *
+   * ## Pourquoi ce paramètre existe
+   *
+   * {@link planPhases} déduit les phases de la **durée totale** du plan : quatre
+   * semaines de base, puis du développement, puis de la spécificité, puis
+   * l'affûtage. C'est juste tant que la fenêtre construite *est* le plan entier.
+   *
+   * Elle ne l'est plus quand on reconstruit la fin d'un plan en cours
+   * (`rewriteRemainingPlan`) : dix semaines restantes d'un plan de seize ne sont
+   * pas un plan de dix semaines, elles en sont le dernier tiers. Les recalculer
+   * ici renverrait un athlète entré dans son bloc spécifique en phase de base —
+   * la périodisation redémarrerait à chaque ajustement, et l'entraînement
+   * n'irait jamais nulle part.
+   *
+   * L'appelant calcule donc les phases sur le plan **entier** et n'en passe que
+   * la tranche restante. Ce module ne fait rien d'autre que les prendre pour
+   * argent comptant : il n'a pas les moyens de vérifier une position dans une
+   * durée qu'il ne connaît pas.
+   */
+  phases?: readonly PlanPhase[];
 };
 
 /** Une étape mesurée en distance, sans aucune cible : toutes les clés, `null` pour le reste. */
@@ -470,7 +494,9 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   } = params;
   if (weeks <= 0) return [];
 
-  const phases = planPhases({ weeks, firstWeekFromDay, race: params.race });
+  // La périodisation de l'appelant quand il en a une (cf.
+  // {@link PlanSkeletonParams.phases}) ; celle de la fenêtre sinon.
+  const phases = params.phases ?? planPhases({ weeks, firstWeekFromDay, race: params.race });
 
   const plans: WeekPlan[] = [];
   for (let index = 0; index < weeks; index += 1) {

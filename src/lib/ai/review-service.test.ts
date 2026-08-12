@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import type { TrainingSnapshotDto } from '@/data/coach-context';
 import type { PlanReviewDto, PlanReviewSessionDto } from '@/data/plan-review';
 import { InvalidPlanError, type PlanDto, type PlanSessionDto } from '@/data/plans';
-import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import { AiInvalidOutputError, AiUnavailableError } from './errors';
 import {
@@ -76,14 +75,21 @@ const SNAPSHOT: TrainingSnapshotDto = {
   recentAvgPaceSecPerKm: 324,
 };
 
-/** Plan démarré le lundi 10 août, 2 semaines : reprise demain (mercredi 12). */
+/**
+ * Plan démarré le lundi 10 août, 2 semaines : reprise demain (mercredi 12), et
+ * la course le dernier jour du plan.
+ *
+ * La date de course n'est plus décorative depuis que la fenêtre restante est
+ * reconstruite par l'appli : c'est elle qui pose la séance du jour J et qui
+ * ferme la semaine de course.
+ */
 const PLAN: PlanDto = {
   id: 3,
   status: 'active',
   goalType: 'race',
   level: 'intermediate',
   goalText: '10 km sous 50 min',
-  raceDate: '2026-09-13',
+  raceDate: '2026-08-23',
   startsOn: '2026-08-10',
   weeks: 2,
   sessionsPerWeek: 3,
@@ -154,46 +160,28 @@ const REVIEW: PlanReviewDto = {
   ],
 };
 
-/** Une étape complète : le contrat porte ses sept clés, `null` pour absent. */
-function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
-  return {
-    role,
-    distanceM: null,
-    durationS: null,
-    paceMinSecPerKm: null,
-    paceMaxSecPerKm: null,
-    hrZone: null,
-    note: null,
-    ...overrides,
-  };
+/**
+ * Ce que le coach rend quand il ajuste : un verdict, et rien d'autre.
+ *
+ * Plus une seule semaine — c'est l'appli qui reconstruit la fenêtre restante
+ * (`rewriteRemainingPlan`). Le contrat de sortie l'impose, et ces fixtures le
+ * montrent : il n'y a plus rien à écrire ici qui ressemble à un plan.
+ */
+const ADJUST = { decision: 'adjust', reason: 'Charge trop élevée.' } as const;
+
+/** Et quand il conserve le plan. */
+const KEEP = { decision: 'keep', reason: 'Le plan tient.' } as const;
+
+/** Les séances écrites en base par la dernière révision. */
+function updatedSessions(): {
+  scheduledOn: string;
+  kind: string;
+  volumeM: number | null;
+  durationS: number | null;
+  targetPaceSecPerKm: number | null;
+}[] {
+  return dal.applyPlanUpdate.mock.calls[0][1].sessions;
 }
-
-const THRESHOLD_STEPS = [
-  { repeat: 1, steps: [step('warmup', { durationS: 900, hrZone: 2 })] },
-  {
-    repeat: 4,
-    steps: [
-      step('run', { durationS: 480, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 }),
-      step('recover', { durationS: 120 }),
-    ],
-  },
-  { repeat: 1, steps: [step('cooldown', { durationS: 600 })] },
-];
-
-/** Une semaine conforme aux règles métier : 3 séances, la plus longue le dimanche. */
-const CONFORMING_WEEK = {
-  sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
-  ],
-};
-
-/** Ce qu'un ajustement rend sur cette fenêtre : semaine entamée, puis semaine pleine. */
-const ADJUST_WEEKS = [
-  { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-  CONFORMING_WEEK,
-];
 
 let logged: MockInstance<typeof console.log>;
 let errored: MockInstance<typeof console.error>;
@@ -368,12 +356,12 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
     await maybeReviewActivePlan();
 
     const system = chatCompletionJson.mock.calls[0][0].messages[0].content;
-    // La méthodologie du coach est reprise telle quelle : une révision se juge
-    // avec les règles qui ont écrit le plan.
-    expect(system).toContain('RÉPARTITION DE LA CHARGE');
-    expect(system).toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
-    expect(system).toContain('tu ne changes RIEN');
-    expect(system).toContain("C'est la réponse par défaut.");
+    expect(system).toContain("C'est la réponse par défaut");
+    // Ce que le prompt ne porte plus : la méthodologie d'entraînement. Elle ne
+    // servait qu'à faire écrire des semaines au modèle, et il n'en écrit plus —
+    // ces règles-là vivent en code, vérifiées à l'exécution.
+    expect(system).not.toContain('RÉPARTITION DE LA CHARGE');
+    expect(system).toContain("Tu n'écris donc aucune séance, aucun volume, aucune allure.");
   });
 });
 
@@ -393,11 +381,10 @@ describe('maybeReviewActivePlan — décision', () => {
     );
   });
 
-  it('réécrit la suite du plan quand le coach ajuste, et reporte la raison au résumé', async () => {
+  it('recalcule la suite du plan quand le coach ajuste, et reporte la raison au résumé', async () => {
     chatCompletionJson.mockResolvedValue({
       decision: 'adjust',
       reason: 'Deux séances manquées et un TSB très négatif : la semaine suivante est allégée.',
-      weeks: ADJUST_WEEKS,
     });
 
     await maybeReviewActivePlan();
@@ -407,12 +394,14 @@ describe('maybeReviewActivePlan — décision', () => {
     expect(planId).toBe(3);
     // Reprise demain, comme un ajustement par instruction.
     expect(update.fromDate).toBe('2026-08-12');
-    expect(update.sessions.map((session: { scheduledOn: string }) => session.scheduledOn)).toEqual([
-      '2026-08-16',
-      '2026-08-18',
-      '2026-08-20',
-      '2026-08-23',
-    ]);
+    // Aucune journée déjà écoulée n'est réécrite, et la dernière séance est la
+    // course elle-même.
+    const days = updatedSessions().map((session) => session.scheduledOn);
+    expect(days.every((day) => day >= '2026-08-12')).toBe(true);
+    expect(updatedSessions()[updatedSessions().length - 1]).toMatchObject({
+      scheduledOn: '2026-08-23',
+      kind: 'Course',
+    });
     expect(update.settings).toEqual({
       summary:
         'Bloc de 2 semaines.\n\nRévision du mardi 11 août 2026 : Deux séances manquées et un TSB très négatif : la semaine suivante est allégée.',
@@ -427,11 +416,7 @@ describe('maybeReviewActivePlan — décision', () => {
   });
 
   it('avance le marqueur et synchronise même sans contexte de requête (watcher FIT)', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
 
     // Le déclencheur nominal est le watcher : `after` y lève. Une révision qui
     // s'en servirait perdrait le marqueur — et réécrirait le plan à chaque
@@ -445,11 +430,7 @@ describe('maybeReviewActivePlan — décision', () => {
   });
 
   it('avance quand même le marqueur quand un effet de bord échoue', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
     dal.reconcilePlanSessions.mockRejectedValue(new Error('base indisponible'));
     syncPlanToIntervalsSafely.mockRejectedValue(new Error('intervals.icu injoignable'));
 
@@ -468,23 +449,15 @@ describe('maybeReviewActivePlan — décision', () => {
       decision: 'adjust',
       reason: 'Trois séances tenues sur quatre : on passe à 4 séances par semaine.',
       settings: { sessionsPerWeek: 4 },
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-        {
-          sessions: [
-            { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8 },
-            { day: 3, kind: 'Endurance', title: 'Footing', distanceKm: 6 },
-            { day: 5, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-            { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
-          ],
-        },
-      ],
     });
 
     await maybeReviewActivePlan();
 
     const [, update] = dal.applyPlanUpdate.mock.calls[0];
     expect(update.settings.sessionsPerWeek).toBe(4);
+    // Et le calendrier recalculé les porte : la semaine pleine en compte quatre.
+    const week = updatedSessions().filter((session) => session.scheduledOn >= '2026-08-17');
+    expect(week).toHaveLength(4);
   });
 
   it('laisse le marqueur intact et journalise quand la révision échoue', async () => {
@@ -502,11 +475,7 @@ describe('maybeReviewActivePlan — décision', () => {
   });
 
   it('n’avance pas le marqueur quand l’écriture du plan ajusté échoue', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
     dal.applyPlanUpdate.mockRejectedValue(new Error('base indisponible'));
 
     await maybeReviewActivePlan();
@@ -517,78 +486,32 @@ describe('maybeReviewActivePlan — décision', () => {
 });
 
 /**
- * Le budget temps d'une révision, jugé comme celui d'un ajustement : sur ce que
- * la **sortie** déclare, pas sur ce que le plan stocke. Une révision qui reporte
- * un budget élargi produirait sinon des semaines déclarées en violation à chaque
- * tentative, et n'aboutirait jamais.
+ * Le budget temps d'une révision est une **entrée du calcul**, comme partout
+ * ailleurs depuis la bascule : les cibles de la fenêtre sont chiffrées sous lui,
+ * et le squelette les répartit sans les défaire.
  */
 describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
   /** Le même plan, mais 2 h par semaine. */
   const AT_2H = { plan: { ...PLAN, weeklyTimeMinutes: 120 }, sessions: ACTIVE.sessions };
 
-  /** La semaine entamée, durée déclarée : dans son budget au prorata (5/7 de 2 h). */
-  const PARTIAL_WEEK = {
-    sessions: [
-      { day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 },
-    ],
-  };
-
-  /**
-   * La semaine pleine conforme, durées déclarées : 3 h 00 au total.
-   *
-   * La séance de seuil porte un déroulé, et c'est lui qui décide de sa durée :
-   * `THRESHOLD_STEPS` totalise 900 + 4 × (480 + 120) + 600 = 3 900 s, soit
-   * 65 min (cf. `applyDerivedMeasures`) — la valeur déclarée le dit donc aussi.
-   */
-  const THREE_HOURS_WEEK = {
-    sessions: [
-      { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 8, durationMin: 45 },
-      {
-        day: 4,
-        kind: 'Seuil',
-        title: '3 × 8 min',
-        distanceKm: 10,
-        durationMin: 65,
-        steps: THRESHOLD_STEPS,
-      },
-      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 70 },
-    ],
-  };
-
   beforeEach(() => {
     dal.getActivePlanWithSessions.mockResolvedValue(AT_2H);
   });
 
-  it('juge les semaines sur le budget que la révision déclare', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Le bilan montre 4 h disponibles : le plan les utilise.',
-      settings: { weeklyTimeMinutes: 240 },
-      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
-    });
+  it('tient le budget du plan dans les semaines qu’elle recalcule', async () => {
+    chatCompletionJson.mockResolvedValue(ADJUST);
 
     await maybeReviewActivePlan();
 
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(dal.applyPlanUpdate.mock.calls[0][1].settings.weeklyTimeMinutes).toBe(240);
-  });
-
-  it('retombe sur le budget du plan quand la révision ne touche pas aux réglages', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge à revoir.',
-      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
-    });
-
-    await maybeReviewActivePlan();
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(errored).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
-      ),
-    );
+    const byWeek = new Map<string, number>();
+    for (const session of updatedSessions()) {
+      const week = session.scheduledOn < '2026-08-17' ? 'S1' : 'S2';
+      byWeek.set(week, (byWeek.get(week) ?? 0) + (session.durationS ?? 0));
+    }
+    for (const [week, seconds] of byWeek) {
+      // 2 h déclarées, tolérance de 20 % comprise (cf. `VOLUME_RULES`).
+      expect(seconds, week).toBeLessThanOrEqual(120 * 60 * 1.2);
+    }
   });
 
   it('ignore un budget effacé par le modèle : personne ne le lui a demandé', async () => {
@@ -599,48 +522,15 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
     chatCompletionJson.mockResolvedValue({
       decision: 'adjust',
       reason: 'Charge à revoir.',
-      settings: { weeklyTimeMinutes: null, sessionsPerWeek: 4 },
-      weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK],
+      settings: { weeklyTimeMinutes: null, sessionsPerWeek: 2 },
     });
 
     await maybeReviewActivePlan();
 
-    // Les semaines restent jugées sur les 2 h du plan : la sortie est refusée,
-    // comme si le budget n'avait pas été touché.
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(errored).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
-      ),
-    );
-  });
-
-  it('laisse passer les autres réglages d’une révision qui efface le budget', async () => {
+    const { settings } = dal.applyPlanUpdate.mock.calls[0][1];
     // Le budget seul est écarté : réduire le nombre de séances est exactement ce
     // qu'une révision a le droit de conclure.
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Deux séances suffisent.',
-      settings: { weeklyTimeMinutes: null, sessionsPerWeek: 2 },
-      weeks: [
-        { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14, durationMin: 60 }] },
-        {
-          sessions: [
-            // 65 min de déroulé (cf. `THREE_HOURS_WEEK`) + 60 : dans les 2 h du plan.
-            { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, durationMin: 65, steps: THRESHOLD_STEPS },
-            { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16, durationMin: 60 },
-          ],
-        },
-      ],
-    });
-
-    await maybeReviewActivePlan();
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    const { settings } = dal.applyPlanUpdate.mock.calls[0][1];
     expect(settings.sessionsPerWeek).toBe(2);
-    // Ni effacé, ni réécrit : le champ n'est pas dans le patch.
     expect(settings).not.toHaveProperty('weeklyTimeMinutes');
   });
 });
@@ -661,45 +551,33 @@ describe('maybeReviewActivePlan — allures imposées', () => {
     dal.getActivePlanWithSessions.mockResolvedValue(WITH_RACE);
   });
 
-  it('annonce au modèle que les allures sont posées par l’appli, et retire l’ancre parasite', async () => {
-    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+  it('retire du contexte l’ancre parasite quand une table existe', async () => {
+    chatCompletionJson.mockResolvedValue(KEEP);
 
     await maybeReviewActivePlan();
 
-    const [{ messages }] = chatCompletionJson.mock.calls[0];
-    expect(messages[0].content).toContain(
-      "ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE",
-    );
-    expect(messages[0].content).toContain('- T (seuil) : 4:57–5:11/km');
     // L'allure moyenne des dernières sorties égarait le modèle : elle sort du
     // contexte dès qu'une table existe.
+    const [{ messages }] = chatCompletionJson.mock.calls[0];
     expect(messages[1].content).not.toContain('Allure moyenne des dernières sorties');
   });
 
-  it('écrase les allures des semaines réécrites', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+  it('pose les allures de la table sur les semaines recalculées', async () => {
+    chatCompletionJson.mockResolvedValue(ADJUST);
 
     await maybeReviewActivePlan();
 
-    const [, update] = dal.applyPlanUpdate.mock.calls[0];
-    // Sortie longue et endurance au milieu de [E] (5:56–6:32/km), seuil au
-    // milieu de [T] (4:57–5:11/km).
-    expect(update.sessions.map((s: { targetPaceSecPerKm: number }) => s.targetPaceSecPerKm)).toEqual(
-      [374, 374, 304, 374],
-    );
-    // L'étape d'effort de la séance au seuil prend les bornes de [T].
-    expect(update.sessions[2].steps[1].steps[0]).toMatchObject({
-      paceMinSecPerKm: 297,
-      paceMaxSecPerKm: 311,
-    });
+    const sessions = updatedSessions();
+    // Endurance au milieu de [E] (5:56–6:32/km) …
+    expect(sessions[0].targetPaceSecPerKm).toBe(374);
+    // … et le jour J à l'allure de l'objectif, jamais en endurance.
+    const raceDay = sessions[sessions.length - 1];
+    expect(raceDay.kind).toBe('Course');
+    expect(raceDay.targetPaceSecPerKm).toBeLessThan(374);
   });
 
   it('ne touche à rien quand la révision conserve le plan', async () => {
-    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+    chatCompletionJson.mockResolvedValue(KEEP);
 
     await maybeReviewActivePlan();
 
@@ -708,64 +586,23 @@ describe('maybeReviewActivePlan — allures imposées', () => {
   });
 
   it('dérive les mesures sans rien prescrire quand le plan ne porte pas de chrono', async () => {
-    // Le troisième chemin passe par le même post-traitement : sans table, les
-    // volumes se dérivent quand même — sans quoi une révision butait sur
-    // « Volumes hebdomadaires invérifiables » comme le reste.
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge à revoir.',
-      weeks: [
-        {
-          sessions: [
-            {
-              day: 7,
-              kind: 'Sortie longue',
-              title: '1 h',
-              steps: [{ repeat: 1, steps: [step('run', { durationS: 3600 })] }],
-            },
-          ],
-        },
-        {
-          sessions: [
-            {
-              day: 2,
-              kind: 'Endurance',
-              title: 'Footing',
-              steps: [{ repeat: 1, steps: [step('run', { distanceM: 8000 })] }],
-            },
-            { day: 4, kind: 'Seuil', title: '4 × 8 min', steps: THRESHOLD_STEPS },
-            {
-              day: 7,
-              kind: 'Sortie longue',
-              title: 'Endurance',
-              steps: [{ repeat: 1, steps: [step('run', { distanceM: 16_000 })] }],
-            },
-          ],
-        },
-      ],
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
 
     await maybeReviewActivePlan();
 
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    const [, update] = dal.applyPlanUpdate.mock.calls[0];
-    expect(update.sessions.map((s: { volumeM: number }) => s.volumeM)).toEqual([
-      11_100, 8_000, 12_400, 16_000,
-    ]);
-    // Aucune allure posée : sans table, les prescriptions restent celles du modèle.
-    expect(update.sessions.map((s: { targetPaceSecPerKm: number | null }) => s.targetPaceSecPerKm))
-      .toEqual([null, null, null, null]);
+    // Les volumes sont écrits par l'appli dans les deux régimes ; sans table, la
+    // seule chose qui manque est la prescription d'allure.
+    expect(updatedSessions().every((session) => session.volumeM !== null)).toBe(true);
+    expect(
+      updatedSessions().every((session) => session.targetPaceSecPerKm === null),
+    ).toBe(true);
   });
 });
 
 describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
   beforeEach(() => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
   });
 
   it('abandonne sans écrire quand le plan a bougé pendant la génération', async () => {
@@ -776,9 +613,25 @@ describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
     await maybeReviewActivePlan();
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    // Marqueur intact : le prochain palier retentera sur l'état à jour.
+    // Marqueur intact : la révision reste due, sur l'état à jour.
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
     expect(logs()).toContain('[plan/review] plan 3 modifié pendant la révision — abandon');
+  });
+
+  it('ne rejoue pas la génération entière à l’import suivant', async () => {
+    // Le marqueur n'avance pas, donc le seuil reste franchi : sans cooldown, le
+    // prochain fichier importé redemanderait la même révision et rejouerait les
+    // mêmes appels au modèle — 45 mesurés sur un plan de 16 semaines à 5 séances,
+    // pour un travail qu'on vient de jeter.
+    dal.getPlanUpdatedAt.mockResolvedValue('2026-08-11T09:30:00.000Z');
+
+    await maybeReviewActivePlan();
+    const callsAfterAbandon = chatCompletionJson.mock.calls.length;
+
+    await maybeReviewActivePlan();
+
+    expect(chatCompletionJson.mock.calls.length).toBe(callsAfterAbandon);
+    expect(logs()).toContain('[plan/review] déclenchement ignoré : échec récent');
   });
 
   it('abandonne aussi quand le plan n’est plus actif', async () => {
@@ -808,11 +661,7 @@ describe('maybeReviewActivePlan — échecs', () => {
   });
 
   it('avance le marqueur quand le plan produit sort de sa fenêtre', async () => {
-    chatCompletionJson.mockResolvedValue({
-      decision: 'adjust',
-      reason: 'Charge trop élevée.',
-      weeks: ADJUST_WEEKS,
-    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
     dal.applyPlanUpdate.mockRejectedValue(
       new InvalidPlanError('sessions', 'Séance hors de la fenêtre du plan.'),
     );
@@ -927,101 +776,132 @@ describe('withReviewNote', () => {
 });
 
 /*
- * Révision par tranches.
+ * Une révision sur une **longue** fenêtre restante.
+ *
+ * Le plan de deux semaines ci-dessus tient en une phase d'affûtage : il ne porte
+ * aucun créneau de qualité, donc la révision n'y appelle le modèle qu'une fois.
+ * Ce plan-ci en porte, et c'est ce qui permet d'éprouver la reconstruction
+ * complète — périodisation conservée, créneaux remplis, repli quand le coach
+ * lâche.
  */
-
-/** Un plan long : douze semaines, dont la première déjà entamée (reprise mercredi). */
-const LONG_PLAN: PlanDto = { ...PLAN, weeks: 12, raceDate: '2026-11-01' };
-
-/** Une semaine de trois séances qui pèse `km`, sortie longue le dimanche. */
-function weekOfKm(km: number) {
-  return {
-    sessions: [
-      { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: km * 0.31 },
-      { day: 4, kind: 'Endurance', title: 'Footing', distanceKm: km * 0.31 },
-      { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: km * 0.38 },
-    ],
-  };
-}
 
 /**
- * Douze semaines conformes aux règles de progression : montée par palier avec
- * semaine allégée toutes les quatre semaines, puis deux semaines d'affûtage.
+ * Seize semaines commencées le lundi 1er juin, course le dimanche 20 septembre.
+ * Au mardi 11 août, il en reste six — et l'athlète est dans son bloc spécifique.
  */
-const LONG_WEEKS = [
-  { sessions: [{ day: 7, kind: 'Sortie longue', title: '14 km', distanceKm: 14 }] },
-  ...[30, 32, 34, 28, 30, 32, 34, 28, 30, 24, 18].map(weekOfKm),
-];
+const LONG_PLAN: PlanDto = {
+  ...PLAN,
+  startsOn: '2026-06-01',
+  weeks: 16,
+  raceDate: '2026-09-20',
+};
 
-describe('maybeReviewActivePlan — par tranches', () => {
+/** Le coach de cette fenêtre : un verdict, puis un déroulé par créneau. */
+function coachAdjustsLongPlan(): void {
+  chatCompletionJson.mockImplementation(async (call: { schemaName: string }) => {
+    if (call.schemaName === 'training_plan_review') return ADJUST;
+    if (call.schemaName === 'quality_session') {
+      return {
+        title: 'Séance écrite par le coach',
+        steps: [
+          {
+            repeat: 1,
+            steps: [
+              {
+                role: 'run',
+                distanceM: 6_000,
+              },
+            ],
+          },
+        ],
+      };
+    }
+    throw new Error(`schéma inattendu sur le chemin de révision : ${call.schemaName}`);
+  });
+}
+
+describe('maybeReviewActivePlan — fenêtre longue', () => {
   beforeEach(() => {
     dal.getActivePlanWithSessions.mockResolvedValue({ plan: LONG_PLAN, sessions: ACTIVE.sessions });
   });
 
-  it('décide dans le premier appel, puis écrit la suite tranche par tranche', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({
-        decision: 'adjust',
-        reason: 'Les allures se dégradent à fréquence cardiaque égale.',
-        weeks: LONG_WEEKS.slice(0, 6),
-      })
-      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+  it('conserve la position dans la périodisation : pas de retour en phase de base', async () => {
+    coachAdjustsLongPlan();
 
     await maybeReviewActivePlan();
 
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    // La première tranche est bornée par la grammaire, comme les suivantes.
-    expect(chatCompletionJson.mock.calls[0][0].jsonSchema.properties.weeks).toMatchObject({
-      minItems: 6,
-      maxItems: 6,
-    });
-    expect(chatCompletionJson.mock.calls[1][0].schemaName).toBe('training_plan_review_chunk');
+    // Quatre créneaux de qualité sur les six semaines restantes : trois de
+    // spécificité, un d'affûtage. Une périodisation recalculée sur la seule
+    // fenêtre restante aurait rendu des semaines de base.
+    const kinds = updatedSessions().map((session) => session.kind);
+    // Spécificité 10 km : du seuil ; affûtage : de la VMA ; puis la course.
+    expect(kinds).toContain('Seuil');
+    expect(kinds).toContain('VMA');
+    expect(kinds).toContain('Course');
+    // Les répétitions courtes sont la qualité de la phase de **base** : leur
+    // absence est la preuve que le plan n'y est pas retourné.
+    expect(kinds).not.toContain('Répétitions');
+  });
 
-    // Les douze semaines sont écrites en une transaction, tranche 1 comprise.
-    const [, update] = dal.applyPlanUpdate.mock.calls[0];
-    expect(update.sessions).toHaveLength(34);
-    expect(update.sessions[33].scheduledOn).toBe('2026-11-01');
+  it('ne réécrit aucune journée déjà écoulée', async () => {
+    coachAdjustsLongPlan();
+
+    await maybeReviewActivePlan();
+
+    expect(updatedSessions().every((session) => session.scheduledOn >= '2026-08-12')).toBe(true);
+  });
+
+  it('écrit un plan entièrement déterministe quand le coach lâche après son verdict', async () => {
+    chatCompletionJson.mockImplementation(async (call: { schemaName: string }) => {
+      if (call.schemaName === 'training_plan_review') return ADJUST;
+      throw new AiUnavailableError('unreachable');
+    });
+
+    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+
+    // Le plan est écrit malgré tout, complet et mesuré : un créneau qui échoue
+    // se replie sur un déroulé déterministe.
+    expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
+    expect(updatedSessions().every((session) => session.volumeM !== null)).toBe(true);
+    expect(updatedSessions().map((session) => session.kind)).not.toContain('Répétitions');
     expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
   });
 
-  it('rappelle à chaque tranche ce qui a été constaté, et où elle en est', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({
-        decision: 'adjust',
-        reason: 'Trois séances manquées sur quatre.',
-        weeks: LONG_WEEKS.slice(0, 6),
-      })
-      .mockResolvedValueOnce({ weeks: LONG_WEEKS.slice(6) });
+  it('n’écrit rien et retentera quand le verdict lui-même n’arrive pas', async () => {
+    // Un verdict n'a pas de repli déterministe, et c'est délibéré : se replier
+    // sur « keep » avalerait une révision due, sur « adjust » ferait recalculer
+    // un plan que personne n'a jugé.
+    chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
 
-    await maybeReviewActivePlan();
+    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
 
-    const [system, user] = chatCompletionJson.mock.calls[1][0].messages.map(
-      (message: { content: string }) => message.content,
-    );
-
-    expect(system).toContain('Ce que tu as constaté : « Trois séances manquées sur quatre. »');
-    expect(user).toContain('Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 des semaines restantes');
-    expect(user).toContain('Fin de la tranche précédente — semaine 6 :');
-    // Le bilan des séances réalisées ne repart pas : il a servi à décider.
-    expect(user).not.toContain('Séances depuis ta dernière révision');
-  });
-
-  it('ne demande aucune tranche quand le plan reste adapté', async () => {
-    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
-
-    await maybeReviewActivePlan();
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    expect(dal.markPlanReviewed).not.toHaveBeenCalled();
+    expect(errored).toHaveBeenCalledWith(
+      expect.stringContaining('nouvelle tentative dans 30 min au plus tôt'),
+    );
   });
 
-  it('annonce au premier appel qu’il ne rend que le début de la suite', async () => {
-    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+  it('abandonne sans faire échouer l’import quand la fenêtre est infaisable', async () => {
+    // Six séances par semaine sur un volume réel de 1 km : le squelette refuse
+    // d'écrire des séances de moins de 500 m. Échec **permanent** — le marqueur
+    // avance, sans quoi chaque fichier importé rejouerait le même refus.
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...LONG_PLAN, sessionsPerWeek: 6, weeklyTimeMinutes: null },
+      sessions: ACTIVE.sessions,
+    });
+    dal.getTrainingSnapshot.mockResolvedValue({
+      ...SNAPSHOT,
+      weeks: [{ startsOn: '2026-08-03', distanceKm: 1, movingTimeS: 400, sessions: 1 }],
+    });
+    chatCompletionJson.mockResolvedValue(ADJUST);
 
-    await maybeReviewActivePlan();
+    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
 
-    expect(chatCompletionJson.mock.calls[0][0].messages[1].content).toContain(
-      "En « adjust », n'écris ici que les 6 premières (semaines 1 à 6 des semaines restantes)",
+    expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(errored).toHaveBeenCalledWith(
+      expect.stringContaining('[plan/review] révision abandonnée'),
     );
   });
 });

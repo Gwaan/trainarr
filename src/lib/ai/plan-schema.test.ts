@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import type { TrainingPaces } from '@/lib/metrics/vdot';
@@ -12,14 +14,10 @@ import {
   isMarathonGoal,
   sessionPaceZone,
   mapPlanWeeksToSessions,
-  planChunkJsonSchema,
-  planChunkOutputSchema,
-  planChunkOutputSchemaFor,
+  planInstructionJsonSchema,
+  planInstructionOutputSchema,
   planReviewJsonSchema,
   planReviewOutputSchema,
-  planUpdateChunkJsonSchema,
-  planUpdateJsonSchema,
-  planUpdateOutputSchema,
   planWeeksPostProcessing,
   resolveWeeklyTimeBudget,
   taperWeekCount,
@@ -72,190 +70,37 @@ function week(days: number[], distancesKm?: number[]): PlanWeekOutput {
   };
 }
 
-/*
- * Le contrat Zod des semaines et des séances, éprouvé à travers l'enveloppe qui
- * lui survit : celle d'une **tranche**. L'enveloppe « plan entier d'un seul
- * tenant » a disparu avec la bascule sur squelette (l'appli écrit le plan, elle
- * ne le fait plus écrire), mais `planSessionSchema` est le même pour tout le
- * monde — c'est lui que ces cas décrivent.
- */
-describe('planChunkOutputSchema', () => {
-  it('accepte une sortie minimale et laisse les champs facultatifs absents', () => {
-    const parsed = planChunkOutputSchema.parse({
-      summary: 'Bloc de 2 semaines.',
-      weeks: [week([3, 7]), week([3, 7])],
-    });
-
-    expect(parsed.weeks).toHaveLength(2);
-    expect(parsed.weeks[0].sessions[0].distanceKm).toBeUndefined();
-  });
-
-  it('refuse un jour hors de la semaine ISO', () => {
-    const result = planChunkOutputSchema.safeParse({
-      summary: 'x',
-      weeks: [{ sessions: [session(8)] }],
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  it('refuse une allure cible aberrante', () => {
-    const result = planChunkOutputSchema.safeParse({
-      summary: 'x',
-      weeks: [{ sessions: [session(3, { targetPaceSecPerKm: 30 })] }],
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  it('refuse un résumé vide : il porte la logique du plan', () => {
-    expect(planChunkOutputSchema.safeParse({ summary: '', weeks: [week([7])] }).success).toBe(false);
-  });
-});
-
-describe('planChunkOutputSchema — déroulé structuré', () => {
-  /** Le déroulé tel que le modèle l'écrit : les champs sans valeur sont absents. */
-  function parseSteps(steps: unknown) {
-    return planChunkOutputSchema.safeParse({
-      summary: 'x',
-      weeks: [{ sessions: [{ day: 3, kind: 'Seuil', title: '3 × 8 min', steps }] }],
-    });
-  }
-
-  it('accepte un déroulé et le normalise : clés absentes à `null`, `repeat` à 1', () => {
-    const result = parseSteps([
-      { steps: [{ role: 'warmup', durationS: 900, hrZone: 2 }] },
-      {
-        repeat: 4,
-        steps: [
-          { role: 'run', distanceM: 1_000, paceMinSecPerKm: 300, paceMaxSecPerKm: 310 },
-          { role: 'recover', durationS: 120, note: '  trot souple  ' },
-        ],
-      },
-    ]);
-
-    expect(result.success).toBe(true);
-    const parsed = result.data?.weeks[0].sessions[0].steps;
-    expect(parsed?.[0]).toEqual({
-      repeat: 1,
-      steps: [
-        {
-          role: 'warmup',
-          distanceM: null,
-          durationS: 900,
-          paceMinSecPerKm: null,
-          paceMaxSecPerKm: null,
-          hrZone: 2,
-          note: null,
-        },
-      ],
-    });
-    expect(parsed?.[1].repeat).toBe(4);
-    expect(parsed?.[1].steps[1].note).toBe('trot souple');
-  });
-
-  it('laisse `steps` absent sur une séance qui n’en porte pas', () => {
-    const parsed = planChunkOutputSchema.parse({ summary: 'x', weeks: [week([7])] });
-
-    expect(parsed.weeks[0].sessions[0].steps).toBeUndefined();
-  });
-
-  it('arrondit les valeurs entières que le contrat exige', () => {
-    const result = parseSteps([{ steps: [{ role: 'run', durationS: 150.4 }] }]);
-
-    expect(result.data?.weeks[0].sessions[0].steps?.[0].steps[0].durationS).toBe(150);
-  });
-
-  it('refuse une étape qui porte ses deux mesures', () => {
-    expect(parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, durationS: 300 }] }]).success).toBe(
-      false,
-    );
-  });
-
-  it('refuse une étape sans aucune mesure', () => {
-    expect(parseSteps([{ steps: [{ role: 'run', hrZone: 3 }] }]).success).toBe(false);
-  });
-
-  it('normalise une borne unique en allure unique (constaté en prod : le modèle n’en écrit qu’une)', () => {
-    const min = parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 300 }] }]);
-    const minStep = min.data?.weeks[0].sessions[0].steps?.[0].steps[0];
-    expect(minStep?.paceMinSecPerKm).toBe(300);
-    expect(minStep?.paceMaxSecPerKm).toBe(300);
-
-    const max = parseSteps([{ steps: [{ role: 'run', distanceM: 1_000, paceMaxSecPerKm: 310 }] }]);
-    const maxStep = max.data?.weeks[0].sessions[0].steps?.[0].steps[0];
-    expect(maxStep?.paceMinSecPerKm).toBe(310);
-    expect(maxStep?.paceMaxSecPerKm).toBe(310);
-  });
-
-  it('remet à l’endroit des bornes d’allure inversées', () => {
-    const result = parseSteps([
-      { steps: [{ role: 'run', distanceM: 1_000, paceMinSecPerKm: 320, paceMaxSecPerKm: 300 }] },
-    ]);
-
-    const step = result.data?.weeks[0].sessions[0].steps?.[0].steps[0];
-    expect(step?.paceMinSecPerKm).toBe(300);
-    expect(step?.paceMaxSecPerKm).toBe(320);
-  });
-
-  it('refuse une allure et une zone cardiaque sur la même étape', () => {
-    expect(
-      parseSteps([
-        {
-          steps: [
-            { role: 'run', distanceM: 1_000, paceMinSecPerKm: 300, paceMaxSecPerKm: 310, hrZone: 4 },
-          ],
-        },
-      ]).success,
-    ).toBe(false);
-  });
-
-  it('refuse une zone cardiaque hors des cinq zones du projet', () => {
-    expect(parseSteps([{ steps: [{ role: 'run', durationS: 600, hrZone: 6 }] }]).success).toBe(false);
-  });
-
-  it('refuse une allure aberrante, un rôle inventé et un bloc vide', () => {
-    expect(
-      parseSteps([
-        { steps: [{ role: 'run', distanceM: 400, paceMinSecPerKm: 30, paceMaxSecPerKm: 30 }] },
-      ]).success,
-    ).toBe(false);
-    expect(parseSteps([{ steps: [{ role: 'sprint', distanceM: 400 }] }]).success).toBe(false);
-    expect(parseSteps([{ steps: [] }]).success).toBe(false);
-  });
-
-  it('refuse un nombre de répétitions hors bornes', () => {
-    expect(parseSteps([{ repeat: 0, steps: [{ role: 'run', distanceM: 400 }] }]).success).toBe(false);
-    expect(parseSteps([{ repeat: 21, steps: [{ role: 'run', distanceM: 400 }] }]).success).toBe(
-      false,
-    );
-  });
-});
-
-describe('planUpdateOutputSchema', () => {
-  it('accepte une sortie sans `settings` : rien ne change côté réglages', () => {
-    const parsed = planUpdateOutputSchema.parse({ summary: 'Ajusté.', weeks: [week([7])] });
+describe('planInstructionOutputSchema', () => {
+  it('accepte une instruction qui ne change aucun réglage', () => {
+    const parsed = planInstructionOutputSchema.parse({});
     expect(parsed.settings).toBeUndefined();
   });
 
   it('accepte un patch partiel de réglages', () => {
-    const parsed = planUpdateOutputSchema.parse({
-      summary: 'Trois séances désormais.',
-      settings: { sessionsPerWeek: 3 },
-      weeks: [week([7])],
-    });
-
+    const parsed = planInstructionOutputSchema.parse({ settings: { sessionsPerWeek: 3 } });
     expect(parsed.settings).toEqual({ sessionsPerWeek: 3 });
   });
 
   it('accepte un budget temps effacé : `null` lève la contrainte, il ne la tait pas', () => {
-    const parsed = planUpdateOutputSchema.parse({
-      summary: 'Plus de contrainte de temps.',
-      settings: { weeklyTimeMinutes: null },
-      weeks: [week([7])],
-    });
-
+    const parsed = planInstructionOutputSchema.parse({ settings: { weeklyTimeMinutes: null } });
     expect(parsed.settings).toEqual({ weeklyTimeMinutes: null });
+  });
+
+  it('refuse un réglage hors bornes plutôt que de le rabattre', () => {
+    expect(planInstructionOutputSchema.safeParse({ settings: { longRunDay: 8 } }).success).toBe(
+      false,
+    );
+    expect(
+      planInstructionOutputSchema.safeParse({ settings: { sessionsPerWeek: 0 } }).success,
+    ).toBe(false);
+  });
+
+  it('ne laisse passer aucune semaine : le modèle n’en écrit plus', () => {
+    // La grammaire ne propose pas la clé ; Zod l'écarte pour les providers qui
+    // ne la suivent pas. Une semaine qui passerait ici pourrait être appliquée
+    // telle quelle, sans être passée par le squelette ni par les règles de
+    // volume — c'est exactement ce que l'inversion retire au modèle.
+    expect(planInstructionOutputSchema.parse({ weeks: [week([7])] })).not.toHaveProperty('weeks');
   });
 });
 
@@ -269,36 +114,43 @@ describe('planReviewOutputSchema', () => {
     expect(parsed).toEqual({ decision: 'keep', reason: 'Les séances sont dans les cibles.' });
   });
 
-  it('écarte les semaines d’un « keep » : rien ne doit pouvoir être appliqué', () => {
+  it('écarte les réglages d’un « keep » : rien ne doit pouvoir être appliqué', () => {
     const parsed = planReviewOutputSchema.parse({
       decision: 'keep',
       reason: 'Rien à changer.',
-      weeks: [week([7])],
+      settings: { sessionsPerWeek: 3 },
     });
 
-    expect(parsed).not.toHaveProperty('weeks');
+    expect(parsed).not.toHaveProperty('settings');
   });
 
-  it('exige les semaines d’un « adjust »', () => {
-    // La grammaire ne sait pas exprimer cette dépendance : c'est ici qu'elle
-    // est tenue, et le modèle se voit renvoyer le champ en défaut.
-    const parsed = planReviewOutputSchema.safeParse({
+  it('accepte un « adjust » sans réglages : l’appli recalcule seule les semaines', () => {
+    const parsed = planReviewOutputSchema.parse({
       decision: 'adjust',
       reason: 'Charge trop élevée.',
     });
 
-    expect(parsed.success).toBe(false);
+    expect(parsed).toEqual({ decision: 'adjust', reason: 'Charge trop élevée.' });
   });
 
-  it('accepte un « adjust » avec ses semaines et un patch de réglages', () => {
+  it('accepte un « adjust » avec un patch de réglages', () => {
     const parsed = planReviewOutputSchema.parse({
       decision: 'adjust',
       reason: 'Trois séances manquées : on repasse à 3 par semaine.',
       settings: { sessionsPerWeek: 3 },
-      weeks: [week([7])],
     });
 
     expect(parsed).toMatchObject({ decision: 'adjust', settings: { sessionsPerWeek: 3 } });
+  });
+
+  it('ne laisse passer aucune semaine : une révision juge, elle n’écrit pas', () => {
+    expect(
+      planReviewOutputSchema.parse({
+        decision: 'adjust',
+        reason: 'Charge trop élevée.',
+        weeks: [week([7])],
+      }),
+    ).not.toHaveProperty('weeks');
   });
 
   it('refuse une décision inventée', () => {
@@ -337,131 +189,54 @@ describe('resolveWeeklyTimeBudget', () => {
 });
 
 describe('JSON Schema', () => {
-  it('interdit les propriétés inventées à tous les niveaux', () => {
-    const json = JSON.stringify(planUpdateJsonSchema);
+  it('interdit les propriétés inventées, et n’exige rien d’une instruction', () => {
+    const json = JSON.stringify(planInstructionJsonSchema);
     expect(json).toContain('"additionalProperties":false');
-    expect(planUpdateJsonSchema.required).toEqual(['summary', 'weeks']);
+    // Une consigne qui ne change aucun réglage durable est le cas nominal :
+    // exiger la clé forcerait le modèle à inventer un nombre de séances.
+    expect(planInstructionJsonSchema.required).toEqual([]);
   });
 
-  it('déclare le déroulé sans type nullable, comme le reste du fichier', () => {
-    const json = JSON.stringify(planUpdateJsonSchema);
+  it('ne propose aucune semaine ni au modèle d’instruction ni à celui de révision', () => {
+    // Ce que la grammaire ne propose pas, le modèle ne peut pas l'écrire : c'est
+    // la première des deux barrières qui lui retirent l'écriture des plans.
+    expect(JSON.stringify(planInstructionJsonSchema)).not.toContain('weeks');
+    expect(JSON.stringify(planReviewJsonSchema)).not.toContain('weeks');
+  });
 
-    // Un bloc exige ses étapes, une étape exige son rôle ; tout le reste est
-    // facultatif par absence — c'est ce que la conversion GBNF traduit.
-    expect(json).toContain('"required":["steps"]');
-    expect(json).toContain('"required":["role"]');
-    expect(json).toContain('"enum":["warmup","run","recover","cooldown"]');
+  it('déclare les réglages sans type nullable, comme le reste du fichier', () => {
+    const json = JSON.stringify(planInstructionJsonSchema);
+    // `weeklyTimeMinutes: null` (« plus de contrainte ») se traduit mal en GBNF :
+    // l'omission dit déjà « inchangé », et Zod accepte le `null` d'un provider
+    // hors grammaire.
     expect(json).not.toContain('null');
   });
 
   it('reste cohérent avec les bornes partagées par le schéma Zod', () => {
-    const update = planUpdateJsonSchema.properties as Record<string, Record<string, unknown>>;
-    expect(update.weeks.maxItems).toBe(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
+    const instruction = planInstructionJsonSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const settings = instruction.settings.properties as Record<string, Record<string, unknown>>;
 
-    expect(update.settings.additionalProperties).toBe(false);
-    // `settings` reste facultatif : le modèle ne le rend que s'il change quelque chose.
-    expect(planUpdateJsonSchema.required).toEqual(['summary', 'weeks']);
+    expect(instruction.settings.additionalProperties).toBe(false);
+    expect(settings.sessionsPerWeek.maximum).toBe(PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max);
+    expect(settings.longRunDay.maximum).toBe(PLAN_OUTPUT_BOUNDS.day.max);
+    expect(settings.weeklyTimeMinutes.maximum).toBe(PLAN_OUTPUT_BOUNDS.weeklyTimeMinutes.max);
   });
 
   it('n’exige d’une révision que sa décision et sa raison', () => {
-    // `weeks` hors de `required` : c'est ce qui permet de conclure « keep » sans
-    // écrire un plan entier. Zod tient l'implication inverse.
+    // `settings` hors de `required` : c'est ce qui permet de conclure « keep »
+    // sans rien patcher. Zod tient l'implication inverse.
     expect(planReviewJsonSchema.required).toEqual(['decision', 'reason']);
 
     const review = planReviewJsonSchema.properties as Record<string, Record<string, unknown>>;
     expect(review.decision.enum).toEqual(['keep', 'adjust']);
     expect(review.reason.maxLength).toBe(PLAN_OUTPUT_BOUNDS.reasonChars);
-    // Les semaines et les réglages sont ceux d'un ajustement, à la lettre.
-    expect(review.weeks).toBe((planUpdateJsonSchema.properties as Record<string, unknown>).weeks);
+    // Les réglages sont ceux d'une instruction, à la lettre.
     expect(review.settings).toBe(
-      (planUpdateJsonSchema.properties as Record<string, unknown>).settings,
+      (planInstructionJsonSchema.properties as Record<string, unknown>).settings,
     );
-  });
-});
-
-describe('JSON Schema — bornes du compte de séances', () => {
-  /** Le sous-schéma du tableau `sessions` d'une semaine. */
-  function sessionsSchemaOf(schema: Record<string, unknown>): Record<string, unknown> {
-    const properties = schema.properties as Record<string, Record<string, unknown>>;
-    const week = properties.weeks.items as Record<string, Record<string, unknown>>;
-    return week.properties.sessions as Record<string, unknown>;
-  }
-
-  it('impose le compte exact de séances quand la tranche n’a que des semaines pleines', () => {
-    const schema = planChunkJsonSchema(5, false, { sessionsPerWeek: 6, hasStartedWeek: false });
-
-    expect(schema.properties).toMatchObject({ weeks: { minItems: 5, maxItems: 5 } });
-    // Le modèle ne PEUT plus écrire une septième séance : c'est tout l'objet du
-    // resserrement, la règle métier ne pouvait que le constater après coup.
-    expect(sessionsSchemaOf(schema)).toMatchObject({ minItems: 6, maxItems: 6 });
-  });
-
-  it('garde des bornes souples sur la tranche qui porte la semaine entamée', () => {
-    // Les items d'un tableau JSON Schema sont uniformes : imposer 6 séances à
-    // toutes les semaines de la tranche en imposerait 6 à une semaine amputée de
-    // ses premiers jours. C'est la règle métier qui juge celle-là.
-    const schema = planChunkJsonSchema(5, false, { sessionsPerWeek: 6, hasStartedWeek: true });
-
-    expect(sessionsSchemaOf(schema)).toMatchObject({
-      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-      maxItems: 6,
-    });
-  });
-
-  it('reste aux bornes générales sans compte annoncé, et garde la forme des semaines', () => {
-    const schema = planChunkJsonSchema(3, false);
-    const sessions = sessionsSchemaOf(schema);
-
-    expect(sessions).toMatchObject({
-      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-      maxItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
-    });
-    // Le resserrement ne touche à rien d'autre : mêmes séances, mêmes
-    // interdictions de propriétés inventées.
-    const week = (schema.properties as Record<string, Record<string, unknown>>).weeks
-      .items as Record<string, unknown>;
-    expect(week).toMatchObject({ additionalProperties: false, required: ['sessions'] });
-    expect(JSON.stringify(sessions.items)).toBe(
-      JSON.stringify(
-        (
-          (planUpdateJsonSchema.properties as Record<string, Record<string, unknown>>).weeks
-            .items as Record<string, Record<string, Record<string, unknown>>>
-        ).properties.sessions.items,
-      ),
-    );
-  });
-
-  it('laisse les enveloppes d’ajustement libres de leur compte de séances', () => {
-    // Leur premier appel porte aussi `settings`, dont `sessionsPerWeek` que
-    // l'instruction peut justement changer : le figer interdirait au modèle
-    // d'appliquer « passe à 5 séances par semaine ».
-    expect(sessionsSchemaOf(planUpdateChunkJsonSchema(4))).toMatchObject({
-      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-      maxItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.max,
-    });
-  });
-});
-
-describe('planChunkOutputSchemaFor', () => {
-  /** Une tranche d'une semaine de `sessions` séances. */
-  function chunkOf(sessions: number) {
-    return { weeks: [week([1, 2, 3, 4, 5, 6, 7].slice(0, sessions))] };
-  }
-
-  it('refuse le compte que la grammaire interdit, quand un provider l’ignore', () => {
-    const schema = planChunkOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
-
-    expect(schema.safeParse(chunkOf(6)).success).toBe(true);
-    expect(schema.safeParse(chunkOf(7)).success).toBe(false);
-    expect(schema.safeParse(chunkOf(5)).success).toBe(false);
-  });
-
-  it('accepte une semaine plus courte sur la tranche qui porte la semaine entamée', () => {
-    const schema = planChunkOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
-
-    expect(schema.safeParse(chunkOf(2)).success).toBe(true);
-    expect(schema.safeParse(chunkOf(6)).success).toBe(true);
-    expect(schema.safeParse(chunkOf(7)).success).toBe(false);
   });
 });
 
@@ -3052,6 +2827,21 @@ describe('weeklyVolumeTargets', () => {
     expect(targetsOf({ level: 'advanced' })[1].targetKm).toBe(39.1);
   });
 
+  /*
+   * La cadence des semaines allégées d'une **fenêtre restante** n'est plus
+   * éprouvée ici, et c'est le signe que la séparation a eu lieu.
+   *
+   * `weeklyVolumeTargets` portait deux paramètres optionnels
+   * (`firstFullWeekCapKm`, `firstFullWeekCadenceRank`) par lesquels une
+   * continuation lui faisait faire autre chose qu'un démarrage. Ils ont été
+   * retirés : reprendre un plan en cours à sa semaine N a désormais son
+   * arithmétique propre (`remainingVolumeTargets`, dans `plan-service.ts`), et
+   * c'est là que la cadence, l'ancrage et les trajectoires se mesurent.
+   *
+   * Ce qui reste partagé — et c'est délibéré, deux cadences finiraient par
+   * diverger — est {@link isCutbackCadenceRank}, éprouvée des deux côtés.
+   */
+
   it('ne s’offre pas de semaine allégée quand le plan est trop court pour ça', () => {
     // Quatre semaines de développement : la règle ne l'exige pas, et en gaspiller
     // une reviendrait à supprimer le quart du bloc.
@@ -3104,9 +2894,134 @@ describe('weeklyVolumeTargets', () => {
     expect(targetsOf({ weeks: 12 }).every((target) => target.kind !== 'race')).toBe(true);
   });
 
+  /*
+   * La régression du chantier : une fenêtre **restante** dont la première
+   * semaine — entamée, donc à l'index 0 — est déjà une semaine d'affûtage ou la
+   * semaine de la course.
+   *
+   * La boucle d'affûtage partait de `Math.max(taperFrom, firstFull)` et sautait
+   * donc l'index 0 dès que la semaine était entamée ; la valeur écrite ensuite
+   * pour cet index-là était le **départ** proratisé, sans facteur d'affûtage.
+   * Sur une création, l'index 0 est la première semaine du plan et le raccourci
+   * ne se voyait pas. Sur la fenêtre restante d'un plan en cours — révision
+   * déclenchée le lundi qui suit la sortie longue, course le dimanche suivant —
+   * la semaine de la course recevait un volume de développement.
+   *
+   * Mesuré avant correction, meilleure semaine réelle 60 km : **61,6 km** écrits
+   * pour la semaine de course, quatre « Récupération » de 10,8 km et l'épreuve —
+   * un affûtage au-dessus de tout ce que l'athlète avait couru, et
+   * `validatePlanBusinessRules` n'y voyait rien.
+   */
+  const RESTART = { recentWeeklyKm: 60, race: { isMarathon: true }, firstWeekFromDay: 2 } as const;
+
+  it('affûte la semaine entamée qui porte la course, au lieu de la faire développer', () => {
+    // Une seule semaine restante, entamée au mardi : c'est la semaine de course.
+    // 71,9 km de base × 0,55 (facteur de la dernière semaine) = 39,5, proratisés
+    // sur six jours = 33,8. Avant : 61,6.
+    const [raceWeek] = targetsOf({ ...RESTART, weeks: 1 });
+
+    expect(raceWeek.targetKm).toBe(33.8);
+    // Et le premier invariant qu'un affûtage doit tenir : rester très en dessous
+    // de ce que l'athlète court en développement.
+    expect(raceWeek.targetKm).toBeLessThan(RESTART.recentWeeklyKm * 0.65);
+  });
+
+  it('affûte la semaine entamée qui précède la course', () => {
+    // Deux semaines restantes : la première (entamée) est un affûtage à 0,75,
+    // la seconde la course à 0,55 — et la course, elle, était déjà juste.
+    expect(targetKm(targetsOf({ ...RESTART, weeks: 2 }))).toEqual([46.1, 39.5]);
+  });
+
+  it('ne touche pas à une semaine entamée qui n’est pas un affûtage', () => {
+    // Le cas de la création, celui qui ne doit pas bouger : dix semaines
+    // restantes, l'index 0 est une semaine de développement, il se proratise
+    // depuis le départ comme avant.
+    const targets = targetsOf({ ...RESTART, weeks: 10 });
+
+    expect(targets[0].kind).toBe('partial');
+    expect(targets[0].targetKm).toBe(61.6);
+    expect(targets[1].targetKm).toBe(71.9);
+  });
+
   it('rend une entrée par semaine, et rien du tout sans semaine', () => {
     expect(targetsOf({ weeks: 52 })).toHaveLength(52);
     expect(weeklyVolumeTargets({ ...({} as WeeklyVolumeTargetsParams), weeks: 0 })).toEqual([]);
+  });
+});
+
+/**
+ * Le **témoin différentiel de la création** : une empreinte de 28 560
+ * configurations, relevée sur le code d'avant la correction de l'affûtage et
+ * inchangée après elle.
+ *
+ * ## Pourquoi une empreinte plutôt que des valeurs
+ *
+ * Parce que ce que ce test doit prouver n'est pas *quelles* cibles la création
+ * écrit — les tests ci-dessus s'en chargent, chiffre par chiffre — mais qu'elle
+ * n'en a **pas bougé d'un dixième** sur tout le domaine, y compris là où
+ * personne ne pense à regarder. Trente mille tableaux ne se recopient pas dans
+ * un fichier de test ; leur empreinte, si.
+ *
+ * ## Ce que le balayage exclut, et pourquoi
+ *
+ * Les fenêtres dont **toutes** les semaines sont un affûtage
+ * (`weeks <= taperWeekCount`, soit une ou deux semaines menant à une course).
+ * Celles-là ont bel et bien changé, et c'est la correction : leur index 0 est
+ * lui-même une semaine d'affûtage ou la semaine de la course, et il recevait un
+ * volume de développement. Mesuré sur le balayage complet : 1 440 lignes
+ * modifiées sur 30 240, toutes dans ce coin-là (24 combinaisons
+ * `semaines × objectif × jour de départ`, toutes à `weeks ∈ {1, 2}`, avec course
+ * et départ en milieu de semaine), et le sens du changement est celui qu'on
+ * voulait — 61,6 → 33,8 km sur une semaine de course d'une athlète à 60 km.
+ * Les trois tests nommés ci-dessus les couvrent un par un.
+ *
+ * Le reste — les 28 560 autres, dont **toute** la grille de production
+ * (`volumeCases`, 4 860 combinaisons à 4, 6, 8, 16 et 52 semaines) — est
+ * identique au bit près.
+ *
+ * ## Si ce test casse
+ *
+ * C'est que la création a bougé. Ce n'est pas nécessairement une faute, mais ce
+ * n'est jamais un effet de bord acceptable : il faut le vouloir, le mesurer, et
+ * remplacer l'empreinte en connaissance de cause.
+ */
+describe('weeklyVolumeTargets — non-régression de la création', () => {
+  /** L'empreinte gelée. Ne se met à jour qu'avec une intention écrite. */
+  const CREATION_DIGEST = 'f2221039b817047403a14a61dd680134d0e69e443f985668da0bbe7780d3f600';
+
+  it('rend exactement les mêmes cibles qu’avant sur tout le domaine', () => {
+    const races = [null, { isMarathon: false }, { isMarathon: true }] as const;
+    const levels = ['beginner', 'intermediate', 'advanced'] as const;
+    const rows: string[] = [];
+
+    for (let weeks = 1; weeks <= 24; weeks += 1) {
+      for (const race of races) {
+        // Les fenêtres entièrement en affûtage sont exclues : cf. l'en-tête.
+        if (weeks <= taperWeekCount(weeks, race)) continue;
+        for (let firstWeekFromDay = 1; firstWeekFromDay <= 7; firstWeekFromDay += 1) {
+          for (const weeklyTimeMinutes of [null, 120, 300, 600]) {
+            for (const recentWeeklyKm of [null, 4, 8, 42.1, 90]) {
+              for (const level of levels) {
+                const params: WeeklyVolumeTargetsParams = {
+                  weeks,
+                  firstWeekFromDay,
+                  recentWeeklyKm,
+                  weeklyTimeMinutes,
+                  easyPaceSecPerKm: 330,
+                  race,
+                  level,
+                };
+                const key = `${weeks}|${race === null ? 'x' : race.isMarathon ? 'm' : 'r'}|${firstWeekFromDay}|${weeklyTimeMinutes}|${recentWeeklyKm}|${level}`;
+                rows.push(`${key}=${JSON.stringify(weeklyVolumeTargets(params))}`);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(rows).toHaveLength(28_560);
+    expect(createHash('sha256').update(rows.join('\n')).digest('hex')).toBe(CREATION_DIGEST);
   });
 });
 
@@ -3127,6 +3042,52 @@ describe('weeklySessionBudgets', () => {
       { role: 'easy', km: 3.4 },
       { role: 'easy', km: 3.4 },
     ]);
+  });
+
+  /**
+   * **La sortie longue est la plus longue séance de la semaine, sans exception.**
+   *
+   * Ce n'est pas une préférence d'écriture : `validatePlanBusinessRules` refuse
+   * une semaine dont la plus longue séance tombe un autre jour, et une semaine
+   * décomposée par cette fonction vient de l'**appli**, pas du modèle. Le refus
+   * sort donc en `InvalidGeneratedPlanError` — « incohérence interne » —, là où un
+   * `InvalidPlanError` actionnable serait le seul verdict lisible pour l'athlète.
+   *
+   * Les parts garantissent l'ordre en réels ; ce sont les arrondis qui le
+   * cassaient, et seulement dans un trou d'un dixième de kilomètre. Mesuré avant
+   * correction : à 4,1 km sur 5 séances dont 2 de qualité, **1,0 km de sortie
+   * longue contre 1,1 km pour le plus gros footing** — quand 4,0 et 4,2 km
+   * passaient. Le balayage ci-dessous couvre les six autres trous du même genre
+   * (3,1 · 4,1 · 4,2 · 4,3 km à 4 séances, et les cibles sous 1,2 km que le
+   * plancher de distance du contrat rendait impossibles).
+   */
+  it('ne budgète jamais un footing plus long que la sortie longue', () => {
+    // Le trou mesuré, nommément.
+    const budgets = weeklySessionBudgets(4.1, 5, 2);
+    expect(budgets[0].km).toBeGreaterThanOrEqual(
+      Math.max(...budgets.slice(1).map((budget) => budget.km)),
+    );
+
+    // Puis tout le domaine : chaque dixième de 0,1 à 20 km, de 2 à 7 séances, de
+    // 0 à 2 séances de qualité.
+    const failures: string[] = [];
+    for (let tenths = 1; tenths <= 200; tenths += 1) {
+      const targetKm = Math.round(tenths) / 10;
+      for (let sessions = 2; sessions <= 7; sessions += 1) {
+        for (let quality = 0; quality <= 2; quality += 1) {
+          const decomposition = weeklySessionBudgets(targetKm, sessions, quality);
+          const longest = Math.max(...decomposition.slice(1).map((budget) => budget.km));
+          if (decomposition[0].km < longest) {
+            failures.push(
+              `${targetKm} km · ${sessions} séances · ${quality} qualité → sortie longue ` +
+                `${decomposition[0].km} km contre ${longest} km`,
+            );
+          }
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
   });
 
   it('fait tomber la somme exactement sur la cible', () => {
@@ -3305,6 +3266,17 @@ describe('weeklyVolumeTargets × validatePlanBusinessRules', () => {
     expect(failures).toEqual([]);
   });
 });
+
+/*
+ * Le balayage « fenêtre restante » a déménagé.
+ *
+ * Il éprouvait `weeklyVolumeTargets` muni de ses deux paramètres de
+ * continuation, retirés depuis. Son équivalent — les cibles d'une fenêtre
+ * restante qu'aucune règle ne refuse, sur tout le domaine des rangs de cadence,
+ * des objectifs, des jours de reprise, des niveaux et des budgets — vit
+ * désormais dans `plan-service.test.ts`, contre `remainingVolumeTargets`, qui
+ * les calcule.
+ */
 
 /**
  * Le pendant du balayage précédent, un cran plus bas : un plan qui suit la

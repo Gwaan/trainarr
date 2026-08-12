@@ -6,24 +6,32 @@
  * testable exhaustivement, et c'est là que vit tout ce qui peut mal tourner
  * entre le modèle et la table `planned_sessions`.
  *
- * ## Trois barrières, et ce que chacune garantit
+ * ## Le modèle n'écrit plus de semaines — ce que ça change ici
  *
- * 1. **La grammaire** (`planChunkJsonSchema`, `planUpdateJsonSchema`, convertis
- *    en GBNF par llama.cpp) : le modèle ne *peut pas* écrire un token hors
- *    schéma. Elle garantit la forme.
- * 2. **Zod** (`planChunkOutputSchemaFor`, `planUpdateOutputSchema`) : re-valide
- *    côté application, parce que rien ne dit qu'un provider tiers honore
- *    `response_format`.
- * 3. **{@link validatePlanBusinessRules}** : la forme ne dit rien du *sens*. Un
- *    JSON parfaitement valide peut placer deux séances le même jour, oublier la
- *    sortie longue, ou compter 11 semaines quand on en demandait 12. Ces
- *    violations-là se corrigent en le disant au modèle, pas en le contraignant.
+ * L'inversion du coach a retiré au modèle l'écriture des plans : la création
+ * (`writeGeneratedPlan`), l'ajustement et la révision passent tous par le
+ * squelette déterministe (`lib/plan-skeleton`), et le modèle ne rend plus que
+ * des **déroulés de séance** (`quality-fill.ts`), des **textes** (résumé,
+ * justification) et des **décisions** (« keep » ou « adjust », les réglages
+ * qu'une instruction change).
+ *
+ * Il n'y a donc plus ni grammaire ni schéma Zod pour une semaine : ce qui reste
+ * de ce fichier est
+ *
+ * 1. le **type** de ce que l'appli écrit ({@link PlanSessionOutput},
+ *    {@link PlanWeekOutput}) — un type TypeScript nu, et non plus un `z.infer`,
+ *    puisqu'il n'y a plus rien à parser ;
+ * 2. les **contrats de décision** ({@link planInstructionOutputSchema},
+ *    {@link planReviewOutputSchema}), qui eux viennent bien du modèle et gardent
+ *    leurs deux barrières — grammaire JSON Schema et re-validation Zod, parce
+ *    que rien ne dit qu'un provider tiers honore `response_format` ;
+ * 3. les **règles métier** ({@link validatePlanBusinessRules}) : la forme ne dit
+ *    rien du sens, et elles restent la seule chose qui juge un plan écrit — que
+ *    ce soit le modèle ou l'appli qui l'ait écrit.
  *
  * ## La semaine est implicite
  *
  * Aucun numéro de semaine dans la sortie : l'index du tableau `weeks` fait foi.
- * Demander à un petit modèle de compter jusqu'à 12 sans se tromper est un pari
- * perdu ; ne pas le lui demander coûte zéro.
  */
 
 import { z } from 'zod';
@@ -32,13 +40,7 @@ import type { PlanLevel } from '@/data/db/schema';
 import type { NewPlanSessionInput } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import type { PaceZone, TrainingPaces } from '@/lib/metrics/vdot';
-import {
-  PLAN_STEP_BOUNDS,
-  PLAN_STEP_ROLES,
-  planSessionStepsSchema,
-  type PlanSessionSteps,
-  type PlanStep,
-} from '@/lib/plan-steps/schema';
+import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
 
 import {
   formatDuration,
@@ -77,160 +79,53 @@ export const PLAN_OUTPUT_BOUNDS = {
 } as const;
 
 /*
- * Schémas Zod.
+ * Ce que l'appli écrit : le type d'une semaine.
+ *
+ * Un type TypeScript nu, et non plus un `z.infer` : plus aucune semaine ne
+ * remonte du modèle, donc il n'y a plus rien à parser. La grammaire et le schéma
+ * Zod qui la doublait n'avaient qu'un rôle — encadrer une sortie de modèle — et
+ * ce rôle a disparu avec l'inversion (cf. l'en-tête).
+ *
+ * Ce qui garde ces objets honnêtes n'est donc plus Zod, c'est la chaîne qui les
+ * produit : le squelette les écrit ({@link buildPlanSkeleton}), le remplissage
+ * de créneaux les complète en revalidant chaque déroulé
+ * (`quality-fill.ts`, {@link sessionStepViolations}),
+ * {@link validatePlanBusinessRules} juge l'ensemble, et le DAL revalide une
+ * dernière fois ce qu'il écrit en base.
  */
 
 /**
- * Le déroulé d'une séance **tel que le modèle l'écrit**, puis normalisé vers le
- * contrat du projet ({@link planSessionStepsSchema}).
+ * Une séance du plan, telle que l'appli l'écrit et telle que les règles la
+ * lisent.
  *
- * Deux formes pour une même donnée, et c'est délibéré :
- *
- * - côté modèle, un champ sans valeur est **absent** — c'est le style du reste
- *   de ce fichier (cf. `targetPaceSecPerKm`), celui que la conversion GBNF de
- *   llama.cpp traduit sans surprise, et celui qui évite de faire écrire sept
- *   `null` par étape à un petit modèle ;
- * - côté application, toutes les clés sont présentes, à `null` quand elles ne
- *   portent rien.
- *
- * La transformation fait ce passage-là (plus l'arrondi des entiers, pour les
- * providers qui ne respectent pas `response_format`) et **normalise l'allure
- * quand l'intention est sans ambiguïté** : une seule borne fournie = allure
- * unique (les deux bornes égales), bornes inversées = plage remise à l'endroit.
- * Constaté en prod : un modèle local écrit spontanément une borne unique sur
- * quasiment chaque étape — la grammaire ne peut pas exiger « les deux bornes
- * ensemble », et rejeter cette forme faisait échouer des générations entières
- * pour une pure convention. Les **vrais** invariants (exclusivité
- * distance/durée, exclusivité allure/zone, bornes et tailles) restent vérifiés
- * par le `pipe` en sortie, à la source : une ambiguïté réelle est toujours
- * rejetée.
+ * Les champs facultatifs le sont **par absence**, jamais par `null` : une séance
+ * qui ne déclare pas de durée n'a pas la clé. C'est la convention que
+ * {@link mapPlanWeeksToSessions} traduit en `null` au passage vers le DAL, qui
+ * lui stocke des colonnes nullables.
  */
-const planStepOutputSchema = z
-  .object({
-    role: z.enum(PLAN_STEP_ROLES),
-    distanceM: z.number().optional(),
-    durationS: z.number().optional(),
-    paceMinSecPerKm: z.number().optional(),
-    paceMaxSecPerKm: z.number().optional(),
-    hrZone: z.number().optional(),
-    note: z.string().optional(),
-  })
-  .transform((step) => {
-    const roundedMin =
-      step.paceMinSecPerKm === undefined ? null : Math.round(step.paceMinSecPerKm);
-    const roundedMax =
-      step.paceMaxSecPerKm === undefined ? null : Math.round(step.paceMaxSecPerKm);
-    // Une seule borne → allure unique ; deux bornes inversées → plage remise à
-    // l'endroit. Aucun cas ambigu n'est décidé ici.
-    const single = roundedMin ?? roundedMax;
-    const paceMinSecPerKm =
-      roundedMin === null || roundedMax === null ? single : Math.min(roundedMin, roundedMax);
-    const paceMaxSecPerKm =
-      roundedMin === null || roundedMax === null ? single : Math.max(roundedMin, roundedMax);
-
-    return {
-      role: step.role,
-      distanceM: step.distanceM ?? null,
-      durationS: step.durationS === undefined ? null : Math.round(step.durationS),
-      paceMinSecPerKm,
-      paceMaxSecPerKm,
-      hrZone: step.hrZone === undefined ? null : Math.round(step.hrZone),
-      note: trimmedOrNull(step.note),
-    };
-  });
-
-const planSessionStepsOutputSchema = z
-  .array(
-    z.object({
-      // Facultatif : la très grande majorité des blocs ne se répètent pas, et
-      // `repeat: 1` partout est du bruit que le modèle finit par mal recopier.
-      repeat: z.number().optional(),
-      steps: z.array(planStepOutputSchema),
-    }),
-  )
-  .transform((blocks) =>
-    blocks.map((block) => ({
-      repeat: block.repeat === undefined ? 1 : Math.round(block.repeat),
-      steps: block.steps,
-    })),
-  )
-  .pipe(planSessionStepsSchema);
-
-const planSessionSchema = z.object({
+export type PlanSessionOutput = {
   /** Jour ISO : 1 = lundi … 7 = dimanche. */
-  day: z.number().int().min(PLAN_OUTPUT_BOUNDS.day.min).max(PLAN_OUTPUT_BOUNDS.day.max),
-  kind: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.kindChars),
-  title: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.titleChars),
-  warmup: z.string().max(PLAN_OUTPUT_BOUNDS.noteChars).optional(),
-  recovery: z.string().max(PLAN_OUTPUT_BOUNDS.noteChars).optional(),
-  cooldown: z.string().max(PLAN_OUTPUT_BOUNDS.noteChars).optional(),
-  targetPaceSecPerKm: z
-    .number()
-    .int()
-    .min(PLAN_OUTPUT_BOUNDS.targetPaceSecPerKm.min)
-    .max(PLAN_OUTPUT_BOUNDS.targetPaceSecPerKm.max)
-    .optional(),
-  distanceKm: z
-    .number()
-    .min(PLAN_OUTPUT_BOUNDS.distanceKm.min)
-    .max(PLAN_OUTPUT_BOUNDS.distanceKm.max)
-    .optional(),
-  durationMin: z
-    .number()
-    .min(PLAN_OUTPUT_BOUNDS.durationMin.min)
-    .max(PLAN_OUTPUT_BOUNDS.durationMin.max)
-    .optional(),
+  day: number;
+  /** Le type de séance, en français — c'est lui qui décide de l'allure posée. */
+  kind: string;
+  title: string;
+  warmup?: string;
+  recovery?: string;
+  cooldown?: string;
+  /** Allure cible, en secondes par kilomètre. */
+  targetPaceSecPerKm?: number;
+  distanceKm?: number;
+  durationMin?: number;
   /** Déroulé structuré. Absent sur une séance qui n'en appelle pas (footing simple). */
-  steps: planSessionStepsOutputSchema.optional(),
-});
+  steps?: PlanSessionSteps;
+};
 
-/**
- * Les bornes d'un tableau — des semaines d'un plan, des séances d'une semaine.
- *
- * Un intervalle plutôt qu'un nombre parce que les deux cas existent : une
- * semaine pleine porte **exactement** le nombre de séances demandé, une première
- * semaine entamée au plus autant (cf. {@link chunkSessionCountBounds}).
+/** Une semaine du plan : ses séances, et rien d'autre — l'index du tableau fait le numéro. */
+export type PlanWeekOutput = { sessions: PlanSessionOutput[] };
+
+/*
+ * Ce que le modèle rend encore : des décisions et des réglages.
  */
-type CountBounds = { min: number; max: number };
-
-function planWeekSchemaFor(sessions: CountBounds) {
-  return z.object({
-    sessions: z.array(planSessionSchema).min(sessions.min).max(sessions.max),
-  });
-}
-
-function planWeeksSchemaFor(sessions: CountBounds) {
-  return z
-    .array(planWeekSchemaFor(sessions))
-    .min(PLAN_OUTPUT_BOUNDS.weeksPerPlan.min)
-    .max(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
-}
-
-const planWeeksSchema = planWeeksSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
-
-/** Le contrat d'une tranche, aux bornes de séances données ({@link planChunkOutputSchemaFor}). */
-function chunkOutputSchemaFor(sessions: CountBounds) {
-  return z.object({
-    summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars).optional(),
-    weeks: planWeeksSchemaFor(sessions),
-  });
-}
-
-/**
- * Ce que le modèle produit pour **une tranche** d'un plan long (cf. la
- * génération par tranches de `plan-service.ts`).
- *
- * Les mêmes semaines, sans enveloppe : une tranche n'est pas un plan, elle n'a
- * ni objectif ni réglages propres. Le `summary` n'y est que parce que la
- * **dernière** tranche le porte — c'est elle qui a vu passer tout le plan, et
- * c'est le seul moment où il peut être écrit en connaissance de cause. Sur les
- * autres tranches, la grammaire ne propose même pas la clé
- * ({@link planChunkJsonSchema}).
- *
- * Aux bornes générales : une tranche qui connaît son compte de séances passe par
- * {@link planChunkOutputSchemaFor}.
- */
-export const planChunkOutputSchema = chunkOutputSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
 
 /**
  * Réglages qu'une instruction peut faire bouger. Tous facultatifs : le modèle
@@ -265,31 +160,46 @@ const planSettingsPatchSchema = z.object({
     .nullish(),
 });
 
-/** Ce que le modèle produit pour une **modification** : les mêmes semaines, plus les réglages. */
-export const planUpdateOutputSchema = z.object({
-  summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars),
+/**
+ * Ce que le modèle rend d'une **instruction de l'athlète** (« plutôt 3 séances »,
+ * « ma sortie longue passe au samedi ») : la traduction de cette phrase en
+ * réglages durables, et rien de plus.
+ *
+ * ## Pourquoi il n'y a plus de semaines ici
+ *
+ * Parce qu'un ajustement ne les fait plus écrire : l'appli reconstruit le
+ * squelette de la fenêtre restante avec les réglages patchés
+ * (`rewriteRemainingPlan`). Ce que le modèle sait faire de cette instruction, et
+ * qu'aucune expression régulière ne ferait aussi bien, c'est la **lire** — trois
+ * entiers en sortie, contre les quelques milliers de tokens d'un plan qu'il ne
+ * tenait de toute façon pas.
+ *
+ * `settings` est facultatif, et c'est le cas nominal d'une instruction qui ne
+ * change aucun réglage durable : la fenêtre restante est alors simplement
+ * recalculée sur ce que l'athlète court réellement aujourd'hui.
+ */
+export const planInstructionOutputSchema = z.object({
   settings: planSettingsPatchSchema.optional(),
-  weeks: planWeeksSchema,
 });
 
 /**
- * Ce que le modèle produit pour une **révision** du plan actif.
+ * Ce que le modèle produit pour une **révision** du plan actif : un verdict, sa
+ * justification, et les réglages durables que ce verdict implique.
  *
- * Union discriminée, et c'est tout l'objet du contrat : une révision qui
- * conclut « rien à changer » ne porte **aucune** semaine, et le type l'impose —
- * `keep` ne se laisse pas accompagner d'un plan réécrit qu'on risquerait
- * d'appliquer par mégarde. `adjust`, lui, a exactement la forme d'un ajustement
- * ({@link planUpdateOutputSchema}), semaines comprises, et suit le même chemin
- * d'écriture.
+ * Union discriminée, et c'est tout l'objet du contrat : une révision qui conclut
+ * « rien à changer » ne porte **aucun** réglage, et le type l'impose — `keep` ne
+ * se laisse pas accompagner d'un patch qu'on risquerait d'appliquer par mégarde.
  *
- * Le `summary` de l'ajustement n'y figure pas : une révision n'est pas demandée
- * par l'athlète, elle survient toute seule après quelques séances — ce qu'elle
- * doit rendre, c'est ce qu'elle a constaté (`reason`), pas une nouvelle
- * présentation du plan. Le service reporte cette raison dans le résumé existant.
+ * Ce qui a disparu de ce contrat, ce sont les semaines. Elles n'ont jamais été
+ * ce que le modèle faisait de mieux ; le jugement, si — décider qu'un plan tient
+ * ou ne tient plus au vu de quatre séances réalisées est exactement le genre de
+ * lecture qu'un gabarit ne sait pas faire. La réécriture, elle, revient à
+ * l'appli (`rewriteRemainingPlan`), qui la fait à partir du même verdict.
  *
- * La grammaire, elle, ne sait pas exprimer cette dépendance : elle autorise
- * `weeks` dans les deux cas, et c'est Zod qui refuse un `adjust` sans semaines —
- * la reprise du modèle est alors la même que pour toute sortie hors schéma.
+ * Le `summary` n'y figure pas non plus : une révision n'est pas demandée par
+ * l'athlète, elle survient toute seule après quelques séances — ce qu'elle doit
+ * rendre, c'est ce qu'elle a constaté (`reason`), pas une nouvelle présentation
+ * du plan. Le service reporte cette raison dans le résumé existant.
  */
 export const planReviewOutputSchema = z.discriminatedUnion('decision', [
   z.object({
@@ -300,69 +210,11 @@ export const planReviewOutputSchema = z.discriminatedUnion('decision', [
     decision: z.literal('adjust'),
     reason: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.reasonChars),
     settings: planSettingsPatchSchema.optional(),
-    weeks: planWeeksSchema,
   }),
 ]);
 
-/**
- * Ce qu'une génération sait du **nombre de séances** de ses semaines — les
- * tranches d'un ajustement ou d'une révision.
- *
- * ## Pourquoi la grammaire s'en mêle
- *
- * Constaté sur les premiers plans de production : sous message de reprise — donc
- * sous pression de correction — le modèle écrit 7 séances là où 6 étaient
- * demandées. La règle métier le voyait, le disait, et faisait régénérer la
- * tranche : plusieurs minutes perdues pour un compte que la grammaire peut
- * rendre **impossible à écrire**. C'est la même bascule que le nombre de
- * semaines d'une tranche (`minItems` = `maxItems`), d'un cran plus bas.
- *
- * ## Pourquoi la première semaine entamée y échappe
- *
- * Les items d'un tableau JSON Schema sont uniformes : `sessions` est décrit une
- * fois pour toutes les semaines produites, et il n'existe pas de bornes par
- * index que la conversion GBNF de llama.cpp traduise fidèlement. Une génération
- * qui porte la première semaine entamée — laquelle en compte légitimement moins,
- * puisque des jours sont déjà passés — garde donc des bornes **souples**
- * (1 à `sessionsPerWeek`) sur toutes ses semaines, et c'est la règle métier
- * ({@link validatePlanBusinessRules}, compte exact) qui reste le filet — pour
- * celle-là comme pour les providers qui ignorent le schéma.
- */
-export type ChunkSessionBounds = {
-  /** Le nombre de séances hebdomadaires demandé par l'athlète. */
-  sessionsPerWeek: number;
-  /** Les semaines produites comprennent-elles la première, déjà entamée ? */
-  hasStartedWeek: boolean;
-};
-
-/** Les bornes du tableau `sessions`, exactes ou souples — cf. {@link ChunkSessionBounds}. */
-function chunkSessionCountBounds(bounds: ChunkSessionBounds | null): CountBounds {
-  if (bounds === null) return PLAN_OUTPUT_BOUNDS.sessionsPerWeek;
-  return bounds.hasStartedWeek
-    ? { min: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min, max: bounds.sessionsPerWeek }
-    : { min: bounds.sessionsPerWeek, max: bounds.sessionsPerWeek };
-}
-
-/**
- * Le contrat Zod d'une tranche, **au même resserrement que sa grammaire**
- * ({@link planChunkJsonSchema}).
- *
- * Les deux barrières disent la même chose ou elles ne disent rien : une
- * grammaire qui interdit la septième séance et un Zod qui l'accepte laisserait
- * passer, chez un provider hors grammaire, exactement ce que la grammaire
- * cherche à empêcher.
- */
-export function planChunkOutputSchemaFor(bounds: ChunkSessionBounds): z.ZodType<PlanChunkOutput> {
-  return chunkOutputSchemaFor(chunkSessionCountBounds(bounds));
-}
-
-export type PlanSessionOutput = z.infer<typeof planSessionSchema>;
-// Depuis la fabrique : les bornes du tableau `sessions` ne changent pas le type
-// d'une semaine, seulement ce que le schéma accepte.
-export type PlanWeekOutput = z.infer<ReturnType<typeof planWeekSchemaFor>>;
-export type PlanChunkOutput = z.infer<typeof planChunkOutputSchema>;
-export type PlanUpdateOutput = z.infer<typeof planUpdateOutputSchema>;
 export type PlanSettingsOutput = z.infer<typeof planSettingsPatchSchema>;
+export type PlanInstructionOutput = z.infer<typeof planInstructionOutputSchema>;
 export type PlanReviewOutput = z.infer<typeof planReviewOutputSchema>;
 
 /*
@@ -378,220 +230,6 @@ export type PlanReviewOutput = z.infer<typeof planReviewOutputSchema>;
  * nativement, et les rendre obligatoires forcerait le modèle à remplir un
  * échauffement pour un footing qui n'en a pas.
  */
-
-/**
- * Une étape du déroulé. Même style que le reste du fichier : les champs qui
- * peuvent manquer sont simplement hors de `required` — pas de `type: [..., 'null']`,
- * que la conversion GBNF traduit mal et qui ferait écrire des `null` au modèle.
- *
- * Les exclusions (une mesure, une cible) ne sont pas exprimables en JSON Schema
- * sans `oneOf` ; elles sont laissées à Zod, qui les tient depuis
- * `lib/plan-steps/schema`. La grammaire borne, elle ne prouve pas.
- */
-const stepJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['role'],
-  properties: {
-    role: {
-      type: 'string',
-      enum: [...PLAN_STEP_ROLES],
-      description: 'warmup = échauffement, run = effort, recover = récupération, cooldown = retour au calme',
-    },
-    distanceM: {
-      type: 'number',
-      minimum: PLAN_STEP_BOUNDS.distanceM.min,
-      maximum: PLAN_STEP_BOUNDS.distanceM.max,
-      description: 'mètres — exclusif de durationS',
-    },
-    durationS: {
-      type: 'integer',
-      minimum: PLAN_STEP_BOUNDS.durationS.min,
-      maximum: PLAN_STEP_BOUNDS.durationS.max,
-      description: 'secondes — exclusif de distanceM',
-    },
-    paceMinSecPerKm: {
-      type: 'integer',
-      minimum: PLAN_STEP_BOUNDS.paceSecPerKm.min,
-      maximum: PLAN_STEP_BOUNDS.paceSecPerKm.max,
-      description: 'borne rapide de l’allure, en s/km — va avec paceMaxSecPerKm',
-    },
-    paceMaxSecPerKm: {
-      type: 'integer',
-      minimum: PLAN_STEP_BOUNDS.paceSecPerKm.min,
-      maximum: PLAN_STEP_BOUNDS.paceSecPerKm.max,
-      description: 'borne lente de l’allure, en s/km',
-    },
-    hrZone: {
-      type: 'integer',
-      minimum: PLAN_STEP_BOUNDS.hrZone.min,
-      maximum: PLAN_STEP_BOUNDS.hrZone.max,
-      description: 'zone cardiaque 1 à 5 — exclusive d’une allure',
-    },
-    note: { type: 'string', maxLength: PLAN_STEP_BOUNDS.noteChars },
-  },
-} as const;
-
-/** Le déroulé complet : des blocs d'étapes, sans imbrication possible. */
-const stepsJsonSchema = {
-  type: 'array',
-  minItems: PLAN_STEP_BOUNDS.blocksPerSession.min,
-  maxItems: PLAN_STEP_BOUNDS.blocksPerSession.max,
-  items: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['steps'],
-    properties: {
-      repeat: {
-        type: 'integer',
-        minimum: PLAN_STEP_BOUNDS.repeat.min,
-        maximum: PLAN_STEP_BOUNDS.repeat.max,
-        description: 'nombre de passages du bloc, 1 par défaut',
-      },
-      steps: {
-        type: 'array',
-        minItems: PLAN_STEP_BOUNDS.stepsPerBlock.min,
-        maxItems: PLAN_STEP_BOUNDS.stepsPerBlock.max,
-        items: stepJsonSchema,
-      },
-    },
-  },
-} as const;
-
-const sessionJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['day', 'kind', 'title'],
-  properties: {
-    day: {
-      type: 'integer',
-      minimum: PLAN_OUTPUT_BOUNDS.day.min,
-      maximum: PLAN_OUTPUT_BOUNDS.day.max,
-      description: '1 = lundi, 7 = dimanche',
-    },
-    kind: { type: 'string', minLength: 1, maxLength: PLAN_OUTPUT_BOUNDS.kindChars },
-    title: { type: 'string', minLength: 1, maxLength: PLAN_OUTPUT_BOUNDS.titleChars },
-    warmup: { type: 'string', maxLength: PLAN_OUTPUT_BOUNDS.noteChars },
-    recovery: { type: 'string', maxLength: PLAN_OUTPUT_BOUNDS.noteChars },
-    cooldown: { type: 'string', maxLength: PLAN_OUTPUT_BOUNDS.noteChars },
-    targetPaceSecPerKm: {
-      type: 'integer',
-      minimum: PLAN_OUTPUT_BOUNDS.targetPaceSecPerKm.min,
-      maximum: PLAN_OUTPUT_BOUNDS.targetPaceSecPerKm.max,
-    },
-    distanceKm: {
-      type: 'number',
-      minimum: PLAN_OUTPUT_BOUNDS.distanceKm.min,
-      maximum: PLAN_OUTPUT_BOUNDS.distanceKm.max,
-    },
-    durationMin: {
-      type: 'number',
-      minimum: PLAN_OUTPUT_BOUNDS.durationMin.min,
-      maximum: PLAN_OUTPUT_BOUNDS.durationMin.max,
-    },
-    steps: stepsJsonSchema,
-  },
-} as const;
-
-/**
- * Le tableau `weeks`, aux bornes qu'on lui connaît.
- *
- * Fabrique plutôt que constante : une tranche resserre le nombre de semaines
- * (exact) **et** le nombre de séances de chaque semaine (cf.
- * {@link ChunkSessionBounds}), et ce que la grammaire interdit d'écrire n'a plus
- * à être corrigé après coup.
- */
-function weeksJsonSchemaFor(
-  weeks: CountBounds,
-  sessions: CountBounds,
-): Record<string, unknown> {
-  return {
-    type: 'array',
-    minItems: weeks.min,
-    maxItems: weeks.max,
-    items: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['sessions'],
-      properties: {
-        sessions: {
-          type: 'array',
-          minItems: sessions.min,
-          maxItems: sessions.max,
-          items: sessionJsonSchema,
-        },
-      },
-    },
-  };
-}
-
-/**
- * Les bornes générales : celles d'un plan entier, qui ne sait ni combien de
- * semaines ni combien de séances lui seront demandées.
- *
- * Instance **unique** et partagée par les trois schémas de plan entier : la
- * révision reprend à la lettre les semaines d'un ajustement, et l'identité le
- * dit mieux qu'un commentaire.
- */
-const weeksJsonSchema = weeksJsonSchemaFor(
-  PLAN_OUTPUT_BOUNDS.weeksPerPlan,
-  PLAN_OUTPUT_BOUNDS.sessionsPerWeek,
-);
-
-const summaryJsonSchema = {
-  type: 'string',
-  minLength: 1,
-  maxLength: PLAN_OUTPUT_BOUNDS.summaryChars,
-} as const;
-
-/**
- * JSON Schema d'**une tranche** — le pendant de {@link planChunkOutputSchema},
- * aux bornes de la tranche.
- *
- * Deux resserrements par rapport au schéma d'un plan entier (celui d'un
- * ajustement, {@link planUpdateJsonSchema}), et les deux comptent sur un petit
- * modèle : le nombre de semaines est **exact** (`minItems`
- * = `maxItems`), donc la grammaire l'empêche d'en écrire une de trop ou de moins
- * — ce que la règle métier ne pouvait que constater après coup, au prix d'une
- * régénération ; et la clé `summary` **n'existe pas** hors de la dernière
- * tranche, plutôt que d'être facultative. Une clé absente de la grammaire ne
- * peut pas être écrite ; une clé facultative, si — et un modèle qui résume
- * chaque tranche paie trois fois le prix d'un résumé qui sera jeté deux fois.
- *
- * Un troisième depuis : le nombre de **séances** de chaque semaine, exact lui
- * aussi dès que la tranche ne porte que des semaines pleines (cf.
- * {@link ChunkSessionBounds}). Un modèle sous grammaire ne peut alors plus en
- * écrire sept quand six sont demandées — ce qu'il faisait précisément sous
- * message de reprise, au prix d'une régénération de plus.
- *
- * @param weeks nombre de semaines attendues dans cette tranche.
- * @param withSummary la tranche porte-t-elle le résumé du plan (la dernière) ?
- * @param sessions le compte de séances à imposer, `null` pour les bornes
- * générales (un provider ou un appelant qui n'a rien à en dire).
- */
-export function planChunkJsonSchema(
-  weeks: number,
-  withSummary: boolean,
-  sessions: ChunkSessionBounds | null = null,
-): Record<string, unknown> {
-  const chunkWeeksJsonSchema = weeksJsonSchemaFor(
-    { min: weeks, max: weeks },
-    chunkSessionCountBounds(sessions),
-  );
-  return withSummary
-    ? {
-        type: 'object',
-        additionalProperties: false,
-        required: ['weeks', 'summary'],
-        properties: { weeks: chunkWeeksJsonSchema, summary: summaryJsonSchema },
-      }
-    : {
-        type: 'object',
-        additionalProperties: false,
-        required: ['weeks'],
-        properties: { weeks: chunkWeeksJsonSchema },
-      };
-}
 
 /**
  * Les réglages durables, tels que la modification et la révision les rendent.
@@ -623,55 +261,28 @@ const settingsJsonSchema = {
   },
 } as const;
 
-/** JSON Schema d'une modification — le pendant de {@link planUpdateOutputSchema}. */
-export const planUpdateJsonSchema: Record<string, unknown> = {
+/**
+ * JSON Schema d'une **instruction** — le pendant de
+ * {@link planInstructionOutputSchema}.
+ *
+ * `settings` reste hors de `required` : une instruction qui ne change aucun
+ * réglage durable (« je me sens fatiguée en ce moment ») est le cas nominal, et
+ * exiger la clé forcerait le modèle à inventer un nombre de séances.
+ */
+export const planInstructionJsonSchema: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'weeks'],
-  properties: {
-    summary: summaryJsonSchema,
-    settings: settingsJsonSchema,
-    weeks: weeksJsonSchema,
-  },
+  required: [],
+  properties: { settings: settingsJsonSchema },
 };
-
-/**
- * Le même schéma, dont `weeks` compte **exactement** `weeks` éléments.
- *
- * Sert aux enveloppes d'un ajustement ou d'une révision découpés en tranches :
- * leur premier appel porte à la fois les réglages (ou la décision) et les
- * semaines de la première tranche, pas celles de toute la fenêtre restante. La
- * grammaire le dit, plutôt que de laisser une règle métier le constater après
- * coup (cf. {@link planChunkJsonSchema}).
- */
-function withWeekCount(schema: Record<string, unknown>, weeks: number): Record<string, unknown> {
-  const properties = schema.properties as Record<string, unknown>;
-  return {
-    ...schema,
-    properties: {
-      ...properties,
-      // Le nombre de **séances**, lui, reste aux bornes générales : ces
-      // enveloppes-là portent aussi les réglages, dont `sessionsPerWeek` que
-      // l'instruction peut justement changer (« passe à 5 séances »). Le figer
-      // dans la grammaire interdirait au modèle d'appliquer l'instruction qu'on
-      // lui donne.
-      weeks: weeksJsonSchemaFor({ min: weeks, max: weeks }, PLAN_OUTPUT_BOUNDS.sessionsPerWeek),
-    },
-  };
-}
-
-/** L'enveloppe d'un ajustement, bornée à la première tranche. */
-export function planUpdateChunkJsonSchema(weeks: number): Record<string, unknown> {
-  return withWeekCount(planUpdateJsonSchema, weeks);
-}
 
 /**
  * JSON Schema d'une révision — le pendant de {@link planReviewOutputSchema}.
  *
- * `weeks` et `settings` restent hors de `required` : c'est ce qui permet à une
- * révision de conclure « keep » sans écrire un plan entier — la contrainte
- * inverse (« adjust exige des semaines ») n'est pas exprimable ici sans `oneOf`,
- * que la conversion GBNF traduit mal, et vit donc dans Zod.
+ * `settings` reste hors de `required` : c'est ce qui permet à une révision de
+ * conclure « keep » sans rien patcher — la contrainte inverse (« keep n'a pas le
+ * droit d'en porter ») n'est pas exprimable ici sans `oneOf`, que la conversion
+ * GBNF traduit mal, et vit donc dans Zod.
  */
 export const planReviewJsonSchema: Record<string, unknown> = {
   type: 'object',
@@ -681,7 +292,7 @@ export const planReviewJsonSchema: Record<string, unknown> = {
     decision: {
       type: 'string',
       enum: ['keep', 'adjust'],
-      description: "keep = le plan reste tel quel, adjust = la suite du plan est réécrite",
+      description: "keep = le plan reste tel quel, adjust = la suite du plan est recalculée",
     },
     reason: {
       type: 'string',
@@ -690,19 +301,8 @@ export const planReviewJsonSchema: Record<string, unknown> = {
       description: 'ce qui est constaté et ce qui en est fait, en une ou deux phrases',
     },
     settings: settingsJsonSchema,
-    weeks: weeksJsonSchema,
   },
 };
-
-/**
- * L'enveloppe d'une révision, bornée à la première tranche.
- *
- * `weeks` y reste hors de `required` : une révision qui conclut « keep » n'écrit
- * aucune semaine, et le compte exact ne vaut que pour celle qui ajuste.
- */
-export function planReviewChunkJsonSchema(weeks: number): Record<string, unknown> {
-  return withWeekCount(planReviewJsonSchema, weeks);
-}
 
 /*
  * Mapping vers le DAL.
@@ -833,11 +433,17 @@ export type PlanExpectations = {
    *    que deux jours à remplir. Mesuré avant cette règle, un marathon un lundi
    *    à 6 séances recevait 5 séances et 23,3 km *après* la course.
    *
-   * Seule la **création** le renseigne (`writeGeneratedPlan`), parce qu'elle
-   * seule connaît la date de la course et écrit la semaine qui la porte. Un
-   * ajustement ou une révision ne le posent pas : leur fenêtre se termine bien
-   * avec le plan, mais elles ne réécrivent pas la séance du jour J, et la règle
-   * reste alors celle d'avant — un champ absent ne change rien.
+   * **Les trois chemins le renseignent**, et c'est ce que l'inversion a changé :
+   * la création (`writeGeneratedPlan`) comme l'ajustement et la révision, qui
+   * passent tous deux par `rewriteRemainingPlan`. Une fenêtre restante se
+   * termine avec le plan, donc avec la course, et elle **réécrit** désormais la
+   * semaine qui la porte — séance du jour J comprise. Ne pas le déclarer là
+   * reviendrait à y reposer une sortie longue le jour de sortie longue habituel,
+   * et des séances après l'épreuve.
+   *
+   * Le champ reste facultatif pour les fenêtres qui n'ont pas de course, et pour
+   * celles dont la date de course ne tombe pas dans la dernière semaine
+   * (`planRaceIsoDay` le vérifie) : un champ absent ne change rien.
    */
   raceDay?: number | null;
   /**
@@ -2115,12 +1721,8 @@ export function taperWeekCount(weeks: number, race: PlanRaceGoal | null | undefi
 /**
  * Volume d'une semaine, en km — `null` dès qu'une séance ne déclare pas sa
  * distance : une somme partielle ferait constater des baisses qui n'existent pas.
- *
- * Exportée pour le résumé de continuité d'une tranche (`plan-service.ts`) : ce
- * qu'on dit à la tranche suivante du volume de la précédente doit être compté
- * exactement comme la règle le comptera.
  */
-export function weekVolumeKm(week: PlanWeekOutput): number | null {
+function weekVolumeKm(week: PlanWeekOutput): number | null {
   let total = 0;
   for (const session of week.sessions) {
     if (session.distanceKm === undefined) return null;
@@ -2270,7 +1872,26 @@ export type WeeklyVolumeTarget = {
   kind: WeeklyVolumeTargetKind;
 };
 
-/** Ce dont le planificateur a besoin pour chiffrer un plan entier. */
+/**
+ * Ce dont le planificateur a besoin pour chiffrer un plan entier.
+ *
+ * **Un plan entier, et rien d'autre.** Ce type et la fonction qui le consomme
+ * ({@link weeklyVolumeTargets}) ne décrivent qu'un *démarrage* : choisir un
+ * point de départ à partir du réel récent, monter, alléger périodiquement,
+ * affûter. Trois rondes de corrections ont essayé de leur faire porter aussi la
+ * *continuation* — reprendre un plan en cours à sa semaine N — en leur ajoutant
+ * des paramètres optionnels (`firstFullWeekCapKm`, puis
+ * `firstFullWeekCadenceRank`), et chacun de ces paramètres a créé une couture
+ * qui a produit le défaut suivant. Ils ont été retirés : la continuation calcule
+ * désormais ses cibles avec sa propre arithmétique (`remainingVolumeTargets`
+ * dans `plan-service.ts`), qui ne réutilise de ce module que des briques
+ * partagées ({@link taperWeekCount}, {@link taperFactors},
+ * {@link isCutbackCadenceRank}, {@link VOLUME_RULES}, {@link VOLUME_TARGET_RULES}).
+ *
+ * Démarrer et continuer n'obéissent pas aux mêmes règles ; les mélanger dans une
+ * fonction paramétrée produit des cas limites sans fin. Si une continuation a
+ * besoin d'un comportement nouveau, il s'écrit **là-bas**, pas ici.
+ */
 export type WeeklyVolumeTargetsParams = {
   /** Nombre de semaines du plan, la première (parfois entamée) comprise. */
   weeks: number;
@@ -2363,8 +1984,12 @@ export const VOLUME_TARGET_RULES = {
  * commencer *au-dessus* d'elle, ce que la règle d'affûtage (« le volume baisse
  * strictement chaque semaine ») refuse. La semaine de course reste sous 55 % de
  * cette base, donc sous les 65 % du pic qu'exige {@link VOLUME_RULES}.
+ *
+ * Exportée : la reconstruction d'une fenêtre restante affûte de la même façon
+ * (`remainingVolumeTargets` dans `plan-service.ts`). C'est une brique partagée,
+ * pas un paramètre de plus — les deux arithmétiques restent distinctes.
  */
-function taperFactors(weeks: number): number[] {
+export function taperFactors(weeks: number): number[] {
   if (weeks <= 1) return [0.55];
   if (weeks === 2) return [0.75, 0.55];
   return [0.8, 0.65, 0.5];
@@ -2389,13 +2014,43 @@ function taperFactors(weeks: number): number[] {
  *
  * Un dixième de kilomètre de marge : invisible dans un plan, définitif pour une
  * inégalité.
+ *
+ * Exportée pour que la continuation arrondisse **exactement** comme la création :
+ * deux arrondis divergents produiraient des cibles que la validation refuse.
  */
-function floorKm(value: number): number {
+export function floorKm(value: number): number {
   return Math.floor((value - 1e-9) * 10) / 10;
 }
 
 /**
- * Les volumes hebdomadaires cibles d'un plan entier, une entrée par semaine.
+ * Le rang d'une semaine dans la cadence des semaines allégées est-il celui de la
+ * **respiration** — le dernier du bloc ?
+ *
+ * Le rang 0 est la **première semaine pleine du bloc** — celle d'un plan qui
+ * démarre, ici ; celle que la continuation désigne, là-bas. Seul son reste
+ * modulo {@link VOLUME_TARGET_RULES.cutbackEvery} compte. Le `+ every` avant le
+ * second `%` garde la cadence lisible sur un rang négatif — `-1 % 4` vaut `-1`
+ * en JavaScript, qu'aucune comparaison de rang ne reconnaîtrait.
+ *
+ * Exporté parce que la reconstruction d'une fenêtre restante pose exactement la
+ * même question sur la cadence du plan d'origine (`remainingVolumeTargets` dans
+ * `plan-service.ts`). C'est la seule chose que les deux arithmétiques partagent
+ * de la cadence, et c'est délibéré : deux façons de compter les semaines
+ * allégées finiraient par diverger, et le désaccord serait silencieux — une
+ * semaine étiquetée `cutback` dont le volume monterait quand même.
+ */
+export function isCutbackCadenceRank(rank: number): boolean {
+  const every = VOLUME_TARGET_RULES.cutbackEvery;
+  return ((Math.trunc(rank) % every) + every) % every === every - 1;
+}
+
+/**
+ * Les volumes hebdomadaires cibles d'un plan **qui démarre**, une entrée par
+ * semaine.
+ *
+ * Réservée à la création : reprendre un plan en cours à sa semaine N est une
+ * autre arithmétique, et elle vit ailleurs (cf. l'en-tête de
+ * {@link WeeklyVolumeTargetsParams}).
  *
  * L'algorithme, dans l'ordre :
  *
@@ -2408,7 +2063,10 @@ function floorKm(value: number): number {
  *    hausse du niveau, **plafonnée au budget** : c'est le budget qui contraint la
  *    montée, jamais l'inverse. Toutes les quatre semaines, une semaine allégée à
  *    85 % de la précédente — mais seulement là où la règle l'exige, un bloc court
- *    n'a pas de respiration à s'offrir.
+ *    n'a pas de respiration à s'offrir. La cadence se compte depuis la première
+ *    semaine **pleine** du plan ({@link isCutbackCadenceRank}) : une semaine
+ *    entamée porte quelques jours et un volume proratisé, elle n'ouvre pas un
+ *    bloc d'entraînement.
  * 3. **L'affûtage** ({@link taperFactors}), quand le plan mène à une course.
  * 4. **La première semaine entamée**, au prorata des jours qui y restent.
  *
@@ -2438,6 +2096,8 @@ export function weeklyVolumeTargets(params: WeeklyVolumeTargetsParams): WeeklyVo
       ? null
       : (params.weeklyTimeMinutes * VOLUME_TARGET_RULES.timeBudgetShare) / paceMinPerKm;
 
+  // Le plafond de la première semaine pleine : celui du réel récent, ou le
+  // départ prudent du niveau quand aucun historique ne l'ancre.
   const anchorKm =
     params.recentWeeklyKm !== null && params.recentWeeklyKm > 0
       ? firstFullWeekMaxKm(params.recentWeeklyKm)
@@ -2454,8 +2114,9 @@ export function weeklyVolumeTargets(params: WeeklyVolumeTargetsParams): WeeklyVo
 
   for (let index = firstFull + 1; index <= lastBuild; index += 1) {
     const previous = kilometers[index - 1];
-    const isCutback =
-      eases && (index - firstFull) % VOLUME_TARGET_RULES.cutbackEvery === VOLUME_TARGET_RULES.cutbackEvery - 1;
+    // Une création ouvre son propre bloc : sa première semaine pleine est le rang
+    // 0 de la cadence, et tout le reste se compte à partir d'elle.
+    const isCutback = eases && isCutbackCadenceRank(index - firstFull);
     if (isCutback) {
       kilometers[index] = floorKm(previous * VOLUME_RULES.cutbackRatio);
       kinds[index] = 'cutback';
@@ -2467,17 +2128,38 @@ export function weeklyVolumeTargets(params: WeeklyVolumeTargetsParams): WeeklyVo
 
   // L'affûtage se cale sur la dernière semaine de développement — ou sur le
   // départ quand le plan est trop court pour en compter une.
+  //
+  // **La boucle part de `taperFrom`, y compris quand ce rang est l'index 0.**
+  // Elle s'arrêtait avant à `Math.max(taperFrom, firstFull)`, ce qui sautait
+  // l'index 0 dès que la première semaine était entamée. À la création, cet
+  // index-là est la première semaine du plan et le raccourci ne se voyait pas ;
+  // sur une **fenêtre restante**, il peut être la semaine d'affûtage ou la
+  // semaine de la course, et le facteur d'affûtage disparaissait alors purement
+  // et simplement. Mesuré sur le code d'avant, marathon de 16 semaines, course
+  // le dimanche 20/09, meilleure semaine réelle 60 km, révision déclenchée le
+  // lundi 14/09 : la semaine de course était chiffrée à **61,6 km** au lieu de
+  // 39,5 — un volume de développement, au-dessus du meilleur réel de l'athlète,
+  // et `validatePlanBusinessRules` n'y voyait rien.
   const taperFrom = weeks - taper;
   const base = lastBuild >= firstFull ? kilometers[lastBuild] : start;
   const factors = taperFactors(taper);
-  for (let index = Math.max(taperFrom, firstFull); index < weeks; index += 1) {
+  for (let index = taperFrom; index < weeks; index += 1) {
     kilometers[index] = floorKm(base * factors[index - taperFrom]);
     kinds[index] = index === weeks - 1 ? 'race' : 'taper';
   }
 
+  // La semaine entamée, au prorata de ses jours restants — et au prorata de la
+  // valeur **déjà calculée** pour elle, jamais du départ. Les deux se
+  // confondaient tant que l'index 0 était forcément une semaine de
+  // développement (`kilometers[0]` valait alors `start`) ; ils divergent dès que
+  // cet index porte un affûtage ou une course, et c'est le second qui a raison.
+  //
+  // Le `kinds[0]` posé juste avant par la boucle d'affûtage est écrasé ici, et
+  // c'est voulu : une semaine entamée est d'abord une semaine entamée. Ce champ
+  // ne sert qu'à se relire — la périodisation, elle, vient des phases.
   const remainingDays = remainingWeekDays(firstWeekFromDay);
   if (firstFull === 1) {
-    kilometers[0] = floorKm((start * remainingDays) / 7);
+    kilometers[0] = floorKm((kilometers[0] * remainingDays) / 7);
     kinds[0] = 'partial';
   }
 
@@ -2559,7 +2241,11 @@ function tenthKm(value: number): number {
  *    ({@link longRunMaxShare}) —, et **plafonnée** à ce que cette même règle
  *    laisse à une semaine de ce nombre de séances ;
  * 3. **ce qui reste** se partage entre les footings — pas leur part théorique :
- *    c'est ce qui fait tomber la somme sur la cible.
+ *    c'est ce qui fait tomber la somme sur la cible ;
+ * 4. et la sortie longue est **relevée une dernière fois, après les arrondis**,
+ *    au niveau du plus gros footing s'il l'a dépassée — la borne que les parts
+ *    garantissent en réels et que les arrondis cassaient sur les toutes petites
+ *    semaines.
  *
  * Les arrondis, et pourquoi ils ne tombent pas au même endroit : la sortie
  * longue et les séances de qualité s'arrondissent au demi-kilomètre — ce sont
@@ -2610,28 +2296,78 @@ export function weeklySessionBudgets(
   // qui lui est permis.
   const floor = Math.ceil(targetKm * VOLUME_RULES.longRunShare.min * 10) / 10;
   const ceiling = Math.floor(targetKm * longRunMaxShare(sessionsPerWeek) * 10) / 10;
-  const longKm = Math.min(Math.max(halfKm(targetKm * share), floor), ceiling);
 
   const qualityKm = halfKm(targetKm * SESSION_BUDGET_SHARES.quality);
-  const budgets: SessionBudget[] = [
+
+  // La sortie longue est **la plus longue séance de la semaine**, et ce n'est pas
+  // une préférence d'écriture : `validatePlanBusinessRules` refuse une semaine
+  // dont la plus longue séance tombe un autre jour, et cette semaine-là vient de
+  // l'appli, pas du modèle — le refus sort donc en
+  // `InvalidGeneratedPlanError` (« incohérence interne »), là où un
+  // `InvalidPlanError` actionnable serait le seul verdict lisible.
+  //
+  // Les parts, elles, garantissent l'ordre : `balanced` relève déjà la sortie
+  // longue au-dessus du partage égal du reste. Ce sont les **arrondis** qui le
+  // cassent, et seulement sur les toutes petites semaines — la sortie longue
+  // s'arrondit au demi-kilomètre (vers le bas, la moitié du temps), les footings
+  // au dixième et vers le haut par le reliquat. Mesuré : `weeklySessionBudgets(4,1, 5, 2)`
+  // budgétait 1,0 km de sortie longue contre 1,1 km pour le plus gros footing,
+  // quand 4,0 et 4,2 km passaient — un trou d'un dixième de kilomètre dans
+  // lequel un plan tombait avec une exception d'incohérence interne.
+  //
+  // La correction est la borne elle-même : la sortie longue vaut au moins le plus
+  // gros footing. Relever la sortie longue réduit ce qui reste aux footings, donc
+  // le plus gros footing : la boucle décroît et s'arrête en deux tours au plus.
+  // Le garde-fou d'itérations est là pour l'entrée dégénérée — une cible que la
+  // plus petite distance du contrat ne peut plus exprimer (0,1 km sur cinq
+  // séances), qu'un plan ne finance de toute façon jamais.
+  let longKm = Math.min(Math.max(halfKm(targetKm * share), floor), ceiling);
+  let easyKm = easySessionBudgets(targetKm - longKm - quality * qualityKm, easyCount);
+  for (let guard = 0; guard < MAX_LONG_RUN_RAISES; guard += 1) {
+    const biggestEasy = easyKm.reduce((max, km) => Math.max(max, km), 0);
+    if (biggestEasy <= longKm) break;
+    longKm = biggestEasy;
+    easyKm = easySessionBudgets(targetKm - longKm - quality * qualityKm, easyCount);
+  }
+
+  return [
     { role: 'long', km: longKm },
     ...Array.from({ length: quality }, () => ({ role: 'quality' as const, km: qualityKm })),
+    ...easyKm.map((km) => ({ role: 'easy' as const, km })),
   ];
+}
 
-  // Les footings se partagent ce qui reste, au dixième — le dernier prend le
-  // reliquat de la division, qui ne peut valoir qu'un dixième de kilomètre.
-  let remaining = tenthKm(targetKm - longKm - quality * qualityKm);
+/**
+ * Ce que les footings se partagent, au dixième — le dernier prend le reliquat de
+ * la division, qui ne peut valoir qu'un dixième de kilomètre.
+ *
+ * Extrait de {@link weeklySessionBudgets} pour être rejoué : relever la sortie
+ * longue au niveau du plus gros footing change ce qui reste à partager, donc les
+ * footings eux-mêmes.
+ */
+function easySessionBudgets(restKm: number, easyCount: number): number[] {
+  const budgets: number[] = [];
+  let remaining = tenthKm(restKm);
   for (let index = 0; index < easyCount; index += 1) {
     const km =
       index === easyCount - 1
         ? Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, tenthKm(remaining))
         : Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, tenthKm(remaining / (easyCount - index)));
-    budgets.push({ role: 'easy', km });
+    budgets.push(km);
     remaining = tenthKm(remaining - km);
   }
-
   return budgets;
 }
+
+/**
+ * Combien de fois la sortie longue peut être relevée au niveau du plus gros
+ * footing avant qu'on renonce.
+ *
+ * Deux suffisent sur toute cible finançable — la boucle décroît. La troisième
+ * est pour les entrées dégénérées, où le plancher de distance du contrat empêche
+ * toute convergence : mieux vaut une décomposition imparfaite qu'une boucle.
+ */
+const MAX_LONG_RUN_RAISES = 3;
 
 /**
  * Ce qui, dans la progression des volumes hebdomadaires, ne tient pas debout.
@@ -2715,8 +2451,33 @@ function volumeViolations(
     buildWeeks >= VOLUME_RULES.minBuildWeeksForCutback
   ) {
     const window = VOLUME_RULES.cutbackWindowWeeks;
+
+    // La fenêtre jugée s'ouvre-t-elle **sur** une semaine allégée ?
+    //
+    // C'est la couture entre le chiffrage et la validation, et elle ne se voit
+    // que sur une fenêtre restante. Une allégée se reconnaît d'ordinaire à sa
+    // baisse *par rapport à la semaine d'avant* — mais la première semaine pleine
+    // n'en a pas dans la fenêtre : sa référence est le volume réellement couru
+    // avant elle, que rien ici ne connaît. Quand la cadence du plan d'origine la
+    // désigne comme la respiration du bloc, la cible le dit (`kind: 'cutback'`)
+    // — c'est le seul témoin disponible, et il vient du même calcul que les
+    // volumes annoncés au modèle. La continuation ne pose cette étiquette que
+    // sur une semaine dont le volume **baisse réellement** par rapport à ce que
+    // l'athlète a couru (cf. `remainingVolumeTargets`), ce qui est exactement ce
+    // que la règle ci-dessous croit lire.
+    //
+    // Sans cette lecture, la reconstruction d'une fenêtre qui s'ouvre sur une
+    // allégée serait **systématiquement refusée** : ses trois semaines suivantes
+    // montent, la respiration est bien là, mais elle est au rang que la boucle
+    // ci-dessous ne peut pas juger. Une cible que la validation refuse est le pire
+    // des états — l'appli se contredit elle-même, et la reprise est perdue
+    // d'avance.
+    const opensOnCutback = targets !== null && targets[firstFull]?.kind === 'cutback';
+
     for (let start = firstFull; start + window - 1 <= lastBuild; start += 1) {
-      let eased = false;
+      // Seule la toute première fenêtre glissante contient cette semaine-là ; les
+      // suivantes commencent après elle et se jugent normalement.
+      let eased = start === firstFull && opensOnCutback;
       for (let index = Math.max(start, firstFull + 1); index <= start + window - 1; index += 1) {
         const current = buildVolume(index);
         const previous = buildVolume(index - 1);
@@ -2846,8 +2607,13 @@ function volumeViolations(
  */
 export const MIN_FIRST_WEEK_DAYS = 4;
 
-/** Jours qu'il reste dans une semaine reprise le jour ISO `firstWeekFromDay`. */
-function remainingWeekDays(firstWeekFromDay: number): number {
+/**
+ * Jours qu'il reste dans une semaine reprise le jour ISO `firstWeekFromDay`.
+ *
+ * Exportée : une fenêtre restante proratise sa semaine entamée avec la même
+ * arithmétique, et le budget temps de cette semaine-là se calcule dessus.
+ */
+export function remainingWeekDays(firstWeekFromDay: number): number {
   return 8 - firstWeekFromDay;
 }
 

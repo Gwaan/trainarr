@@ -14,10 +14,21 @@ import 'server-only';
  * page du plan lui montrant la date de la dernière révision et son résumé
  * portant la raison invoquée.
  *
- * Le reste du chemin est celui de l'ajustement par instruction : mêmes règles
- * métier (portée `adjustment`), mêmes allures imposées par le chrono du plan,
- * même écriture transactionnelle, mêmes effets de bord. Une révision n'est pas
- * un second moteur de planification, c'est un déclencheur.
+ * ## Ce que le coach décide, et ce que l'appli calcule
+ *
+ * Le coach ne rend qu'un **verdict** : « keep » ou « adjust », sa justification,
+ * et au plus deux réglages durables (cf. {@link REVIEW_SYSTEM_PROMPT}). Il
+ * n'écrit plus une seule séance. En « adjust », c'est
+ * {@link rewriteRemainingPlan} qui reconstruit la fenêtre restante — le même
+ * squelette déterministe qu'une création et qu'un ajustement, avec la
+ * périodisation du plan conservée et les volumes recalculés sur ce que
+ * l'athlète a réellement couru.
+ *
+ * Cette répartition est le tout de la révision : juger du réalisé est ce qu'un
+ * modèle de langue fait mieux qu'un gabarit, répartir des kilomètres sur des
+ * semaines est ce qu'il ne sait pas faire. Une révision n'est donc pas un second
+ * moteur de planification — c'est un déclencheur, et il déclenche exactement le
+ * même moteur que l'ajustement par instruction.
  *
  * ## Cadence, et pourquoi un compte de séances
  *
@@ -50,14 +61,17 @@ import 'server-only';
  * ## Échouer sans boucler
  *
  * Le marqueur est ce qui empêche de rejuger deux fois le même passé ; ne pas
- * l'avancer sur un échec **déterministe** (sortie hors schéma trois fois de
- * suite, plan produit hors fenêtre) laisserait le seuil franchi pour toujours,
- * et chaque fichier importé relancerait trois générations. Deux réponses, selon
- * la nature de l'échec :
+ * l'avancer sur un échec **déterministe** (sortie hors schéma, fenêtre restante
+ * infaisable, plan produit hors règles) laisserait le seuil franchi pour
+ * toujours, et chaque fichier importé relancerait une génération. Deux réponses,
+ * selon la nature de l'échec :
  *
- * - **non transitoire** ({@link AiInvalidOutputError}, {@link InvalidPlanError})
- *   — le marqueur avance quand même, la révision est abandonnée en le disant :
- *   redemander la même chose au même modèle donnerait la même sortie ;
+ * - **non transitoire** ({@link AiInvalidOutputError}, {@link InvalidPlanError},
+ *   {@link InvalidGeneratedPlanError}) — le marqueur avance quand même, la
+ *   révision est abandonnée en le disant : redemander la même chose au même
+ *   modèle sur les mêmes données donnerait la même sortie, et un volume qui ne
+ *   finance pas les séances demandées ne se finance pas davantage dans une
+ *   demi-heure ;
  * - **transitoire** (coach injoignable, réponse HTTP cassée, base indisponible)
  *   — le marqueur reste, mais un {@link REVIEW_COOLDOWN_MS} en mémoire interdit
  *   une nouvelle tentative avant une demi-heure. Sans lui, un backfill de
@@ -93,7 +107,7 @@ import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import type { TrainingPaces } from '@/lib/metrics/vdot';
 
 import { getAiAvailability } from './availability';
-import type { ChatMessage } from './client';
+import { chatCompletionJson, type ChatMessage } from './client';
 import { AiInvalidOutputError } from './errors';
 import {
   formatCivilDate,
@@ -103,33 +117,32 @@ import {
   formatTrainingSnapshot,
 } from './format';
 import {
-  goalPaceSecPerKm,
   mapPlanWeeksToSessions,
-  planReviewChunkJsonSchema,
   planReviewJsonSchema,
   planReviewOutputSchema,
-  resolveWeeklyTimeBudget,
-  type PlanExpectations,
   type PlanReviewOutput,
   type PlanSettingsOutput,
 } from './plan-schema';
 import {
-  chunkInstructionLines,
-  chunkWindow,
-  estimatePlanChars,
+  InvalidGeneratedPlanError,
   formatUpcomingPlan,
-  generateWeeksInChunks,
-  generateWithBusinessRules,
-  planChunks,
   planSettingsPatch,
-  planSystemPrompt,
   planTrainingPaces,
-  planReferenceRace,
-  raceGoalOf,
+  planWeeklyVolumeKm,
   remainingPlanWindow,
-  type PlanChunkSpec,
+  rewriteRemainingPlan,
+  type RemainingPlanRewrite,
   type RemainingPlanWindow,
 } from './plan-service';
+
+/**
+ * Température d'un verdict : la même que celle des plans.
+ *
+ * Basse à dessein. On ne veut pas d'un juge créatif — on veut que les mêmes
+ * résultats donnent la même décision deux fois de suite, sans quoi le plan se
+ * mettrait à osciller entre « keep » et « adjust » d'un import à l'autre.
+ */
+const REVIEW_TEMPERATURE = 0.3;
 
 /**
  * Nombre de séances réalisées non encore relues à partir duquel une révision se
@@ -158,8 +171,15 @@ type PlanReviewState = {
   /** Une révision est-elle en cours ? Verrou de process, cf. l'en-tête. */
   reviewing: boolean;
   /**
-   * Instant (epoch ms) avant lequel aucune nouvelle tentative n'est faite, après
-   * un échec transitoire. `0` tant qu'il n'y en a pas eu.
+   * Instant (epoch ms) avant lequel aucune nouvelle tentative n'est faite. `0`
+   * tant qu'il n'y a rien à différer.
+   *
+   * Deux situations le posent, et elles ont en commun de laisser la révision
+   * **due** — marqueur inchangé, donc seuil toujours franchi — alors que la
+   * rejouer tout de suite ne servirait à rien : un échec transitoire (coach
+   * injoignable, base indisponible) et un abandon au contrôle de fraîcheur
+   * (`runReview`). Sans cette garde, le prochain import relancerait aussitôt une
+   * génération complète.
    */
   retryNotBefore: number;
 };
@@ -244,21 +264,37 @@ function formatReviewSession(session: PlanReviewSessionDto): string {
 }
 
 /**
- * Les consignes propres à la révision, en surcharge de la méthodologie.
+ * Le système d'une révision — un **juge**, plus un coach.
+ *
+ * ## Ce que ce prompt ne porte plus, et pourquoi ce n'est pas une perte
+ *
+ * Il ne porte plus la méthodologie d'entraînement (distribution polarisée,
+ * typologie des allures, progression du volume, affûtage). Elle n'y servait qu'à
+ * une chose : faire écrire des semaines au modèle. Il n'en écrit plus — l'appli
+ * reconstruit la fenêtre restante elle-même (`rewriteRemainingPlan`), et ces
+ * règles-là y vivent en code, vérifiées à l'exécution plutôt qu'espérées d'un
+ * prompt.
+ *
+ * Ce qu'on lui demande est ce qu'aucun calcul ne fait : **regarder du réalisé et
+ * décider**. Quatre séances courues plus lentement que prévu peuvent être une
+ * mauvaise semaine ou une fatigue installée ; c'est un jugement, et c'est
+ * exactement ce qu'un modèle de langue fait bien.
  *
  * L'insistance sur « keep » n'est pas de la précaution rédactionnelle : un
  * modèle à qui l'on demande de juger un plan trouve toujours quelque chose à
- * corriger, et un plan réécrit toutes les quatre séances ne serait plus un plan.
+ * corriger, et un plan recalculé toutes les quatre séances ne serait plus un
+ * plan.
  */
-const REVIEW_SYSTEM_LINES = [
+const REVIEW_SYSTEM_PROMPT = [
+  "Tu es coach de course à pied francophone. Tu relis le plan qu'une athlète suit, au vu de ce qu'elle a réellement couru depuis ta dernière révision, et tu décides d'une seule chose : le plan tient-il encore ?",
   '',
-  "RÉVISION DU PLAN — tu relis un plan que l'athlète suit, au vu de ses résultats.",
-  "- Si le plan reste adapté, tu ne changes RIEN : `decision` vaut « keep », tu n'écris ni `weeks` ni `settings`, et `reason` dit en une phrase pourquoi le plan tient. C'est la réponse par défaut.",
-  "- Tu ne réécris la suite (`decision` vaut « adjust ») que si les résultats l'exigent : séances systématiquement au-dessus ou en-dessous des allures cibles, plusieurs séances manquées, ou fatigue installée (TSB très négatif, allures qui se dégradent à fréquence cardiaque égale). Un écart isolé, une séance manquée, une semaine un peu creuse : ce n'est pas une raison de réécrire un plan.",
+  "- Si le plan reste adapté, `decision` vaut « keep », tu n'écris pas `settings`, et `reason` dit en une phrase pourquoi le plan tient. C'est la réponse par défaut, et de loin la plus fréquente.",
+  "- `decision` ne vaut « adjust » que si les résultats l'exigent : séances systématiquement au-dessus ou en-dessous des allures cibles, plusieurs séances manquées, ou fatigue installée (TSB très négatif, allures qui se dégradent à fréquence cardiaque égale). Un écart isolé, une séance manquée, une semaine un peu creuse : ce n'est pas une raison de rebattre les cartes.",
   '- `reason` fait une à deux phrases en français : ce que tu constates dans les résultats, et ce que tu en fais.',
-  "- En « adjust », tu régénères toutes les semaines restantes, weeks[0] étant la première semaine restante : le passé de l'athlète ne se réécrit pas. Tu réécris chaque séance en entier, `steps` compris — ce que les résultats ne remettent pas en cause, tu le reconduis tel quel.",
-  "- En « adjust », si un réglage durable doit changer (nombre de séances, jour de la sortie longue, temps hebdomadaire), reporte-le dans `settings` ; sinon, omets `settings`.",
-];
+  '',
+  "En « adjust », l'application recalcule elle-même toutes les semaines restantes — périodisation, volumes, jours, séances — à partir de ce que l'athlète a réellement couru ces dernières semaines. Tu n'écris donc aucune séance, aucun volume, aucune allure.",
+  "La seule chose que tu peux changer du calendrier tient dans `settings`, et uniquement si les résultats l'imposent : `sessionsPerWeek` (le nombre de séances par semaine) ou `longRunDay` (le jour de la sortie longue, 1 = lundi … 7 = dimanche). Tu omets `settings` si rien de durable n'est à changer, ce qui est le cas ordinaire.",
+].join('\n');
 
 /**
  * Ce que le bilan ne détaille pas, en une ligne — ou rien s'il détaille tout.
@@ -285,22 +321,9 @@ export function buildPlanReviewMessages(
   review: PlanReviewDto,
   snapshot: TrainingSnapshotDto,
   paces: TrainingPaces | null = null,
-  chunk: PlanChunkSpec | null = null,
 ): ChatMessage[] {
-  const system = planSystemPrompt(
-    plan.level,
-    plan.goalType,
-    paces,
-    planReferenceRace(plan),
-    REVIEW_SYSTEM_LINES,
-  );
-
-  // Découpée, la révision ne montre que la première tranche du plan restant :
-  // c'est sur elle que porteront les semaines qu'elle réécrira, et le bilan des
-  // séances réalisées suffit à décider (cf. la génération par tranches).
-  const scope = chunk === null ? window : chunkWindow(window, chunk);
   const user = [
-    formatUpcomingPlan(plan, upcoming, scope),
+    formatUpcomingPlan(plan, upcoming, window),
     '',
     'Séances depuis ta dernière révision (prévu, puis réalisé) :',
     ...formatOlderSessions(review),
@@ -311,71 +334,12 @@ export function buildPlanReviewMessages(
     // dernières sorties sort du contexte (cf. `SnapshotFormatOptions`).
     formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
     '',
-    chunk === null
-      ? `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes.`
-      : `Décide : « keep » si le plan reste adapté, « adjust » s'il faut réécrire les ${window.weeks} semaines restantes. En « adjust », n'écris ici que les ${chunk.weeks} premières (semaines 1 à ${chunk.weeks} des semaines restantes) : la suite te sera demandée tranche par tranche.`,
+    `Décide : « keep » si le plan reste adapté, « adjust » s'il faut recalculer les ${window.weeks} semaines restantes.`,
   ].join('\n');
 
   return [
-    { role: 'system', content: system },
+    { role: 'system', content: REVIEW_SYSTEM_PROMPT },
     { role: 'user', content: user },
-  ];
-}
-
-/**
- * Ce que le système dit à une **tranche** de révision, une fois la décision
- * prise.
- *
- * La décision, le bilan et la raison appartiennent au premier appel : ces
- * tranches-là n'ont plus qu'à écrire des semaines. Leur rappeler ce qui a été
- * constaté est en revanche indispensable — c'est la seule chose qui relie les
- * semaines qu'elles écrivent à la révision qui les a demandées.
- */
-function reviewChunkSystemLines(reason: string): string[] {
-  return [
-    '',
-    "RÉVISION DU PLAN — tu as relu le plan de l'athlète et décidé de réécrire la suite.",
-    `- Ce que tu as constaté : « ${reason.replace(/\s+/g, ' ').trim()} ». Le plan réécrit en tient compte.`,
-    "- Tu réécris chaque séance en entier, `steps` compris : ce que les résultats ne remettent pas en cause, tu le reconduis tel quel.",
-    '- Tu ne rends que les semaines demandées ci-dessous, dans leur ordre chronologique.',
-  ];
-}
-
-/** Les messages d'une tranche de révision, la décision « adjust » déjà prise. */
-function buildReviewChunkMessages(
-  context: ReviewContext,
-  chunk: PlanChunkSpec,
-  continuity: string | null,
-  reason: string,
-): ChatMessage[] {
-  const { plan, window, paces } = context;
-  const scope = chunkWindow(window, chunk);
-
-  return [
-    {
-      role: 'system',
-      content: planSystemPrompt(
-        plan.level,
-        plan.goalType,
-        paces,
-        planReferenceRace(plan),
-        reviewChunkSystemLines(reason),
-      ),
-    },
-    {
-      role: 'user',
-      content: [
-        formatUpcomingPlan(plan, context.upcoming, scope, chunk.fromWeek + 1),
-        '',
-        ...chunkInstructionLines(
-          chunk,
-          continuity,
-          scope.firstWeekStart,
-          'des semaines restantes',
-          false,
-        ),
-      ].join('\n'),
-    },
   ];
 }
 
@@ -419,6 +383,15 @@ export function withReviewNote(summary: string | null, today: string, reason: st
 type ReviewContext = {
   plan: PlanDto;
   upcoming: PlanSessionDto[];
+  /**
+   * Ce que le plan prescrit par semaine ISO ({@link planWeeklyVolumeKm}) — la
+   * mémoire dont la reconstruction a besoin pour ne pas repartir du seul réel.
+   *
+   * Calculée sur **toutes** les séances du plan, pas sur `upcoming` : ce qui
+   * intéresse la reconstruction est ce que le plan demandait pour les semaines
+   * **révolues**, celles-là mêmes que `upcoming` exclut.
+   */
+  plannedWeeklyKm: ReadonlyMap<string, number>;
   window: RemainingPlanWindow;
   review: PlanReviewDto;
   snapshot: TrainingSnapshotDto;
@@ -485,14 +458,23 @@ export async function maybeReviewActivePlan(): Promise<void> {
 /**
  * L'échec est-il de ceux qu'une nouvelle tentative ne réparerait pas ?
  *
- * Une sortie hors schéma après trois générations, ou un plan produit hors de sa
- * fenêtre, ne tiennent ni au réseau ni à la base : redemander la même chose au
- * même modèle sur les mêmes données donnerait la même sortie. Tout le reste —
- * coach injoignable, réponse HTTP cassée, base indisponible — est traité comme
- * transitoire, qui est le sens conservateur : au pire, on attend une demi-heure.
+ * Une sortie hors schéma, une fenêtre restante que le volume ne finance pas, un
+ * plan que l'appli n'arrive pas à écrire dans les règles : aucun de ces trois ne
+ * tient au réseau ni à la base, et les trois se reproduiraient à l'identique.
+ * Tout le reste — coach injoignable, réponse HTTP cassée, base indisponible —
+ * est traité comme transitoire, qui est le sens conservateur : au pire, on
+ * attend une demi-heure.
  */
 function isPermanentFailure(error: unknown): boolean {
-  return error instanceof AiInvalidOutputError || error instanceof InvalidPlanError;
+  return (
+    error instanceof AiInvalidOutputError ||
+    error instanceof InvalidPlanError ||
+    // L'appli n'arrive pas à écrire une fenêtre valide, même tout en
+    // déterministe : c'est une incohérence interne, et elle est reproductible
+    // par construction. Retenter à l'identique ne ferait que rejouer le même
+    // échec à chaque import.
+    error instanceof InvalidGeneratedPlanError
+  );
 }
 
 /** Le corps de {@link maybeReviewActivePlan}, une fois le verrou pris. */
@@ -530,13 +512,22 @@ async function reviewActivePlan(): Promise<void> {
 }
 
 /**
- * La révision proprement dite : générer, décider, écrire, avancer le marqueur,
- * puis les effets de bord.
+ * La révision proprement dite : juger, reconstruire, écrire, avancer le
+ * marqueur, puis les effets de bord.
  *
- * L'ordre n'est pas indifférent. Le marqueur avance **dès que l'écriture a
- * réussi** : c'est elle le fait générateur, et une révision déjà inscrite au
- * plan ne doit jamais être remise en jeu par un rapprochement ou une
- * synchronisation ratés (cf. {@link applyReviewEffects}).
+ * L'ordre n'est pas indifférent, et deux points s'y jouent.
+ *
+ * Le **contrôle de fraîcheur** vient après la reconstruction, pas avant. Les
+ * deux étapes lentes de cette fonction sont le verdict (un appel) et la
+ * reconstruction (un appel par créneau de qualité, soit des minutes) : placer la
+ * relecture de l'`updatedAt` entre le verdict et la reconstruction rouvrirait
+ * exactement la fenêtre que ce contrôle est censé fermer. Elle se fait donc au
+ * plus près de la transaction, à quelques millisecondes d'elle.
+ *
+ * Le **marqueur** avance dès que l'écriture a réussi : c'est elle le fait
+ * générateur, et une révision déjà inscrite au plan ne doit jamais être remise
+ * en jeu par un rapprochement ou une synchronisation ratés (cf.
+ * {@link applyReviewEffects}).
  */
 async function runReview(context: ReviewContext): Promise<void> {
   const { plan, review } = context;
@@ -548,18 +539,37 @@ async function runReview(context: ReviewContext): Promise<void> {
     return;
   }
 
-  // Le plan a-t-il bougé pendant les minutes de génération ? Un ajustement
-  // demandé entre-temps par l'athlète prime sur ce que le modèle vient
-  // d'écrire — l'écraser reviendrait à annuler silencieusement sa demande.
+  const rewrite = await rewriteRemainingPlan({
+    plan,
+    window: context.window,
+    snapshot: context.snapshot,
+    plannedWeeklyKm: context.plannedWeeklyKm,
+    settings: reviewSettings(output.settings),
+    // Pas de suivi de progression : personne ne regarde une révision se dérouler.
+  });
+
+  // Le plan a-t-il bougé pendant les minutes de reconstruction ? Un ajustement
+  // demandé entre-temps par l'athlète prime sur ce que la révision vient de
+  // calculer — l'écraser reviendrait à annuler silencieusement sa demande.
   const updatedAt = await getPlanUpdatedAt(plan.id);
   if (updatedAt !== review.updatedAt) {
+    // Le marqueur n'avance pas — la révision reste due, et c'est voulu : ce qui
+    // vient d'être écrit par l'athlète n'a pas été relu. Mais sans cooldown, le
+    // **prochain import** (pas le prochain palier : le seuil est toujours
+    // franchi) redemanderait aussitôt la même révision et rejouerait les mêmes
+    // appels au modèle — 45 mesurés sur un plan de 16 semaines à 5 séances, tous
+    // pour un travail qu'on vient de jeter. Le cooldown borne ce gâchis à une
+    // fois par demi-heure, et laisse à l'athlète le temps de finir ce qu'elle
+    // était en train de faire au plan.
+    reviewState().retryNotBefore = Date.now() + REVIEW_COOLDOWN_MS;
     console.log(
-      `[plan/review] plan ${plan.id} modifié pendant la révision — abandon, le prochain palier repartira de l'état à jour.`,
+      `[plan/review] plan ${plan.id} modifié pendant la révision — abandon ; nouvelle tentative ` +
+        `dans ${Math.round(REVIEW_COOLDOWN_MS / 60_000)} min au plus tôt, sur l'état à jour.`,
     );
     return;
   }
 
-  await applyReview(context, output);
+  await writeReview(context, output, rewrite);
   await markPlanReviewed(plan.id, review.completedSessionCount);
   console.log(`[plan/review] plan ${plan.id} ajusté — ${output.reason}`);
 
@@ -604,6 +614,7 @@ async function prepareReview(): Promise<PreparedReview | null> {
     context: {
       plan: active.plan,
       upcoming,
+      plannedWeeklyKm: planWeeklyVolumeKm(active.sessions),
       window,
       review,
       snapshot: await getTrainingSnapshot(),
@@ -662,30 +673,49 @@ function reviewSettings(settings: PlanSettingsOutput | undefined): PlanSettingsO
   return { sessionsPerWeek: settings.sessionsPerWeek, longRunDay: settings.longRunDay };
 }
 
-/** La génération, sous le même contrôle métier qu'un ajustement. */
+/**
+ * Le plafond de génération d'un verdict, en tokens.
+ *
+ * Une décision, deux phrases et au plus deux entiers : 512 laisse largement la
+ * place. Explicite comme partout ailleurs — un `max_tokens` absent laisse le
+ * serveur trancher, et un JSON coupé ne rend pas un JSON incomplet, il ne rend
+ * pas de JSON du tout.
+ */
+const REVIEW_MAX_OUTPUT_TOKENS = 512;
+
+/**
+ * Délai de garde d'un verdict : 90 secondes.
+ *
+ * Plus long qu'un résumé, parce que le prompt l'est aussi (le plan restant, le
+ * bilan séance par séance, l'état de forme) et qu'un modèle local met une bonne
+ * minute à le lire. Un dépassement ici est traité comme n'importe quel échec
+ * transitoire : cooldown, et on reverra au prochain palier.
+ */
+const REVIEW_REQUEST_TIMEOUT_MS = 90_000;
+
+/**
+ * Le verdict du coach.
+ *
+ * ## Pourquoi il n'y a pas de repli déterministe ici
+ *
+ * Partout ailleurs sur ce chemin, un modèle muet se remplace par l'appli : les
+ * déroulés de séance ont leur gabarit, les résumés leur version factuelle. Une
+ * **décision**, non — et ce n'est pas un oubli. Se replier sur « keep »
+ * avalerait une révision qui était due (le marqueur avancerait sans que rien
+ * n'ait été relu) ; se replier sur « adjust » ferait recalculer un plan que
+ * personne n'a jugé. Les deux replis inventent un jugement que l'on n'a pas.
+ *
+ * L'échec remonte donc à {@link maybeReviewActivePlan}, qui le traite comme
+ * transitoire : marqueur intact, cooldown d'une demi-heure, nouvelle tentative
+ * au prochain import. C'est le seul comportement qui ne perd ni ne fabrique
+ * d'information — et l'import, lui, n'en sait rien (cf. l'en-tête).
+ *
+ * @throws les erreurs du socle IA, telles quelles.
+ */
 async function generateReview(context: ReviewContext): Promise<PlanReviewOutput> {
   const { plan, window, snapshot, paces } = context;
-  const chunks = planChunks(window.weeks);
-  const chunked = chunks.length > 1;
 
-  // Fenêtre restante, pas plan complet — même portée qu'un ajustement, pour la
-  // même raison (cf. `updatePlanFromInstruction`).
-  const expectationsOf = (settings: PlanSettingsOutput | undefined): PlanExpectations => ({
-    scope: 'adjustment',
-    weeks: window.weeks,
-    sessionsPerWeek: settings?.sessionsPerWeek ?? plan.sessionsPerWeek,
-    longRunDay: settings?.longRunDay ?? plan.longRunDay,
-    firstWeekFromDay: window.firstWeekFromDay,
-    race: raceGoalOf(plan.goalType, plan.goalText),
-  });
-  const paceContext = {
-    referencePaceSecPerKm: snapshot.recentAvgPaceSecPerKm,
-    paces,
-    // Pas de `recentWeeklyKm` : le plan en cours fait foi (cf. `plan-service`).
-  };
-  const goalPace = goalPaceSecPerKm(plan.goalText);
-
-  const output = await generateWithBusinessRules({
+  return chatCompletionJson<PlanReviewOutput>({
     messages: buildPlanReviewMessages(
       plan,
       context.upcoming,
@@ -693,82 +723,38 @@ async function generateReview(context: ReviewContext): Promise<PlanReviewOutput>
       context.review,
       snapshot,
       paces,
-      chunked ? chunks[0] : null,
     ),
     schemaName: 'training_plan_review',
-    jsonSchema: chunked ? planReviewChunkJsonSchema(chunks[0].weeks) : planReviewJsonSchema,
+    jsonSchema: planReviewJsonSchema,
     schema: planReviewOutputSchema,
-    // « keep » ne réécrit aucune semaine : il n'y a rien à juger. Découpée, la
-    // première tranche non plus — la validation a lieu à l'assemblage.
-    weeksOf: (output) => (output.decision === 'adjust' && !chunked ? output.weeks : null),
-    expectationsOf: (output) =>
-      expectationsOf(output.decision === 'adjust' ? output.settings : undefined),
-    // « keep » ne porte aucune semaine : il n'y a rien à post-traiter. L'allure
-    // objectif vient du but du plan, comme à l'ajustement.
-    withPostProcessedWeeks: (output, postProcess) =>
-      output.decision === 'adjust'
-        ? { ...output, weeks: postProcess(output.weeks) }
-        : output,
-    goalPaceSecPerKm: goalPace,
-    // Le budget de vie de l'athlète vaut aussi quand c'est le coach qui reprend
-    // la main : une révision n'a pas plus le droit qu'un ajustement de lui
-    // planifier trois heures là où elle en a deux. Même mécanique qu'un
-    // ajustement, donc : si la révision reporte un budget élargi dans ses
-    // réglages, c'est celui-là qui juge ses semaines. « keep » n'en porte
-    // aucun — et n'a de toute façon aucune semaine à juger. Un budget *effacé*,
-    // lui, est ignoré (cf. `reviewSettings`).
-    weeklyTimeBudgetOf: (output) =>
-      resolveWeeklyTimeBudget(
-        output.decision === 'adjust' ? reviewSettings(output.settings) : undefined,
-        plan.weeklyTimeMinutes,
-      ),
-    paceContext,
-    // Pas de `progressId` : personne ne regarde une révision se dérouler.
-    estimatedChars: estimatePlanChars(
-      chunked ? chunks[0].weeks : window.weeks,
-      plan.sessionsPerWeek,
-    ),
+    temperature: REVIEW_TEMPERATURE,
+    maxTokens: REVIEW_MAX_OUTPUT_TOKENS,
+    timeoutMs: REVIEW_REQUEST_TIMEOUT_MS,
   });
-
-  // Le plan tient, ou il tient en un seul appel : rien à assembler.
-  if (output.decision === 'keep' || !chunked) return output;
-
-  const settings = reviewSettings(output.settings);
-  const { weeks } = await generateWeeksInChunks({
-    chunks,
-    messagesFor: (chunk, continuity) =>
-      buildReviewChunkMessages(context, chunk, continuity, output.reason),
-    firstChunkWeeks: output.weeks,
-    // Une révision ne réécrit pas le résumé du plan : elle y ajoute sa raison
-    // (cf. `withReviewNote`).
-    withSummary: false,
-    schemaName: 'training_plan_review_chunk',
-    expectations: expectationsOf(settings),
-    paceContext,
-    weeklyTimeMinutes: resolveWeeklyTimeBudget(settings, plan.weeklyTimeMinutes),
-    goalPaceSecPerKm: goalPace,
-    sessionsPerWeek: settings?.sessionsPerWeek ?? plan.sessionsPerWeek,
-  });
-
-  return { ...output, weeks };
 }
 
-/** L'écriture d'une révision qui ajuste : exactement le chemin de l'ajustement. */
-async function applyReview(
+/**
+ * L'écriture d'une révision qui ajuste : **exactement** le chemin de
+ * l'ajustement, et c'est le point de tout ce chantier.
+ *
+ * Séances et réglages en une seule transaction, comme un ajustement. La raison
+ * de la révision part avec, dans le résumé : c'est là que l'athlète la lira.
+ */
+async function writeReview(
   context: ReviewContext,
   output: Extract<PlanReviewOutput, { decision: 'adjust' }>,
+  rewrite: RemainingPlanRewrite,
 ): Promise<void> {
-  const { plan, window, fromDate } = context;
+  const { plan, window, fromDate, snapshot } = context;
+  const settings = reviewSettings(output.settings);
 
-  // Séances et réglages en une seule transaction, comme un ajustement. La raison
-  // de la révision part avec, dans le résumé : c'est là que l'athlète la lira.
   await applyPlanUpdate(plan.id, {
     fromDate,
-    sessions: mapPlanWeeksToSessions(output.weeks, window.firstWeekStart),
+    sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
     settings: planSettingsPatch(
       plan,
-      reviewSettings(output.settings),
-      withReviewNote(plan.summary, context.snapshot.today, output.reason),
+      settings,
+      withReviewNote(plan.summary, snapshot.today, output.reason),
     ),
   });
 }
