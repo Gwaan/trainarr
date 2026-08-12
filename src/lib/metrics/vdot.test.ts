@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   InvalidRacePerformanceError,
   REFERENCE_DISTANCES,
+  REPETITION_FRACTION_ANCHORS,
+  REPETITION_HALF_WIDTH,
   VDOT_ZONE_FRACTIONS,
   estimateVdot,
   paceSecPerKmAtVdotFraction,
+  repetitionFractionsAtVdot,
   trainingPacesFromRace,
   vdotFromRace,
   type PaceZone,
@@ -103,6 +106,22 @@ const REFERENCE_RACES = {
   50: { '5k': 19 * 60 + 57, '10k': 41 * 60 + 21, half: 91 * 60 + 35, marathon: 190 * 60 + 49 },
 } as const;
 
+/**
+ * Chronos 5 km publiés des quatre lignes de table qui servent d'ancrage. Les
+ * lignes basses (VDOT 30 et 35) n'ont longtemps eu aucun test : la table
+ * n'était vérifiée qu'à VDOT 40 et 50, ce qui a laissé la bande R dériver sans
+ * bruit sur tout le bas du spectre — celui où court l'utilisatrice de l'appli.
+ * Seule la colonne 5 km est relevée pour ces deux lignes : c'est l'ancre la plus
+ * fiable du modèle (effort de 15 à 50 min) et il en faut une seule pour
+ * atteindre la ligne.
+ */
+const REFERENCE_5K = {
+  30: 30 * 60 + 41,
+  35: 26 * 60 + 59,
+  40: REFERENCE_RACES[40]['5k'],
+  50: REFERENCE_RACES[50]['5k'],
+} as const;
+
 /** Allures de la table, en s/km. */
 const TABLE_PACES = {
   40: {
@@ -123,6 +142,41 @@ const TABLE_PACES = {
   },
 } as const;
 
+/**
+ * Lignes basses de la table (VDOT 30 et 35). Trois colonnes seulement : la
+ * borne rapide de E, T et I. La borne lente de E et la colonne M ne sont pas
+ * relevées sur ces deux lignes — on n'ancre que ce qu'on a lu, jamais une valeur
+ * reconstituée.
+ *
+ * La colonne R n'y figure pas non plus, et c'est délibéré : R est vérifiée par
+ * son *milieu de bande* aux trois points de contrôle du calibrage (30, 40, 50),
+ * cf. le test dédié plus bas. La ligne VDOT 35 y échapperait de toute façon —
+ * son 400 m publié (1:55) implique 108,5 % de VO2max, hors de la tendance de ses
+ * voisines (104,6 % à 30, 105,0 % à 40, 107,2 % à 50).
+ */
+const LOW_TABLE_PACES = {
+  30: {
+    easyFast: perMile(12, 19),
+    threshold: perMile(10, 18),
+    interval: perMile(9, 28),
+  },
+  35: {
+    easyFast: perMile(10, 56),
+    threshold: perMile(9, 7),
+    interval: perMile(8, 22),
+  },
+} as const;
+
+/**
+ * Allures R publiées (temps au 400 m de la table) aux trois points de contrôle
+ * du calibrage de la bande de répétitions, en s/km.
+ */
+const TABLE_REPETITION_PACES = {
+  30: 134 / 0.4, // 400 m en 2:14 → 5:35/km
+  40: 106 / 0.4, // 400 m en 1:46 → 4:25/km
+  50: 87 / 0.4, //  400 m en 1:27 → 3:38/km
+} as const;
+
 describe('vdotFromRace', () => {
   it.each([
     ['5k', 40],
@@ -141,6 +195,15 @@ describe('vdotFromRace', () => {
 
       // Les chronos de la table sont imprimés à la seconde : ±0,1 de VDOT.
       expect(Math.abs(vdotFromRace(distanceM, timeS) - expectedVdot)).toBeLessThanOrEqual(0.1);
+    },
+  );
+
+  it.each([30, 35, 40, 50] as const)(
+    'retrouve VDOT %s sur le 5 km équivalent publié',
+    (expectedVdot) => {
+      const vdot = vdotFromRace(REFERENCE_DISTANCES['5k'], REFERENCE_5K[expectedVdot]);
+
+      expect(Math.abs(vdot - expectedVdot)).toBeLessThanOrEqual(0.1);
     },
   );
 
@@ -239,6 +302,47 @@ describe('trainingPacesFromRace', () => {
   });
 
   /**
+   * Le bas de la table (VDOT 30 et 35), longtemps absent des ancrages. Les
+   * fractions fixes E/T/I y tombent juste sans le moindre ajustement — c'est ce
+   * qui a permis d'imputer la dérive constatée à la seule bande R.
+   */
+  it.each([
+    [30, 'easyFast', 0.7],
+    [30, 'threshold', 0.88],
+    [30, 'interval', 0.98],
+    [35, 'easyFast', 0.7],
+    [35, 'threshold', 0.88],
+    [35, 'interval', 0.98],
+  ] as const)('reproduit la table VDOT %s (%s) à ±3 s/km', (vdot, key, fraction) => {
+    const expected = LOW_TABLE_PACES[vdot][key];
+
+    expect(Math.abs(paceSecPerKmAtVdotFraction(vdot, fraction) - expected)).toBeLessThanOrEqual(
+      TOLERANCE_S_PER_KM,
+    );
+  });
+
+  /**
+   * **Le milieu de la bande R**, aux trois points de contrôle de son calibrage.
+   *
+   * C'est le milieu qui compte, pas les bornes : `zoneMidPace`
+   * (`src/lib/ai/plan-schema.ts`) en fait la cible affichée et imposée d'une
+   * séance de répétitions. Avec l'ancienne bande fixe 105-110 %, il sortait
+   * 7 s/km trop rapide à VDOT 30 et 5 s/km trop rapide à VDOT 40 — invisible
+   * tant que rien n'ancrait le bas de la table.
+   */
+  it.each([30, 40, 50] as const)(
+    'pose le milieu de la bande R sur l’allure publiée à VDOT %s (±3 s/km)',
+    (vdot) => {
+      const paces = trainingPacesFromRace(REFERENCE_DISTANCES['5k'], REFERENCE_5K[vdot]);
+      const mid = (paces.repetition.minSecPerKm + paces.repetition.maxSecPerKm) / 2;
+
+      expect(Math.abs(mid - TABLE_REPETITION_PACES[vdot])).toBeLessThanOrEqual(
+        TOLERANCE_S_PER_KM,
+      );
+    },
+  );
+
+  /**
    * Chaque allure publiée tombe dans le créneau calculé. C'est le contrôle qui
    * vaut pour R à VDOT 50 : la table imprime un 400 m en 1:27 (≈ 107 % de
    * VDOT), arrondi au demi-seconde près sur la piste — il tombe dans 105-110 %
@@ -329,5 +433,48 @@ describe('trainingPacesFromRace', () => {
   it('propage la validation de vdotFromRace', () => {
     expect(() => trainingPacesFromRace(5000, 8 * 60)).toThrow(InvalidRacePerformanceError);
     expect(() => trainingPacesFromRace(0, 1200)).toThrow(InvalidRacePerformanceError);
+  });
+});
+
+describe('repetitionFractionsAtVdot', () => {
+  it('passe par les fractions publiées à chaque point d’ancrage', () => {
+    for (const { vdot, fraction } of REPETITION_FRACTION_ANCHORS) {
+      const { slow, fast } = repetitionFractionsAtVdot(vdot);
+
+      expect((slow + fast) / 2).toBeCloseTo(fraction, 10);
+    }
+  });
+
+  it('garde une bande de largeur constante, plus rapide que le créneau I', () => {
+    for (const vdot of [25, 30, 35, 40, 45, 50, 60]) {
+      const { slow, fast } = repetitionFractionsAtVdot(vdot);
+
+      expect(fast - slow).toBeCloseTo(2 * REPETITION_HALF_WIDTH, 10);
+      expect(slow).toBeGreaterThan(VDOT_ZONE_FRACTIONS.interval.fast);
+    }
+  });
+
+  /**
+   * Clamp plutôt qu'extrapolation hors du domaine mesuré : prolonger la pente
+   * 40 → 50 donnerait 111,6 % à VDOT 70, un chiffre que la table ne dit nulle
+   * part. La fonction reste continue en 30 et en 50.
+   */
+  it('clampe aux bornes du domaine mesuré [30, 50]', () => {
+    expect(repetitionFractionsAtVdot(20)).toEqual(repetitionFractionsAtVdot(30));
+    expect(repetitionFractionsAtVdot(29.9)).toEqual(repetitionFractionsAtVdot(30));
+    expect(repetitionFractionsAtVdot(70)).toEqual(repetitionFractionsAtVdot(50));
+    expect(repetitionFractionsAtVdot(50.1)).toEqual(repetitionFractionsAtVdot(50));
+  });
+
+  it('ne décroît jamais quand le VDOT monte', () => {
+    let previous = repetitionFractionsAtVdot(20);
+
+    for (let vdot = 20.5; vdot <= 70; vdot += 0.5) {
+      const current = repetitionFractionsAtVdot(vdot);
+
+      expect(current.slow).toBeGreaterThanOrEqual(previous.slow);
+      expect(current.fast).toBeGreaterThanOrEqual(previous.fast);
+      previous = current;
+    }
   });
 });

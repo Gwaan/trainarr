@@ -144,9 +144,11 @@ export const MIN_RACE_SPEED_M_PER_S = 1.6;
 export const MAX_RACE_SPEED_M_PER_S = 8;
 
 /**
- * Fractions de VDOT définissant chaque créneau d'entraînement, en pourcentage
- * de VO2max. `fast` est la borne haute d'intensité (donc l'allure la plus
- * rapide), `slow` la borne basse.
+ * Fractions de VDOT définissant chaque créneau d'entraînement **dont la
+ * fraction publiée ne dépend pas du niveau**, en pourcentage de VO2max. `fast`
+ * est la borne haute d'intensité (donc l'allure la plus rapide), `slow` la
+ * borne basse. Le créneau R fait exception et vit dans
+ * {@link repetitionFractionsAtVdot}.
  *
  * Sources des créneaux publiés (E 59-74 %, M 75-84 %, T 83-88 %, I 95-100 %,
  * R ≥ 105 %) :
@@ -170,8 +172,12 @@ export const MAX_RACE_SPEED_M_PER_S = 8;
  * (VDOT 40 et VDOT 50, cf. `vdot.test.ts`) :
  *  - E : la colonne E vaut 9:50-10:52/mi à VDOT 40 et 8:14-9:07/mi à VDOT 50,
  *    soit 70,0 % et 61,6-61,7 % aux deux niveaux — d'où 62-70 %.
- *  - M/T/I/R : les créneaux publiés encadrent les allures de la table
- *    (allure marathon ≈ 81 %, T ≈ 88 %, I ≈ 98 %, R 400 m ≈ 105-107 %).
+ *  - M/T/I : les créneaux publiés encadrent les allures de la table
+ *    (allure marathon ≈ 81 %, T ≈ 88 %, I ≈ 98 %).
+ *
+ * Ces quatre créneaux ont depuis été vérifiés ligne à ligne de VDOT 30 à
+ * VDOT 50 : ils reproduisent la table à ±0,2 s/km sur E, T et I. Le cinquième,
+ * R, dérive avec le niveau — cf. {@link repetitionFractionsAtVdot}.
  *
  * Conformément à la règle du projet, ce sont les pourcentages qui ont été
  * ajustés à la table, jamais les régressions de Daniels & Gilbert.
@@ -181,8 +187,73 @@ export const VDOT_ZONE_FRACTIONS = {
   marathon: { slow: 0.75, fast: 0.84 },
   threshold: { slow: 0.83, fast: 0.88 },
   interval: { slow: 0.95, fast: 1.0 },
-  repetition: { slow: 1.05, fast: 1.1 },
 } as const;
+
+/**
+ * Fractions de VO2max donnant l'allure R publiée, relevées sur les temps au
+ * 400 m de la table. Ce sont les trois points de contrôle du calibrage.
+ */
+export const REPETITION_FRACTION_ANCHORS = [
+  { vdot: 30, fraction: 1.046 }, // 400 m en 2:14 → 5:35/km
+  { vdot: 40, fraction: 1.05 }, //  400 m en 1:46 → 4:25/km
+  { vdot: 50, fraction: 1.072 }, // 400 m en 1:27 → 3:38/km
+] as const;
+
+/**
+ * Demi-largeur de la bande R, en fraction de VO2max. La bande garde l'amplitude
+ * des créneaux publiés (5 points de pourcentage, comme l'ancien 105-110 %) :
+ * c'est son centre qui dérivait avec le niveau, pas son ouverture.
+ */
+export const REPETITION_HALF_WIDTH = 0.025;
+
+/**
+ * Bande R (répétitions) du `vdot` donné — **le seul créneau dont la fraction
+ * publiée dépend du niveau**.
+ *
+ * Les quatre autres créneaux se laissent décrire par une bande fixe de
+ * pourcentages ({@link VDOT_ZONE_FRACTIONS}), vérifiée à ±0,2 s/km contre la
+ * table de VDOT 30 à 50. R, non : mesurée sur les temps au 400 m imprimés, sa
+ * fraction implicite monte avec le niveau — **104,6 % à VDOT 30** (2:14 →
+ * 5:35/km), **105,0 % à VDOT 40** (1:46 → 4:25/km), **107,2 % à VDOT 50**
+ * (1:27 → 3:38/km). Ce n'est pas une anomalie de la table : R n'est pas une
+ * intensité aérobie mais une allure de piste courte, où la part anaérobie —
+ * donc l'écart au modèle purement aérobie de Daniels & Gilbert — grandit avec
+ * la vitesse.
+ *
+ * **Ce que corrige cette dépendance.** Avec l'ancienne bande fixe 105-110 %, le
+ * *milieu* de bande — c'est lui qui est affiché et imposé comme cible de séance
+ * (`zoneMidPace`, `src/lib/ai/plan-schema.ts`) — sortait 7 s/km trop rapide à
+ * VDOT 30 (5:28 au lieu de 5:35) et 5 s/km trop rapide à VDOT 40 (4:20 au lieu
+ * de 4:25), pour tomber juste à VDOT 50. Les tests n'ancraient la table qu'à
+ * VDOT 40 et 50 : le bas de la table, seul concerné, n'était surveillé par
+ * personne.
+ *
+ * **Forme retenue** : fraction centrale interpolée linéairement entre les trois
+ * fractions publiées ({@link REPETITION_FRACTION_ANCHORS}), **clampée** hors de
+ * [30, 50] — prolonger la pente 40 → 50 donnerait 111,6 % à VDOT 70, une
+ * extrapolation que rien ne mesure — et bande de demi-largeur constante
+ * {@link REPETITION_HALF_WIDTH} autour. La fraction croît avec le VDOT, donc
+ * les deux bornes d'allure accélèrent quand le coureur progresse.
+ */
+export function repetitionFractionsAtVdot(vdot: number): { slow: number; fast: number } {
+  const center = repetitionCenterFraction(vdot);
+
+  return { slow: center - REPETITION_HALF_WIDTH, fast: center + REPETITION_HALF_WIDTH };
+}
+
+function repetitionCenterFraction(vdot: number): number {
+  const [low, mid, high] = REPETITION_FRACTION_ANCHORS;
+
+  if (vdot <= low.vdot) return low.fraction;
+  if (vdot >= high.vdot) return high.fraction;
+
+  const [from, to] = vdot <= mid.vdot ? [low, mid] : [mid, high];
+
+  return (
+    from.fraction +
+    ((to.fraction - from.fraction) * (vdot - from.vdot)) / (to.vdot - from.vdot)
+  );
+}
 
 /** Plage d'allure en s/km (`minSecPerKm` = borne rapide). */
 export type PaceZone = { minSecPerKm: number; maxSecPerKm: number };
@@ -299,6 +370,6 @@ export function trainingPacesFromRace(distanceM: number, timeS: number): Trainin
     marathon: zoneOf(vdot, VDOT_ZONE_FRACTIONS.marathon),
     threshold: zoneOf(vdot, VDOT_ZONE_FRACTIONS.threshold),
     interval: zoneOf(vdot, VDOT_ZONE_FRACTIONS.interval),
-    repetition: zoneOf(vdot, VDOT_ZONE_FRACTIONS.repetition),
+    repetition: zoneOf(vdot, repetitionFractionsAtVdot(vdot)),
   };
 }
