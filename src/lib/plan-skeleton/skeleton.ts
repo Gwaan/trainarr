@@ -63,6 +63,7 @@ import {
 import type { PlanLevel } from '@/data/db/schema';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
+import { weeklyQualityShares, type CompositionAnchor } from './composition';
 import { placeSessionDays } from './days';
 import {
   minFundableWeeklyKm,
@@ -288,6 +289,23 @@ export type PlanSkeletonParams = {
    * durée qu'il ne connaît pas.
    */
   phases?: readonly PlanPhase[];
+  /**
+   * Où cette fenêtre se situe dans la séquence de développement du **plan
+   * entier** — ce qui décide de la composition de chaque semaine
+   * ({@link weeklyQualityShares}).
+   *
+   * Absent, la fenêtre **est** le plan : c'est le cas nominal d'une création,
+   * et la rampe se mesure alors sur la fenêtre elle-même. Le contrat que les
+   * deux chemins partagent est celui-ci : *une même semaine calendaire reçoit
+   * la même composition, qu'elle soit écrite à la création ou par n'importe
+   * quelle fenêtre de reconstruction*.
+   *
+   * Le paramètre suit exactement l'esprit de {@link phases} — l'appelant sait
+   * ce que le module ne peut pas déduire —, et il existe pour la même raison :
+   * une rampe calée sur la position dans la fenêtre se recalerait à chaque
+   * réadaptation.
+   */
+  compositionAnchor?: CompositionAnchor;
 };
 
 /**
@@ -420,6 +438,16 @@ type WeekPlan = {
   /** Les zones que la phase propose, dans l'ordre où les créneaux les prendront. */
   zones: QualityZone[];
   slotCount: number;
+  /**
+   * La part du volume que prend **chaque** créneau de qualité de cette
+   * semaine-là ({@link weeklyQualityShares}).
+   *
+   * Portée par la semaine et pas recalculée à l'usage : elle sert à trois
+   * endroits — le minimum finançable, le repli sur un nombre de séances tenable
+   * et la décomposition elle-même —, et trois calculs séparés seraient trois
+   * occasions de diverger.
+   */
+  qualityShare: number;
 };
 
 /**
@@ -452,7 +480,9 @@ function fundableSessionsPerWeek(
     const fits = plans.every((plan) => {
       const sessionCount = sessionsFitting(candidate, plan.fromDay, plan.lastDay);
       const slotCount = qualitySlotCount(level, plan.zones.length, sessionCount);
-      return plan.target.targetKm >= minFundableWeeklyKm(sessionCount, slotCount);
+      // La part de qualité ne dépend que de la phase et du rang, jamais du
+      // nombre de séances : celle de la semaine reste la bonne à tout candidat.
+      return plan.target.targetKm >= minFundableWeeklyKm(sessionCount, slotCount, plan.qualityShare);
     });
     if (fits) return candidate;
   }
@@ -477,7 +507,7 @@ function assertFundable(
   const underfunded: PlanSkeletonUnderfundedWeek[] = [];
 
   for (const plan of plans) {
-    const minimumKm = minFundableWeeklyKm(plan.sessionCount, plan.slotCount);
+    const minimumKm = minFundableWeeklyKm(plan.sessionCount, plan.slotCount, plan.qualityShare);
     if (plan.target.targetKm >= minimumKm) continue;
     underfunded.push({
       weekNumber: plan.weekNumber,
@@ -550,6 +580,9 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   // La périodisation de l'appelant quand il en a une (cf.
   // {@link PlanSkeletonParams.phases}) ; celle de la fenêtre sinon.
   const phases = params.phases ?? planPhases({ weeks, firstWeekFromDay, race: params.race });
+  // La composition de chaque semaine, décidée par sa position dans le PLAN et
+  // non dans la fenêtre (cf. {@link PlanSkeletonParams.compositionAnchor}).
+  const qualityShares = weeklyQualityShares(phases, params.compositionAnchor);
 
   const plans: WeekPlan[] = [];
   for (let index = 0; index < weeks; index += 1) {
@@ -574,6 +607,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       sessionCount,
       zones,
       slotCount: qualitySlotCount(level, zones.length, sessionCount),
+      qualityShare: qualityShares[index],
     });
   }
 
@@ -591,12 +625,25 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     sessionCount,
     zones,
     slotCount,
+    qualityShare,
   } of plans) {
     // La décomposition part du nombre de séances **réellement plaçables** : les
     // kilomètres des séances qu'une borne a supprimées sont ainsi répartis sur
     // celles qui restent, et la semaine retombe sur sa cible. Les abandonner la
     // ferait passer sous sa bande de ±10 %.
-    const budgets = weeklySessionBudgets(target.targetKm, sessionCount, slotCount);
+    //
+    // `undefined` sur la part de sortie longue : elle reste celle que la
+    // décomposition décide seule. Mesurée sur le plan de l'utilisatrice, elle
+    // est déjà collée à son plafond réglementaire en développement (39,1 à
+    // 39,9 % pour un maximum de 40 %) — une rampe n'y aurait rien à relever,
+    // et le raisonnement complet est dans `composition.ts`.
+    const budgets = weeklySessionBudgets(
+      target.targetKm,
+      sessionCount,
+      slotCount,
+      undefined,
+      qualityShare,
+    );
     const longBudget = budgets.find((budget) => budget.role === 'long');
     const qualityBudgets = budgets.filter((budget) => budget.role === 'quality');
     const easyBudgets = budgets.filter((budget) => budget.role === 'easy');

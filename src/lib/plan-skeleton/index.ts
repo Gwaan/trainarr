@@ -19,6 +19,12 @@
  * semaine tient).
  */
 
+export {
+  isDevelopmentPhase,
+  QUALITY_SHARE,
+  weeklyQualityShares,
+  type CompositionAnchor,
+} from './composition';
 export { placeSessionDays, type PlaceSessionDaysParams, type SessionDayPlacement } from './days';
 export {
   minFundableWeeklyKm,

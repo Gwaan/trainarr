@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { PLAN_OUTPUT_BOUNDS, weeklySessionBudgets } from '@/lib/ai/plan-schema';
+import { PLAN_OUTPUT_BOUNDS, SESSION_BUDGET_SHARES, weeklySessionBudgets } from '@/lib/ai/plan-schema';
 
+import { QUALITY_SHARE } from './composition';
 import { minFundableWeeklyKm, PlanSkeletonInfeasibleError } from './feasibility';
 
 /*
@@ -9,11 +10,47 @@ import { minFundableWeeklyKm, PlanSkeletonInfeasibleError } from './feasibility'
  * de `weeklySessionBudgets`, pas une formule qu'on aurait le droit d'énoncer à
  * côté. Ce fichier confronte donc systématiquement la fonction au balayage de la
  * décomposition qu'elle prétend décrire.
+ *
+ * ## Ce que la rampe de composition y a ajouté
+ *
+ * La part de qualité n'est plus une constante : {@link weeklyQualityShares} la
+ * fait croître au fil de la préparation, et elle entre dans la décomposition.
+ * Le minimum finançable en dépend donc, et le balayage aussi — il se rejoue sur
+ * toute l'amplitude de la rampe ({@link SWEPT_QUALITY_SHARES}). Un minimum
+ * calculé sur une part que la semaine n'utilise pas est exactement le défaut que
+ * ce fichier existe pour attraper.
  */
 
+/**
+ * Les parts de qualité que le balayage rejoue : les deux bornes de la rampe, la
+ * valeur hors rampe, les 16 % historiques, et deux valeurs intermédiaires que la
+ * rampe produit réellement (rangs 4 et 5 d'une séquence de 10, celle du plan de
+ * l'utilisatrice) — dont l'une ne tombe sur aucun chiffre rond, ce qui est le
+ * cas courant.
+ */
+const SWEPT_QUALITY_SHARES = [
+  QUALITY_SHARE.outsideRamp,
+  QUALITY_SHARE.ramp.from,
+  SESSION_BUDGET_SHARES.quality,
+  QUALITY_SHARE.ramp.from + (QUALITY_SHARE.ramp.to - QUALITY_SHARE.ramp.from) * (4 / 9),
+  QUALITY_SHARE.ramp.from + (QUALITY_SHARE.ramp.to - QUALITY_SHARE.ramp.from) * (5 / 9),
+  QUALITY_SHARE.ramp.to,
+];
+
 /** La somme d'une décomposition, et ce qu'elle vaut face à sa cible. */
-function decomposition(targetKm: number, sessionCount: number, qualityCount: number) {
-  const budgets = weeklySessionBudgets(targetKm, sessionCount, qualityCount);
+function decomposition(
+  targetKm: number,
+  sessionCount: number,
+  qualityCount: number,
+  qualityShare: number = SESSION_BUDGET_SHARES.quality,
+) {
+  const budgets = weeklySessionBudgets(
+    targetKm,
+    sessionCount,
+    qualityCount,
+    undefined,
+    qualityShare,
+  );
   const sum = budgets.reduce((total, budget) => total + budget.km, 0);
   return {
     budgets,
@@ -31,6 +68,9 @@ function decomposition(targetKm: number, sessionCount: number, qualityCount: num
 const SESSION_COUNTS = [1, 2, 3, 4, 5, 6, 7];
 const QUALITY_COUNTS = [0, 1, 2, 3];
 
+/** La part historique, celle sur laquelle les seuils de ce fichier ont été relevés. */
+const REFERENCE_SHARE = SESSION_BUDGET_SHARES.quality;
+
 /** Le balayage de contrôle : de 0,1 à 60 km au dixième, comme la revue l'a fait. */
 const SWEEP_TENTHS = 600;
 
@@ -38,25 +78,31 @@ describe('minFundableWeeklyKm', () => {
   it('coïncide avec le balayage de weeklySessionBudgets : rien n’échoue au-dessus, le seuil échoue', () => {
     for (const sessionCount of SESSION_COUNTS) {
       for (const qualityCount of QUALITY_COUNTS) {
-        const minimum = minFundableWeeklyKm(sessionCount, qualityCount);
-        const where = `${sessionCount} séances, ${qualityCount} qualité(s)`;
-        expect(Number.isFinite(minimum), where).toBe(true);
+        for (const qualityShare of SWEPT_QUALITY_SHARES) {
+          const minimum = minFundableWeeklyKm(sessionCount, qualityCount, qualityShare);
+          const where =
+            `${sessionCount} séances, ${qualityCount} qualité(s), ` +
+            `part ${(qualityShare * 100).toFixed(2)} %`;
+          expect(Number.isFinite(minimum), where).toBe(true);
 
-        let lastFailing = 0;
-        for (let tenths = 1; tenths <= SWEEP_TENTHS; tenths += 1) {
-          const targetKm = tenths / 10;
-          const { finances } = decomposition(targetKm, sessionCount, qualityCount);
-          if (!finances) lastFailing = targetKm;
-          if (targetKm >= minimum) {
-            // La promesse de la fonction : au-dessus du minimum, la semaine
-            // tombe exactement sur sa cible.
-            expect(finances, `${where}, cible ${targetKm} km`).toBe(true);
+          let lastFailing = 0;
+          for (let tenths = 1; tenths <= SWEEP_TENTHS; tenths += 1) {
+            const targetKm = tenths / 10;
+            const { finances } = decomposition(targetKm, sessionCount, qualityCount, qualityShare);
+            if (!finances) lastFailing = targetKm;
+            if (targetKm >= minimum) {
+              // La promesse de la fonction : au-dessus du minimum, la semaine
+              // tombe exactement sur sa cible.
+              expect(finances, `${where}, cible ${targetKm} km`).toBe(true);
+            }
           }
-        }
 
-        // … et le minimum est bien le plus petit qui la tienne : un dixième plus
-        // bas, la décomposition échoue.
-        expect(Math.round(minimum * 10) / 10, where).toBe(Math.round((lastFailing + 0.1) * 10) / 10);
+          // … et le minimum est bien le plus petit qui la tienne : un dixième
+          // plus bas, la décomposition échoue.
+          expect(Math.round(minimum * 10) / 10, where).toBe(
+            Math.round((lastFailing + 0.1) * 10) / 10,
+          );
+        }
       }
     }
   });
@@ -93,41 +139,66 @@ describe('minFundableWeeklyKm', () => {
       expect(Math.round(lastOutOfBand * 10) / 10, where).toBe(threshold);
 
       // … et le minimum finançable le domine, donc refuse tout ce que la revue
-      // refusait, plus les semaines simplement remontées.
-      expect(minFundableWeeklyKm(sessionCount, 2), where).toBeGreaterThan(threshold);
+      // refusait, plus les semaines simplement remontées. Les seuils ayant été
+      // relevés avant la rampe, c'est la part historique qui les juge.
+      expect(
+        minFundableWeeklyKm(sessionCount, 2, SESSION_BUDGET_SHARES.quality),
+        where,
+      ).toBeGreaterThan(threshold);
     }
   });
 
   it('n’exige que le plancher du contrat quand la semaine tient en une séance', () => {
     // Une séance unique EST la sortie longue : elle prend toute la cible, aucun
     // plancher ne peut mordre au-dessus de 0,5 km.
-    expect(minFundableWeeklyKm(1, 0)).toBe(PLAN_OUTPUT_BOUNDS.distanceKm.min);
-    expect(minFundableWeeklyKm(1, 2)).toBe(PLAN_OUTPUT_BOUNDS.distanceKm.min);
+    expect(minFundableWeeklyKm(1, 0, REFERENCE_SHARE)).toBe(PLAN_OUTPUT_BOUNDS.distanceKm.min);
+    expect(minFundableWeeklyKm(1, 2, REFERENCE_SHARE)).toBe(PLAN_OUTPUT_BOUNDS.distanceKm.min);
   });
 
   it('ne finance rien sans séance', () => {
-    expect(minFundableWeeklyKm(0, 0)).toBe(Number.POSITIVE_INFINITY);
-    expect(minFundableWeeklyKm(-3, 1)).toBe(Number.POSITIVE_INFINITY);
+    expect(minFundableWeeklyKm(0, 0, REFERENCE_SHARE)).toBe(Number.POSITIVE_INFINITY);
+    expect(minFundableWeeklyKm(-3, 1, REFERENCE_SHARE)).toBe(Number.POSITIVE_INFINITY);
   });
 
   it('borne le nombre de créneaux comme weeklySessionBudgets le borne', () => {
     // Trois créneaux sur quatre séances n'en font que deux : une semaine garde
     // toujours un footing à côté de sa sortie longue.
-    expect(minFundableWeeklyKm(4, 3)).toBe(minFundableWeeklyKm(4, 2));
-    expect(minFundableWeeklyKm(4, 9)).toBe(minFundableWeeklyKm(4, 2));
+    expect(minFundableWeeklyKm(4, 3, REFERENCE_SHARE)).toBe(
+      minFundableWeeklyKm(4, 2, REFERENCE_SHARE),
+    );
+    expect(minFundableWeeklyKm(4, 9, REFERENCE_SHARE)).toBe(
+      minFundableWeeklyKm(4, 2, REFERENCE_SHARE),
+    );
   });
 
   it('monte avec le nombre de séances : plus de planchers à payer', () => {
     for (let sessionCount = 2; sessionCount < 7; sessionCount += 1) {
       expect(
-        minFundableWeeklyKm(sessionCount + 1, 2),
+        minFundableWeeklyKm(sessionCount + 1, 2, REFERENCE_SHARE),
         `${sessionCount} → ${sessionCount + 1} séances`,
-      ).toBeGreaterThanOrEqual(minFundableWeeklyKm(sessionCount, 2));
+      ).toBeGreaterThanOrEqual(minFundableWeeklyKm(sessionCount, 2, REFERENCE_SHARE));
     }
   });
 
   it('est déterministe et mémoïsable : deux appels, même chiffre', () => {
-    expect(minFundableWeeklyKm(6, 1)).toBe(minFundableWeeklyKm(6, 1));
+    expect(minFundableWeeklyKm(6, 1, REFERENCE_SHARE)).toBe(
+      minFundableWeeklyKm(6, 1, REFERENCE_SHARE),
+    );
+  });
+
+  it('distingue deux parts de qualité : le minimum n’est pas mémoïsé à travers la rampe', () => {
+    // Le défaut qu'une clé de cache incomplète rétablirait : un seul minimum
+    // pour toute la rampe, calculé sur la première part rencontrée. Les deux
+    // bornes de la rampe ne financent pas au même seuil, et chacune doit
+    // coïncider avec sa propre décomposition.
+    for (const share of [QUALITY_SHARE.ramp.from, QUALITY_SHARE.ramp.to]) {
+      const minimum = minFundableWeeklyKm(6, 2, share);
+      expect(decomposition(minimum, 6, 2, share).finances, `part ${share}`).toBe(true);
+      expect(
+        decomposition(Math.round((minimum - 0.1) * 10) / 10, 6, 2, share).finances,
+        `part ${share}, un dixième plus bas`,
+      ).toBe(false);
+    }
   });
 
   /*
@@ -139,7 +210,7 @@ describe('minFundableWeeklyKm', () => {
     const { sum, finances } = decomposition(2.9, 6, 1);
     expect(sum).toBeCloseTo(3.5, 6);
     expect(finances).toBe(false);
-    expect(minFundableWeeklyKm(6, 1)).toBeGreaterThan(2.9);
+    expect(minFundableWeeklyKm(6, 1, REFERENCE_SHARE)).toBeGreaterThan(2.9);
   });
 });
 

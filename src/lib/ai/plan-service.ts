@@ -80,7 +80,9 @@ import {
 import {
   PlanSkeletonInfeasibleError,
   buildPlanSkeleton,
+  isDevelopmentPhase,
   planPhases,
+  type CompositionAnchor,
   type PlanPhase,
   type PlanSkeletonParams,
   type SkeletonWeek,
@@ -1316,7 +1318,7 @@ export function planSettingsPatch(
  *
  * **3. La périodisation ne redémarre pas.** Une fenêtre restante n'est pas un
  * plan neuf : les phases sont calculées sur le plan **entier** puis tranchées
- * (cf. {@link remainingPhases}).
+ * (cf. {@link remainingComposition}).
  */
 
 /** Ce qu'il faut pour reconstruire la fin d'un plan en cours. */
@@ -1460,8 +1462,17 @@ function planRaceIsoDay(plan: PlanDto, window: RemainingPlanWindow): number | nu
  * inconnus est un pari qu'aucun entraîneur ne prend. La semaine de **course**,
  * elle, garde sa phase : elle ne porte de toute façon aucune qualité, et lui
  * retirer son étiquette lui retirerait sa course.
+ *
+ * ## L'ancrage de composition, rendu par la même fonction
+ *
+ * Parce qu'il se déduit des mêmes deux tableaux, et que les séparer ferait
+ * calculer deux fois la périodisation du plan entier — deux occasions de
+ * diverger, sur exactement le genre de position que ce chantier corrige.
  */
-function remainingPhases(plan: PlanDto, window: RemainingPlanWindow): PlanPhase[] {
+function remainingComposition(
+  plan: PlanDto,
+  window: RemainingPlanWindow,
+): { phases: PlanPhase[]; compositionAnchor: CompositionAnchor } {
   const race = raceGoalOf(plan.goalType, plan.goalText);
   const full = planPhases({
     weeks: plan.weeks,
@@ -1476,7 +1487,23 @@ function remainingPhases(plan: PlanDto, window: RemainingPlanWindow): PlanPhase[
   if (window.firstWeekFromDay > 1 && phases.length > 0 && phases[0] !== 'race') {
     phases[0] = 'partial';
   }
-  return phases;
+
+  // Combien de semaines de développement la fenêtre **ne porte pas** — par
+  // soustraction, et non par un décompte du préfixe.
+  //
+  // La nuance est celle de la ligne au-dessus : ramener la première semaine à
+  // `partial` lui retire son rang de développement. Un décompte du préfixe
+  // ignorerait cette semaine-là et décalerait d'un rang toutes les suivantes ;
+  // la soustraction la range du bon côté, puisque la fenêtre est un **suffixe**
+  // du plan et que toute semaine de développement y est donc soit avant, soit
+  // dedans.
+  const planDevelopmentWeeks = full.filter(isDevelopmentPhase).length;
+  const compositionAnchor: CompositionAnchor = {
+    planDevelopmentWeeks,
+    completedDevelopmentWeeks: planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
+  };
+
+  return { phases, compositionAnchor };
 }
 
 /**
@@ -2469,7 +2496,7 @@ export async function rewriteRemainingPlan(
     // pour une échéance qui n'existe pas.
     goalDistanceKm: plan.goalType === 'race' ? goalDistanceKm(plan.goalText) : null,
     targets,
-    phases: remainingPhases(plan, window),
+    ...remainingComposition(plan, window),
   });
 
   // 2. Le seul travail du modèle : le déroulé des séances dures. Ne lève jamais

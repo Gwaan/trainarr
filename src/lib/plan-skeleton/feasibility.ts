@@ -94,7 +94,22 @@ function easyShareFloorKm(easyCount: number): number {
  */
 const SWEEP_MARGIN_KM = 5;
 
-/** Le résultat de {@link minFundableWeeklyKm}, par `séances/créneaux`. */
+/**
+ * Le résultat de {@link minFundableWeeklyKm}, par `séances/créneaux/part`.
+ *
+ * **La part de qualité fait partie de la clé**, depuis que le squelette la fait
+ * varier d'une semaine à l'autre ({@link weeklyQualityShares}) : elle change la
+ * décomposition, donc le minimum. L'omettre rendrait le minimum de la première
+ * semaine calculée pour toutes les suivantes — un refus (ou une acceptation) au
+ * mauvais seuil, silencieusement.
+ *
+ * La clé n'est pas quantifiée : deux parts distinctes de 1e-9 doivent donner
+ * deux entrées distinctes, sans quoi le minimum cesserait de coïncider
+ * exactement avec {@link weeklySessionBudgets} — ce que le balayage de
+ * `feasibility.test.ts` exige. Le nombre d'entrées reste borné par les valeurs
+ * que la rampe peut prendre (une par rang de développement et par longueur de
+ * plan), et chacune coûte une centaine d'évaluations d'une fonction pure.
+ */
 const minimumCache = new Map<string, number>();
 
 /**
@@ -117,8 +132,21 @@ const minimumCache = new Map<string, number>();
  * - **aucune séance sous le plancher du contrat** (0,5 km) : une séance de
  *   0,4 km serait refusée par Zod avant même d'atteindre les règles métier.
  */
-function financesTarget(targetKm: number, sessionCount: number, qualitySlotCount: number): boolean {
-  const budgets = weeklySessionBudgets(targetKm, sessionCount, qualitySlotCount);
+function financesTarget(
+  targetKm: number,
+  sessionCount: number,
+  qualitySlotCount: number,
+  qualityShare: number,
+): boolean {
+  // `undefined` sur la part de sortie longue : c'est le défaut de la
+  // décomposition qu'on interroge, et le recopier ici le ferait diverger.
+  const budgets = weeklySessionBudgets(
+    targetKm,
+    sessionCount,
+    qualitySlotCount,
+    undefined,
+    qualityShare,
+  );
   if (budgets.length === 0) return false;
 
   let sum = 0;
@@ -176,8 +204,18 @@ function financesTarget(targetKm: number, sessionCount: number, qualitySlotCount
  * comprise. Zéro séance ne finance rien : `Infinity`.
  * @param qualitySlotCount le nombre de créneaux de qualité, tel que
  * {@link weeklySessionBudgets} le bornera lui-même à `sessionCount − 2`.
+ * @param qualityShare la part que prendra **chaque** créneau de qualité de
+ * cette semaine-là. Paramètre **obligatoire**, et c'est délibéré : depuis que
+ * le squelette la fait varier d'une semaine à l'autre, un défaut ici
+ * rétablirait en silence le défaut qu'on corrige — un minimum calculé sur une
+ * part que la semaine n'utilise pas. C'est l'appelant qui sait, et il doit le
+ * dire.
  */
-export function minFundableWeeklyKm(sessionCount: number, qualitySlotCount: number): number {
+export function minFundableWeeklyKm(
+  sessionCount: number,
+  qualitySlotCount: number,
+  qualityShare: number,
+): number {
   if (sessionCount <= 0) return Number.POSITIVE_INFINITY;
 
   // Une séance unique EST la sortie longue : elle prend toute la cible, il n'y a
@@ -186,11 +224,19 @@ export function minFundableWeeklyKm(sessionCount: number, qualitySlotCount: numb
   if (sessionCount === 1) return PLAN_OUTPUT_BOUNDS.distanceKm.min;
 
   const quality = Math.min(Math.max(0, Math.trunc(qualitySlotCount)), sessionCount - 2);
-  const key = `${sessionCount}/${quality}`;
+  // Sans créneau, la part de qualité ne pèse sur rien : la faire entrer dans la
+  // clé multiplierait les entrées sans changer un seul résultat.
+  const key = `${sessionCount}/${quality}/${quality === 0 ? 0 : qualityShare}`;
   const cached = minimumCache.get(key);
   if (cached !== undefined) return cached;
 
-  const probe = weeklySessionBudgets(SHARE_PROBE_KM, sessionCount, quality);
+  const probe = weeklySessionBudgets(
+    SHARE_PROBE_KM,
+    sessionCount,
+    quality,
+    undefined,
+    qualityShare,
+  );
   const easyCount = probe.filter((budget) => budget.role === 'easy').length;
   const easyShare =
     probe
@@ -211,7 +257,7 @@ export function minFundableWeeklyKm(sessionCount: number, qualitySlotCount: numb
   // d'autres cibles échouent encore.
   let lastFailingTenths = 0;
   for (let tenths = 1; tenths <= Math.ceil(sweepToKm * 10); tenths += 1) {
-    if (!financesTarget(tenths / 10, sessionCount, quality)) lastFailingTenths = tenths;
+    if (!financesTarget(tenths / 10, sessionCount, quality, qualityShare)) lastFailingTenths = tenths;
   }
 
   const minimum = (lastFailingTenths + 1) / 10;

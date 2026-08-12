@@ -2214,6 +2214,11 @@ export const SESSION_BUDGET_SHARES = {
    * Le milieu de 15-18 %. C'est le total de la séance qui compte ici, pas son
    * corps : le contrat demande au modèle de déclarer la distance totale d'une
    * séance à déroulé, et une VMA de 5 km de corps en fait 9 avec son enveloppe.
+   *
+   * **Ce n'est plus qu'un défaut.** Le squelette fait désormais croître cette
+   * part au fil de la préparation (`plan-skeleton/composition.ts`) et la passe
+   * explicitement ; 16 % reste le milieu de sa rampe, et la valeur que rendent
+   * les appels qui ne s'en préoccupent pas.
    */
   quality: 0.16,
 } as const;
@@ -2271,12 +2276,20 @@ function tenthKm(value: number): number {
  * polarisée.
  * @param longRunShare la part visée par la sortie longue, pour les cas où
  * l'appelant en sait plus que le réglage par défaut.
+ * @param qualityShare la part que prend **chaque** séance de qualité. Le
+ * squelette la fait croître au fil de la préparation
+ * (`plan-skeleton/composition.ts`) : c'est le levier par lequel deux semaines de
+ * même kilométrage cessent d'être la même semaine. Elle entre dans `rest`, donc
+ * dans `balanced`, donc dans la part de la sortie longue — les deux ne sont pas
+ * indépendantes, et c'est pour cela qu'un balayage vérifie que la sortie longue
+ * reste dans ses bornes sur toute l'amplitude de la rampe.
  */
 export function weeklySessionBudgets(
   targetKm: number,
   sessionsPerWeek: number,
   hasQuality: number,
   longRunShare: number = SESSION_BUDGET_SHARES.longRun,
+  qualityShare: number = SESSION_BUDGET_SHARES.quality,
 ): SessionBudget[] {
   if (targetKm <= 0 || sessionsPerWeek <= 0) return [];
   // Une séance unique EST la sortie longue : il n'y a rien à répartir.
@@ -2285,7 +2298,7 @@ export function weeklySessionBudgets(
   const quality = Math.min(Math.max(0, Math.trunc(hasQuality)), sessionsPerWeek - 2);
   const easyCount = sessionsPerWeek - 1 - quality;
 
-  const rest = 1 - quality * SESSION_BUDGET_SHARES.quality;
+  const rest = 1 - quality * qualityShare;
   // La sortie longue est la plus longue séance de la semaine : sur peu de
   // séances, le partage égal du reste la dépasserait.
   const balanced = (rest * LONG_RUN_SESSION_FACTOR) / (easyCount + LONG_RUN_SESSION_FACTOR);
@@ -2297,7 +2310,7 @@ export function weeklySessionBudgets(
   const floor = Math.ceil(targetKm * VOLUME_RULES.longRunShare.min * 10) / 10;
   const ceiling = Math.floor(targetKm * longRunMaxShare(sessionsPerWeek) * 10) / 10;
 
-  const qualityKm = halfKm(targetKm * SESSION_BUDGET_SHARES.quality);
+  const qualityKm = halfKm(targetKm * qualityShare);
 
   // La sortie longue est **la plus longue séance de la semaine**, et ce n'est pas
   // une préférence d'écriture : `validatePlanBusinessRules` refuse une semaine

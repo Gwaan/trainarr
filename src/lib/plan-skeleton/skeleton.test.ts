@@ -8,6 +8,7 @@ import {
   PLAN_OUTPUT_BOUNDS,
   sessionPaceZone,
   validatePlanBusinessRules,
+  VOLUME_RULES,
   weeklyVolumeTargets,
   type PlanExpectations,
   type PlanRaceGoal,
@@ -19,8 +20,9 @@ import {
 import { trainingPacesFromRace, type TrainingPaces } from '@/lib/metrics/vdot';
 import { flattenSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
+import { isDevelopmentPhase } from './composition';
 import { PlanSkeletonInfeasibleError } from './feasibility';
-import type { PlanPhase } from './phases';
+import { planPhases, type PlanPhase } from './phases';
 import { buildPlanSkeleton, type QualitySlot, type SkeletonWeek } from './skeleton';
 
 /*
@@ -1538,6 +1540,230 @@ describe('buildPlanSkeleton', () => {
       expect(own.flatMap((week) => week.qualitySlots.map((slot) => slot.kind))).toContain(
         'Répétitions',
       );
+    });
+  });
+});
+
+/*
+ * ------------------------------------------------------------------------
+ * La rampe de composition, éprouvée sur le plan qui l'a fait écrire.
+ * ------------------------------------------------------------------------
+ *
+ * Le constat d'origine, mesuré en production : 16 semaines, 4 séances, budget
+ * 4 h, endurance à 7:23/km. Le budget plafonne le volume à 30,8 km dès la
+ * semaine 3, et les cibles se mettent à tourner en rond —
+ * **26,1 · 28,1 · 30,3 · 30,8**, trois fois de la semaine 5 à la semaine 14.
+ * Comme la décomposition ne dépendait que de la cible, les semaines de même
+ * volume recevaient des séances identiques au dixième.
+ *
+ * Ce que ces tests fixent est le résultat : à cibles **inchangées** (elles ne
+ * bougent pas d'un dixième, cf. le témoin SHA de `plan-schema.test.ts`), deux
+ * semaines de même volume ne se composent plus pareil.
+ */
+describe('la rampe de composition sur le plan de l’utilisatrice', () => {
+  const USER_ATHLETE = {
+    recentWeeklyKm: 30,
+    weeklyTimeMinutes: 240,
+    /** 7:23/km — l'allure d'endurance relevée sur son historique. */
+    easyPaceSecPerKm: 443,
+  };
+
+  const USER_RACE: PlanRaceGoal = { isMarathon: false };
+  const USER_WEEKS = 16;
+  const USER_SESSIONS = 4;
+
+  function userTargets(): WeeklyVolumeTarget[] {
+    return weeklyVolumeTargets({
+      weeks: USER_WEEKS,
+      firstWeekFromDay: 1,
+      recentWeeklyKm: USER_ATHLETE.recentWeeklyKm,
+      weeklyTimeMinutes: USER_ATHLETE.weeklyTimeMinutes,
+      easyPaceSecPerKm: USER_ATHLETE.easyPaceSecPerKm,
+      race: USER_RACE,
+      level: 'intermediate',
+    });
+  }
+
+  function userSkeleton(targets: readonly WeeklyVolumeTarget[]): SkeletonWeek[] {
+    return buildPlanSkeleton({
+      weeks: USER_WEEKS,
+      firstWeekFromDay: 1,
+      sessionsPerWeek: USER_SESSIONS,
+      longRunDay: 7,
+      level: 'intermediate',
+      race: USER_RACE,
+      raceDay: 7,
+      goalDistanceKm: HALF_GOAL.goalDistanceKm,
+      targets,
+    });
+  }
+
+  /** La composition d'une semaine : ce que la rampe décide, et rien d'autre. */
+  function composition(week: SkeletonWeek) {
+    const longRun = week.sessions.find(
+      (session) => session.kind === 'Sortie longue' || session.kind === 'Course',
+    );
+    return {
+      longRunKm: longRun?.distanceKm ?? null,
+      qualityKm: week.qualitySlots.map((slot) => slot.budgetKm),
+      easyKm: week.sessions
+        .filter((session) => session !== longRun)
+        .map((session) => session.distanceKm),
+    };
+  }
+
+  it('reproduit bien le plan du constat : le même quatuor de volumes, trois fois', () => {
+    // Si cette ligne bouge, ce n'est plus le plan de l'utilisatrice qu'on teste.
+    expect(userTargets().map((target) => target.targetKm)).toEqual([
+      26.8, 28.9, 30.8, 26.1, 28.1, 30.3, 30.8, 26.1, 28.1, 30.3, 30.8, 26.1, 28.1, 30.3, 22.7,
+      16.6,
+    ]);
+  });
+
+  it('ne touche pas à un seul kilomètre des cibles hebdomadaires', () => {
+    // Le contrat du chantier : la progression passe par la composition, à
+    // kilométrage hebdomadaire strictement inchangé.
+    const targets = userTargets();
+    for (const week of userSkeleton(targets)) {
+      const written =
+        week.sessions.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0) +
+        week.qualitySlots.reduce((sum, slot) => sum + slot.budgetKm, 0);
+      expect(Math.round(written * 10) / 10, `semaine ${week.weekNumber}`).toBe(
+        week.target.targetKm,
+      );
+    }
+  });
+
+  it('sépare les semaines jumelles que le constat désignait', () => {
+    const skeleton = userSkeleton(userTargets());
+    const at = (weekNumber: number) => JSON.stringify(composition(skeleton[weekNumber - 1]));
+
+    // Les deux paires de même volume ET de même phase — celles que rien ne
+    // distinguait, et le cœur du reproche.
+    expect(at(5), 's5 vs s9 (28,1 km, développement)').not.toBe(at(9));
+    expect(at(6), 's6 vs s10 (30,3 km, développement)').not.toBe(at(10));
+
+    // Et les paires de même volume à cheval sur deux phases.
+    expect(at(7), 's7 vs s11 (30,8 km)').not.toBe(at(11));
+    expect(at(8), 's8 vs s12 (26,1 km)').not.toBe(at(12));
+    expect(at(5), 's5 vs s13 (28,1 km)').not.toBe(at(13));
+    expect(at(6), 's6 vs s14 (30,3 km)').not.toBe(at(14));
+  });
+
+  it('fait croître le budget de qualité de la semaine 5 à la semaine 14', () => {
+    const skeleton = userSkeleton(userTargets());
+
+    // Le tableau du chantier, semaine par semaine : la qualité monte, les
+    // footings absorbent en sens inverse, la sortie longue reste à son plafond.
+    expect(skeleton.slice(4, 14).map((week) => composition(week).qualityKm)).toEqual([
+      [4, 4], //     s5  build     28,1 km
+      [4.5, 4.5], // s6  build     30,3 km
+      [5, 5], //     s7  build     30,8 km
+      [4.5, 4.5], // s8  build     26,1 km
+      [4.5, 4.5], // s9  build     28,1 km
+      [5, 5], //     s10 build     30,3 km
+      [5.5, 5.5], // s11 specific  30,8 km
+      [4.5, 4.5], // s12 specific  26,1 km
+      [5, 5], //     s13 specific  28,1 km
+      [6, 6], //     s14 specific  30,3 km
+    ]);
+  });
+
+  it('tient le budget temps de 4 h sur chaque semaine', () => {
+    // Le calcul le plus défavorable : **tout** le kilométrage à l'allure
+    // d'endurance. Les kilomètres de qualité se courent plus vite, donc la durée
+    // réelle est en dessous — c'est le sens dans lequel la rampe pousse.
+    const ceilingMinutes = USER_ATHLETE.weeklyTimeMinutes * VOLUME_RULES.weeklyTimeTolerance;
+
+    for (const week of userSkeleton(userTargets())) {
+      const km =
+        week.sessions.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0) +
+        week.qualitySlots.reduce((sum, slot) => sum + slot.budgetKm, 0);
+      const minutes = (km * USER_ATHLETE.easyPaceSecPerKm) / 60;
+      expect(minutes, `semaine ${week.weekNumber}`).toBeLessThanOrEqual(ceilingMinutes);
+    }
+  });
+
+  /*
+   * LE test d'ancrage. Une rampe calée sur la position dans la **fenêtre** — et
+   * non dans le plan — remettrait la composition au bas de sa progression à
+   * chaque réadaptation. Comme la révision se déclenche toutes les quatre
+   * séances, la préparation n'avancerait jamais.
+   *
+   * On rejoue donc ici ce que `rewriteRemainingPlan` fait : les phases du plan
+   * entier, tranchées, et l'ancrage calculé par la même soustraction. Les cibles
+   * sont celles de la création, tranchées elles aussi — ce qui isole la
+   * composition de l'arithmétique des volumes, qui a ses propres tests.
+   */
+  describe('création et reconstruction se rejoignent', () => {
+    const FULL_PHASES = planPhases({ weeks: USER_WEEKS, firstWeekFromDay: 1, race: USER_RACE });
+    const PLAN_DEVELOPMENT_WEEKS = FULL_PHASES.filter(isDevelopmentPhase).length;
+
+    /** La fenêtre restante de `weeks` semaines, telle que le service la construit. */
+    function rebuild(weeks: number, firstWeekFromDay: number): SkeletonWeek[] {
+      const targets = userTargets();
+      const offset = USER_WEEKS - weeks;
+      const phases: PlanPhase[] = FULL_PHASES.slice(offset);
+      if (firstWeekFromDay > 1 && phases[0] !== 'race') phases[0] = 'partial';
+
+      return buildPlanSkeleton({
+        weeks,
+        firstWeekFromDay,
+        sessionsPerWeek: USER_SESSIONS,
+        longRunDay: 7,
+        level: 'intermediate',
+        race: USER_RACE,
+        raceDay: 7,
+        goalDistanceKm: HALF_GOAL.goalDistanceKm,
+        targets: targets.slice(offset),
+        phases,
+        // La soustraction de `remainingComposition` : les semaines de
+        // développement que la fenêtre ne porte pas, démotion comprise.
+        compositionAnchor: {
+          planDevelopmentWeeks: PLAN_DEVELOPMENT_WEEKS,
+          completedDevelopmentWeeks:
+            PLAN_DEVELOPMENT_WEEKS - phases.filter(isDevelopmentPhase).length,
+        },
+      });
+    }
+
+    it('donne la même composition à une semaine calendaire, quelle que soit la fenêtre', () => {
+      const created = userSkeleton(userTargets());
+
+      // Toutes les reconstructions possibles, de la plus longue à la plus
+      // courte : c'est la même semaine calendaire qu'on suit à chaque fois.
+      for (let weeks = 1; weeks <= USER_WEEKS; weeks += 1) {
+        const offset = USER_WEEKS - weeks;
+        const rebuilt = rebuild(weeks, 1);
+
+        for (let index = 0; index < weeks; index += 1) {
+          expect(
+            composition(rebuilt[index]),
+            `fenêtre de ${weeks} semaines, semaine calendaire ${offset + index + 1}`,
+          ).toEqual(composition(created[offset + index]));
+        }
+      }
+    });
+
+    it('garde le bon rang quand la fenêtre s’ouvre sur une semaine déjà entamée', () => {
+      const created = userSkeleton(userTargets());
+
+      // Une fenêtre entamée démote sa première semaine en `partial` : elle perd
+      // sa qualité, mais **les suivantes gardent leur rang**. C'est la
+      // soustraction qui le garantit — un décompte du préfixe les décalerait
+      // toutes d'un cran.
+      for (const weeks of [10, 9, 7, 6, 5]) {
+        const offset = USER_WEEKS - weeks;
+        const rebuilt = rebuild(weeks, 4);
+
+        expect(rebuilt[0].qualitySlots, `fenêtre de ${weeks} semaines`).toEqual([]);
+        for (let index = 1; index < weeks; index += 1) {
+          expect(
+            composition(rebuilt[index]),
+            `fenêtre entamée de ${weeks} semaines, semaine calendaire ${offset + index + 1}`,
+          ).toEqual(composition(created[offset + index]));
+        }
+      }
     });
   });
 });
