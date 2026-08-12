@@ -8,9 +8,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *
  * Le problème : sur un modèle local, une génération dure des minutes. Une
  * rotative n'y dit rien — elle tourne pareil au bout de dix secondes et de trois
- * minutes. Le serveur, lui, sait combien de caractères le modèle a déjà écrits
- * et sur quelle tentative il en est (cf. `lib/ai/progress.ts`) : il ne reste
- * qu'à aller le lui demander.
+ * minutes. Le serveur, lui, sait où il en est (cf. `lib/ai/progress.ts`) : il ne
+ * reste qu'à aller le lui demander.
  *
  * Interrogation régulière plutôt que flux poussé : la progression est déjà
  * approximative, deux secondes de latence n'y changent rien, et cela évite une
@@ -18,9 +17,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
  */
 
 export type GenerationProgress = {
-  /** Part de la sortie attendue déjà reçue, de 0 à 99. */
+  /**
+   * Part du travail déjà faite, de 0 à 100.
+   *
+   * **Deux producteurs, deux échelles**, et c'est ce qu'il faut savoir avant de
+   * déboguer cette barre (le détail est sur `PlanProgress`, dans
+   * `lib/ai/progress.ts`) : une **création** compte ses créneaux de qualité
+   * écrits et va jusqu'à 100, puisque plus rien ne peut la faire recommencer ;
+   * un **ajustement** ou une **révision** comptent des caractères reçus contre
+   * une taille estimée et plafonnent à 99, tant que la validation métier n'a pas
+   * parlé.
+   */
   percent: number;
+  /** Tentative en cours, à partir de 1. */
   attempt: number;
+  /**
+   * Nombre total de tentatives possibles — `1` quand le chemin n'en rejoue
+   * aucune, ce qui est le cas d'une création depuis la bascule sur squelette.
+   * Le rang n'est alors pas affiché.
+   */
   maxAttempts: number;
 };
 
@@ -189,13 +204,20 @@ export function GenerationProgressMeter({ percent }: { percent: number }) {
  * valeur qui change toutes les deux secondes y serait annoncée toutes les deux
  * secondes. La barre reste accessible à la lecture (rôle `progressbar` et
  * `aria-valuenow`), elle cesse simplement de parler par-dessus.
+ *
+ * Le rang de la tentative n'apparaît que s'il y en a plusieurs à tenter. Depuis
+ * que la **création** écrit son plan elle-même et n'appelle plus le coach que
+ * séance par séance, elle n'a plus qu'une passe : « tentative 1/1 » ne
+ * décrirait rien, il ferait seulement craindre qu'il y en ait une seconde.
+ * L'ajustement et la révision, eux, rejouent bien le plan et gardent la mention.
  */
 export function GenerationProgressBar({ progress }: { progress: GenerationProgress }) {
   return (
     <div aria-live="off">
       <GenerationProgressMeter percent={progress.percent} />
       <p className="num mt-1.5 text-[0.76rem] text-fg-muted">
-        {progress.percent}&nbsp;% — tentative {progress.attempt}/{progress.maxAttempts}
+        {progress.percent}&nbsp;%
+        {progress.maxAttempts > 1 ? ` — tentative ${progress.attempt}/${progress.maxAttempts}` : ''}
       </p>
     </div>
   );

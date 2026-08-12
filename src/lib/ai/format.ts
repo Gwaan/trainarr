@@ -33,13 +33,6 @@ const ISO_DAY_NAMES = [
   'dimanche',
 ] as const;
 
-/**
- * Jours ISO abrégés, pour les listes compactes : `SL sam` plutôt que
- * `SL samedi`. Trois lettres suffisent à lever l'ambiguïté en français, et
- * chaque caractère se paie en tokens sur une ligne par semaine.
- */
-const ISO_DAY_SHORT_NAMES = ['lun', 'mar', 'mer', 'jeu', 'ven', 'sam', 'dim'] as const;
-
 const DAY_MS = 86_400_000;
 
 /**
@@ -247,74 +240,14 @@ export function formatTrainingPaces(
 }
 
 /*
- * Volumes hebdomadaires cibles, pour les prompts.
- */
-
-/**
- * Un volume cible, **toujours au dixième de kilomètre**.
+ * Décomposition d'une cible hebdomadaire entre les séances.
  *
- * L'arrondi à l'entier au-dessus de 10 km a été retiré, et ce n'est pas une
- * question de goût. Ce qui contraint le chiffre annoncé n'est pas la bande de
- * ±10 % — large — mais la **marge d'un dixième** que le planificateur laisse
- * sous ses plafonds (`floorKm` dans `plan-schema.ts`) : semaine allégée à 0,85 ×
- * exactement, ancrage de la première semaine pleine sur le volume réellement
- * couru, hausse maximale. Un dixième arrondi vers le haut consomme toute cette
- * marge : des cibles 23,9 / 25,8 / 27,8 / 23,6 imprimées « 24 · 26 · 28 · 24 »
- * font une allégée à 0,857 de la semaine précédente, au-dessus des 0,85 permis —
- * et le plan qui recopie fidèlement les chiffres du prompt se fait refuser. Sur
- * la grille exhaustive des configurations, 2 716 combinaisons sur 4 860 étaient
- * dans ce cas.
- *
- * Le dixième coûte un token de plus par semaine. Le test de bout en bout de
- * `plan-schema.test.ts` rejoue toute la grille sur les valeurs **imprimées** :
- * c'est lui qui interdit d'y revenir.
- */
-function formatTargetKm(km: number): string {
-  return `${formatNumber(km, 1)} km`;
-}
-
-/**
- * Les volumes hebdomadaires cibles, en **une ligne** : `S1 ~14 km (≈1 h 56) ·
- * S2 ~15 km (≈2 h 04) · …`.
- *
- * C'est la consigne la plus chargée du prompt de génération — une donnée par
- * semaine du plan — d'où la compacité : ~12 tokens par semaine, contre la
- * cinquantaine qu'une phrase par semaine coûterait. Sur seize semaines, l'écart
- * décide de la place qui reste pour le plan lui-même.
- *
- * Le temps accompagne les kilomètres parce que c'est lui la contrainte de vie :
- * « 45 km » ne dit rien à qui a deux heures par semaine, « 45 km (≈4 h 30) » si.
- *
- * La seconde ligne rétablit ce que « à ±10 % » laissait croire : la bande est le
- * critère de **refus**, pas un espace où se promener. Les règles de progression
- * se vérifient sur les volumes réellement écrits, or une montée visée à 8 %
- * contre un plafond de 12 % ne tolère qu'environ 1,8 % de jeu relatif entre deux
- * semaines, et une allégée posée à 0,85 × exactement n'en tolère aucun — deux
- * semaines tirées au hasard dans leur bande sont refusées à peu près à coup sûr
- * (493 fois sur 500, mesuré). Le prompt annonce donc la cible comme un chiffre à
- * viser, la tolérance comme un filet.
- *
- * @param firstWeekNumber numéro de la première semaine listée, dans la
- * numérotation du **plan entier** : une tranche annonce S7 à S11, pas S1 à S5.
- */
-export function formatWeeklyVolumeTargets(
-  targets: readonly { targetKm: number; targetMinutes: number }[],
-  firstWeekNumber = 1,
-): string {
-  const cells = targets.map(
-    (target, index) =>
-      `S${firstWeekNumber + index} ~${formatTargetKm(target.targetKm)} (≈${formatDuration(target.targetMinutes * 60)})`,
-  );
-  return [
-    `Volumes hebdomadaires cibles (à ±10 %) : ${cells.join(' · ')}`,
-    'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté : ' +
-      'les règles de progression (hausse ≤ 12 %, semaine allégée à 85 %) se vérifient sur les volumes ' +
-      'réellement écrits, semaine contre semaine.',
-  ].join('\n');
-}
-
-/*
- * Décomposition d'une cible hebdomadaire entre les séances, pour les prompts.
+ * Il n'en reste que les **types**. Les deux formateurs qui les imprimaient
+ * (`formatWeeklyVolumeTargets`, `formatWeeklySessionBudgets`) n'existaient que
+ * pour le prompt de plan entier, disparu avec la bascule sur squelette : l'appli
+ * n'annonce plus ses chiffres au modèle, elle écrit les séances elle-même.
+ * `plan-schema.ts` produit toujours ces budgets (`weeklySessionBudgets`), et
+ * c'est le squelette qui les consomme.
  */
 
 /**
@@ -337,105 +270,6 @@ export type SessionBudgetRole = 'long' | 'quality' | 'easy';
  */
 export type SessionBudget = { role: SessionBudgetRole; km: number };
 
-/** La décomposition d'**une** semaine, telle que le prompt l'imprime. */
-export type WeeklySessionBudget = {
-  /** Numéro de la semaine dans la numérotation du **plan entier**. */
-  weekNumber: number;
-  targetKm: number;
-  /** Les séances, sortie longue en tête puis qualité puis footings. */
-  sessions: readonly SessionBudget[];
-};
-
-/**
- * Un groupe de séances de même rôle : `qualité ~4,5 km`, `4 footings ~3,5 km ≈ 26 min`.
- *
- * Un seul chiffre pour tout le groupe — celui de la première séance : les
- * séances d'un même rôle portent le même budget, à un dixième de kilomètre près
- * sur les footings, qui absorbent le reliquat de la division.
- * Le compte n'est écrit que quand il y en a plusieurs, et le pluriel avec.
- *
- * @param easyPaceSecPerKm l'allure d'endurance qui convertit ces kilomètres en
- * minutes, `null` pour ne pas écrire de durée du tout — c'est le cas du groupe
- * de qualité, dont la durée dépend de la structure de la séance (échauffement,
- * récupérations, retour au calme) et non de son seul kilométrage. Annoncer
- * « 3,0 km ≈ 13 min » sur une VMA serait faux d'un facteur trois.
- */
-function formatBudgetGroup(
-  sessions: readonly SessionBudget[],
-  singular: string,
-  plural: string,
-  easyPaceSecPerKm: number | null,
-): string | null {
-  const first = sessions[0];
-  if (first === undefined) return null;
-  const label = sessions.length === 1 ? singular : `${sessions.length} ${plural}`;
-  const distance = `${label} ~${formatNumber(first.km, 1)} km`;
-  return easyPaceSecPerKm === null
-    ? distance
-    : `${distance} ≈ ${formatDuration(first.km * easyPaceSecPerKm)}`;
-}
-
-/**
- * La décomposition de chaque cible **entre ses séances**, une ligne par
- * semaine : `S1 (~27,2 km) : SL sam ~8,0 km ≈ 1 h 00 · qualité ~4,5 km ·
- * 4 footings ~3,7 km ≈ 28 min`.
- *
- * Ce qu'elle corrige, constaté sur les premiers plans de production : le modèle
- * reçoit une cible hebdomadaire et écrit des semaines à 44 puis 70 km pour des
- * cibles de 27 à 37 — non par désobéissance, mais parce que « répartir 27 km
- * sur 6 séances dont une sortie longue et une séance de qualité » est une
- * division qu'un petit modèle ne pose pas de tête. L'appli la pose pour lui,
- * comme elle pose déjà les volumes hebdomadaires et les allures.
- *
- * Compacité : une ligne par semaine, groupée par rôle — pas une ligne par
- * séance. Comptez ~25 tokens par semaine, à comparer aux ~12 de la ligne des
- * cibles seules ({@link formatWeeklyVolumeTargets}).
- *
- * Les chiffres imprimés **tombent sur la cible** — à un dixième de kilomètre
- * près, ce que la répartition du reliquat sur les footings laisse d'écart entre
- * le chiffre d'un groupe et la somme réelle (cf. `weeklySessionBudgets`). Une
- * aide au calcul dont la somme ne fait pas son total ferait écrire au modèle des
- * semaines systématiquement sous leur cible.
- *
- * Les **durées** accompagnent les kilomètres depuis le constat de production
- * suivant : à 4 h de budget pour 6 séances, le modèle recevait « ~2,3 km » par
- * footing et écrivait des semaines à 40-49 km pour des cibles de 19 à 31. Un
- * kilométrage ne dit rien à ses priors ; « ≈ 17 min » leur parle directement,
- * parce que c'est en durée qu'il se représente une sortie. Le groupe de qualité
- * n'en porte pas — sa durée dépend de sa structure, pas de son kilométrage.
- *
- * @param longRunDay jour ISO de la sortie longue — la seule séance dont le
- * décompte nomme le jour, parce que c'est le seul qui soit imposé.
- * @param easyPaceSecPerKm l'allure d'endurance qui convertit ces kilomètres en
- * minutes — la même que celle des cibles hebdomadaires, sans quoi les deux
- * lignes du prompt se contrediraient.
- */
-export function formatWeeklySessionBudgets(
-  weeks: readonly WeeklySessionBudget[],
-  longRunDay: number,
-  easyPaceSecPerKm: number,
-): string {
-  const day = ISO_DAY_SHORT_NAMES[longRunDay - 1] ?? formatIsoDay(longRunDay);
-
-  const rows = weeks.map((week) => {
-    const of = (role: SessionBudgetRole) => week.sessions.filter((session) => session.role === role);
-    const cells = [
-      formatBudgetGroup(of('long'), `SL ${day}`, `SL ${day}`, easyPaceSecPerKm),
-      formatBudgetGroup(of('quality'), 'qualité', 'qualité', null),
-      formatBudgetGroup(of('easy'), 'footing', 'footings', easyPaceSecPerKm),
-    ].filter((cell): cell is string => cell !== null);
-
-    return `S${week.weekNumber} (~${formatNumber(week.targetKm, 1)} km) : ${cells.join(' · ')}`;
-  });
-
-  return [
-    'Décomposition de chaque cible entre ses séances (échauffement et récupérations compris) — ' +
-      'ces chiffres tombent exactement sur la cible, pars de là plutôt que de refaire la division. ' +
-      'Les durées (≈) sont celles de ces kilomètres courus en endurance : écris des séances de cette ' +
-      'longueur-là, même si elles te paraissent courtes :',
-    ...rows,
-  ].join('\n');
-}
 
 /** Le profil sur une ligne. Les champs absents ne sont pas mentionnés. */
 function formatProfile(profile: TrainingSnapshotDto['profile']): string {

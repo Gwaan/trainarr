@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PlanLevel } from '@/data/db/schema';
 import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
 import type { QualitySlot, QualityZone } from '@/lib/plan-skeleton';
 import {
@@ -43,10 +44,14 @@ vi.mock('./client', () => ({ chatCompletionJson }));
 const SLOT: QualitySlot = {
   day: 3,
   phase: 'build',
+  level: 'intermediate',
   zone: 'threshold',
   kind: 'Seuil',
   budgetKm: 8,
 };
+
+/** Les trois niveaux du contrat : le prompt doit en dire quelque chose de différent. */
+const LEVELS: PlanLevel[] = ['beginner', 'intermediate', 'advanced'];
 
 /** La table d'allures d'une coureuse plausible : 45:00 sur 10 km. */
 const PACES = trainingPacesFromRace(REFERENCE_DISTANCES['10k'], 45 * 60);
@@ -170,6 +175,34 @@ describe('buildQualitySessionMessages', () => {
 
     expect(user.content).toContain('Séance de VMA');
     expect(user.content).toContain('spécificité');
+  });
+
+  /*
+   * Le niveau de l'athlète décide du **contenu** de la séance, et il faut le
+   * dire au modèle.
+   *
+   * Régression mesurée après la bascule sur squelette, où cette règle vivait
+   * dans le prompt du plan entier (`LEVEL_RULES`) et a disparu avec lui : sur un
+   * semi en 1 h 45 à 4 séances, une **débutante** recevait 9 séances de seuil à
+   * la structure exacte d'une confirmée, et `advanced` produisait un plan
+   * strictement identique à `intermediate`. Seul le *nombre* de créneaux
+   * distinguait encore les niveaux.
+   */
+  it('prescrit une forme d’effort par niveau, sans jamais chiffrer', () => {
+    const lineFor = (level: PlanLevel): string =>
+      buildQualitySessionMessages({ ...SLOT, level })[1].content;
+
+    expect(lineFor('beginner')).toContain('efforts nettement plus courts');
+    expect(lineFor('beginner')).toContain('récupération généreuse');
+    expect(lineFor('advanced')).toContain('efforts plus longs');
+    expect(lineFor('advanced')).toContain('récupération serrée');
+    // Trois demandes réellement différentes, et non trois habillages du même
+    // texte : c'est ce que le défaut mesuré rendait impossible.
+    expect(new Set(LEVELS.map(lineFor)).size).toBe(LEVELS.length);
+    // Et toujours un seul nombre dans tout le message : le budget.
+    for (const level of LEVELS) {
+      expect(lineFor(level).match(/\d+([,.]\d+)?/g), level).toEqual(['8,0']);
+    }
   });
 
   it('interdit les allures dans le titre comme dans les étapes', () => {
@@ -321,12 +354,13 @@ describe('fillQualitySlot — repli déterministe', () => {
     chatCompletionJson.mockRejectedValue(new AiUnavailableError('unconfigured'));
 
     const slots: QualitySlot[] = [
-      { day: 2, phase: 'base', zone: 'repetition', kind: 'Répétitions', budgetKm: 5 },
-      { day: 4, phase: 'build', zone: 'interval', kind: 'VMA', budgetKm: 7.5 },
-      { day: 5, phase: 'specific', zone: 'threshold', kind: 'Seuil', budgetKm: 10 },
+      { day: 2, phase: 'base', level: 'beginner', zone: 'repetition', kind: 'Répétitions', budgetKm: 5 },
+      { day: 4, phase: 'build', level: 'intermediate', zone: 'interval', kind: 'VMA', budgetKm: 7.5 },
+      { day: 5, phase: 'specific', level: 'advanced', zone: 'threshold', kind: 'Seuil', budgetKm: 10 },
       {
         day: 6,
         phase: 'specific',
+        level: 'intermediate',
         zone: 'marathon',
         kind: 'Spécifique allure course',
         budgetKm: 12,
@@ -516,6 +550,7 @@ describe("fillQualitySlot — l'enveloppe, quel que soit le kind", () => {
   const MARATHON_SLOT: QualitySlot = {
     day: 6,
     phase: 'specific',
+    level: 'intermediate',
     zone: 'marathon',
     kind: 'Spécifique allure course',
     budgetKm: 8,

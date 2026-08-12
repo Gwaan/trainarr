@@ -8,10 +8,12 @@
  *
  * ## Trois barrières, et ce que chacune garantit
  *
- * 1. **La grammaire** (`planJsonSchema`, converti en GBNF par llama.cpp) : le
- *    modèle ne *peut pas* écrire un token hors schéma. Elle garantit la forme.
- * 2. **Zod** (`planOutputSchema`) : re-valide côté application, parce que rien
- *    ne dit qu'un provider tiers honore `response_format`.
+ * 1. **La grammaire** (`planChunkJsonSchema`, `planUpdateJsonSchema`, convertis
+ *    en GBNF par llama.cpp) : le modèle ne *peut pas* écrire un token hors
+ *    schéma. Elle garantit la forme.
+ * 2. **Zod** (`planChunkOutputSchemaFor`, `planUpdateOutputSchema`) : re-valide
+ *    côté application, parce que rien ne dit qu'un provider tiers honore
+ *    `response_format`.
  * 3. **{@link validatePlanBusinessRules}** : la forme ne dit rien du *sens*. Un
  *    JSON parfaitement valide peut placer deux séances le même jour, oublier la
  *    sortie longue, ou compter 11 semaines quand on en demandait 12. Ces
@@ -206,22 +208,6 @@ function planWeeksSchemaFor(sessions: CountBounds) {
 
 const planWeeksSchema = planWeeksSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
 
-/** Le contrat d'une création, aux bornes de séances données ({@link planOutputSchemaFor}). */
-function planSchemaFor(sessions: CountBounds) {
-  return z.object({
-    summary: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.summaryChars),
-    weeks: planWeeksSchemaFor(sessions),
-  });
-}
-
-/**
- * Ce que le modèle produit pour une **création** de plan.
- *
- * Aux bornes générales : une génération qui connaît son compte de séances passe
- * par {@link planOutputSchemaFor}.
- */
-export const planOutputSchema = planSchemaFor(PLAN_OUTPUT_BOUNDS.sessionsPerWeek);
-
 /** Le contrat d'une tranche, aux bornes de séances données ({@link planChunkOutputSchemaFor}). */
 function chunkOutputSchemaFor(sessions: CountBounds) {
   return z.object({
@@ -319,8 +305,8 @@ export const planReviewOutputSchema = z.discriminatedUnion('decision', [
 ]);
 
 /**
- * Ce qu'une génération sait du **nombre de séances** de ses semaines — une
- * tranche d'un plan long comme un plan produit d'un seul tenant.
+ * Ce qu'une génération sait du **nombre de séances** de ses semaines — les
+ * tranches d'un ajustement ou d'une révision.
  *
  * ## Pourquoi la grammaire s'en mêle
  *
@@ -370,22 +356,10 @@ export function planChunkOutputSchemaFor(bounds: ChunkSessionBounds): z.ZodType<
   return chunkOutputSchemaFor(chunkSessionCountBounds(bounds));
 }
 
-/**
- * Le contrat Zod d'une création **d'un seul tenant**, au même resserrement que
- * sa grammaire ({@link planJsonSchemaFor}).
- *
- * Même raison que pour une tranche ({@link planChunkOutputSchemaFor}) : les deux
- * barrières disent la même chose ou elles ne disent rien.
- */
-export function planOutputSchemaFor(bounds: ChunkSessionBounds): z.ZodType<PlanOutput> {
-  return planSchemaFor(chunkSessionCountBounds(bounds));
-}
-
 export type PlanSessionOutput = z.infer<typeof planSessionSchema>;
 // Depuis la fabrique : les bornes du tableau `sessions` ne changent pas le type
 // d'une semaine, seulement ce que le schéma accepte.
 export type PlanWeekOutput = z.infer<ReturnType<typeof planWeekSchemaFor>>;
-export type PlanOutput = z.infer<typeof planOutputSchema>;
 export type PlanChunkOutput = z.infer<typeof planChunkOutputSchema>;
 export type PlanUpdateOutput = z.infer<typeof planUpdateOutputSchema>;
 export type PlanSettingsOutput = z.infer<typeof planSettingsPatchSchema>;
@@ -570,50 +544,13 @@ const summaryJsonSchema = {
   maxLength: PLAN_OUTPUT_BOUNDS.summaryChars,
 } as const;
 
-/** L'enveloppe d'une création, autour du tableau de semaines qu'on lui donne. */
-function planJsonSchemaWith(weeks: Record<string, unknown>): Record<string, unknown> {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['summary', 'weeks'],
-    properties: { summary: summaryJsonSchema, weeks },
-  };
-}
-
-/**
- * JSON Schema d'une création de plan — le pendant de {@link planOutputSchema}.
- *
- * Aux bornes générales : une génération qui connaît son compte de séances passe
- * par {@link planJsonSchemaFor}.
- */
-export const planJsonSchema: Record<string, unknown> = planJsonSchemaWith(weeksJsonSchema);
-
-/**
- * Le même schéma, dont chaque semaine porte **exactement** le nombre de séances
- * demandé — le pendant de {@link planOutputSchemaFor}.
- *
- * C'est le resserrement des tranches ({@link planChunkJsonSchema}) appliqué au
- * format le plus courant : sous les six semaines, le plan se produit d'un seul
- * tenant, et rien n'y empêchait le modèle d'écrire la septième séance qu'il
- * écrit précisément sous message de reprise. Une génération qui porte la
- * première semaine entamée garde des bornes souples, pour la raison
- * d'uniformité rappelée par {@link ChunkSessionBounds}.
- *
- * Le nombre de **semaines**, lui, reste aux bornes générales : la fenêtre du
- * plan n'est pas rappelée ici, et c'est la règle métier qui la vérifie.
- */
-export function planJsonSchemaFor(sessions: ChunkSessionBounds): Record<string, unknown> {
-  return planJsonSchemaWith(
-    weeksJsonSchemaFor(PLAN_OUTPUT_BOUNDS.weeksPerPlan, chunkSessionCountBounds(sessions)),
-  );
-}
-
 /**
  * JSON Schema d'**une tranche** — le pendant de {@link planChunkOutputSchema},
  * aux bornes de la tranche.
  *
- * Deux resserrements par rapport au schéma d'un plan entier, et les deux
- * comptent sur un petit modèle : le nombre de semaines est **exact** (`minItems`
+ * Deux resserrements par rapport au schéma d'un plan entier (celui d'un
+ * ajustement, {@link planUpdateJsonSchema}), et les deux comptent sur un petit
+ * modèle : le nombre de semaines est **exact** (`minItems`
  * = `maxItems`), donc la grammaire l'empêche d'en écrire une de trop ou de moins
  * — ce que la règle métier ne pouvait que constater après coup, au prix d'une
  * régénération ; et la clé `summary` **n'existe pas** hors de la dernière
@@ -879,6 +816,31 @@ export type PlanExpectations = {
    */
   race?: PlanRaceGoal | null;
   /**
+   * Le jour ISO de la **course**, dans la dernière semaine de la fenêtre —
+   * absent ou `null` quand la fenêtre ne se termine pas sur un jour J connu.
+   *
+   * Ce qu'il change, et **uniquement** sur la dernière semaine :
+   *
+   * 1. c'est ce jour-là, et non {@link PlanExpectations.longRunDay}, qui doit
+   *    porter la plus longue séance de la semaine. La raison est d'entraînement
+   *    avant d'être technique — la semaine de course n'a pas de sortie longue,
+   *    elle a une course, et programmer un long run la veille ou le lendemain du
+   *    jour J serait une faute. Exiger malgré tout une séance le jour de sortie
+   *    longue habituel reviendrait à réclamer exactement cela ;
+   * 2. il **ferme** la semaine, comme {@link PlanExpectations.firstWeekFromDay}
+   *    l'ouvre : aucune séance après lui, et le compte de séances devient un
+   *    maximum au lieu d'un exact — une semaine de course courue le mardi n'a
+   *    que deux jours à remplir. Mesuré avant cette règle, un marathon un lundi
+   *    à 6 séances recevait 5 séances et 23,3 km *après* la course.
+   *
+   * Seule la **création** le renseigne (`writeGeneratedPlan`), parce qu'elle
+   * seule connaît la date de la course et écrit la semaine qui la porte. Un
+   * ajustement ou une révision ne le posent pas : leur fenêtre se termine bien
+   * avec le plan, mais elles ne réécrivent pas la séance du jour J, et la règle
+   * reste alors celle d'avant — un champ absent ne change rien.
+   */
+  raceDay?: number | null;
+  /**
    * Les volumes hebdomadaires que l'appli a calculés pour cette fenêtre
    * ({@link weeklyVolumeTargets}), dans l'ordre des semaines — absents quand
    * aucune cible n'a été chiffrée, et la règle ne s'applique alors pas.
@@ -1092,6 +1054,23 @@ function goalTimeSeconds(normalized: string): number | null {
 const GOAL_PACE_BOUNDS = { min: 120, max: 900 } as const;
 
 /**
+ * La distance de l'objectif, en km — `null` quand son texte n'en nomme aucune
+ * ({@link GOAL_DISTANCES_KM} n'en connaît que quatre, et c'est délibéré).
+ *
+ * Extraite de {@link goalPaceSecPerKm}, qui la calculait pour elle-même : le
+ * squelette du plan en a besoin **sans** le chrono, puisque c'est elle qui
+ * décide de la grille de qualité (`qualityZones`) et de la spécificité de la
+ * sortie longue. Deux lectures du même texte finiraient par diverger ; il n'y en
+ * a qu'une.
+ *
+ * Fonction **pure**.
+ */
+export function goalDistanceKm(goalText: string): number | null {
+  const normalized = normalizeText(goalText);
+  return GOAL_DISTANCES_KM.find(([pattern]) => pattern.test(normalized))?.[1] ?? null;
+}
+
+/**
  * L'allure de l'objectif, en s/km, dérivée d'un but chiffré — `null` dès que le
  * texte ne porte pas les deux moitiés (une distance connue **et** un temps), ou
  * que leur quotient ne ressemble pas à une allure de course
@@ -1113,7 +1092,7 @@ const GOAL_PACE_BOUNDS = { min: 120, max: 900 } as const;
 export function goalPaceSecPerKm(goalText: string): number | null {
   const normalized = normalizeText(goalText);
 
-  const distanceKm = GOAL_DISTANCES_KM.find(([pattern]) => pattern.test(normalized))?.[1] ?? null;
+  const distanceKm = goalDistanceKm(goalText);
   if (distanceKm === null) return null;
 
   const seconds = goalTimeSeconds(normalized);
@@ -2885,9 +2864,9 @@ function remainingWeekDays(firstWeekFromDay: number): number {
  * d'avance. En dessous du seuil, le prorata devient plus petit qu'une séance
  * normale : la contrainte n'a plus de sens, elle ne s'applique pas.
  *
- * Exportée pour que le prompt annonce **exactement** le plafond que la règle
- * vérifiera (cf. {@link formatPartialWeekTimeBudget}) : deux arithmétiques
- * feraient refuser un plan qui applique la consigne à la lettre.
+ * Exportée pour ses tests : c'est du calcul de bord (jours restants, seuil de
+ * pertinence) qui mérite d'être éprouvé pour lui-même, et non seulement à
+ * travers la règle qui l'appelle.
  *
  * @param weeklyTimeMinutes le budget hebdomadaire déclaré, `null` s'il n'y en a pas.
  * @param firstWeekFromDay le jour ISO à partir duquel la semaine porte des séances.
@@ -2902,22 +2881,6 @@ export function partialWeekTimeBudget(
   if (remainingDays < MIN_FIRST_WEEK_DAYS) return null;
 
   return (weeklyTimeMinutes * remainingDays) / 7;
-}
-
-/**
- * Ce même plafond **tel qu'il s'écrit dans un prompt**, arrondi du côté
- * satisfiable ({@link hoursAtMost}) — `null` quand il n'y a rien à annoncer.
- *
- * Sans cette ligne, la consigne était muette : le modèle recevait un budget
- * hebdomadaire, produisait une semaine entamée à sa mesure, et se faisait refuser
- * par un plafond qu'il n'avait aucun moyen de deviner.
- */
-export function formatPartialWeekTimeBudget(
-  weeklyTimeMinutes: number | null,
-  firstWeekFromDay: number,
-): string | null {
-  const budget = partialWeekTimeBudget(weeklyTimeMinutes, firstWeekFromDay);
-  return budget === null ? null : hoursAtMost(budget);
 }
 
 /**
@@ -3090,7 +3053,26 @@ export function validatePlanBusinessRules(
   const corridor = paceCorridor(context);
   const violations: string[] = [];
   const firstWeekFromDay = expected.firstWeekFromDay ?? 1;
-  const longRunDayName = formatIsoDay(expected.longRunDay);
+  /**
+   * La **semaine de la course** : la dernière de la fenêtre, quand celle-ci
+   * déclare un jour J ({@link PlanExpectations.raceDay}) — `null` sinon, et
+   * toutes les règles ci-dessous retrouvent alors leur forme d'avant.
+   *
+   * Deux d'entre elles en dépendent, et toutes deux la traitent comme une
+   * première semaine entamée : son compte de séances est un **maximum** et non
+   * un exact, et ses jours utilisables s'arrêtent au jour J.
+   */
+  const raceWeek =
+    expected.raceDay === undefined || expected.raceDay === null
+      ? null
+      : { index: weeks.length - 1, day: expected.raceDay };
+
+  /**
+   * Le jour qui doit porter le **plus gros effort** de la semaine `index` : le
+   * jour de sortie longue partout, sauf la semaine de course, où c'est le jour J.
+   */
+  const hardDayOf = (index: number): number =>
+    raceWeek !== null && index === raceWeek.index ? raceWeek.day : expected.longRunDay;
 
   if (weeks.length !== expected.weeks) {
     violations.push(
@@ -3101,18 +3083,31 @@ export function validatePlanBusinessRules(
   weeks.forEach((week, index) => {
     const label = `Semaine ${index + 1}`;
     const isPartial = index === 0 && firstWeekFromDay > 1;
+    const isRaceWeek = raceWeek !== null && index === raceWeek.index;
     const days = week.sessions.map((session) => session.day);
 
-    if (isPartial) {
+    // Une semaine **amputée** — entamée par son début, close par le jour J, ou
+    // les deux — ne peut pas porter le compte exact de séances : elle a moins de
+    // jours utilisables que le réglage n'en demande. Les deux amputations se
+    // jugent donc pareil, un maximum et une fenêtre de jours.
+    if (isPartial || isRaceWeek) {
       if (week.sessions.length > expected.sessionsPerWeek) {
         violations.push(
-          `${label} (déjà entamée) : ${week.sessions.length} séances, alors que le maximum est ${expected.sessionsPerWeek}.`,
+          `${label} (${isPartial ? 'déjà entamée' : 'semaine de course'}) : ${week.sessions.length} séances, alors que le maximum est ${expected.sessionsPerWeek}.`,
         );
       }
       for (const day of days) {
-        if (day < firstWeekFromDay) {
+        if (isPartial && day < firstWeekFromDay) {
           violations.push(
             `${label} : aucune séance avant ${formatIsoDay(firstWeekFromDay)}, ces jours sont passés — la séance placée le ${formatIsoDay(day)} est à retirer.`,
+          );
+        }
+        // Le jour J ferme la semaine : programmer un footing le lendemain d'une
+        // compétition n'est pas un plan d'affûtage. Mesuré sans cette règle, un
+        // marathon un lundi recevait 5 séances et 23,3 km après la course.
+        if (raceWeek !== null && isRaceWeek && day > raceWeek.day) {
+          violations.push(
+            `${label} : aucune séance après le ${formatIsoDay(raceWeek.day)}, jour de la course — la séance placée le ${formatIsoDay(day)} est à retirer.`,
           );
         }
       }
@@ -3140,12 +3135,27 @@ export function validatePlanBusinessRules(
       if (paceViolation !== null) violations.push(paceViolation);
     }
 
+    // Le jour du plus gros effort de la semaine — la sortie longue, ou la course
+    // sur la dernière semaine d'un plan qui y mène.
+    //
+    // La nature du jour se lit sur `isRaceWeek`, jamais sur `hardDay !==
+    // longRunDay` : une course qui tombe le jour de sortie longue habituel de
+    // l'athlète — le cas le plus fréquent, un dimanche — les rend égaux, et la
+    // violation parlait alors de « jour de la sortie longue » sur la semaine de
+    // la course.
+    const hardDay = hardDayOf(index);
+    const hardDayName = formatIsoDay(hardDay);
+
     // Sur une semaine entamée dont le jour de sortie longue est déjà passé, la
     // règle n'a plus d'objet : le long run de la semaine a eu lieu (ou pas), il
     // n'est plus replanifiable.
-    const longRunApplies = !isPartial || expected.longRunDay >= firstWeekFromDay;
-    if (longRunApplies && !seen.has(expected.longRunDay)) {
-      violations.push(`${label} : aucune séance le ${longRunDayName}, jour de la sortie longue.`);
+    const longRunApplies = !isPartial || hardDay >= firstWeekFromDay;
+    if (longRunApplies && !seen.has(hardDay)) {
+      violations.push(
+        isRaceWeek
+          ? `${label} : aucune séance le ${hardDayName}, jour de la course.`
+          : `${label} : aucune séance le ${hardDayName}, jour de la sortie longue.`,
+      );
       return;
     }
     if (!longRunApplies) return;
@@ -3159,13 +3169,13 @@ export function validatePlanBusinessRules(
     // le premier maximum rencontré déclarerait une violation, et coûterait une
     // régénération de plusieurs minutes pour un plan pourtant conforme.
     const longestMeasure = Math.max(...measures);
-    // Le jour de sortie longue est forcément présent : la règle précédente est
-    // sortie de la semaine dans le cas contraire.
-    const longRunIndex = week.sessions.findIndex((session) => session.day === expected.longRunDay);
+    // Le jour dur est forcément présent : la règle précédente est sortie de la
+    // semaine dans le cas contraire.
+    const longRunIndex = week.sessions.findIndex((session) => session.day === hardDay);
     if (measures[longRunIndex] < longestMeasure) {
       const longestDay = week.sessions[measures.indexOf(longestMeasure)].day;
       violations.push(
-        `${label} : la séance la plus longue tombe le ${formatIsoDay(longestDay)} et non le ${longRunDayName}, qui doit porter la sortie longue.`,
+        `${label} : la séance la plus longue tombe le ${formatIsoDay(longestDay)} et non le ${hardDayName}, qui doit porter ${isRaceWeek ? 'la course' : 'la sortie longue'}.`,
       );
     }
   });

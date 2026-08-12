@@ -66,6 +66,7 @@ import 'server-only';
 
 import { z } from 'zod';
 
+import type { PlanLevel } from '@/data/db/schema';
 import type { PlanPhase, QualitySlot, QualityZone } from '@/lib/plan-skeleton';
 import { qualitySessionTemplate } from '@/lib/plan-skeleton/quality-template';
 import {
@@ -379,6 +380,43 @@ const QUALITY_ZONE_BRIEFS: Record<QualityZone, string> = {
   marathon: "un ou deux blocs longs à l'allure de la course, sans fractionnement serré",
 };
 
+/**
+ * Ce que le **niveau** de l'athlète change à la forme de la séance, en une ligne
+ * et en mots.
+ *
+ * ## Pourquoi cette ligne existe
+ *
+ * Elle remplace une règle qui a disparu avec le prompt du plan entier
+ * (`LEVEL_RULES` dans `plan-service.ts` : « NIVEAU DÉBUTANT — au plus une séance
+ * de qualité, courte et douce […] Jamais de bloc de seuil long » contre
+ * « CONFIRMÉ — blocs de seuil plus longs »). Sans elle, mesuré sur un semi en
+ * 1 h 45 à 4 séances : une **débutante** recevait 9 séances de seuil à la
+ * structure exacte d'une confirmée, et `advanced` produisait un plan strictement
+ * identique à `intermediate`. Seul le *nombre* de créneaux distinguait encore
+ * les niveaux.
+ *
+ * ## Pourquoi elle ne porte aucun chiffre
+ *
+ * Même raison que pour les zones et les phases, et c'est la leçon la plus chère
+ * de ce prompt : le modèle ancre sur n'importe quel nombre traînant dans son
+ * contexte. « 6 à 8 × 30 s » se retrouverait recopié tel quel dans un créneau de
+ * 12 km. On décrit donc le **sens** du réglage — plus court / plus long, plus
+ * récupéré / plus serré —, et le budget reste le seul nombre du prompt.
+ *
+ * Ce que ces trois lignes décrivent est exactement ce que le déroulé
+ * déterministe applique de son côté (`LEVEL_RECOVERY_FACTOR` dans
+ * `plan-skeleton/quality-template.ts`) : les deux chemins doivent prescrire la
+ * même chose, sans quoi une séance changerait de nature selon que le coach a
+ * répondu ou non.
+ */
+const QUALITY_LEVEL_BRIEFS: Record<PlanLevel, string> = {
+  beginner:
+    "Athlète débutante : des efforts nettement plus courts que d'ordinaire, et une récupération généreuse entre chacun — jamais de bloc long.",
+  intermediate: 'Athlète intermédiaire : le format habituel de la zone, ni durci ni dilué.',
+  advanced:
+    "Athlète confirmée : des efforts plus longs que d'ordinaire, et une récupération serrée entre chacun.",
+};
+
 /** La phase, en français — ce qui situe la séance dans la préparation. */
 const QUALITY_PHASE_LABELS: Record<PlanPhase, string> = {
   partial: 'reprise',
@@ -407,6 +445,7 @@ export function buildQualitySessionMessages(slot: QualitySlot): ChatMessage[] {
       content: [
         `Séance de ${slot.kind} : ${QUALITY_ZONE_BRIEFS[slot.zone]}.`,
         `Phase : ${QUALITY_PHASE_LABELS[slot.phase]}.`,
+        QUALITY_LEVEL_BRIEFS[slot.level],
         `Total de la séance, échauffement et retour au calme compris : ${formatDistanceKm(slot.budgetKm * 1_000)}.`,
       ].join('\n'),
     },
@@ -830,7 +869,12 @@ function lastResortSteps(budgetKm: number): PlanSessionSteps {
 function templateSteps(slot: QualitySlot): PlanSessionSteps | null {
   try {
     const parsed = planSessionStepsSchema.safeParse(
-      qualitySessionTemplate({ zone: slot.zone, budgetKm: slot.budgetKm, phase: slot.phase }),
+      qualitySessionTemplate({
+        zone: slot.zone,
+        budgetKm: slot.budgetKm,
+        phase: slot.phase,
+        level: slot.level,
+      }),
     );
     if (parsed.success) return parsed.data;
 
@@ -852,8 +896,15 @@ function templateSteps(slot: QualitySlot): PlanSessionSteps | null {
  *
  * Et s'il échoue lui aussi, {@link lastResortSteps} tient la promesse : cette
  * fonction rend une séance, toujours.
+ *
+ * **Exportée** pour la dégradation en escalier de `plan-service.ts` : quand un
+ * plan assemblé viole malgré tout une règle métier, le service réécrit *tous*
+ * ses créneaux avec cette fonction et revalide. C'est le cas de référence mesuré
+ * à zéro violation sur des dizaines de milliers de plans — et le seul recours
+ * possible, puisqu'il n'y a personne à qui redemander un plan que l'appli a
+ * écrit elle-même.
  */
-function templateSession(slot: QualitySlot): PlanSessionOutput {
+export function deterministicQualitySession(slot: QualitySlot): PlanSessionOutput {
   const template = templateSteps(slot);
   const steps = template ?? lastResortSteps(slot.budgetKm);
 
@@ -903,7 +954,7 @@ function errorReason(error: unknown): string {
  *    dans la limite de {@link MAX_ATTEMPTS} ;
  * 3. il échoue jusqu'au bout, il n'est pas joignable, ou sa séance ne se laisse
  *    pas ramener au budget proprement : l'appli écrit la séance
- *    ({@link templateSession}).
+ *    ({@link deterministicQualitySession}).
  *
  * L'absorption ne donne pas lieu à une reprise : le modèle a écrit une séance
  * *acceptable*, l'écart restant est de l'ordre de ce qu'on lui a demandé de ne
@@ -936,7 +987,7 @@ export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOut
       });
     } catch (error) {
       logQualityFallback(slot, errorReason(error));
-      return templateSession(slot);
+      return deterministicQualitySession(slot);
     }
 
     const session = qualitySessionFor(slot, output);
@@ -954,12 +1005,12 @@ export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOut
         slot,
         "l'écart au budget ne se reporte pas proprement sur le retour au calme",
       );
-      return templateSession(slot);
+      return deterministicQualitySession(slot);
     }
 
     if (last) {
       logQualityFallback(slot, violations.join(' '));
-      return templateSession(slot);
+      return deterministicQualitySession(slot);
     }
 
     messages.push({ role: 'user', content: buildQualityViolationsMessage(violations) });
@@ -967,7 +1018,7 @@ export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOut
 
   // Inatteignable : la dernière tentative se replie ou rend sa séance. Le
   // compilateur, lui, ne lit pas la boucle.
-  return templateSession(slot);
+  return deterministicQualitySession(slot);
 }
 
 /**
@@ -981,13 +1032,20 @@ export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOut
  * Ne lève jamais, par construction : chaque créneau se replie pour son propre
  * compte, et un modèle tombé au milieu d'un plan ne coûte que le sur-mesure des
  * séances restantes.
+ *
+ * @param onFilled appelé après **chaque** créneau, avec le nombre de créneaux
+ * déjà écrits et leur total. C'est la seule mesure honnête de l'avancement d'une
+ * génération de plan depuis la bascule : le créneau est l'unité de travail du
+ * modèle, et le reste du plan est écrit avant même le premier appel.
  */
 export async function fillQualitySlots(
   slots: readonly QualitySlot[],
+  onFilled?: (filled: number, total: number) => void,
 ): Promise<PlanSessionOutput[]> {
   const sessions: PlanSessionOutput[] = [];
   for (const slot of slots) {
     sessions.push(await fillQualitySlot(slot));
+    onFilled?.(sessions.length, slots.length);
   }
   return sessions;
 }

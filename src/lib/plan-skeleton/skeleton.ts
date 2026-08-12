@@ -85,6 +85,7 @@ const SESSION_KINDS = {
   easy: 'Endurance fondamentale',
   recovery: 'Récupération',
   longRun: 'Sortie longue',
+  race: 'Course',
 } as const;
 
 /** Les titres lus dans la timeline : du français court, pas des étiquettes techniques. */
@@ -93,6 +94,7 @@ const SESSION_TITLES = {
   recovery: 'Footing de récupération',
   longRun: 'Sortie longue en endurance',
   specificLongRun: 'Sortie longue avec bloc à allure objectif',
+  race: 'Jour J : la course',
 } as const;
 
 /**
@@ -156,6 +158,22 @@ export type QualitySlot = {
   day: number;
   /** La phase de la semaine — ce qui a décidé de la zone. */
   phase: PlanPhase;
+  /**
+   * Le niveau de l'athlète — ce qui décide de la **forme** de l'effort.
+   *
+   * Il voyage avec le créneau parce que c'est là qu'il sert, et des deux côtés :
+   * le prompt du modèle (`buildQualitySessionMessages`) et le déroulé
+   * déterministe (`qualitySessionTemplate`) le lisent tous les deux, sans quoi
+   * ils divergeraient dès le premier repli.
+   *
+   * Ce qu'il répare est une régression mesurée de la bascule sur squelette : le
+   * niveau ne décidait plus que du **nombre** de créneaux
+   * ({@link qualitySlotCount}), jamais de leur contenu. Sur un semi en 1 h 45 à
+   * 4 séances, une débutante recevait 9 séances de seuil à la structure exacte
+   * d'une confirmée, et `advanced` rendait un plan strictement identique à
+   * `intermediate`.
+   */
+  level: PlanLevel;
   zone: QualityZone;
   /** Le `kind` français de la séance, tel qu'il sera écrit ({@link QUALITY_ZONE_KINDS}). */
   kind: string;
@@ -190,6 +208,21 @@ export type PlanSkeletonParams = {
   level: PlanLevel;
   /** L'objectif, quand c'est une course : elle impose un affûtage et une semaine de course. */
   race: PlanRaceGoal | null;
+  /**
+   * Le **jour ISO du jour J** dans la dernière semaine du plan — `null` hors
+   * objectif daté.
+   *
+   * Sans lui, la semaine de course recevait une « Sortie longue » posée le jour
+   * de sortie longue habituel de l'athlète, y compris quand ce jour-là *était*
+   * celui de sa course : vérifié en production, l'athlète lisait « 8,5 km à
+   * 5:54/km » sur la case de son marathon. Le squelette ne pouvait pas le
+   * corriger seul — il ne connaissait que `race.isMarathon`, jamais la date.
+   *
+   * Ce jour-là porte donc {@link SESSION_KINDS.race}, un libellé que
+   * `sessionPaceZone` range en zone `marathon` (cf. `RACE_DAY_PATTERN`) : la
+   * séance du jour J s'affiche à l'allure de l'objectif, pas en endurance.
+   */
+  raceDay: number | null;
   /** La distance de l'objectif, en km — `null` quand il n'est pas chiffré. */
   goalDistanceKm: number | null;
   /**
@@ -300,16 +333,27 @@ type WeekPlan = {
   target: WeeklyVolumeTarget;
   /** Premier jour ISO disponible : 1 partout, sauf sur une première semaine entamée. */
   fromDay: number;
-  /** Les séances réellement plaçables — une semaine entamée en porte moins. */
+  /** Dernier jour ISO disponible : 7 partout, sauf sur la semaine de la course. */
+  lastDay: number;
+  /**
+   * Les séances réellement plaçables — une semaine entamée en porte moins, une
+   * semaine de course aussi.
+   */
   sessionCount: number;
   /** Les zones que la phase propose, dans l'ordre où les créneaux les prendront. */
   zones: QualityZone[];
   slotCount: number;
 };
 
-/** Le nombre de séances plaçables sur une semaine qui commence ce jour-là. */
-function sessionsFittingFrom(sessionsPerWeek: number, fromDay: number): number {
-  return Math.min(sessionsPerWeek, DAYS_PER_WEEK - fromDay + 1);
+/**
+ * Le nombre de séances plaçables dans la fenêtre `[fromDay, lastDay]`.
+ *
+ * Les deux bornes existent pour la même raison — il y a des jours sur lesquels
+ * cette semaine-là ne peut rien poser : ceux déjà passés d'une première semaine
+ * entamée, et ceux qui suivent le jour J d'une semaine de course.
+ */
+function sessionsFitting(sessionsPerWeek: number, fromDay: number, lastDay: number): number {
+  return Math.min(sessionsPerWeek, Math.max(0, lastDay - fromDay + 1));
 }
 
 /**
@@ -329,7 +373,7 @@ function fundableSessionsPerWeek(
 ): number {
   for (let candidate = requested - 1; candidate >= 1; candidate -= 1) {
     const fits = plans.every((plan) => {
-      const sessionCount = sessionsFittingFrom(candidate, plan.fromDay);
+      const sessionCount = sessionsFitting(candidate, plan.fromDay, plan.lastDay);
       const slotCount = qualitySlotCount(level, plan.zones.length, sessionCount);
       return plan.target.targetKm >= minFundableWeeklyKm(sessionCount, slotCount);
     });
@@ -394,14 +438,36 @@ function assertFundable(
  * devient alors le plus long footing de la semaine. Le volume de la semaine doit
  * tomber sur sa cible, et un budget abandonné le ferait passer sous la barre.
  *
+ * **La semaine de course fait exception aux points 1 et 4.** Au point 4, c'est
+ * le jour J ({@link PlanSkeletonParams.raceDay}) qui prend le rôle `long`, et la
+ * séance écrite est la course elle-même : le jour de sortie longue de l'athlète
+ * n'a plus cours cette semaine-là — deux gros efforts à quelques jours d'écart,
+ * dont l'un est une compétition, ne sont pas une semaine d'affûtage. Au point 1,
+ * ses jours disponibles s'arrêtent **au jour J** : mesuré avant cette borne, un
+ * marathon un lundi à 6 séances donnait 5 séances et 23,3 km *après* la course,
+ * dont une le lendemain de l'épreuve.
+ *
+ * Cette semaine-là porte donc moins de séances que le réglage, exactement comme
+ * une première semaine entamée — et pour la même raison. `PlanExpectations`
+ * l'apprend par le même champ (`raceDay`), et `validatePlanBusinessRules` y
+ * plafonne le compte de séances au lieu de l'exiger exact.
+ *
  * @throws {PlanSkeletonInfeasibleError} quand au moins une semaine vise un
  * volume que son nombre de séances ne peut pas financer — un athlète à 3 km par
  * semaine qui demande 6 séances demande 500 m par séance. Le squelette le dit au
  * lieu d'écrire une semaine que la validation refusera.
  */
 export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
-  const { weeks, firstWeekFromDay, sessionsPerWeek, longRunDay, level, goalDistanceKm, targets } =
-    params;
+  const {
+    weeks,
+    firstWeekFromDay,
+    sessionsPerWeek,
+    longRunDay,
+    level,
+    raceDay,
+    goalDistanceKm,
+    targets,
+  } = params;
   if (weeks <= 0) return [];
 
   const phases = planPhases({ weeks, firstWeekFromDay, race: params.race });
@@ -412,7 +478,12 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     // Seule la première semaine peut être amputée ; les suivantes sont pleines,
     // quel que soit le jour où le plan a commencé.
     const fromDay = index === 0 && firstWeekFromDay > 1 ? firstWeekFromDay : 1;
-    const sessionCount = sessionsFittingFrom(sessionsPerWeek, fromDay);
+    // La semaine de la course s'arrête au jour J. Les jours qui le suivent ne
+    // sont pas des jours d'entraînement : mesuré avant cette borne, un marathon
+    // un lundi à 6 séances donnait **5 séances et 23,3 km après la course**,
+    // dont une le lendemain de l'épreuve.
+    const lastDay = phase === 'race' && raceDay !== null ? raceDay : DAYS_PER_WEEK;
+    const sessionCount = sessionsFitting(sessionsPerWeek, fromDay, lastDay);
     const zones = qualityZones(phase, goalDistanceKm);
 
     plans.push({
@@ -420,6 +491,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       phase,
       target: targets[index],
       fromDay,
+      lastDay,
       sessionCount,
       zones,
       slotCount: qualitySlotCount(level, zones.length, sessionCount),
@@ -431,17 +503,38 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
 
   const skeleton: SkeletonWeek[] = [];
 
-  for (const { weekNumber, phase, target, fromDay, sessionCount, zones, slotCount } of plans) {
+  for (const {
+    weekNumber,
+    phase,
+    target,
+    fromDay,
+    lastDay,
+    sessionCount,
+    zones,
+    slotCount,
+  } of plans) {
+    // La décomposition part du nombre de séances **réellement plaçables** : les
+    // kilomètres des séances qu'une borne a supprimées sont ainsi répartis sur
+    // celles qui restent, et la semaine retombe sur sa cible. Les abandonner la
+    // ferait passer sous sa bande de ±10 %.
     const budgets = weeklySessionBudgets(target.targetKm, sessionCount, slotCount);
     const longBudget = budgets.find((budget) => budget.role === 'long');
     const qualityBudgets = budgets.filter((budget) => budget.role === 'quality');
     const easyBudgets = budgets.filter((budget) => budget.role === 'easy');
 
+    // La semaine de course n'a pas de sortie longue : elle a une course, et
+    // c'est le jour J qui porte le rôle `long` — son plus gros effort. Le jour
+    // de sortie longue de l'athlète n'y a plus cours, sans quoi le plan lui
+    // proposerait un long run la veille ou le lendemain de son épreuve.
+    const isRaceWeek = phase === 'race' && raceDay !== null;
+    const hardDay = isRaceWeek ? raceDay : longRunDay;
+
     const days = placeSessionDays({
       sessionsPerWeek: sessionCount,
-      longRunDay,
+      longRunDay: hardDay,
       qualityCount: slotCount,
       fromDay,
+      toDay: lastDay,
     });
 
     // Un footing d'affûtage ou de semaine de course n'est pas un footing
@@ -453,14 +546,33 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     const sessions: PlanSessionOutput[] = [];
 
     if (days.longRunDay !== null && longBudget !== undefined) {
+      // Aucun déroulé le jour J : `wantsSpecificLongRun` n'accepte que la phase
+      // `specific`, et la semaine de course n'en est pas une.
       const steps = wantsSpecificLongRun(phase, goalDistanceKm)
         ? specificLongRunSteps(longBudget.km)
         : undefined;
 
       sessions.push({
         day: days.longRunDay,
-        kind: SESSION_KINDS.longRun,
-        title: steps === undefined ? SESSION_TITLES.longRun : SESSION_TITLES.specificLongRun,
+        kind: isRaceWeek ? SESSION_KINDS.race : SESSION_KINDS.longRun,
+        title: isRaceWeek
+          ? SESSION_TITLES.race
+          : steps === undefined
+            ? SESSION_TITLES.longRun
+            : SESSION_TITLES.specificLongRun,
+        // **Le budget de la décomposition, jamais la distance réelle de la
+        // course.** C'est une décision assumée, et elle mérite d'être écrite :
+        // un plan d'entraînement porte des volumes d'**entraînement**, et
+        // injecter les 42,195 km d'un marathon dans la semaine qui le porte
+        // ferait exploser tout ce qui l'encadre — l'affûtage descend strictement
+        // chaque semaine, et la semaine de course reste sous 65 % du pic
+        // (`VOLUME_RULES.raceWeekMaxRatio`). Aucun plan ne survivrait à ces deux
+        // règles avec un marathon compté dedans.
+        //
+        // La séance du jour J est donc un **repère** : le bon libellé, le bon
+        // jour, la bonne allure — pas une comptabilisation de l'épreuve. La
+        // question de compter réellement la course dans le volume reste ouverte,
+        // et elle se réglera ailleurs (côté volumes cibles, pas ici).
         distanceKm: longBudget.km,
         ...(steps === undefined ? {} : { steps }),
       });
@@ -488,6 +600,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       return {
         day,
         phase,
+        level,
         zone,
         kind: QUALITY_ZONE_KINDS[zone],
         budgetKm: qualityBudgets[slotIndex].km,

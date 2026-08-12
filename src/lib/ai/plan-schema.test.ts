@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { TrainingPaces } from '@/lib/metrics/vdot';
 import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
-import { formatWeeklyVolumeTargets, type SessionBudget } from './format';
+import type { SessionBudget } from './format';
 import {
   PLAN_OUTPUT_BOUNDS,
   applyDerivedMeasures,
@@ -13,11 +13,8 @@ import {
   sessionPaceZone,
   mapPlanWeeksToSessions,
   planChunkJsonSchema,
+  planChunkOutputSchema,
   planChunkOutputSchemaFor,
-  planJsonSchema,
-  planJsonSchemaFor,
-  planOutputSchema,
-  planOutputSchemaFor,
   planReviewJsonSchema,
   planReviewOutputSchema,
   planUpdateChunkJsonSchema,
@@ -75,9 +72,16 @@ function week(days: number[], distancesKm?: number[]): PlanWeekOutput {
   };
 }
 
-describe('planOutputSchema', () => {
+/*
+ * Le contrat Zod des semaines et des séances, éprouvé à travers l'enveloppe qui
+ * lui survit : celle d'une **tranche**. L'enveloppe « plan entier d'un seul
+ * tenant » a disparu avec la bascule sur squelette (l'appli écrit le plan, elle
+ * ne le fait plus écrire), mais `planSessionSchema` est le même pour tout le
+ * monde — c'est lui que ces cas décrivent.
+ */
+describe('planChunkOutputSchema', () => {
   it('accepte une sortie minimale et laisse les champs facultatifs absents', () => {
-    const parsed = planOutputSchema.parse({
+    const parsed = planChunkOutputSchema.parse({
       summary: 'Bloc de 2 semaines.',
       weeks: [week([3, 7]), week([3, 7])],
     });
@@ -87,7 +91,7 @@ describe('planOutputSchema', () => {
   });
 
   it('refuse un jour hors de la semaine ISO', () => {
-    const result = planOutputSchema.safeParse({
+    const result = planChunkOutputSchema.safeParse({
       summary: 'x',
       weeks: [{ sessions: [session(8)] }],
     });
@@ -96,7 +100,7 @@ describe('planOutputSchema', () => {
   });
 
   it('refuse une allure cible aberrante', () => {
-    const result = planOutputSchema.safeParse({
+    const result = planChunkOutputSchema.safeParse({
       summary: 'x',
       weeks: [{ sessions: [session(3, { targetPaceSecPerKm: 30 })] }],
     });
@@ -105,14 +109,14 @@ describe('planOutputSchema', () => {
   });
 
   it('refuse un résumé vide : il porte la logique du plan', () => {
-    expect(planOutputSchema.safeParse({ summary: '', weeks: [week([7])] }).success).toBe(false);
+    expect(planChunkOutputSchema.safeParse({ summary: '', weeks: [week([7])] }).success).toBe(false);
   });
 });
 
-describe('planOutputSchema — déroulé structuré', () => {
+describe('planChunkOutputSchema — déroulé structuré', () => {
   /** Le déroulé tel que le modèle l'écrit : les champs sans valeur sont absents. */
   function parseSteps(steps: unknown) {
-    return planOutputSchema.safeParse({
+    return planChunkOutputSchema.safeParse({
       summary: 'x',
       weeks: [{ sessions: [{ day: 3, kind: 'Seuil', title: '3 × 8 min', steps }] }],
     });
@@ -151,7 +155,7 @@ describe('planOutputSchema — déroulé structuré', () => {
   });
 
   it('laisse `steps` absent sur une séance qui n’en porte pas', () => {
-    const parsed = planOutputSchema.parse({ summary: 'x', weeks: [week([7])] });
+    const parsed = planChunkOutputSchema.parse({ summary: 'x', weeks: [week([7])] });
 
     expect(parsed.weeks[0].sessions[0].steps).toBeUndefined();
   });
@@ -334,13 +338,13 @@ describe('resolveWeeklyTimeBudget', () => {
 
 describe('JSON Schema', () => {
   it('interdit les propriétés inventées à tous les niveaux', () => {
-    const json = JSON.stringify(planJsonSchema);
+    const json = JSON.stringify(planUpdateJsonSchema);
     expect(json).toContain('"additionalProperties":false');
-    expect(planJsonSchema.required).toEqual(['summary', 'weeks']);
+    expect(planUpdateJsonSchema.required).toEqual(['summary', 'weeks']);
   });
 
   it('déclare le déroulé sans type nullable, comme le reste du fichier', () => {
-    const json = JSON.stringify(planJsonSchema);
+    const json = JSON.stringify(planUpdateJsonSchema);
 
     // Un bloc exige ses étapes, une étape exige son rôle ; tout le reste est
     // facultatif par absence — c'est ce que la conversion GBNF traduit.
@@ -351,10 +355,9 @@ describe('JSON Schema', () => {
   });
 
   it('reste cohérent avec les bornes partagées par le schéma Zod', () => {
-    const weeks = planJsonSchema.properties as Record<string, Record<string, unknown>>;
-    expect(weeks.weeks.maxItems).toBe(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
-
     const update = planUpdateJsonSchema.properties as Record<string, Record<string, unknown>>;
+    expect(update.weeks.maxItems).toBe(PLAN_OUTPUT_BOUNDS.weeksPerPlan.max);
+
     expect(update.settings.additionalProperties).toBe(false);
     // `settings` reste facultatif : le modèle ne le rend que s'il change quelque chose.
     expect(planUpdateJsonSchema.required).toEqual(['summary', 'weeks']);
@@ -421,37 +424,11 @@ describe('JSON Schema — bornes du compte de séances', () => {
     expect(JSON.stringify(sessions.items)).toBe(
       JSON.stringify(
         (
-          (planJsonSchema.properties as Record<string, Record<string, unknown>>).weeks
+          (planUpdateJsonSchema.properties as Record<string, Record<string, unknown>>).weeks
             .items as Record<string, Record<string, Record<string, unknown>>>
         ).properties.sessions.items,
       ),
     );
-  });
-
-  it('impose le compte exact au plan produit d’un seul tenant', () => {
-    // Le format le plus courant (sous six semaines, pas de découpage) : rien n'y
-    // empêchait le modèle d'écrire la septième séance.
-    const schema = planJsonSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
-
-    expect(sessionsSchemaOf(schema)).toMatchObject({ minItems: 6, maxItems: 6 });
-    // L'enveloppe, elle, ne bouge pas : c'est le schéma d'une création, et le
-    // nombre de semaines y reste aux bornes générales.
-    expect(schema.required).toEqual(['summary', 'weeks']);
-    expect((schema.properties as Record<string, Record<string, unknown>>).weeks).toMatchObject({
-      minItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.min,
-      maxItems: PLAN_OUTPUT_BOUNDS.weeksPerPlan.max,
-    });
-  });
-
-  it('garde des bornes souples quand le plan porte la semaine entamée', () => {
-    // Même limite d'uniformité que pour une tranche : les items du tableau sont
-    // décrits une fois pour toutes les semaines.
-    const schema = planJsonSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
-
-    expect(sessionsSchemaOf(schema)).toMatchObject({
-      minItems: PLAN_OUTPUT_BOUNDS.sessionsPerWeek.min,
-      maxItems: 6,
-    });
   });
 
   it('laisse les enveloppes d’ajustement libres de leur compte de séances', () => {
@@ -485,29 +462,6 @@ describe('planChunkOutputSchemaFor', () => {
     expect(schema.safeParse(chunkOf(2)).success).toBe(true);
     expect(schema.safeParse(chunkOf(6)).success).toBe(true);
     expect(schema.safeParse(chunkOf(7)).success).toBe(false);
-  });
-});
-
-describe('planOutputSchemaFor', () => {
-  /** Un plan d'une semaine de `sessions` séances. */
-  function planOf(sessions: number) {
-    return { summary: 'x', weeks: [week([1, 2, 3, 4, 5, 6, 7].slice(0, sessions))] };
-  }
-
-  it('refuse le compte que la grammaire interdit, quand un provider l’ignore', () => {
-    const schema = planOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: false });
-
-    expect(schema.safeParse(planOf(6)).success).toBe(true);
-    expect(schema.safeParse(planOf(7)).success).toBe(false);
-    expect(schema.safeParse(planOf(5)).success).toBe(false);
-  });
-
-  it('accepte une semaine plus courte quand le plan porte la semaine entamée', () => {
-    const schema = planOutputSchemaFor({ sessionsPerWeek: 6, hasStartedWeek: true });
-
-    expect(schema.safeParse(planOf(2)).success).toBe(true);
-    expect(schema.safeParse(planOf(6)).success).toBe(true);
-    expect(schema.safeParse(planOf(7)).success).toBe(false);
   });
 });
 
@@ -677,6 +631,64 @@ describe('validatePlanBusinessRules', () => {
       'Volumes hebdomadaires invérifiables : chaque séance déclare sa distance `distanceKm`, ' +
         'footings et récupérations compris — il en manque semaine 1.',
     ]);
+  });
+
+  /*
+   * La semaine de la course, quand la fenêtre en déclare une (`raceDay`).
+   *
+   * Elle se juge comme une **première semaine entamée**, et pour la même raison :
+   * il y a des jours sur lesquels elle ne peut rien poser. Le jour J la ferme,
+   * exactement comme le jour de reprise l'ouvre — donc un maximum de séances au
+   * lieu d'un compte exact, et rien après le jour J.
+   *
+   * Ce que ça répare, mesuré avant : un marathon un lundi à 6 séances recevait
+   * 5 séances et 23,3 km **après** la course, dont une le lendemain de l'épreuve.
+   */
+  describe('semaine de course', () => {
+    /** Course le mercredi de la dernière semaine — un jour J qui ampute vraiment. */
+    const WITH_RACE: PlanExpectations = { ...EXPECTED, raceDay: 3 };
+
+    it('accepte une semaine de course qui porte moins de séances que le réglage', () => {
+      // Deux séances au lieu de trois : la semaine s'arrête au mercredi, elle
+      // n'a que trois jours à remplir et en garde un de repos avant le jour J.
+      const weeks = [week([2, 4, 7], [8, 10, 16]), week([1, 3], [6, 12])];
+
+      expect(validatePlanBusinessRules(weeks, WITH_RACE)).toEqual([]);
+    });
+
+    it('refuse une séance programmée après le jour J', () => {
+      const weeks = [week([2, 4, 7], [8, 10, 16]), week([1, 3, 4], [6, 12, 8])];
+
+      expect(validatePlanBusinessRules(weeks, WITH_RACE)).toContain(
+        'Semaine 2 : aucune séance après le mercredi, jour de la course — la séance placée le jeudi est à retirer.',
+      );
+    });
+
+    it('plafonne quand même son nombre de séances', () => {
+      const weeks = [week([2, 4, 7], [8, 10, 16]), week([1, 2, 3], [4, 4, 12])];
+
+      expect(
+        validatePlanBusinessRules([weeks[0], { sessions: [...weeks[1].sessions, session(3)] }], {
+          ...WITH_RACE,
+          // Quatre séances sur une semaine qui n'en admet que trois.
+          sessionsPerWeek: 3,
+        }),
+      ).toContain('Semaine 2 (semaine de course) : 4 séances, alors que le maximum est 3.');
+    });
+
+    /*
+     * Le message, et lui seul : la course qui tombe le jour de sortie longue
+     * habituel — un dimanche, le cas le plus fréquent — rendait `hardDay` égal à
+     * `longRunDay`, et la violation parlait alors de « jour de la sortie
+     * longue » sur la semaine de la course.
+     */
+    it('nomme la course même quand elle tombe le jour de sortie longue habituel', () => {
+      const weeks = [week([2, 4, 7], [8, 10, 16]), week([1, 2, 4], [6, 6, 12])];
+
+      expect(validatePlanBusinessRules(weeks, { ...EXPECTED, raceDay: 7 })).toContain(
+        'Semaine 2 : aucune séance le dimanche, jour de la course.',
+      );
+    });
   });
 
   describe('déroulé des séances', () => {
@@ -3274,23 +3286,6 @@ function violationsForCase(
   );
 }
 
-/** Une durée telle que le prompt l'écrit (`3 h 35`, `45 min`), relue en minutes. */
-function parsePrintedMinutes(text: string): number {
-  const withHours = /^(\d+) h (\d+)$/.exec(text);
-  if (withHours !== null) return Number(withHours[1]) * 60 + Number(withHours[2]);
-  const minutes = /^(\d+) min$/.exec(text);
-  // Reste `N s`, que `formatDuration` n'écrit que sous la minute : zéro minute.
-  return minutes === null ? 0 : Number(minutes[1]);
-}
-
-/** L'inverse de `formatWeeklyVolumeTargets` : ce que le modèle lit, en nombres. */
-function parsePrintedTargets(line: string): { targetKm: number; targetMinutes: number }[] {
-  return [...line.matchAll(/S\d+ ~([\d,]+) km \(≈([^)]+)\)/g)].map((match) => ({
-    targetKm: Number(match[1].replace(',', '.')),
-    targetMinutes: parsePrintedMinutes(match[2]),
-  }));
-}
-
 /**
  * Le test qui porte tout le chantier : un plan qui **applique les cibles** ne
  * viole aucune règle de volume, quelle que soit la configuration.
@@ -3304,38 +3299,6 @@ describe('weeklyVolumeTargets × validatePlanBusinessRules', () => {
   it('produit des cibles qu’aucune règle de volume ne refuse', () => {
     const failures = volumeCases()
       .map((testCase) => ({ testCase, violations: violationsForCase(testCase, testCase.targets) }))
-      .filter(({ violations }) => violations.length > 0)
-      .map(({ testCase, violations }) => `${testCase.label} → ${violations.join(' | ')}`);
-
-    expect(failures).toEqual([]);
-  });
-
-  /**
-   * Le même balayage, mais sur les chiffres **tels que le prompt les imprime**.
-   *
-   * C'est le seul contrat qui compte vraiment : le modèle ne voit pas les cibles
-   * en flottants, il voit une ligne de texte, et le plan le plus obéissant qu'il
-   * puisse écrire est celui qui recopie cette ligne. Un arrondi d'affichage qui
-   * mange la marge d'un dixième laissée sous les plafonds (`floorKm`) refuse ce
-   * plan-là — c'est exactement ce qu'un arrondi au kilomètre entier au-dessus de
-   * 10 km faisait, sur 2 716 des 4 860 combinaisons.
-   */
-  it('produit des cibles que le prompt imprime sans les rendre fautives', () => {
-    const cases = volumeCases();
-    const printed = cases.map((testCase) =>
-      parsePrintedTargets(formatWeeklyVolumeTargets(testCase.targets)),
-    );
-
-    // Une ligne mal relue ferait passer le test sur des plans vides.
-    expect(printed.map((weeks) => weeks.length)).toEqual(
-      cases.map((testCase) => testCase.targets.length),
-    );
-
-    const failures = cases
-      .map((testCase, index) => ({
-        testCase,
-        violations: violationsForCase(testCase, printed[index]),
-      }))
       .filter(({ violations }) => violations.length > 0)
       .map(({ testCase, violations }) => `${testCase.label} → ${violations.join(' | ')}`);
 

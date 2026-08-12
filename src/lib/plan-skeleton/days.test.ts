@@ -40,6 +40,7 @@ describe('placeSessionDays', () => {
       longRunDay: 6,
       qualityCount: 2,
       fromDay: 1,
+      toDay: 7,
     });
 
     expect(placement.longRunDay).toBe(6);
@@ -53,6 +54,7 @@ describe('placeSessionDays', () => {
         longRunDay: 7,
         qualityCount: Math.min(2, Math.max(0, sessionsPerWeek - 2)),
         fromDay: 1,
+        toDay: 7,
       });
       const days = allDays(placement);
       expect(days, `${sessionsPerWeek} séances`).toHaveLength(sessionsPerWeek);
@@ -74,6 +76,7 @@ describe('placeSessionDays', () => {
             longRunDay,
             qualityCount,
             fromDay: 1,
+            toDay: 7,
           });
           expect(
             smallestHardGap(placement),
@@ -94,6 +97,7 @@ describe('placeSessionDays', () => {
       longRunDay: 3,
       qualityCount: 2,
       fromDay: 3,
+      toDay: 7,
     });
 
     expect(placement.longRunDay).toBe(3);
@@ -145,6 +149,7 @@ describe('placeSessionDays', () => {
               longRunDay,
               qualityCount,
               fromDay,
+              toDay: 7,
             });
 
             const free: number[] = [];
@@ -172,7 +177,7 @@ describe('placeSessionDays', () => {
     for (let sessionsPerWeek = 1; sessionsPerWeek <= 7; sessionsPerWeek += 1) {
       for (let longRunDay = 1; longRunDay <= 7; longRunDay += 1) {
         for (let fromDay = 1; fromDay <= 7; fromDay += 1) {
-          const params = { sessionsPerWeek, longRunDay, qualityCount: 2, fromDay };
+          const params = { sessionsPerWeek, longRunDay, qualityCount: 2, fromDay, toDay: 7 };
           expect(placeSessionDays(params)).toEqual(placeSessionDays(params));
         }
       }
@@ -188,6 +193,7 @@ describe('placeSessionDays', () => {
             longRunDay,
             qualityCount: 2,
             fromDay,
+            toDay: 7,
           });
           for (const day of allDays(placement)) {
             expect(day, `reprise jour ${fromDay}`).toBeGreaterThanOrEqual(fromDay);
@@ -202,6 +208,7 @@ describe('placeSessionDays', () => {
         longRunDay: 7,
         qualityCount: 2,
         fromDay: 5,
+        toDay: 7,
       });
       expect(allDays(placement)).toEqual([5, 6, 7]);
     });
@@ -212,6 +219,7 @@ describe('placeSessionDays', () => {
         longRunDay: 2,
         qualityCount: 0,
         fromDay: 4,
+        toDay: 7,
       });
       expect(placement.longRunDay).toBeNull();
       expect(placement.easyDays).toEqual([4, 5, 6, 7]);
@@ -223,14 +231,53 @@ describe('placeSessionDays', () => {
         longRunDay: 7,
         qualityCount: 0,
         fromDay: 5,
+        toDay: 7,
       });
       expect(placement.longRunDay).toBe(7);
       expect(placement.easyDays).toEqual([5, 6]);
     });
   });
 
+  /*
+   * La semaine de course : le jour J ferme la semaine.
+   *
+   * Sans cette borne, mesuré sur un marathon un lundi à 6 séances, la semaine de
+   * course portait 5 séances et 23,3 km **après** la course, dont une le
+   * lendemain de l'épreuve. La borne est symétrique de celle du jour de reprise,
+   * et se lit dans la même fenêtre `[fromDay, toDay]`.
+   */
+  describe('sur la semaine de la course', () => {
+    it('ne place jamais de séance après le jour J', () => {
+      for (let toDay = 1; toDay <= 7; toDay += 1) {
+        const placement = placeSessionDays({
+          sessionsPerWeek: 6,
+          longRunDay: toDay,
+          qualityCount: 0,
+          fromDay: 1,
+          toDay,
+        });
+        for (const day of allDays(placement)) {
+          expect(day, `jour J ${toDay}`).toBeLessThanOrEqual(toDay);
+        }
+        // Le jour J lui-même reste porté : c'est la course.
+        expect(placement.longRunDay, `jour J ${toDay}`).toBe(toDay);
+      }
+    });
+
+    it('plafonne le nombre de séances aux jours qui précèdent le jour J', () => {
+      const placement = placeSessionDays({
+        sessionsPerWeek: 6,
+        longRunDay: 3,
+        qualityCount: 0,
+        fromDay: 1,
+        toDay: 3,
+      });
+      expect(allDays(placement)).toEqual([1, 2, 3]);
+    });
+  });
+
   it('ne place rien quand aucune séance n’est demandée', () => {
-    expect(placeSessionDays({ sessionsPerWeek: 0, longRunDay: 7, qualityCount: 2, fromDay: 1 }))
+    expect(placeSessionDays({ sessionsPerWeek: 0, longRunDay: 7, qualityCount: 2, fromDay: 1, toDay: 7 }))
       .toEqual({ longRunDay: null, qualityDays: [], easyDays: [] });
   });
 });

@@ -1,24 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
-import { PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
+import { InvalidPlanError, PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import { REFERENCE_DISTANCES, trainingPacesFromRace } from '@/lib/metrics/vdot';
 
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
-import { weeklyVolumeTargets } from './plan-schema';
 import {
   MAX_PLAN_WEEKS,
   MIN_RACE_PLAN_WEEKS,
-  buildPlanMessages,
   buildPlanUpdateMessages,
   buildSchemaIssuesMessage,
   buildViolationsMessage,
   estimatePlanChars,
   generatePlan,
+  InvalidGeneratedPlanError,
   planChunks,
   planProgressPercent,
+  planSystemPrompt,
   planWindow,
   remainingPlanWindow,
   updatePlanFromInstruction,
@@ -52,6 +52,34 @@ const { syncPlanToIntervalsSafely } = vi.hoisted(() => ({
  * branchement et le fait qu'il passe par `after`, pas le moment de l'exécution.
  */
 const { scheduleAfter } = vi.hoisted(() => ({ scheduleAfter: vi.fn() }));
+
+/**
+ * Le crochet qui permet de **forcer une violation métier** sur un plan écrit par
+ * l'appli.
+ *
+ * Il n'y a pas d'autre moyen : depuis la bascule sur squelette, une création
+ * écrit ses volumes elle-même et le remplissage ramène chaque créneau sur son
+ * budget au mètre près — aucune entrée de test ne peut produire un plan que
+ * `validatePlanBusinessRules` refuse. Or c'est précisément ce cas-là que la
+ * dégradation en escalier existe pour traiter, et le laisser non éprouvé
+ * reviendrait à ne pas l'avoir écrite.
+ *
+ * Rendre `undefined` (le défaut) laisse la **vraie** règle décider : tous les
+ * autres tests du fichier voient donc le module réel.
+ */
+const { businessRuleViolations } = vi.hoisted(() => ({ businessRuleViolations: vi.fn() }));
+
+vi.mock('./plan-schema', async () => {
+  const actual = await vi.importActual<typeof import('./plan-schema')>('./plan-schema');
+  return {
+    ...actual,
+    validatePlanBusinessRules: (
+      ...args: Parameters<typeof actual.validatePlanBusinessRules>
+    ): string[] =>
+      (businessRuleViolations(...args) as string[] | undefined) ??
+      actual.validatePlanBusinessRules(...args),
+  };
+});
 
 vi.mock('./client', () => ({ chatCompletionJson }));
 vi.mock('next/server', () => ({ after: scheduleAfter }));
@@ -178,48 +206,6 @@ const CONFORMING_WEEK = {
   ],
 };
 
-/**
- * La même semaine, à l'échelle d'une **première semaine entamée un mardi** : la
- * cible y est proratée sur six jours (50,5 × 6/7 ≈ 43,2 km).
- */
-const CONFORMING_PARTIAL_WEEK = {
-  sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 13, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
-  ],
-};
-
-/**
- * Les deux semaines d'un plan `REQUEST` conforme, dans l'ordre : `REQUEST`
- * démarre aujourd'hui (un mardi), sa première semaine est donc entamée et porte
- * une cible plus basse que la seconde.
- */
-const CONFORMING_WEEKS = [CONFORMING_PARTIAL_WEEK, CONFORMING_WEEK];
-
-/**
- * Une **première semaine entamée** conforme : rien avant le jeudi, et la sortie
- * longue toujours le dimanche.
- */
-const PARTIAL_FIRST_WEEK = {
-  sessions: [
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 16 },
-  ],
-};
-
-/**
- * La même semaine, dont le footing du mardi porte une allure délirante :
- * 10:00/km pour une athlète qui court en 5:24/km (SNAPSHOT).
- */
-const ABERRANT_PACE_WEEK = {
-  sessions: [
-    { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10, targetPaceSecPerKm: 600 },
-    { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 13, steps: THRESHOLD_STEPS },
-    { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
-  ],
-};
-
 /** Une semaine qui viole les règles : deux séances, aucune le dimanche. */
 const BROKEN_WEEK = {
   sessions: [
@@ -227,6 +213,98 @@ const BROKEN_WEEK = {
     { day: 4, kind: 'Seuil', title: '3 × 8 min', distanceKm: 10 },
   ],
 };
+
+/*
+ * Le coach simulé de la **création**.
+ *
+ * Depuis la bascule sur squelette, une génération n'appelle plus le modèle que
+ * deux fois par nature : une par créneau de qualité (`quality_session`) et une
+ * pour le résumé (`plan_summary`). Le doublon ci-dessous répond aux deux, sans
+ * réseau et sans horloge — c'est le seul moyen d'éprouver le chemin de bout en
+ * bout, et c'est ce que la tâche exige.
+ */
+
+/** Ce que le service envoie, réduit à ce que le doublon consomme. */
+type CoachCall = {
+  schemaName: string;
+  messages: { role: string; content: string }[];
+  onProgress?: (receivedChars: number) => void;
+};
+
+/** Une étape normalisée, telle que le contrat la porte : sept clés, `null` pour absent. */
+function fillStep(role: PlanStepRole, distanceM: number): PlanStep {
+  return step(role, { distanceM });
+}
+
+/**
+ * Le budget que le prompt d'un créneau annonce, en km.
+ *
+ * Relu dans le message plutôt que passé de côté : c'est exactement ce que le
+ * modèle voit, et un doublon qui devinerait le budget autrement ne prouverait
+ * rien du contrat entre le squelette et le remplissage.
+ */
+function slotBudgetKm(call: CoachCall): number {
+  const asked = /compris : ([\d,]+) km/.exec(call.messages[1].content);
+  if (asked === null) throw new Error(`budget introuvable dans : ${call.messages[1].content}`);
+  return Number(asked[1].replace(',', '.'));
+}
+
+/**
+ * Le déroulé qu'un coach compétent rendrait : échauffement, quatre efforts avec
+ * leur récupération, retour au calme — et la somme **tombe pile sur le budget**,
+ * le retour au calme absorbant le reliquat des divisions.
+ */
+function qualityOutputFor(budgetKm: number) {
+  const totalM = Math.round(budgetKm * 1_000);
+  const warmupM = Math.round(totalM * 0.25);
+  const cooldownM = Math.round(totalM * 0.25);
+  const bodyM = totalM - warmupM - cooldownM;
+  const runM = Math.round((bodyM * 0.6) / 4);
+  const recoverM = Math.round((bodyM * 0.4) / 4);
+
+  return {
+    title: 'Séance écrite par le coach',
+    steps: [
+      { repeat: 1, steps: [fillStep('warmup', warmupM)] },
+      { repeat: 4, steps: [fillStep('run', runM), fillStep('recover', recoverM)] },
+      {
+        repeat: 1,
+        steps: [fillStep('cooldown', cooldownM + bodyM - 4 * (runM + recoverM))],
+      },
+    ],
+  };
+}
+
+/** Le résumé que le coach simulé rend, reconnaissable dans les assertions. */
+const COACH_SUMMARY = 'Huit semaines pour arriver frais le jour J.';
+
+/**
+ * Le coach simulé : il remplit chaque créneau au budget demandé et rédige le
+ * résumé. Aucun autre schéma ne devrait lui parvenir sur ce chemin — s'il en
+ * arrive un, c'est le test qui doit le dire.
+ */
+function coachAnswers(): void {
+  chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+    if (call.schemaName === 'plan_summary') return { summary: COACH_SUMMARY };
+    if (call.schemaName === 'quality_session') return qualityOutputFor(slotBudgetKm(call));
+    throw new Error(`schéma inattendu sur le chemin de création : ${call.schemaName}`);
+  });
+}
+
+/** Les séances écrites en base par la dernière génération. */
+type WrittenSession = {
+  scheduledOn: string;
+  kind: string;
+  title: string;
+  volumeM: number | null;
+  durationS: number | null;
+  targetPaceSecPerKm: number | null;
+  steps: { repeat: number; steps: PlanStep[] }[] | null;
+};
+
+function writtenSessions(): WrittenSession[] {
+  return dal.createDraftPlanWithSessions.mock.calls[0][0].sessions as WrittenSession[];
+}
 
 /**
  * Les rejets du modèle sont journalisés : la console est muselée pour tous les
@@ -252,7 +330,13 @@ beforeEach(() => {
   // Un mardi : un plan sans date de départ commence donc ce jour-là, sur la
   // semaine du lundi 10 août 2026.
   vi.setSystemTime(new Date('2026-08-11T09:00:00.000Z'));
-  vi.clearAllMocks();
+  // `reset` et non `clear` : ce dernier n'efface que les appels enregistrés, pas
+  // les implémentations. Le crochet qui l'impose est
+  // `businessRuleViolations.mockReturnValue([VIOLATION])`, posé par les cas de
+  // dégradation en escalier : sous `clearAllMocks`, il survit au test et force
+  // une violation sur **tous** les suivants — vérifié par exécution, les 30
+  // échecs sont tous situés après lui, et aucun avant.
+  vi.resetAllMocks();
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
   requireAi.mockResolvedValue(undefined);
@@ -505,22 +589,26 @@ describe('remainingPlanWindow', () => {
   });
 });
 
-describe('buildPlanMessages', () => {
-  const messages = buildPlanMessages(
-    { ...REQUEST, goalType: 'race', goalText: '10 km sous 50 min', raceDate: '2026-09-13', weeklyTimeMinutes: 300 },
-    { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-    SNAPSHOT,
-  );
+/**
+ * La méthodologie du coach, telle qu'elle part au modèle.
+ *
+ * Le prompt de **plan entier** a disparu avec la bascule sur squelette : une
+ * création n'appelle plus le modèle que séance par séance
+ * (`quality-fill.ts`), et l'appli écrit tout le reste. Ce message système, lui,
+ * reste entier — c'est celui de l'ajustement (`buildPlanUpdateMessages`) et de
+ * la révision automatique (`review-service.ts`), deux chemins qui font toujours
+ * réécrire des semaines complètes. Les cas ci-dessous étaient portés par
+ * `buildPlanMessages` ; ils jugent désormais leur source directement.
+ */
+describe('planSystemPrompt', () => {
+  const system = planSystemPrompt('intermediate', 'race', null, undefined);
 
-  it('pose le rôle et les principes dans le message système', () => {
-    expect(messages[0].role).toBe('system');
-    expect(messages[0].content).toContain('coach de course à pied');
-    expect(messages[0].content).toContain('10 %');
+  it('pose le rôle et les principes', () => {
+    expect(system).toContain('coach de course à pied');
+    expect(system).toContain('10 %');
   });
 
   it('encode la méthodologie : polarisation, typologie, progression, affûtage', () => {
-    const system = messages[0].content;
-
     // Distribution polarisée et espacement des séances dures.
     expect(system).toContain('80 %');
     expect(system).toContain('Jamais deux jours de suite');
@@ -540,8 +628,6 @@ describe('buildPlanMessages', () => {
    * conforme, et une génération de plusieurs minutes est perdue.
    */
   it('donne les seuils de volume exacts que la validation vérifie', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('PROGRESSION DU VOLUME');
     expect(system).toContain("n'augmente jamais de plus de 12 %");
     expect(system).toContain('TOUTE séance déclare sa distance');
@@ -560,218 +646,21 @@ describe('buildPlanMessages', () => {
    * Le budget temps : une limite dure, et dite comme telle.
    *
    * Constaté en production : 2 h par semaine déclarées, ~3 h 30 planifiées. La
-   * contrainte figurait bien dans la demande (« 2 h 00 d'entraînement par
-   * semaine au plus »), mais rien ne disait au modèle qu'elle serait vérifiée —
-   * ni ce qui devait céder quand elle ne tenait pas.
+   * contrainte figurait bien dans la demande, mais rien ne disait au modèle
+   * qu'elle serait vérifiée — ni ce qui devait céder quand elle ne tenait pas.
    */
   it('annonce le temps hebdomadaire comme une limite dure vérifiée', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('limite DURE, vérifiée semaine par semaine');
     expect(system).toContain("la somme des `durationMin` d'une semaine");
     expect(system).toContain("c'est le volume qui baisse");
-    // Et la contrainte elle-même figure dans la demande, chiffrée.
-    expect(messages[1].content).toContain("5 h 00 d'entraînement par semaine au plus");
-  });
-
-  /**
-   * Le volume de départ : le modèle doit viser juste du premier coup.
-   *
-   * Constaté en production : 25 km la première semaine, chez une athlète dont
-   * les quatre dernières font 9 à 13,6 km. Ce plafond-là ne s'annonce plus comme
-   * une règle à appliquer — la première cible le porte déjà, chiffrée.
-   */
-  it('ancre la première cible sur le volume réel récent, sans énoncer de plafond', () => {
-    // Meilleure semaine du snapshot : 42,1 km → max(42,1 × 1,2 ; 42,1 + 3) = 50,5.
-    expect(messages[1].content).toContain('S1 ~50,5 km');
-    expect(messages[1].content).not.toContain('Volume de départ');
-  });
-
-  /**
-   * Le cœur du chantier : ce que le modèle reçoit n'est plus une règle de
-   * progression à appliquer lui-même, mais le chiffre de chaque semaine. Un plan
-   * de 16 semaines à 6 séances lui faisait ignorer le budget onze semaines
-   * d'affilée ; l'arithmétique est désormais faite.
-   */
-  it('donne le volume de chaque semaine, temps compris, sur une seule ligne', () => {
-    const line = messages[1].content
-      .split('\n')
-      .find((row) => row.startsWith('Volumes hebdomadaires cibles'));
-
-    // Quatre semaines, dont deux d'affûtage (course) : la montée puis la baisse.
-    // Au dixième, toujours : c'est le chiffre exact que le modèle doit recopier
-    // (cf. `formatTargetKm`), l'entier lui ferait franchir les plafonds.
-    expect(line).toBe(
-      'Volumes hebdomadaires cibles (à ±10 %) : S1 ~50,5 km (≈4 h 33) · S2 ~52,7 km (≈4 h 45) · ' +
-        'S3 ~39,5 km (≈3 h 33) · S4 ~28,9 km (≈2 h 36)',
-    );
-  });
-
-  /**
-   * Le cran d'après : la cible seule laissait au modèle une division qu'il
-   * posait de travers — cibles de 27 à 37 km, semaines écrites de 44 à 70. Le
-   * prompt lui donne désormais l'arithmétique faite, séance par séance.
-   */
-  it('décompose chaque cible entre les séances, une ligne par semaine', () => {
-    const rows = messages[1].content
-      .split('\n')
-      .filter((row) => row.includes('SL dim'));
-
-    // Trois séances (REQUEST) : la sortie longue le dimanche, une séance de
-    // qualité (intermédiaire, ramené à une seule faute de place) et un footing.
-    // Les durées accompagnent les kilomètres partout sauf sur la qualité, dont
-    // le temps tient à la structure et non au kilométrage — et elles sortent de
-    // la même allure que les cibles hebdomadaires (5:24/km ici).
-    expect(rows).toEqual([
-      'S1 (~50,5 km) : SL dim ~26,0 km ≈ 2 h 20 · qualité ~8,0 km · footing ~16,5 km ≈ 1 h 29',
-      'S2 (~52,7 km) : SL dim ~27,0 km ≈ 2 h 26 · qualité ~8,5 km · footing ~17,2 km ≈ 1 h 33',
-      'S3 (~39,5 km) : SL dim ~20,5 km ≈ 1 h 51 · qualité ~6,5 km · footing ~12,5 km ≈ 1 h 08',
-      'S4 (~28,9 km) : SL dim ~15,0 km ≈ 1 h 21 · qualité ~4,5 km · footing ~9,4 km ≈ 51 min',
-    ]);
-  });
-
-  it('ne décompose pas la première semaine entamée : son compte de séances est inconnu', () => {
-    const user = buildPlanMessages(
-      REQUEST,
-      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 4, firstWeekFromDay: 4 },
-      SNAPSHOT,
-    )[1].content;
-
-    // Sa cible reste annoncée — c'est la décomposition, et elle seule, qui
-    // n'aurait aucun sens sur une semaine dont on ignore combien de séances elle
-    // portera (« 3 au plus »).
-    expect(user).toContain('S1 ~');
-    expect(user).not.toContain('S1 (~');
-    expect(user).toContain('S2 (~');
-  });
-
-  /**
-   * Le constat qui a motivé la ligne : 6 séances pour 4 h, cibles de 19 à 31 km,
-   * et le modèle écrit 40 à 49 km deux tentatives de suite. Son prior — « une
-   * sortie dure 45 à 75 min » — résiste aux kilomètres ; il faut lui dire en
-   * toutes lettres que court est voulu.
-   */
-  describe('séances courtes assumées', () => {
-    /** Une athlète qui revient de loin : 12 km la semaine dernière, et le budget ne borne rien. */
-    const RETURNING: TrainingSnapshotDto = {
-      ...SNAPSHOT,
-      weeks: [{ startsOn: '2026-08-03', distanceKm: 12, movingTimeS: 3_900, sessions: 3 }],
-    };
-
-    function userMessage(
-      overrides: Partial<PlanRequest>,
-      snapshot: TrainingSnapshotDto = SNAPSHOT,
-    ): string {
-      return buildPlanMessages(
-        { ...REQUEST, ...overrides },
-        { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-        snapshot,
-      )[1].content;
-    }
-
-    /*
-     * La moyenne se lit sur les cibles, jamais sur le budget brut : ce sont
-     * elles que la table juste au-dessus annonce, et elles sont plus basses que
-     * le budget. Annoncer 40 min pour des semaines qui en chiffrent 38 (ou 14)
-     * redonnerait au modèle exactement le prior qu'on lui retire.
-     */
-    it('annonce la moyenne des cibles quand c’est le budget qui les borne', () => {
-      // 4 h pour 6 séances feraient 40 min de budget brut ; les cibles, elles,
-      // sont plafonnées à 95 % du budget — 3 h 48 planifiées, soit 38 min.
-      expect(userMessage({ weeklyTimeMinutes: 240, sessionsPerWeek: 6 })).toContain(
-        "Tes séances font en moyenne ~38 min (3 h 48 par semaine pour 6 séances) : c'est court et " +
-          "c'est VOULU, le budget est serré — n'écris pas des sorties de 45 à 60 min par habitude, " +
-          'suis les durées indiquées ci-dessous.',
-      );
-    });
-
-    it('annonce la moyenne des cibles quand ce sont les kilomètres qui les bornent', () => {
-      // Mêmes 4 h déclarées, mais l'ancrage sur le réel tient les semaines très
-      // en dessous : c'est ce chiffre-là qu'il faut dire, pas le budget.
-      expect(
-        userMessage({ weeklyTimeMinutes: 240, sessionsPerWeek: 6 }, RETURNING),
-      ).toContain('Tes séances font en moyenne ~15 min (1 h 30 par semaine pour 6 séances)');
-    });
-
-    it('ne dit rien quand les séances sont d’une durée ordinaire', () => {
-      // 300 min pour 3 séances : 1 h 40 la séance, le modèle n'a besoin d'aucune
-      // permission pour l'écrire.
-      expect(userMessage({ weeklyTimeMinutes: 300, sessionsPerWeek: 3 })).not.toContain(
-        'Tes séances font en moyenne',
-      );
-      // 6 h pour 6 séances : les cibles dépassent l'heure de séance, on est
-      // au-dessus du seuil et une consigne de plus ne ferait que diluer les
-      // autres.
-      expect(userMessage({ weeklyTimeMinutes: 360, sessionsPerWeek: 6 })).not.toContain(
-        'Tes séances font en moyenne',
-      );
-    });
-
-    it('ne dit rien sans budget déclaré : il n’y a rien à assumer', () => {
-      expect(userMessage({ weeklyTimeMinutes: undefined, sessionsPerWeek: 6 })).not.toContain(
-        'Tes séances font en moyenne',
-      );
-    });
-
-    /**
-     * La régression qui a échappé aux cas ci-dessus, tous en semaine pleine : la
-     * ligne et la décomposition qui la suit doivent annoncer **la même** moyenne.
-     * La semaine entamée n'est pas décomposée (cf. `sessionBudgetWeeks`), et sa
-     * cible au prorata tirait la moyenne de la ligne sous celle des semaines
-     * imprimées — 11 minutes d'écart, dans le sens qui réarme le prior.
-     */
-    it('moyenne sur les seules semaines décomposées quand la première est entamée', () => {
-      // Départ un jeudi : la semaine 1 est entamée, la table commence donc à S2.
-      const user = buildPlanMessages(
-        { ...REQUEST, weeklyTimeMinutes: 240, sessionsPerWeek: 6 },
-        { startsOn: '2026-08-13', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 4 },
-        RETURNING,
-      )[1].content;
-
-      // La table ne décompose que S2 à S4, annoncées à 1 h 20, 1 h 26 et 1 h 33
-      // — moyenne 1 h 26. C'est ce chiffre-là que la ligne doit dire, et pas les
-      // 1 h 16 que la cible proratée de S1 (46 min) fabriquait.
-      expect(user).toContain(
-        'S1 ~8,5 km (≈46 min) · S2 ~14,9 km (≈1 h 20) · S3 ~16,0 km (≈1 h 26) · S4 ~17,2 km (≈1 h 33)',
-      );
-      expect(user).not.toContain('S1 (~');
-      expect(user).toContain(
-        'Tes séances font en moyenne ~14 min (1 h 26 par semaine pour 6 séances)',
-      );
-    });
-  });
-
-  it('dit dans le prompt que la tolérance n’est pas un espace de liberté', () => {
-    // La bande de ±10 % juge chaque semaine seule, la hausse et l'allégée jugent
-    // deux semaines l'une contre l'autre : s'y promener fait refuser le plan.
-    expect(messages[1].content).toContain(
-      'Vise CHAQUE cible au plus près — la tolérance de ±10 % est un filet, pas un espace de liberté',
-    );
   });
 
   it('impose une sortie compacte : chaque caractère se paie en contexte', () => {
     // Un plan de 16 semaines indenté pèse ~40 k caractères et sature le contexte
     // du serveur, qui coupe la sortie en plein objet.
-    expect(messages[0].content).toContain(
+    expect(system).toContain(
       '- Réponds en JSON compact, sans indentation ni retours à la ligne — chaque caractère compte.',
     );
-  });
-
-  it('part du volume prudent de son niveau quand l’historique est vide ou nul', () => {
-    const window = { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 };
-
-    // Quatre semaines à zéro ne disent pas « démarre à zéro » : elles ne disent
-    // rien, et un intermédiaire démarre alors à 24 km — 23,9 annoncés, le dixième
-    // de marge que `floorKm` garde sous chaque plafond.
-    expect(buildPlanMessages(REQUEST, window, { ...SNAPSHOT, weeks: [] })[1].content).toContain(
-      'S1 ~23,9 km',
-    );
-    expect(
-      buildPlanMessages(REQUEST, window, {
-        ...SNAPSHOT,
-        weeks: [{ startsOn: '2026-08-03', distanceKm: 0, movingTimeS: 0, sessions: 0 }],
-      })[1].content,
-    ).toContain('S1 ~23,9 km');
   });
 
   /**
@@ -782,8 +671,6 @@ describe('buildPlanMessages', () => {
    * une prescription chiffrée, pas une intention.
    */
   it('prescrit un bloc à allure objectif dans les sorties longues d’une préparation course', () => {
-    const system = messages[0].content;
-
     expect(system).toContain(
       "- À partir de la moitié du plan, la sortie longue contient un bloc à allure objectif (étape `run` avec note « allure objectif », 10 à 25 % de la distance de la sortie), qui s'allonge de semaine en semaine. L'affûtage le raccourcit sans le supprimer.",
     );
@@ -795,23 +682,17 @@ describe('buildPlanMessages', () => {
   it('ne prescrit pas de bloc à allure objectif sur un objectif libre', () => {
     // Sans échéance, il n'y a pas d'allure objectif à travailler : la prescrire
     // ferait fabriquer une course au modèle.
-    const system = buildPlanMessages(
-      REQUEST,
-      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-      SNAPSHOT,
-    )[0].content;
+    const free = planSystemPrompt('intermediate', 'free', null, undefined);
 
-    expect(system).not.toContain('À partir de la moitié du plan');
+    expect(free).not.toContain('À partir de la moitié du plan');
     // Le reste de la section PROGRESSION, lui, ne bouge pas.
-    expect(system).toContain("La spécificité croît vers l'objectif");
+    expect(free).toContain("La spécificité croît vers l'objectif");
   });
 
   it('impose la structure des séances de qualité et le format des étapes', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('`steps`');
     expect(system).toContain('échauffement progressif de 10 à 20 min');
-    expect(system).toContain("retour au calme de 5 à 10 min");
+    expect(system).toContain('retour au calme de 5 à 10 min');
     expect(system).toContain("role: 'recover'");
     // Une mesure, une cible : les invariants du contrat, dits au modèle.
     expect(system).toContain('jamais les deux');
@@ -822,15 +703,11 @@ describe('buildPlanMessages', () => {
     // La faute qui revient à chaque reprise en production : l'étape de
     // récupération d'un bloc répété, écrite avec distance ET durée, alors que
     // l'interdiction est déjà énoncée. Un petit modèle recopie un exemple.
-    const system = messages[0].content;
-
     expect(system).toContain('{ "role": "recover", "durationS": 120 }');
     expect(system).toContain('une mesure, jamais les deux');
   });
 
   it('ancre les allures sur une référence dite pour ce qu’elle est : une allure d’endurance', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('Allure moyenne des dernières sorties');
     expect(system).toContain("Ce n'est pas une allure de tempo");
     expect(system).toContain('endurance fondamentale et sortie longue : référence + 0 à 15 s/km');
@@ -841,8 +718,6 @@ describe('buildPlanMessages', () => {
   });
 
   it('ne présente jamais le repos comme une séance', () => {
-    const system = messages[0].content;
-
     // Une séance est une sortie : « ou repos » poussait le modèle à écrire un
     // jour de repos comme une séance, donc à lui inventer une distance.
     expect(system).toContain('« Récupération » : footing court très souple.');
@@ -850,15 +725,11 @@ describe('buildPlanMessages', () => {
   });
 
   it('confronte un objectif chiffré aux données, sans s’y soumettre', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('« 10 km sous 50 min » vaut 5:00/km');
     expect(system).toContain('le plan reste ancré sur les données');
   });
 
   it('dérive les allures des seules données du snapshot, et sait se taire', () => {
-    const system = messages[0].content;
-
     expect(system).toContain('maxima prudents');
     // Donnée manquante : on cible par zone cardiaque, et on le dit.
     expect(system).toContain("Si l'allure de référence est inconnue");
@@ -869,94 +740,18 @@ describe('buildPlanMessages', () => {
   it('interdit explicitement les miles : un modèle anglophone y glisse tout seul', () => {
     // Une allure « 10:00 » pensée en min/mile devient un 10:00/km délirant une
     // fois relue en métrique — le cas constaté en production.
-    expect(messages[0].content).toContain(
+    expect(system).toContain(
       "Tu travailles EXCLUSIVEMENT en système métrique : distances en mètres et en kilomètres, allures en secondes par kilomètre. Jamais de miles, jamais de min/mile — 10:00/mile n'est pas une allure de ce plan.",
     );
   });
 
   it('exige la mesure de séance en plus du déroulé, pour que les volumes se comparent', () => {
-    expect(messages[0].content).toContain(
+    expect(system).toContain(
       'Toute séance qui porte un `steps` déclare AUSSI sa distance totale estimée au niveau de la séance',
     );
   });
 
-  it('porte objectif, fenêtre et contraintes en toutes lettres', () => {
-    const user = messages[1].content;
-
-    expect(user).toContain('« 10 km sous 50 min »');
-    expect(user).toContain('dimanche 13 septembre 2026');
-    expect(user).toContain('4 semaines, du lundi 17 août 2026 au dimanche 13 septembre 2026');
-    expect(user).toContain('3 séances par semaine');
-    expect(user).toContain('sortie longue le dimanche');
-    expect(user).toContain("5 h 00 d'entraînement par semaine au plus");
-  });
-
-  it('annonce une première semaine entamée, son premier jour et son plafond', () => {
-    // Départ le jeudi 13 août : la grille reste ancrée au lundi 10, et les
-    // trois premiers jours du plan n'existent pas.
-    const user = buildPlanMessages(
-      REQUEST,
-      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
-      SNAPSHOT,
-    )[1].content;
-
-    expect(user).toContain('2 semaines, du jeudi 13 août 2026 au dimanche 23 août 2026');
-    expect(user).toContain('weeks[0] est la semaine du lundi 10 août 2026.');
-    expect(user).toContain(
-      "weeks[0] est déjà entamée : elle ne porte de séances qu'à partir du jeudi (day ≥ 4), et en compte 3 au plus.",
-    );
-    expect(user).toContain('Sa sortie longue reste le dimanche.');
-    expect(user).toContain('Les semaines suivantes comptent exactement 3 séances.');
-    // Sans budget déclaré, il n'y a pas de plafond à annoncer.
-    expect(user).not.toContain('au prorata');
-  });
-
-  it('annonce le budget de la semaine entamée, ramené au prorata des jours restants', () => {
-    // Départ le jeudi : quatre jours restants, soit 4/7 des 2 h déclarées. Sans
-    // cette ligne, le modèle produisait une semaine entamée à la mesure du
-    // budget plein, refusée ensuite par un plafond qu'il ne pouvait pas deviner.
-    const user = buildPlanMessages(
-      { ...REQUEST, weeklyTimeMinutes: 120 },
-      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
-      SNAPSHOT,
-    )[1].content;
-
-    expect(user).toContain(
-      'Le budget de la semaine entamée est ramené à 1 h 08 au prorata des jours restants.',
-    );
-  });
-
-  it('n’annonce aucun plafond quand la semaine entamée est trop courte pour en porter un', () => {
-    // Départ le samedi : deux jours restants, la règle de budget ne s'applique
-    // pas à cette semaine-là — annoncer 34 min réclamerait l'impossible.
-    const user = buildPlanMessages(
-      { ...REQUEST, weeklyTimeMinutes: 120 },
-      { startsOn: '2026-08-15', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 6 },
-      SNAPSHOT,
-    )[1].content;
-
-    expect(user).not.toContain('au prorata');
-  });
-
-  it('dispense la semaine entamée de sa sortie longue quand ce jour est passé', () => {
-    const user = buildPlanMessages(
-      { ...REQUEST, longRunDay: 2 },
-      { startsOn: '2026-08-13', anchor: '2026-08-10', weeks: 2, firstWeekFromDay: 4 },
-      SNAPSHOT,
-    )[1].content;
-
-    expect(user).toContain("Elle n'a pas de sortie longue : le mardi de cette semaine-là est passé.");
-  });
-
-  it('ne dit rien d’une semaine entamée quand le plan démarre un lundi', () => {
-    expect(messages[1].content).toContain('Chaque semaine compte exactement 3 séances.');
-    expect(messages[1].content).not.toContain('déjà entamée');
-  });
-
-  it("dit le niveau à la demande et n'envoie que la section correspondante", () => {
-    const system = messages[0].content;
-
-    expect(messages[1].content).toContain('Niveau déclaré : intermédiaire.');
+  it("n'envoie que la section de niveau correspondante", () => {
     expect(system).toContain("NIVEAU DE L'ATHLÈTE : INTERMÉDIAIRE");
     expect(system).toContain('1 à 2 séances de qualité par semaine');
     // Les deux autres niveaux ne sont pas envoyés : le budget de contexte est
@@ -966,49 +761,22 @@ describe('buildPlanMessages', () => {
   });
 
   it('bride la qualité et la progression de volume pour un débutant', () => {
-    const system = buildPlanMessages(
-      { ...REQUEST, level: 'beginner' },
-      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-      SNAPSHOT,
-    );
+    const beginner = planSystemPrompt('beginner', 'race', null, undefined);
 
-    expect(system[1].content).toContain('Niveau déclaré : débutant.');
-    expect(system[0].content).toContain('AU PLUS UNE séance de qualité par semaine');
-    expect(system[0].content).toContain("de 5 à 8 % d'une semaine à l'autre");
-    expect(system[0].content).toContain('marche/course');
-    expect(system[0].content).not.toContain('2 à 3 × 8 à 12 min');
+    expect(beginner).toContain('AU PLUS UNE séance de qualité par semaine');
+    expect(beginner).toContain("de 5 à 8 % d'une semaine à l'autre");
+    expect(beginner).toContain('marche/course');
+    expect(beginner).not.toContain('2 à 3 × 8 à 12 min');
   });
 
   it('ouvre les blocs longs et la troisième séance de qualité au confirmé', () => {
-    const system = buildPlanMessages(
-      { ...REQUEST, level: 'advanced' },
-      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-      SNAPSHOT,
-    );
+    const advanced = planSystemPrompt('advanced', 'race', null, undefined);
 
-    expect(system[1].content).toContain('Niveau déclaré : confirmé.');
-    expect(system[0].content).toContain('2 à 3 × 8 à 12 min');
-    expect(system[0].content).toContain('3 ponctuellement');
-    expect(system[0].content).not.toContain('AU PLUS UNE séance de qualité par semaine');
+    expect(advanced).toContain('2 à 3 × 8 à 12 min');
+    expect(advanced).toContain('3 ponctuellement');
+    expect(advanced).not.toContain('AU PLUS UNE séance de qualité par semaine');
     // La méthodologie générale, elle, ne bouge pas d'un niveau à l'autre.
-    expect(system[0].content).toContain('coach de course à pied');
-  });
-
-  it('porte le snapshot chiffré et rien qui ressemble à une série de points', () => {
-    const user = messages[1].content;
-
-    expect(user).toContain('CTL 52');
-    expect(user).toContain('VO2max estimée : 48,6');
-    expect(user).toContain('5:24/km');
-    expect(user).not.toContain('null');
-    // Un prompt de génération reste court : le budget est pour la sortie. La
-    // décomposition des cibles y ajoute une ligne par semaine (~90 caractères,
-    // durées comprises), et c'est le seul poste qui grandit avec le plan — d'où
-    // le découpage en tranches au-delà de six semaines. Le plafond est monté de
-    // 1 700 à 1 850 avec les durées de la décomposition : ~30 tokens qui
-    // délogent le prior « une sortie fait 45 à 75 min », lequel coûtait jusqu'à
-    // trois générations entières.
-    expect(user.length).toBeLessThan(1_850);
+    expect(advanced).toContain('coach de course à pied');
   });
 });
 
@@ -1019,18 +787,11 @@ describe('buildPlanMessages', () => {
  * l'appli qui les pose (cf. `applyImposedPaces`), le prompt ne fait plus que
  * l'annoncer.
  */
-describe('buildPlanMessages — allures imposées', () => {
+describe('planSystemPrompt — allures imposées', () => {
   const paces = trainingPacesFromRace(REFERENCE_DISTANCES[REFERENCE_RACE.distance], REFERENCE_RACE.timeS);
-  const withRace = buildPlanMessages(
-    { ...REQUEST, referenceRace: REFERENCE_RACE },
-    { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-    SNAPSHOT,
-    paces,
-  );
+  const system = planSystemPrompt('intermediate', 'free', paces, REFERENCE_RACE);
 
   it('donne la table calculée, chrono et VDOT à l’appui', () => {
-    const system = withRace[0].content;
-
     expect(system).toContain("ALLURES — calculées et posées par l'application, tu n'en écris AUCUNE");
     expect(system).toContain('Chrono de référence : 10 km en 48:30 → VDOT 41,5.');
     expect(system).toContain('- E (endurance fondamentale, sortie longue) : 5:56–6:32/km');
@@ -1048,8 +809,6 @@ describe('buildPlanMessages — allures imposées', () => {
    * demande maintenant, c'est de n'écrire aucune allure.
    */
   it('interdit toute allure au modèle au lieu de lui en prescrire', () => {
-    const system = withRace[0].content;
-
     expect(system).toContain(
       "N'écris PAS d'allures : ni `targetPaceSecPerKm` au niveau de la séance, ni `paceMinSecPerKm`/`paceMaxSecPerKm` dans les étapes.",
     );
@@ -1067,7 +826,7 @@ describe('buildPlanMessages — allures imposées', () => {
   it('interdit aussi l’allure écrite en toutes lettres dans le texte libre', () => {
     // Le champ n'est pas le seul chemin vers l'écran : « à 12:00/km » glissé dans
     // un titre ou une note s'affiche à côté de l'allure que l'appli a posée.
-    expect(withRace[0].content).toContain(
+    expect(system).toContain(
       "Tu n'écris pas non plus d'allure en toutes lettres dans les titres, les consignes, les notes ou le résumé — l'affichage les porte déjà.",
     );
   });
@@ -1075,25 +834,10 @@ describe('buildPlanMessages — allures imposées', () => {
   it('dit que le `kind` porte désormais l’allure, et rappelle son vocabulaire', () => {
     // C'est le seul champ dont dépend l'allure posée : un `kind` fantaisiste
     // n'est plus une coquetterie de rédaction, il change la séance courue.
-    const system = withRace[0].content;
-
     expect(system).toContain("C'est le `kind` de la séance qui décide de son allure");
     expect(system).toContain('« Endurance fondamentale »');
     expect(system).toContain('« Répétitions »');
     expect(system).toContain("un libellé hors vocabulaire fera poser une allure d'endurance");
-  });
-
-  /**
-   * L'ancre parasite, telle qu'elle a été diagnostiquée : le modèle calait ses
-   * allures sur l'allure d'entraînement moyenne de l'athlète (lente) plutôt que
-   * sur la table. Elle sort donc du contexte de ce régime — plus aucune allure
-   * ne vient du modèle, elle n'y a plus aucun rôle.
-   */
-  it('retire du contexte l’allure moyenne des dernières sorties', () => {
-    expect(withRace[1].content).not.toContain('Allure moyenne des dernières sorties');
-    // Le reste du snapshot, lui, ne bouge pas : c'est lui qui cale les volumes.
-    expect(withRace[1].content).toContain('CTL 52');
-    expect(withRace[1].content).toContain('42,1 km');
   });
 
   /**
@@ -1104,8 +848,6 @@ describe('buildPlanMessages — allures imposées', () => {
    * modèle : il n'en voit plus qu'une.
    */
   it('supprime entièrement la section de dérivation : une seule source d’allures', () => {
-    const system = withRace[0].content;
-
     expect(system).not.toContain('ALLURES CIBLES');
     expect(system).not.toContain('Référence = ');
     expect(system).not.toContain('récupération trottée : référence + 60 à 120 s/km');
@@ -1120,8 +862,6 @@ describe('buildPlanMessages — allures imposées', () => {
   });
 
   it('garde la table, mais pour ce qu’elle dit du niveau de l’athlète', () => {
-    const system = withRace[0].content;
-
     // Elle ne prescrit plus rien ; elle situe l'athlète, et c'est ce qui doit
     // caler les distances et les durées des séances.
     expect(system).toContain("Cette table est là pour situer le niveau de l'athlète, pas pour être recopiée.");
@@ -1131,26 +871,18 @@ describe('buildPlanMessages — allures imposées', () => {
   it('garde hors des allures les consignes qui valent dans les deux régimes', () => {
     // Elles vivaient dans la section de dérivation mais portent sur le volume et
     // le format : les perdre avec elle changerait le plan produit.
-    expect(withRace[0].content).toContain("Tu n'inventes jamais une valeur");
-    expect(withRace[0].content).toContain('PROGRESSION DU VOLUME');
+    expect(system).toContain("Tu n'inventes jamais une valeur");
+    expect(system).toContain('PROGRESSION DU VOLUME');
   });
 
   it('ne dit rien de tel sans chrono : les règles de dérivation restent le repli', () => {
-    const messages = buildPlanMessages(
-      REQUEST,
-      { startsOn: '2026-08-17', anchor: '2026-08-17', weeks: 4, firstWeekFromDay: 1 },
-      SNAPSHOT,
-    );
-    const system = messages[0].content;
+    const derived = planSystemPrompt('intermediate', 'free', null, undefined);
 
-    expect(system).not.toContain("posées par l'application");
-    // Sans table, le modèle dérive encore ses allures — l'allure moyenne reste
-    // donc dans le contexte, c'est la seule référence qu'il ait.
-    expect(messages[1].content).toContain('Allure moyenne des dernières sorties : 5:24/km.');
-    expect(system).toContain('ALLURES CIBLES — dérivées des seules données fournies');
-    expect(system).toContain('seuil : référence − 30 à 45 s/km');
-    expect(system).toContain('récupération trottée : référence + 60 à 120 s/km');
-    expect(system).toContain("Si l'allure de référence est inconnue");
+    expect(derived).not.toContain("posées par l'application");
+    expect(derived).toContain('ALLURES CIBLES — dérivées des seules données fournies');
+    expect(derived).toContain('seuil : référence − 30 à 45 s/km');
+    expect(derived).toContain('récupération trottée : référence + 60 à 120 s/km');
+    expect(derived).toContain("Si l'allure de référence est inconnue");
   });
 });
 
@@ -1276,19 +1008,37 @@ describe('buildSchemaIssuesMessage', () => {
   });
 });
 
+/**
+ * La création, de bout en bout et **sans réseau**.
+ *
+ * Ce que ces cas éprouvent n'est plus « le modèle a-t-il écrit un plan
+ * conforme » : le plan est écrit par l'appli (`lib/plan-skeleton`), et le modèle
+ * n'y ajoute que le déroulé des séances dures. La question devient donc « un
+ * plan valide sort-il, quoi que fasse le coach » — et la réponse doit être oui
+ * dans les deux régimes, coach compétent ou coach en panne.
+ */
 describe('generatePlan', () => {
-  it('écrit le plan quand la première génération est conforme', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+  /** Une préparation marathon datée : 8 semaines, jour J le dimanche 11 octobre. */
+  const RACE_REQUEST: PlanRequest = {
+    goalType: 'race',
+    level: 'intermediate',
+    goalText: 'Marathon de Nantes',
+    raceDate: '2026-10-11',
+    sessionsPerWeek: 4,
+    // Sortie longue le samedi : elle **diffère** du jour J, ce qui est le cas
+    // que le squelette doit réorganiser sur sa dernière semaine.
+    longRunDay: 6,
+    startsOn: '2026-08-17',
+    referenceRace: REFERENCE_RACE,
+  };
+
+  it('écrit une proposition complète quand le coach répond', async () => {
+    coachAnswers();
 
     const plan = await generatePlan(REQUEST);
 
     // Une proposition, pas un plan en cours : c'est l'athlète qui l'active.
     expect(plan).toBe(DRAFT);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(chatCompletionJson.mock.calls[0][0].schemaName).toBe('training_plan');
 
     const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
     expect(input.level).toBe('intermediate');
@@ -1297,71 +1047,57 @@ describe('generatePlan', () => {
     expect(input.startsOn).toBe('2026-08-11');
     expect(input.weeks).toBe(2);
     expect(input.raceDate).toBeNull();
-    expect(input.summary).toBe('Deux semaines de reprise.');
-    expect(input.sessions).toHaveLength(6);
-    expect(input.sessions[0]).toMatchObject({ scheduledOn: '2026-08-11', volumeM: 10_000 });
-    expect(input.sessions[5].scheduledOn).toBe('2026-08-23');
+    expect(input.summary).toBe(COACH_SUMMARY);
+    // Deux semaines de trois séances, moins ce que la semaine entamée perd.
+    expect(input.sessions.length).toBeGreaterThan(0);
+    for (const session of writtenSessions()) {
+      expect(session.scheduledOn >= '2026-08-11').toBe(true);
+      expect(session.scheduledOn <= '2026-08-23').toBe(true);
+      expect(session.volumeM).not.toBeNull();
+    }
   });
 
-  it('borne explicitement la sortie — sinon le serveur coupe le plan en plein JSON', async () => {
-    // Sans `maxTokens`, llama-server applique son `--n-predict` par défaut : un
-    // plan de seize semaines s'arrêtait au milieu d'un objet, sans rien dire.
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+  it('ne demande au modèle que les créneaux de qualité et le résumé', async () => {
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
-    const { maxTokens } = chatCompletionJson.mock.calls[0][0];
-    expect(typeof maxTokens).toBe('number');
-    // Un plan de 16 semaines × 6 séances pèse 10 à 12 k tokens : le plafond doit
-    // rester largement au-dessus, faute de quoi il tronquerait à son tour.
-    expect(maxTokens).toBeGreaterThanOrEqual(16_384);
+    const schemas = chatCompletionJson.mock.calls.map(
+      (call: { schemaName: string }[]) => call[0].schemaName,
+    );
+    // Le résumé ferme la marche : le plan est écrit et validé avant qu'on le
+    // fasse décrire.
+    expect(schemas[schemas.length - 1]).toBe('plan_summary');
+    expect(new Set(schemas.slice(0, -1))).toEqual(new Set(['quality_session']));
+    // Plus aucun plan entier ne part au modèle.
+    expect(schemas).not.toContain('training_plan');
+    expect(schemas).not.toContain('training_plan_chunk');
   });
 
-  it('démarre le jour demandé et date les séances depuis le lundi de sa semaine', async () => {
-    // Départ le jeudi 13 août : la première semaine ne porte que le jeudi et le
-    // dimanche, la seconde est pleine.
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Reprise en cours de semaine.',
-      weeks: [PARTIAL_FIRST_WEEK, CONFORMING_WEEK],
-    });
+  /**
+   * Le cas qui justifie toute la bascule : un coach injoignable ne coûte plus
+   * qu'un peu de sur-mesure. Le plan sort quand même — écrit, complet, valide,
+   * et **entièrement déterministe**.
+   */
+  it('écrit un plan valide, et le même, quand le coach échoue systématiquement', async () => {
+    chatCompletionJson.mockRejectedValue(new AiResponseError('502 Bad Gateway', 502));
 
-    await generatePlan({ ...REQUEST, startsOn: '2026-08-13' });
+    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
+    const first = writtenSessions();
+    expect(first.length).toBeGreaterThan(0);
 
-    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
-    // Le plan stocke le jour réel du départ, pas l'ancre.
-    expect(input.startsOn).toBe('2026-08-13');
-    expect(input.weeks).toBe(2);
-    expect(
-      input.sessions.map((session: { scheduledOn: string }) => session.scheduledOn),
-    ).toEqual(['2026-08-13', '2026-08-16', '2026-08-18', '2026-08-20', '2026-08-23']);
-  });
+    dal.createDraftPlanWithSessions.mockClear();
+    await generatePlan(REQUEST);
 
-  it('refuse une séance placée avant le départ sur une première semaine entamée', async () => {
-    // Le modèle remplit la semaine entamée comme une semaine pleine : le mardi
-    // et le jeudi sont derrière nous, ils lui sont renvoyés en violation.
-    chatCompletionJson.mockResolvedValue({
-      summary: 'x',
-      weeks: CONFORMING_WEEKS,
-    });
-
-    await expect(generatePlan({ ...REQUEST, startsOn: '2026-08-15' })).rejects.toThrow(
-      AiInvalidOutputError,
+    expect(writtenSessions()).toEqual(first);
+    // Le résumé aussi : il vient du gabarit de l'appli, pas du modèle.
+    expect(dal.createDraftPlanWithSessions.mock.calls[0][0].summary).toContain(
+      'Plan de 2 semaines',
     );
-
-    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
-      'aucune séance avant samedi',
-    );
-    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
   it("n'engage rien : ni rapprochement, ni publication au calendrier", async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
@@ -1371,96 +1107,6 @@ describe('generatePlan', () => {
     expect(dal.reconcilePlanSessions).not.toHaveBeenCalled();
     expect(syncPlanToIntervalsSafely).not.toHaveBeenCalled();
     expect(scheduleAfter).not.toHaveBeenCalled();
-  });
-
-  it('reprend une fois en renvoyant les violations, puis écrit le plan corrigé', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] })
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
-
-    await generatePlan(REQUEST);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    const retryMessages = chatCompletionJson.mock.calls[1][0].messages;
-    expect(retryMessages).toHaveLength(3);
-    expect(retryMessages[2].role).toBe('user');
-    expect(retryMessages[2].content).toContain('aucune séance le dimanche');
-    // La sortie fautive n'est pas renvoyée : elle coûterait le double de contexte.
-    expect(retryMessages.some((message: { content: string }) => message.content.includes('"sessions"'))).toBe(false);
-    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
-  });
-
-  it("renvoie au modèle une allure hors de portée de l'athlète, corridor à l'appui", async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] })
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
-
-    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
-
-    // Le corridor est dérivé de l'allure récente du snapshot (5:24/km).
-    expect(chatCompletionJson.mock.calls[1][0].messages[2].content).toContain(
-      "allure 10:00/km hors de la fourchette plausible [3:34/km – 7:34/km] dérivée de l'allure récente de l'athlète (5:24/km).",
-    );
-  });
-
-  it("ne juge aucune allure quand l'athlète n'a pas d'allure de référence", async () => {
-    dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, recentAvgPaceSecPerKm: null });
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [ABERRANT_PACE_WEEK, CONFORMING_WEEK] });
-
-    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-  });
-
-  it('reprend une sortie hors schéma en pointant le champ fautif, puis écrit le plan', async () => {
-    chatCompletionJson
-      .mockRejectedValueOnce(OFF_SCHEMA)
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
-
-    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    const retryMessages = chatCompletionJson.mock.calls[1][0].messages;
-    expect(retryMessages).toHaveLength(3);
-    expect(retryMessages[2].role).toBe('user');
-    // Le chemin désigne l'étape à reprendre : sans lui, le modèle regénère à
-    // l'aveugle une sortie de plusieurs centaines d'étapes.
-    expect(retryMessages[2].content).toContain('weeks.0.sessions.1.steps.1.steps.0');
-    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
-  });
-
-  it('reprend jusqu’à deux fois avant de renoncer', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] })
-      .mockRejectedValueOnce(OFF_SCHEMA)
-      .mockResolvedValueOnce({ summary: 'Corrigé.', weeks: CONFORMING_WEEKS });
-
-    await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-  });
-
-  it('renonce quand la sortie reste hors schéma après reprises', async () => {
-    chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
-
-    await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
-  });
-
-  it("ne redemande rien quand c'est l'API qui est en défaut", async () => {
-    // Une réponse HTTP cassée ne s'arrangera pas en reposant la question : elle
-    // remonte au premier coup.
-    chatCompletionJson.mockRejectedValue(new AiResponseError('502 Bad Gateway', 502));
-
-    await expect(generatePlan(REQUEST)).rejects.toThrow(AiResponseError);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-  });
-
-  it("renonce après trois échecs, en disant ce qui n'a pas été respecté", async () => {
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
-
-    await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
   });
 
   it('propage une indisponibilité du coach sans rien lire ni écrire', async () => {
@@ -1477,80 +1123,301 @@ describe('generatePlan', () => {
     );
     expect(chatCompletionJson).not.toHaveBeenCalled();
   });
-});
 
-/**
- * Le compte de séances devient une contrainte de grammaire, y compris sur le
- * format le plus courant : sous six semaines, le plan se produit d'un seul
- * tenant, et rien n'y empêchait le modèle d'écrire la septième séance qu'il
- * écrit sous message de reprise (cf. la génération par tranches).
- */
-describe('generatePlan — compte de séances imposé', () => {
-  /** Le sous-schéma du tableau `sessions` d'une semaine, tel qu'il part au modèle. */
-  function sessionsJsonSchemaOf(schema: {
-    properties: { weeks: { items: { properties: { sessions: Record<string, number> } } } };
-  }) {
-    return schema.properties.weeks.items.properties.sessions;
-  }
-
-  /** Un plan d'une semaine de `count` séances, tel qu'un provider hors grammaire l'écrit. */
-  function planOf(count: number) {
-    return {
-      summary: 'x',
-      weeks: [
-        {
-          sessions: [1, 2, 3, 4, 5, 6, 7]
-            .slice(0, count)
-            .map((day) => ({ day, kind: 'Endurance', title: 'Footing' })),
-        },
-      ],
+  /**
+   * Le refus d'infaisabilité, traduit pour l'athlète.
+   *
+   * Une coureuse à 3 km par semaine qui demande 6 séances demande 500 m par
+   * séance : ce n'est pas un plan, c'est une configuration que le squelette
+   * refuse d'écrire (`PlanSkeletonInfeasibleError`). Le service le lui dit sur le
+   * champ qu'elle peut changer, et n'appelle pas le modèle pour rien.
+   */
+  describe('quand le volume ne finance pas les séances demandées', () => {
+    /** Le cas de la revue : 3 km récents, 6 séances, marathon dans 8 semaines. */
+    const TOO_MANY_SESSIONS: PlanRequest = {
+      ...RACE_REQUEST,
+      level: 'beginner',
+      sessionsPerWeek: 6,
+      referenceRace: undefined,
     };
-  }
 
-  it('impose le compte exact quand toutes les semaines du plan sont pleines', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: [CONFORMING_WEEK, CONFORMING_WEEK],
+    beforeEach(() => {
+      dal.getTrainingSnapshot.mockResolvedValue({
+        ...SNAPSHOT,
+        weeks: [{ startsOn: '2026-08-03', distanceKm: 3, movingTimeS: 1_200, sessions: 2 }],
+      });
+      coachAnswers();
     });
 
-    // Départ un lundi : aucune semaine entamée dans la fenêtre.
-    await generatePlan({ ...REQUEST, ...MONDAY });
+    it('refuse sur le nombre de séances, avec un repli chiffré', async () => {
+      const failure = await generatePlan(TOO_MANY_SESSIONS).catch((error: unknown) => error);
 
-    const [{ jsonSchema, schema }] = chatCompletionJson.mock.calls[0];
-    // Le modèle ne PEUT plus écrire une quatrième séance.
-    expect(sessionsJsonSchemaOf(jsonSchema)).toMatchObject({ minItems: 3, maxItems: 3 });
-    // Et Zod dit la même chose, pour le provider qui ignore la grammaire.
-    expect(schema.safeParse(planOf(3)).success).toBe(true);
-    expect(schema.safeParse(planOf(4)).success).toBe(false);
+      expect(failure).toBeInstanceOf(InvalidPlanError);
+      const error = failure as InstanceType<typeof InvalidPlanError>;
+      expect(error.field).toBe('sessionsPerWeek');
+      expect(error.message).toContain('6 séances par semaine ne tiennent pas');
+      expect(error.message).toMatch(/séances? par semaine au plus|Aucun nombre de séances/);
+      expect(error.message).toContain('0,5 km par séance');
+    });
+
+    it('ne dérange pas le modèle et n’écrit rien', async () => {
+      await expect(generatePlan(TOO_MANY_SESSIONS)).rejects.toThrow(InvalidPlanError);
+
+      expect(chatCompletionJson).not.toHaveBeenCalled();
+      expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+    });
+
+    it('journalise le diagnostic chiffré, que le formulaire ne peut pas montrer', async () => {
+      await expect(generatePlan(TOO_MANY_SESSIONS)).rejects.toThrow(InvalidPlanError);
+
+      // Les numéros de semaine ne veulent rien dire dans un formulaire de
+      // création : ils partent au journal, où ils rendent le cas rejouable.
+      expect(loggedText()).toContain('[plan] squelette infaisable : Semaine');
+    });
   });
 
-  it('garde des bornes souples quand le plan démarre en semaine entamée', async () => {
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: CONFORMING_WEEKS });
+  /**
+   * La dégradation en escalier.
+   *
+   * Elle ne devrait jamais servir — le squelette est mesuré à zéro violation sur
+   * des dizaines de milliers de combinaisons —, mais il n'y a personne à qui
+   * redemander un plan que l'appli a écrit : le seul geste interdit est de
+   * rendre un plan invalide.
+   */
+  describe('quand le plan assemblé viole malgré tout une règle', () => {
+    /** Une violation quelconque : ce qu'elle dit n'importe pas, seul son existence compte. */
+    const VIOLATION = 'Semaine 1 : quelque chose ne va pas.';
 
-    // Sans date demandée, le plan démarre aujourd'hui, un mardi : sa première
-    // semaine compte légitimement moins de séances, et les items d'un tableau
-    // JSON Schema sont uniformes. La règle métier reste le filet.
-    await generatePlan(REQUEST);
+    it('réécrit tous les créneaux par l’appli, puis revalide', async () => {
+      coachAnswers();
+      // Le premier passage — celui des créneaux écrits par le modèle — est
+      // refusé ; le second, tout déterministe, retrouve la vraie règle.
+      businessRuleViolations.mockReturnValueOnce([VIOLATION]);
 
-    const [{ jsonSchema, schema }] = chatCompletionJson.mock.calls[0];
-    expect(sessionsJsonSchemaOf(jsonSchema)).toMatchObject({ minItems: 1, maxItems: 3 });
-    expect(schema.safeParse(planOf(2)).success).toBe(true);
-    expect(schema.safeParse(planOf(4)).success).toBe(false);
+      await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
+
+      // Les séances de qualité ne portent plus le titre du modèle : elles ont été
+      // réécrites par le déroulé déterministe.
+      const titles = writtenSessions().map((session) => session.title);
+      expect(titles).not.toContain('Séance écrite par le coach');
+      expect(loggedText()).toContain('réécriture de tous les créneaux');
+      expect(loggedText()).toContain(VIOLATION);
+    });
+
+    it('lève plutôt que d’écrire un plan invalide, et dit de quoi le rejouer', async () => {
+      coachAnswers();
+      businessRuleViolations.mockReturnValue([VIOLATION]);
+
+      await expect(generatePlan(REQUEST)).rejects.toThrow(InvalidGeneratedPlanError);
+
+      expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+      const logged = loggedText();
+      expect(logged).toContain('plan tout-déterministe encore hors règles');
+      expect(logged).toContain(VIOLATION);
+      // La configuration exacte, pour rejouer le cas.
+      expect(logged).toContain('objectif free « reprendre le volume »');
+      expect(logged).toContain('3 séances/semaine');
+    });
+  });
+
+  /**
+   * Le jour J.
+   *
+   * Le défaut corrigé : le squelette posait une « Sortie longue » sur le jour de
+   * sortie longue de l'athlète en semaine de course, et l'athlète lisait 8,5 km
+   * en endurance sur la case de son marathon.
+   */
+  describe('la semaine de la course', () => {
+    it('écrit la course le bon jour, au bon libellé, à l’allure de l’objectif', async () => {
+      coachAnswers();
+
+      await generatePlan(RACE_REQUEST);
+
+      const raceDay = writtenSessions().filter(
+        (session) => session.scheduledOn === '2026-10-11',
+      );
+      expect(raceDay).toHaveLength(1);
+      expect(raceDay[0].kind).toBe('Course');
+      expect(raceDay[0].title).toBe('Jour J : la course');
+      // Zone M de la table (5:08–5:37/km), et non l'endurance (5:56–6:32/km) que
+      // le libellé « Sortie longue » lui valait.
+      expect(raceDay[0].targetPaceSecPerKm).toBeGreaterThanOrEqual(308);
+      expect(raceDay[0].targetPaceSecPerKm).toBeLessThanOrEqual(337);
+    });
+
+    it('ne double pas la course d’une sortie longue', async () => {
+      coachAnswers();
+
+      await generatePlan(RACE_REQUEST);
+
+      const lastWeek = writtenSessions().filter(
+        (session) => session.scheduledOn >= '2026-10-05' && session.scheduledOn <= '2026-10-11',
+      );
+      expect(lastWeek.map((session) => session.kind)).not.toContain('Sortie longue');
+      // Et la course reste la plus longue séance de sa semaine.
+      const raceVolume = lastWeek.find((s) => s.scheduledOn === '2026-10-11')?.volumeM ?? 0;
+      for (const session of lastWeek) expect(raceVolume).toBeGreaterThanOrEqual(session.volumeM ?? 0);
+    });
+
+    it('laisse les autres semaines à leur sortie longue du samedi', async () => {
+      coachAnswers();
+
+      await generatePlan(RACE_REQUEST);
+
+      // Le samedi 3 octobre, une semaine avant la course : encore une sortie
+      // longue, au jour réglé par l'athlète.
+      const saturday = writtenSessions().find((session) => session.scheduledOn === '2026-10-03');
+      expect(saturday?.kind).toBe('Sortie longue');
+    });
+
+    /*
+     * Le jour J est une **borne** : rien ne se programme après lui.
+     *
+     * Mesuré avant correction, marathon un lundi et 6 séances : le plan portait
+     * 5 séances et 23,3 km après la course, dont une le lendemain de l'épreuve.
+     * Ce n'est pas une semaine d'affûtage.
+     */
+    it('n’écrit rien après le jour J, même quand la course tombe un lundi', async () => {
+      coachAnswers();
+
+      // Lundi 12 octobre 2026 : la semaine de course n'a qu'un seul jour utile.
+      await generatePlan({ ...RACE_REQUEST, raceDate: '2026-10-12', sessionsPerWeek: 6 });
+
+      const after = writtenSessions().filter((session) => session.scheduledOn > '2026-10-12');
+      expect(after).toEqual([]);
+      const raceDay = writtenSessions().filter(
+        (session) => session.scheduledOn === '2026-10-12',
+      );
+      expect(raceDay).toHaveLength(1);
+      expect(raceDay[0].kind).toBe('Course');
+    });
+
+    it('n’écrit pas de jour J sur un objectif libre', async () => {
+      coachAnswers();
+
+      await generatePlan(REQUEST);
+
+      expect(writtenSessions().map((session) => session.kind)).not.toContain('Course');
+    });
+  });
+
+  /**
+   * Un objectif **libre** ne se prépare pas comme une course, même quand son
+   * texte nomme une distance.
+   *
+   * La règle est écrite depuis longtemps du côté du prompt (`coachRuleTailLines`,
+   * « sur un objectif libre, il n'y a pas d'allure objectif à travailler, et
+   * prescrire un bloc à une allure qui n'existe pas ferait fabriquer une
+   * échéance ») ; le chemin du squelette, lui, lisait la distance dans le texte
+   * sans regarder `goalType`.
+   *
+   * Mesuré avant correction : « me remettre après mon semi » recevait 3 sorties
+   * longues découpées en « Mise en route / Bloc à allure objectif / Retour au
+   * calme », et « préparer un marathon un jour » 8 séances « Spécifique allure
+   * course » — pour des objectifs qui n'ont ni date ni chrono.
+   */
+  describe('objectif libre dont le texte nomme une distance', () => {
+    /** Assez long pour porter une phase de spécificité, seule à prescrire du spécifique. */
+    const FREE: PlanRequest = { ...REQUEST, weeks: 12, sessionsPerWeek: 5 };
+
+    /** Le plan écrit pour ce texte, réduit à ce qui décrit sa spécificité. */
+    async function planFor(goalText: string): Promise<string[]> {
+      dal.createDraftPlanWithSessions.mockClear();
+      await generatePlan({ ...FREE, goalText });
+      return writtenSessions().map((session) => `${session.kind} — ${session.title}`);
+    }
+
+    beforeEach(() => {
+      coachAnswers();
+    });
+
+    it('ne découpe aucune sortie longue en bloc à allure objectif', async () => {
+      for (const goalText of ['me remettre après mon semi', 'préparer un marathon un jour']) {
+        expect(await planFor(goalText), goalText).not.toContain(
+          'Sortie longue — Sortie longue avec bloc à allure objectif',
+        );
+      }
+    });
+
+    it('écrit le même plan que si le texte ne nommait aucune distance', async () => {
+      // Le seul contrat qui vaille : sur un objectif libre, le **texte** ne
+      // décide de rien. C'est la préparation polyvalente du repli
+      // (`goalFamily(null)`), la même pour « reprendre le volume » que pour un
+      // texte où traîne le mot « marathon ».
+      const neutral = await planFor('reprendre le volume');
+
+      expect(await planFor('me remettre après mon semi')).toEqual(neutral);
+      expect(await planFor('préparer un marathon un jour')).toEqual(neutral);
+    });
+  });
+
+  /** Le résumé : le seul texte libre du plan, et le seul qui puisse manquer. */
+  describe('résumé', () => {
+    it('prend celui du modèle quand il répond', async () => {
+      coachAnswers();
+
+      await generatePlan(REQUEST);
+
+      expect(dal.createDraftPlanWithSessions.mock.calls[0][0].summary).toBe(COACH_SUMMARY);
+    });
+
+    it('décrit le plan sans lui donner de séance à recopier', async () => {
+      coachAnswers();
+
+      await generatePlan(RACE_REQUEST);
+
+      const summaryCall = chatCompletionJson.mock.calls
+        .map((call: CoachCall[]) => call[0])
+        .find((call: CoachCall) => call.schemaName === 'plan_summary') as CoachCall;
+      const user = summaryCall.messages[1].content;
+
+      expect(summaryCall.messages[0].content).toContain('DÉJÀ ÉCRIT');
+      expect(summaryCall.messages[0].content).toContain("Tu n'écris aucune allure");
+      expect(user).toContain('Objectif : la course « Marathon de Nantes »');
+      expect(user).toContain('Plan écrit : 8 semaines');
+      expect(user).toContain('Périodisation :');
+      expect(user).toContain('Volume hebdomadaire :');
+      expect(user).toContain('Séances de qualité :');
+      // Aucune séance : le résumé décrit une forme, il ne recopie pas un plan.
+      expect(user).not.toContain('Jour J : la course');
+      expect(user.length).toBeLessThan(600);
+    });
+
+    it('retombe sur un résumé écrit par l’appli quand le modèle échoue', async () => {
+      chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+        if (call.schemaName === 'plan_summary') throw new AiResponseError('503', 503);
+        return qualityOutputFor(slotBudgetKm(call));
+      });
+
+      await generatePlan(REQUEST);
+
+      const { summary } = dal.createDraftPlanWithSessions.mock.calls[0][0];
+      expect(summary).toContain('Plan de 2 semaines à partir du mardi 11 août 2026');
+      expect(summary).toContain('3 séances par semaine');
+      expect(summary).toContain('sortie longue le dimanche');
+      // Le repli est journalisé : sans trace, un coach en panne depuis des
+      // semaines est indiscernable d'un coach qui écrit bien.
+      expect(loggedText()).toContain("[plan] résumé écrit par l'appli");
+    });
+
+    it('n’échoue pas le plan entier pour un paragraphe', async () => {
+      chatCompletionJson.mockImplementation(async (call: CoachCall) => {
+        if (call.schemaName === 'plan_summary') throw new AiUnavailableError('unreachable');
+        return qualityOutputFor(slotBudgetKm(call));
+      });
+
+      await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
+      expect(writtenSessions().length).toBeGreaterThan(0);
+    });
   });
 });
 
 describe('generatePlan — chrono de référence', () => {
-  it('écrit le chrono avec le plan, et impose sa table au modèle', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+  it('écrit le chrono avec le plan', async () => {
+    coachAnswers();
 
     await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
 
-    expect(chatCompletionJson.mock.calls[0][0].messages[0].content).toContain(
-      'Chrono de référence : 10 km en 48:30 → VDOT 41,5.',
-    );
     // Le chrono part en base avec le plan : c'est lui qui rejugera les allures
     // au prochain ajustement, et que l'écran du plan affiche.
     const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
@@ -1559,10 +1426,7 @@ describe('generatePlan — chrono de référence', () => {
   });
 
   it('laisse les deux colonnes nulles quand aucun chrono n’est donné', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
@@ -1583,75 +1447,55 @@ describe('generatePlan — chrono de référence', () => {
   });
 
   /**
-   * Le cas qui a fait basculer l'architecture : le modèle sort une allure
-   * absurde, et la table existe. Avant, il fallait le lui renvoyer et
-   * regénérer — trois fois de suite pour rien. Maintenant l'allure est écrasée,
-   * la génération passe du premier coup, et le corridor n'a plus rien à dire.
+   * Le renversement, mené à son terme : le modèle n'écrit plus aucune allure —
+   * son schéma ne lui en offre même plus le champ —, et c'est l'appli qui les
+   * pose depuis la table VDOT.
    */
-  it('écrase les allures du modèle au lieu de lui redemander un plan', async () => {
-    const fastWeek = {
-      sessions: [
-        { day: 2, kind: 'Endurance', title: 'Footing', distanceKm: 10 },
-        { day: 4, kind: 'VMA', title: '5 × 3 min', distanceKm: 13, targetPaceSecPerKm: 210, steps: THRESHOLD_STEPS },
-        { day: 7, kind: 'Sortie longue', title: 'Endurance', distanceKm: 20 },
-      ],
-    };
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [fastWeek, CONFORMING_WEEK] });
-
-    await expect(generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE })).resolves.toBe(DRAFT);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-
-    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
-    // VMA → milieu de [I] (4:28–4:39/km), et non les 3:30/km écrits ; footing et
-    // sortie longue au milieu de [E] (5:56–6:32/km).
-    expect(sessions[1]).toMatchObject({ kind: 'VMA', targetPaceSecPerKm: 274 });
-    expect(sessions[0]).toMatchObject({ kind: 'Endurance', targetPaceSecPerKm: 374 });
-    expect(sessions[2]).toMatchObject({ kind: 'Sortie longue', targetPaceSecPerKm: 374 });
-  });
-
-  it('écrit les allures des étapes selon leur rôle, la séance donnant le créneau', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'x',
-      weeks: CONFORMING_WEEKS,
-    });
+  it('pose les allures depuis la table, séance par séance selon son `kind`', async () => {
+    coachAnswers();
 
     await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
 
-    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
-    const [warmup, block, cooldown] = sessions[1].steps;
+    const sessions = writtenSessions();
+    // Milieu de [E] (5:56–6:32/km) pour tout ce qui est endurance.
+    for (const session of sessions.filter((s) => s.kind.includes('ndurance'))) {
+      expect(session.targetPaceSecPerKm).toBe(374);
+    }
+    for (const session of sessions.filter((s) => s.kind === 'Sortie longue')) {
+      expect(session.targetPaceSecPerKm).toBe(374);
+    }
+  });
 
-    // L'échauffement du déroulé porte une `hrZone` : elle est conservée, et
-    // aucune allure ne vient s'y ajouter (une étape ne porte jamais les deux).
-    expect(warmup.steps[0]).toMatchObject({
-      hrZone: 2,
-      paceMinSecPerKm: null,
-      paceMaxSecPerKm: null,
-    });
-    // L'effort d'une séance au seuil : les bornes de [T].
-    expect(block.steps[0]).toMatchObject({ paceMinSecPerKm: 297, paceMaxSecPerKm: 311 });
+  it('écrit les allures des étapes selon leur rôle, la séance donnant le créneau', async () => {
+    coachAnswers();
+
+    await generatePlan({ ...REQUEST, referenceRace: REFERENCE_RACE });
+
+    const quality = writtenSessions().find((session) => session.steps !== null);
+    const [warmup, block, cooldown] = quality?.steps ?? [];
+
+    // L'échauffement se court en endurance, pas à l'allure de la séance.
+    expect(warmup.steps[0]).toMatchObject({ paceMinSecPerKm: 356, paceMaxSecPerKm: 392 });
+    // L'effort : les bornes du créneau de la séance.
+    expect(block.steps[0].paceMinSecPerKm).not.toBeNull();
     // Sa récupération : aucune cible.
     expect(block.steps[1]).toMatchObject({ paceMinSecPerKm: null, paceMaxSecPerKm: null });
-    // Le retour au calme se court en endurance, pas au seuil.
+    // Le retour au calme se court en endurance, pas à l'allure de l'effort.
     expect(cooldown.steps[0]).toMatchObject({ paceMinSecPerKm: 356, paceMaxSecPerKm: 392 });
   });
 
-  it('laisse le modèle poser ses allures quand il n’y a pas de table', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'x',
-      weeks: CONFORMING_WEEKS,
-    });
+  it('ne cible aucune allure quand il n’y a pas de table', async () => {
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
-    const [{ sessions }] = dal.createDraftPlanWithSessions.mock.calls[0];
-    // Sans chrono, rien n'est écrasé : le corridor dérivé de l'allure récente
-    // reste le seul filet.
-    expect(sessions[0].targetPaceSecPerKm).toBeNull();
-    expect(sessions[1].steps[1].steps[0]).toMatchObject({
-      paceMinSecPerKm: 300,
-      paceMaxSecPerKm: 310,
-    });
+    // Sans chrono, `applyDerivedMeasures` ne complète que la comptabilité : le
+    // squelette n'écrit aucune allure, donc aucune n'est prescrite.
+    for (const session of writtenSessions()) {
+      expect(session.targetPaceSecPerKm).toBeNull();
+      expect(session.volumeM).not.toBeNull();
+      expect(session.durationS).not.toBeNull();
+    }
   });
 });
 
@@ -1718,17 +1562,33 @@ describe('updatePlanFromInstruction — chrono de référence', () => {
  * Une génération qui échoue ne laisse à l'utilisatrice qu'un message générique :
  * ces logs sont le seul moyen de savoir, en production, sur quoi le modèle local
  * a buté. Les taire serait un bug.
+ *
+ * Le journal des rejets, éprouvé sur le chemin qui en produit encore.
+ *
+ * La **création** n'en produit plus : elle écrit son plan elle-même et ne
+ * redemande rien au modèle (ses replis, eux, sont journalisés par
+ * `quality-fill.ts` et par la dégradation en escalier). L'ajustement, lui,
+ * rejoue toujours des semaines entières — c'est lui qui porte la boucle de
+ * correction, et donc ces traces-là.
  */
 describe('journal des rejets', () => {
+  /** Un plan actif de deux semaines, la première entamée : la fenêtre d'un ajustement. */
+  beforeEach(() => {
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
+      sessions: [],
+    });
+  });
+
   it('dit le rang de la tentative, la nature du rejet et les violations', async () => {
     chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
 
-    await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
+    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
 
     const logged = loggedText();
-    expect(logged).toContain('[plan] tentative 1/3 (training_plan) rejetée — violations métier');
-    expect(logged).toContain('[plan] tentative 2/3 (training_plan) rejetée — violations métier');
-    expect(logged).toContain('[plan] tentative 3/3 (training_plan) rejetée — violations métier');
+    expect(logged).toContain('[plan] tentative 1/3 (training_plan_update) rejetée — violations métier');
+    expect(logged).toContain('[plan] tentative 2/3 (training_plan_update) rejetée — violations métier');
+    expect(logged).toContain('[plan] tentative 3/3 (training_plan_update) rejetée — violations métier');
     // Le détail exact renvoyé au modèle, pas un « erreur de validation ».
     expect(logged).toContain('aucune séance le dimanche');
     expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
@@ -1737,10 +1597,10 @@ describe('journal des rejets', () => {
   it('dit les champs en défaut quand la sortie est hors schéma', async () => {
     chatCompletionJson.mockRejectedValue(OFF_SCHEMA);
 
-    await expect(generatePlan(REQUEST)).rejects.toBe(OFF_SCHEMA);
+    await expect(updatePlanFromInstruction('change tout')).rejects.toBe(OFF_SCHEMA);
 
     const logged = loggedText();
-    expect(logged).toContain('[plan] tentative 1/3 (training_plan) rejetée — sortie hors schéma');
+    expect(logged).toContain('[plan] tentative 1/3 (training_plan_update) rejetée — sortie hors schéma');
     expect(logged).toContain('weeks.0.sessions.1.steps.1.steps.0');
     expect(logged).toContain('[plan] génération abandonnée après 3 tentatives');
     // Le schéma a bien été violé sur le fond : rien ne laisse penser à une coupure.
@@ -1750,26 +1610,14 @@ describe('journal des rejets', () => {
   it('soupçonne une sortie tronquée quand la réponse n’était même pas du JSON', async () => {
     // Aucune anomalie Zod : `chatCompletionJson` n'a pas pu parser le contenu.
     chatCompletionJson.mockRejectedValue(
-      new AiInvalidOutputError("Le coach IA n'a pas produit du JSON pour « training_plan ».", []),
+      new AiInvalidOutputError("Le coach IA n'a pas produit du JSON pour « training_plan_update ».", []),
     );
 
-    await expect(generatePlan(REQUEST)).rejects.toThrow(AiInvalidOutputError);
+    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
 
     expect(loggedText()).toContain(
       'sortie hors schéma — sortie probablement tronquée (plafond de génération ou contexte ?)',
     );
-  });
-
-  it('journalise aussi les rejets d’un ajustement, sous son propre schéma', async () => {
-    dal.getActivePlanWithSessions.mockResolvedValue({
-      plan: { ...PLAN, startsOn: '2026-08-10', weeks: 2 },
-      sessions: [],
-    });
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
-
-    await expect(updatePlanFromInstruction('change tout')).rejects.toThrow(AiInvalidOutputError);
-
-    expect(loggedText()).toContain('tentative 1/3 (training_plan_update) rejetée');
   });
 });
 
@@ -2135,21 +1983,30 @@ describe('budget temps hebdomadaire', () => {
     });
   });
 
-  it('juge la génération sur le budget de la requête', async () => {
-    // Une création ne porte pas de réglages : rien dans sa sortie ne peut
-    // déplacer le budget que le formulaire a déclaré.
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [PARTIAL_WEEK, THREE_HOURS_WEEK] });
+  it('tient le budget de la requête dans le plan qu’elle écrit', async () => {
+    // Une création ne demande plus rien au modèle en matière de volume : ses
+    // cibles sont calculées sous le budget déclaré (`weeklyVolumeTargets`) et le
+    // squelette les répartit sans les défaire. Le budget n'est donc plus une
+    // règle qu'on vérifie après coup, c'est une entrée du calcul — et ce test
+    // constate le résultat, semaine par semaine.
+    coachAnswers();
 
-    // Départ le jeudi 13 : première semaine entamée, puis une semaine pleine.
-    await expect(
-      generatePlan({ ...REQUEST, weeklyTimeMinutes: 120, startsOn: '2026-08-13' }),
-    ).rejects.toThrow(AiInvalidOutputError);
+    // Départ un lundi : deux semaines pleines, aucun prorata à démêler.
+    await generatePlan({ ...REQUEST, ...MONDAY, weeklyTimeMinutes: 120 });
 
-    expect(loggedText()).toContain(
-      "Semaine 2 : 3 h 00 d'entraînement pour un budget déclaré de 2 h 00",
-    );
-    expect(loggedText()).not.toContain('déjà entamée');
-    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
+    const byWeek = new Map<string, number>();
+    for (const session of writtenSessions()) {
+      // Semaine ISO du plan : lundi 17 puis lundi 24.
+      const week = session.scheduledOn < '2026-08-24' ? 'S1' : 'S2';
+      byWeek.set(week, (byWeek.get(week) ?? 0) + (session.durationS ?? 0));
+    }
+
+    expect(byWeek.size).toBe(2);
+    for (const [week, seconds] of byWeek) {
+      // 2 h déclarées, tolérance de 20 % comprise (cf. `VOLUME_RULES`).
+      expect(seconds, week).toBeLessThanOrEqual(120 * 60 * 1.2);
+    }
+    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
   });
 
   it('exempte du budget une semaine entamée de moins de quatre jours', async () => {
@@ -2331,64 +2188,78 @@ describe('planProgressPercent', () => {
 describe('progression de la génération', () => {
   const PROGRESS_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 
-  /** Ce que `chatCompletionJson` reçoit, réduit à ce que ces tests consomment. */
-  type JsonCall = { onProgress?: (receivedChars: number) => void };
+  /** Ce que \`chatCompletionJson\` reçoit, réduit à ce que ces tests consomment. */
+  type JsonCall = CoachCall & { onProgress?: (receivedChars: number) => void };
 
   /**
-   * Le plan attendu par `REQUEST` : deux semaines de trois séances. Son
-   * estimation sert d'échelle aux pourcentages ci-dessous.
+   * Un plan assez gros pour que la barre ait des paliers : quatre semaines
+   * pleines à cinq séances, soit sept créneaux de qualité.
    */
-  const ESTIMATED = estimatePlanChars(2, 3);
+  const SEVEN_SLOTS: PlanRequest = { ...REQUEST, ...MONDAY, weeks: 4, sessionsPerWeek: 5 };
 
-  it('alimente le registre au fil du flux, puis efface son entrée', async () => {
+  it('avance créneau par créneau jusqu’à 100 %, puis efface son entrée', async () => {
     const seen: (PlanProgress | null)[] = [];
-    chatCompletionJson.mockImplementation(async (options: JsonCall) => {
-      seen.push(getPlanProgress(PROGRESS_ID));
-      options.onProgress?.(Math.round(ESTIMATED / 4));
-      seen.push(getPlanProgress(PROGRESS_ID));
-      options.onProgress?.(Math.round(ESTIMATED / 2));
-      seen.push(getPlanProgress(PROGRESS_ID));
-      return { summary: 'Deux semaines de reprise.', weeks: CONFORMING_WEEKS };
+    chatCompletionJson.mockImplementation(async (call: JsonCall) => {
+      if (call.schemaName === 'plan_summary') {
+        // Le résumé part **après** le dernier créneau : la barre y est pleine.
+        seen.push(getPlanProgress(PROGRESS_ID));
+        return { summary: COACH_SUMMARY };
+      }
+      return qualityOutputFor(slotBudgetKm(call));
     });
 
-    await generatePlan(REQUEST, PROGRESS_ID);
+    await generatePlan(SEVEN_SLOTS, PROGRESS_ID);
 
-    // Une entrée existe dès avant le premier chunk : la barre apparaît sans
-    // attendre que le modèle ait écrit quoi que ce soit.
-    expect(seen.map((progress) => progress?.percent)).toEqual([0, 25, 50]);
-    expect(seen[2]).toMatchObject({ attempt: 1, maxAttempts: 3 });
-    // Effacée en `finally` : plus rien à lire une fois le plan écrit.
+    // Sept créneaux : 1/7, 2/7, … arrondis, et 100 % au dernier.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ percent: 100, attempt: 1, maxAttempts: 1 });
+    // Effacée en \`finally\` : plus rien à lire une fois le plan écrit.
     expect(getPlanProgress(PROGRESS_ID)).toBeNull();
   });
 
-  it('remet le pourcentage à zéro et compte la tentative à chaque reprise', async () => {
-    const attempts: (PlanProgress | null)[] = [];
-    chatCompletionJson
-      .mockImplementationOnce(async (options: JsonCall) => {
-        attempts.push(getPlanProgress(PROGRESS_ID));
-        options.onProgress?.(ESTIMATED);
-        return { summary: 'x', weeks: [BROKEN_WEEK, CONFORMING_WEEK] };
-      })
-      .mockImplementationOnce(async (options: JsonCall) => {
-        // La reprise réécrit le plan complet : laisser la barre à 99 % pendant
-        // toute la seconde génération serait un mensonge.
-        attempts.push(getPlanProgress(PROGRESS_ID));
-        options.onProgress?.(Math.round(ESTIMATED / 10));
-        attempts.push(getPlanProgress(PROGRESS_ID));
-        return { summary: 'Corrigé.', weeks: CONFORMING_WEEKS };
-      });
+  it('mesure des créneaux écrits, pas des caractères devinés', async () => {
+    const percents: number[] = [];
+    chatCompletionJson.mockImplementation(async (call: JsonCall) => {
+      if (call.schemaName === 'plan_summary') return { summary: COACH_SUMMARY };
+      // Relevé **avant** de répondre : c'est l'avancement des créneaux déjà
+      // écrits, celui-ci n'en étant pas encore un.
+      percents.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
+      return qualityOutputFor(slotBudgetKm(call));
+    });
 
-    await generatePlan(REQUEST, PROGRESS_ID);
+    await generatePlan(SEVEN_SLOTS, PROGRESS_ID);
 
-    expect(attempts[0]).toMatchObject({ percent: 0, attempt: 1, maxAttempts: 3 });
-    expect(attempts[1]).toMatchObject({ percent: 0, attempt: 2, maxAttempts: 3 });
-    expect(attempts[2]).toMatchObject({ percent: 10, attempt: 2 });
+    // La barre est posée à zéro avant le premier appel — la modale ne reste
+    // jamais muette —, puis chaque créneau la fait monter d'un cran, sans jamais
+    // reculer.
+    expect(percents).toEqual([0, 14, 29, 43, 57, 71, 86]);
+    // Et rien n'est jamais demandé deux fois : le plan ne se rejoue plus.
+    expect(percents).toHaveLength(new Set(percents).size);
+  });
+
+  it('n’affiche aucun compteur de tentative : ce chemin n’en rejoue aucune', async () => {
+    let during: PlanProgress | null = null;
+    chatCompletionJson.mockImplementation(async (call: JsonCall) => {
+      if (call.schemaName === 'plan_summary') return { summary: COACH_SUMMARY };
+      during = getPlanProgress(PROGRESS_ID) ?? during;
+      return qualityOutputFor(slotBudgetKm(call));
+    });
+
+    await generatePlan(SEVEN_SLOTS, PROGRESS_ID);
+
+    // \`maxAttempts\` à 1 : le formulaire tait alors le rang (cf.
+    // \`GenerationProgressBar\`), qui ne décrirait rien.
+    expect(during).toMatchObject({ attempt: 1, maxAttempts: 1 });
   });
 
   it("efface l'entrée même quand la génération échoue", async () => {
-    chatCompletionJson.mockResolvedValue({ summary: 'x', weeks: [BROKEN_WEEK, BROKEN_WEEK] });
+    coachAnswers();
+    // Le seul échec possible après remplissage : un plan que l'appli refuse.
+    businessRuleViolations.mockReturnValue(['Semaine 1 : quelque chose ne va pas.']);
 
-    await expect(generatePlan(REQUEST, PROGRESS_ID)).rejects.toThrow(AiInvalidOutputError);
+    await expect(generatePlan(SEVEN_SLOTS, PROGRESS_ID)).rejects.toThrow(
+      InvalidGeneratedPlanError,
+    );
 
     expect(getPlanProgress(PROGRESS_ID)).toBeNull();
   });
@@ -2426,10 +2297,7 @@ describe('progression de la génération', () => {
    * n'est pas un UUID. Une attente muette ne disait pas lequel avait lâché.
    */
   it('journalise que la génération est suivie, avec le début de l’identifiant', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+    coachAnswers();
 
     await generatePlan(REQUEST, PROGRESS_ID);
 
@@ -2440,10 +2308,7 @@ describe('progression de la génération', () => {
   });
 
   it('journalise aussi une génération non suivie : le silence était le problème', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
@@ -2468,37 +2333,24 @@ describe('progression de la génération', () => {
     expect(textOf(consoleInfo)).toContain('[plan] progression suivie (id a1b2c3d4)');
   });
 
-  it('ne streame pas et ne suit rien sans identifiant', async () => {
-    chatCompletionJson.mockResolvedValue({
-      summary: 'Deux semaines de reprise.',
-      weeks: CONFORMING_WEEKS,
-    });
+  it('ne suit rien sans identifiant', async () => {
+    coachAnswers();
 
     await generatePlan(REQUEST);
 
-    // Sans callback, `client.ts` reste en mode non-streamé : rien ne change pour
-    // les appelants qui n'affichent pas de progression.
-    expect(chatCompletionJson.mock.calls[0][0].onProgress).toBeUndefined();
+    // Rien n'est enregistré : le registre n'a pas de clé sous laquelle poser
+    // quoi que ce soit, et un appel de créneau ne streame pas.
+    expect(getPlanProgress(PROGRESS_ID)).toBeNull();
+    for (const [call] of chatCompletionJson.mock.calls as [JsonCall][]) {
+      expect(call.onProgress).toBeUndefined();
+    }
   });
 });
 
 /*
- * Génération par tranches.
+ * Ajustement par tranches — le seul chemin qui découpe encore : une création
+ * écrit ses semaines elle-même, quelle que soit leur nombre.
  */
-
-/** Un plan de douze semaines : deux tranches de six, la première entamée un mardi. */
-const LONG_REQUEST: PlanRequest = { ...REQUEST, weeks: 12 };
-
-/** Les cibles que l'appli chiffre pour ce plan-là — l'échelle des semaines mimées. */
-const LONG_TARGETS = weeklyVolumeTargets({
-  weeks: 12,
-  firstWeekFromDay: 2,
-  recentWeeklyKm: 42.1,
-  weeklyTimeMinutes: null,
-  easyPaceSecPerKm: SNAPSHOT.recentAvgPaceSecPerKm,
-  race: null,
-  level: 'intermediate',
-});
 
 /**
  * Une semaine de trois séances qui pèse exactement `km` : sortie longue le
@@ -2515,11 +2367,6 @@ function weekOfKm(km: number) {
   };
 }
 
-/** Les semaines d'une tranche, conformes à leurs cibles. */
-function chunkWeeks(from: number, to: number) {
-  return LONG_TARGETS.slice(from, to).map((target) => weekOfKm(target.targetKm));
-}
-
 describe('planChunks', () => {
   it('ne découpe pas ce qui tient en un appel', () => {
     expect(planChunks(6)).toEqual([{ index: 0, count: 1, fromWeek: 0, weeks: 6 }]);
@@ -2531,218 +2378,6 @@ describe('planChunks', () => {
     expect(planChunks(16).map((chunk) => chunk.weeks)).toEqual([6, 5, 5]);
     expect(planChunks(52).map((chunk) => chunk.weeks)).toEqual([6, 6, 6, 6, 6, 6, 6, 5, 5]);
     expect(planChunks(16).map((chunk) => chunk.fromWeek)).toEqual([0, 6, 11]);
-  });
-});
-
-describe('generatePlan — par tranches', () => {
-  it('génère un plan long en deux appels et les assemble', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Douze semaines de reprise.' });
-
-    await generatePlan(LONG_REQUEST);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    const input = dal.createDraftPlanWithSessions.mock.calls[0][0];
-    expect(input.weeks).toBe(12);
-    expect(input.sessions).toHaveLength(36);
-    // Les semaines s'enchaînent sans trou : la dernière séance tombe douze
-    // semaines après l'ancre (lundi 10 août).
-    expect(input.sessions[35].scheduledOn).toBe('2026-11-01');
-    // Le résumé vient de la dernière tranche : c'est elle qui a vu tout le plan.
-    expect(input.summary).toBe('Douze semaines de reprise.');
-  });
-
-  it('borne la grammaire à la tranche, et ne demande le résumé qu’à la dernière', () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
-
-    return generatePlan(LONG_REQUEST).then(() => {
-      const [first, second] = chatCompletionJson.mock.calls.map(
-        (call: { jsonSchema: { properties: Record<string, unknown>; required: string[] } }[]) =>
-          call[0].jsonSchema,
-      );
-
-      expect(first.properties.weeks).toMatchObject({ minItems: 6, maxItems: 6 });
-      // La clé n'existe pas : un modèle sous grammaire ne peut pas résumer une
-      // tranche dont le résumé serait jeté.
-      expect(first.properties.summary).toBeUndefined();
-      expect(first.required).toEqual(['weeks']);
-      expect(second.properties.summary).toBeDefined();
-      expect(second.required).toEqual(['weeks', 'summary']);
-    });
-  });
-
-  /**
-   * Le compte de séances devient une contrainte de grammaire.
-   *
-   * Constaté en production : sous message de reprise, le modèle écrit 7 séances
-   * là où 6 sont demandées — la règle métier le voyait, mais après coup, au prix
-   * d'une tranche à régénérer. Ce que la grammaire interdit d'écrire n'a plus à
-   * être corrigé.
-   */
-  it('interdit le mauvais compte de séances, sauf sur la tranche entamée', () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
-
-    return generatePlan(LONG_REQUEST).then(() => {
-      const sessionsOf = (schema: {
-        properties: { weeks: { items: { properties: { sessions: Record<string, number> } } } };
-      }) => schema.properties.weeks.items.properties.sessions;
-
-      const [first, second] = chatCompletionJson.mock.calls.map(
-        (call: { jsonSchema: Parameters<typeof sessionsOf>[0] }[]) => sessionsOf(call[0].jsonSchema),
-      );
-
-      // La première tranche porte la semaine entamée du plan (départ un mardi) :
-      // elle en compte moins, et les items d'un tableau JSON Schema sont
-      // uniformes — bornes souples, la règle métier reste le filet.
-      expect(first).toMatchObject({ minItems: 1, maxItems: 3 });
-      // La seconde n'a que des semaines pleines : compte exact.
-      expect(second).toMatchObject({ minItems: 3, maxItems: 3 });
-    });
-  });
-
-  it('annonce à chaque tranche ses bornes, ses cibles et rien de plus', async () => {
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
-
-    await generatePlan(LONG_REQUEST);
-
-    const [first, second] = chatCompletionJson.mock.calls.map(
-      (call: { messages: { content: string }[] }[]) => call[0].messages[1].content,
-    );
-
-    expect(first).toContain(
-      "Tranche 1/2 : rends UNIQUEMENT les semaines 1 à 6 du plan, dans l'ordre chronologique",
-    );
-    expect(first).toContain('Volumes hebdomadaires cibles (à ±10 %) : S1 ');
-    // Les cibles des semaines qu'on ne demande pas ne partent pas : c'est tout
-    // l'objet du découpage.
-    expect(first).not.toContain('S7 ');
-    expect(second).toContain('Tranche 2/2 : rends UNIQUEMENT les semaines 7 à 12 du plan');
-    expect(second).toContain('S7 ');
-    expect(second).toContain('Le résumé (`summary`) porte sur le plan complet');
-    // La première semaine entamée n'est annoncée qu'à la tranche qui la porte.
-    expect(first).toContain('weeks[0] est déjà entamée');
-    expect(second).not.toContain('déjà entamée');
-  });
-
-  it('donne à chaque tranche la fin de la précédente, pour qu’elle enchaîne', async () => {
-    // La sixième semaine porte une séance de qualité : c'est ce que la tranche
-    // suivante doit savoir pour ne pas en enchaîner une troisième.
-    const plain = weekOfKm(LONG_TARGETS[5].targetKm).sessions;
-    const sixth = {
-      sessions: [
-        plain[0],
-        { day: 5, kind: 'Seuil', title: '3 × 8 min', distanceKm: 12, steps: THRESHOLD_STEPS },
-        plain[2],
-      ],
-    };
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: [...chunkWeeks(0, 5), sixth] })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'ok' });
-
-    await generatePlan(LONG_REQUEST).catch(() => undefined);
-
-    const second = chatCompletionJson.mock.calls[1][0].messages[1].content;
-    expect(second).toContain('Fin de la tranche précédente — semaine 6 :');
-    expect(second).toContain('séances de qualité : Seuil.');
-  });
-
-  it('ne régénère que la tranche fautive, pas le plan entier', async () => {
-    // La dixième semaine sort de sa cible : elle est dans la seconde tranche, et
-    // c'est la seule à reprendre.
-    const broken = chunkWeeks(6, 12);
-    broken[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
-
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: broken, summary: 'ok' })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Corrigé.' });
-
-    await generatePlan(LONG_REQUEST);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(3);
-    const retry = chatCompletionJson.mock.calls[2][0].messages;
-    // La reprise porte sur la tranche, avec les numéros de semaine du plan.
-    expect(retry[2].content).toContain('Semaine 10 :');
-    expect(retry[2].content).toContain(
-      'Régénère les 6 semaines de cette tranche (semaines 7 à 12 du plan)',
-    );
-    expect(dal.createDraftPlanWithSessions).toHaveBeenCalledTimes(1);
-  });
-
-  it('régénère les tranches fautives dans l’ordre, pas dans celui des violations', async () => {
-    // Deux tranches fautives, dont les violations arrivent à l'envers : la
-    // semaine 10 sort de sa cible (tranche 2, règle des cibles, énoncée en
-    // premier), tandis que les semaines 2 et 3 restent dans leur bande mais
-    // enchaînent une hausse de 27 % (tranche 1, règle de la hausse, énoncée
-    // après). Régénérer la tranche 2 d'abord la calerait sur une semaine 6 qui
-    // va être réécrite dans la foulée.
-    const firstChunk = chunkWeeks(0, 6);
-    firstChunk[1] = weekOfKm(LONG_TARGETS[1].targetKm * 0.92);
-    firstChunk[2] = weekOfKm(LONG_TARGETS[2].targetKm * 1.08);
-    const secondChunk = chunkWeeks(6, 12);
-    secondChunk[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
-
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: firstChunk })
-      .mockResolvedValueOnce({ weeks: secondChunk, summary: 'ok' })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValueOnce({ weeks: chunkWeeks(6, 12), summary: 'Corrigé.' });
-
-    await generatePlan(LONG_REQUEST);
-
-    expect(chatCompletionJson).toHaveBeenCalledTimes(4);
-    const reprises = chatCompletionJson.mock.calls
-      .slice(2)
-      .map((call: { messages: { content: string }[] }[]) => call[0].messages[2].content);
-
-    expect(reprises[0]).toContain('semaines 1 à 6 du plan');
-    expect(reprises[1]).toContain('semaines 7 à 12 du plan');
-  });
-
-  it('renonce après trois tentatives sur la même tranche', async () => {
-    const broken = chunkWeeks(6, 12);
-    broken[3] = weekOfKm(LONG_TARGETS[9].targetKm * 0.5);
-
-    chatCompletionJson
-      .mockResolvedValueOnce({ weeks: chunkWeeks(0, 6) })
-      .mockResolvedValue({ weeks: broken, summary: 'ok' });
-
-    await expect(generatePlan(LONG_REQUEST)).rejects.toThrow(AiInvalidOutputError);
-
-    // Une pour la première tranche, trois pour la seconde.
-    expect(chatCompletionJson).toHaveBeenCalledTimes(4);
-    expect(loggedText()).toContain('génération par tranches abandonnée');
-    expect(dal.createDraftPlanWithSessions).not.toHaveBeenCalled();
-  });
-
-  it('suit l’avancement global, pas celui de la tranche en cours', async () => {
-    const PROGRESS_ID = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
-    const seen: number[] = [];
-
-    chatCompletionJson
-      .mockImplementationOnce(async (options: { onProgress?: (chars: number) => void }) => {
-        options.onProgress?.(estimatePlanChars(6, 3));
-        seen.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
-        return { weeks: chunkWeeks(0, 6) };
-      })
-      .mockImplementationOnce(async (options: { onProgress?: (chars: number) => void }) => {
-        options.onProgress?.(Math.round(estimatePlanChars(6, 3) / 2));
-        seen.push(getPlanProgress(PROGRESS_ID)?.percent ?? -1);
-        return { weeks: chunkWeeks(6, 12), summary: 'ok' };
-      });
-
-    await generatePlan(LONG_REQUEST, PROGRESS_ID);
-
-    // Première tranche terminée : 99 % de la moitié du plan. Seconde tranche à
-    // moitié : la moitié plus un quart.
-    expect(seen).toEqual([50, 75]);
   });
 });
 

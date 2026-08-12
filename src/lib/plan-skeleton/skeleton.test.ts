@@ -5,6 +5,7 @@ import {
   applyDerivedMeasures,
   applyImposedPaces,
   PLAN_OUTPUT_BOUNDS,
+  sessionPaceZone,
   validatePlanBusinessRules,
   weeklyVolumeTargets,
   type PlanExpectations,
@@ -368,15 +369,25 @@ const SESSIONS_PER_WEEK = [2, 3, 4, 5, 6, 7];
  * **Ne pas rétrécir plus.** Six couples ne peuvent plus couvrir sept jours de
  * chaque côté : on perdrait un jour de sortie longue ou un jour de reprise, donc
  * un placement ou un plafond de séances, en silence.
+ *
+ * ## Le jour J s'apparie ici plutôt que de multiplier la matrice
+ *
+ * `raceDay` ne décide que d'une chose, et sur une seule semaine : quel jour de la
+ * **semaine de course** porte le rôle `long` ({@link buildPlanSkeleton}). Deux
+ * relations seulement comptent — le jour J tombe sur le jour de sortie longue de
+ * l'athlète (cas le plus fréquent : une course le dimanche, des sorties longues
+ * le dimanche) ou il tombe ailleurs, auquel cas le placement de toute la semaine
+ * de course se réorganise autour de lui. Les deux sont représentées, quatre fois
+ * l'une et trois fois l'autre, sans ajouter une seule combinaison.
  */
-const DAY_SETTINGS: { longRunDay: number; firstWeekFromDay: number }[] = [
-  { longRunDay: 7, firstWeekFromDay: 1 },
-  { longRunDay: 1, firstWeekFromDay: 2 },
-  { longRunDay: 4, firstWeekFromDay: 3 },
-  { longRunDay: 5, firstWeekFromDay: 4 },
-  { longRunDay: 2, firstWeekFromDay: 5 },
-  { longRunDay: 6, firstWeekFromDay: 6 },
-  { longRunDay: 3, firstWeekFromDay: 7 },
+const DAY_SETTINGS: { longRunDay: number; firstWeekFromDay: number; raceDay: number }[] = [
+  { longRunDay: 7, firstWeekFromDay: 1, raceDay: 7 },
+  { longRunDay: 1, firstWeekFromDay: 2, raceDay: 6 },
+  { longRunDay: 4, firstWeekFromDay: 3, raceDay: 7 },
+  { longRunDay: 5, firstWeekFromDay: 4, raceDay: 5 },
+  { longRunDay: 2, firstWeekFromDay: 5, raceDay: 3 },
+  { longRunDay: 6, firstWeekFromDay: 6, raceDay: 6 },
+  { longRunDay: 3, firstWeekFromDay: 7, raceDay: 1 },
 ];
 
 type Combination = {
@@ -384,15 +395,28 @@ type Combination = {
   sessionsPerWeek: number;
   longRunDay: number;
   firstWeekFromDay: number;
+  /** Le jour J tel que le formulaire le donnerait — ignoré quand l'objectif n'est pas daté. */
+  raceDay: number;
   level: PlanLevel;
   goal: Goal;
   athlete: Athlete;
 };
 
+/**
+ * Le jour J **effectif** d'une combinaison : celui d'un objectif daté, `null`
+ * sinon — un objectif libre ou une distance sans date n'a pas de semaine de
+ * course, et le squelette comme la validation l'ignorent alors.
+ */
+function raceDayOf(combination: Combination): number | null {
+  return combination.goal.race === null ? null : combination.raceDay;
+}
+
 function describeCombination(combination: Combination): string {
+  const raceDay = raceDayOf(combination);
   return (
     `${combination.weeks} semaines, ${combination.sessionsPerWeek} séances, ` +
     `sortie longue jour ${combination.longRunDay}, départ jour ${combination.firstWeekFromDay}, ` +
+    `${raceDay === null ? 'sans jour J' : `jour J ${raceDay}`}, ` +
     `${combination.level}, objectif ${combination.goal.label}, athlète ${combination.athlete.label}`
   );
 }
@@ -418,6 +442,7 @@ function skeletonFor(combination: Combination, targets: readonly WeeklyVolumeTar
     longRunDay: combination.longRunDay,
     level: combination.level,
     race: combination.goal.race,
+    raceDay: raceDayOf(combination),
     goalDistanceKm: combination.goal.goalDistanceKm,
     targets,
   });
@@ -465,7 +490,7 @@ function allCombinations(): Combination[] {
   const combinations: Combination[] = [];
   for (const weeks of WEEKS) {
     for (const sessionsPerWeek of SESSIONS_PER_WEEK) {
-      for (const { longRunDay, firstWeekFromDay } of DAY_SETTINGS) {
+      for (const { longRunDay, firstWeekFromDay, raceDay } of DAY_SETTINGS) {
         for (const level of SWEPT_LEVELS) {
           for (const goal of GOALS) {
             for (const athlete of ATHLETES) {
@@ -474,6 +499,7 @@ function allCombinations(): Combination[] {
                 sessionsPerWeek,
                 longRunDay,
                 firstWeekFromDay,
+                raceDay,
                 level,
                 goal,
                 athlete,
@@ -576,6 +602,9 @@ describe('buildPlanSkeleton', () => {
         longRunDay: combination.longRunDay,
         firstWeekFromDay: combination.firstWeekFromDay,
         race: combination.goal.race,
+        // La semaine de course se juge sur son jour J, pas sur le jour de sortie
+        // longue de l'athlète — exactement ce que `writeGeneratedPlan` passe.
+        raceDay: raceDayOf(combination),
         weeklyTargets: targets,
       };
 
@@ -600,6 +629,7 @@ describe('buildPlanSkeleton', () => {
       sessionsPerWeek: 5,
       longRunDay: 7,
       firstWeekFromDay: 1,
+      raceDay: 7,
       level: 'intermediate',
       goal: MARATHON_GOAL,
       athlete: ATHLETES[2],
@@ -609,11 +639,14 @@ describe('buildPlanSkeleton', () => {
   });
 
   describe('ce que chaque semaine porte', () => {
+    // Jour J le dimanche, sorties longues le samedi : les deux jours diffèrent,
+    // donc la semaine de course se distingue de toutes les autres.
     const combination: Combination = {
       weeks: 16,
       sessionsPerWeek: 5,
       longRunDay: 6,
       firstWeekFromDay: 1,
+      raceDay: 7,
       level: 'intermediate',
       goal: MARATHON_GOAL,
       athlete: ATHLETES[2],
@@ -644,7 +677,9 @@ describe('buildPlanSkeleton', () => {
     });
 
     it('pose la sortie longue le jour réglé, et c’est la plus longue séance', () => {
-      for (const week of skeleton) {
+      // La semaine de course n'a pas de sortie longue : elle est jugée à part
+      // (cf. « la semaine de course »).
+      for (const week of skeleton.filter((candidate) => candidate.phase !== 'race')) {
         const longRun = week.sessions.find((session) => session.day === 6);
         expect(longRun?.kind, `semaine ${week.weekNumber}`).toBe('Sortie longue');
         const others = [
@@ -669,6 +704,12 @@ describe('buildPlanSkeleton', () => {
           }
         }
       }
+    });
+
+    it('n’écrit aucune sortie longue la semaine de la course', () => {
+      const raceWeek = skeleton[15];
+      expect(raceWeek.phase).toBe('race');
+      expect(raceWeek.sessions.map((session) => session.kind)).not.toContain('Sortie longue');
     });
 
     it('ne laisse aucune séance écrite porter un déroulé, sauf la sortie longue spécifique', () => {
@@ -705,7 +746,136 @@ describe('buildPlanSkeleton', () => {
       expect(raceWeek.qualitySlots).toEqual([]);
       // Et les footings y sont des récupérations, qui ne reçoivent aucune cible.
       for (const session of raceWeek.sessions) {
-        expect(['Récupération', 'Sortie longue']).toContain(session.kind);
+        expect(['Récupération', 'Course']).toContain(session.kind);
+      }
+    });
+  });
+
+  /*
+   * Le jour J.
+   *
+   * Ce que ces cas protègent est un défaut vu en production : le squelette
+   * écrivait « Sortie longue » sur le jour de sortie longue de l'athlète, y
+   * compris quand ce jour-là était celui de sa course — l'athlète lisait
+   * « 8,5 km à 5:54/km » sur la case de son marathon.
+   */
+  describe('la semaine de course', () => {
+    /** Le squelette d'une préparation marathon, jour J au jour ISO donné. */
+    function raceSkeleton(longRunDay: number, raceDay: number): SkeletonWeek[] {
+      const combination: Combination = {
+        weeks: 12,
+        sessionsPerWeek: 5,
+        longRunDay,
+        firstWeekFromDay: 1,
+        raceDay,
+        level: 'intermediate',
+        goal: MARATHON_GOAL,
+        athlete: ATHLETES[2],
+      };
+      return skeletonFor(combination, targetsFor(combination));
+    }
+
+    it('écrit la course le jour J, et rien d’autre ce jour-là', () => {
+      const raceWeek = raceSkeleton(7, 6)[11];
+
+      const raceSession = raceWeek.sessions.filter((session) => session.day === 6);
+      expect(raceSession).toHaveLength(1);
+      expect(raceSession[0].kind).toBe('Course');
+      expect(raceSession[0].title).toBe('Jour J : la course');
+      // Aucun déroulé : une course ne se découpe pas en échauffement et blocs.
+      expect(raceSession[0].steps).toBeUndefined();
+    });
+
+    it('remplace la sortie longue au lieu de s’y ajouter', () => {
+      const raceWeek = raceSkeleton(7, 6)[11];
+
+      expect(raceWeek.sessions.map((session) => session.kind)).not.toContain('Sortie longue');
+      // Le jour de sortie longue de l'athlète ne porte plus rien de long : ce qui
+      // s'y trouve, s'il s'y trouve quelque chose, est un footing de récupération.
+      const onLongRunDay = raceWeek.sessions.find((session) => session.day === 7);
+      expect(onLongRunDay?.kind ?? 'Récupération').toBe('Récupération');
+    });
+
+    it('donne à la course le budget de la sortie longue, jamais la distance réelle', () => {
+      const raceWeek = raceSkeleton(7, 7)[11];
+      const race = raceWeek.sessions.find((session) => session.day === 7);
+
+      expect(race?.kind).toBe('Course');
+      // Le plus gros budget de la semaine, et de très loin sous les 42,195 km
+      // d'un marathon : un plan porte des volumes d'entraînement.
+      for (const session of raceWeek.sessions) {
+        expect(race?.distanceKm ?? 0).toBeGreaterThanOrEqual(session.distanceKm ?? 0);
+      }
+      expect(race?.distanceKm ?? 0).toBeLessThan(42.195);
+    });
+
+    it('classe la séance du jour J en zone objectif, pas en endurance', () => {
+      const raceWeek = raceSkeleton(7, 6)[11];
+      const race = raceWeek.sessions.find((session) => session.day === 6);
+
+      expect(sessionPaceZone(race?.kind ?? '')).toBe('marathon');
+    });
+
+    it('laisse les autres semaines à leur sortie longue habituelle', () => {
+      const skeleton = raceSkeleton(7, 6);
+
+      for (const week of skeleton.slice(0, 11)) {
+        const longRun = week.sessions.find((session) => session.day === 7);
+        expect(longRun?.kind, `semaine ${week.weekNumber}`).toBe('Sortie longue');
+      }
+    });
+
+    /*
+     * Le jour J est une **borne**, pas seulement un jour de plus.
+     *
+     * Mesuré avant correction, marathon un lundi et 6 séances : la semaine de
+     * course portait **5 séances et 23,3 km après la course**, dont une le
+     * lendemain du marathon. `placeSessionDays` étalait les footings sur les
+     * sept jours sans savoir que la semaine s'arrêtait au jour J.
+     */
+    it('ne programme aucune séance après le jour J', () => {
+      for (const raceDay of [1, 3, 5]) {
+        const raceWeek = raceSkeleton(7, raceDay)[11];
+        for (const session of raceWeek.sessions) {
+          expect(session.day, `jour J ${raceDay}`).toBeLessThanOrEqual(raceDay);
+        }
+        // La course est bien là : la borne n'a pas emporté le jour J lui-même.
+        expect(
+          raceWeek.sessions.some((session) => session.day === raceDay && session.kind === 'Course'),
+          `jour J ${raceDay}`,
+        ).toBe(true);
+      }
+    });
+
+    /*
+     * Retirer des séances ne retire pas leurs kilomètres : la cible de la semaine
+     * de course reste celle que `weeklyVolumeTargets` a chiffrée, et un budget
+     * abandonné la ferait passer sous sa barre — donc hors de sa bande de ±10 %.
+     */
+    it('réabsorbe le budget des séances supprimées : la semaine tient sa cible', () => {
+      for (const raceDay of [1, 3, 5]) {
+        const raceWeek = raceSkeleton(7, raceDay)[11];
+        const total = raceWeek.sessions.reduce((sum, s) => sum + (s.distanceKm ?? 0), 0);
+        expect(total, `jour J ${raceDay}`).toBeCloseTo(raceWeek.target.targetKm, 1);
+      }
+    });
+
+    it('ne change rien sans jour J : un objectif libre garde sa sortie longue', () => {
+      const combination: Combination = {
+        weeks: 12,
+        sessionsPerWeek: 5,
+        longRunDay: 7,
+        firstWeekFromDay: 1,
+        raceDay: 7,
+        level: 'intermediate',
+        goal: GOALS[0],
+        athlete: ATHLETES[2],
+      };
+      const skeleton = skeletonFor(combination, targetsFor(combination));
+
+      for (const week of skeleton) {
+        const longRun = week.sessions.find((session) => session.day === 7);
+        expect(longRun?.kind, `semaine ${week.weekNumber}`).toBe('Sortie longue');
       }
     });
   });
@@ -716,6 +886,7 @@ describe('buildPlanSkeleton', () => {
       sessionsPerWeek: 5,
       longRunDay: 2,
       firstWeekFromDay: 5,
+      raceDay: 7,
       level: 'intermediate',
       goal: HALF_GOAL,
       athlete: ATHLETES[2],
@@ -752,6 +923,7 @@ describe('buildPlanSkeleton', () => {
         sessionsPerWeek: 6,
         longRunDay: 7,
         firstWeekFromDay: 1,
+        raceDay: 7,
         level,
         goal: TEN_K_GOAL,
         athlete: ATHLETES[2],
@@ -768,6 +940,7 @@ describe('buildPlanSkeleton', () => {
       sessionsPerWeek: 6,
       longRunDay: 7,
       firstWeekFromDay: 1,
+      raceDay: 7,
       level: 'advanced',
       goal: MARATHON_GOAL,
       athlete: ATHLETES[2],
@@ -790,6 +963,7 @@ describe('buildPlanSkeleton', () => {
         longRunDay: 7,
         level: 'intermediate',
         race: null,
+        raceDay: null,
         goalDistanceKm: null,
         targets: [],
       }),
@@ -818,6 +992,7 @@ describe('buildPlanSkeleton', () => {
       sessionsPerWeek: 4,
       longRunDay: 7,
       firstWeekFromDay: 1,
+      raceDay: 7,
       level: 'intermediate',
       goal: TEN_K_GOAL,
       athlete: ATHLETES[1],
@@ -890,6 +1065,7 @@ describe('buildPlanSkeleton', () => {
       sessionsPerWeek: 6,
       longRunDay: 7,
       firstWeekFromDay: 1,
+      raceDay: 7,
       level: 'beginner',
       goal: MARATHON_GOAL,
       athlete: ATHLETES[3],
@@ -966,6 +1142,7 @@ describe('buildPlanSkeleton', () => {
             longRunDay: 7,
             level: 'intermediate',
             race: null,
+            raceDay: null,
             goalDistanceKm: null,
             targets: [target(targetKm)],
           }),

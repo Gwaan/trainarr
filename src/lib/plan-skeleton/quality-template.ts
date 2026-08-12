@@ -9,8 +9,8 @@
  * faible, et l'expérience du projet est sans appel : il échoue, il tronque, il
  * répond à côté. Un plan d'entraînement ne peut pas dépendre de lui.
  *
- * Ce module est donc le **repli déterministe** : à partir des trois seules
- * données d'un créneau — la zone, le budget, la phase —, il écrit un déroulé
+ * Ce module est donc le **repli déterministe** : à partir des quatre seules
+ * données d'un créneau — la zone, le budget, la phase, le niveau —, il écrit un déroulé
  * complet, valide et physiologiquement sensé. Il sert quand le modèle échoue, et
  * il rend accessoirement le squelette utilisable seul, sans le moindre appel
  * réseau. Ce que le modèle apporte quand il fonctionne, c'est de la variété et
@@ -53,6 +53,7 @@
  * un test le vérifie.
  */
 
+import type { PlanLevel } from '@/data/db/schema';
 import { PLAN_STEP_BOUNDS, type PlanSessionSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import type { PlanPhase } from './phases';
@@ -227,7 +228,8 @@ const ZONE_SHAPES = {
 
 /**
  * Comment la phase de la semaine module le format : **un seul levier, la
- * récupération**.
+ * récupération** — celui-là même que le niveau de l'athlète actionne de son côté
+ * ({@link LEVEL_RECOVERY_FACTOR}), les deux facteurs se multipliant.
  *
  * Le budget est fixé par ailleurs, et c'est ce qui rend ce levier suffisant :
  * allonger la récupération, c'est dépenser en trot des mètres qui seraient allés
@@ -261,6 +263,75 @@ const PHASE_RECOVERY_FACTOR = {
   taper: 1.3,
   race: 1,
 } as const satisfies Record<PlanPhase, number>;
+
+/**
+ * Comment le **niveau de l'athlète** module le format — et pourquoi c'est encore
+ * la récupération, comme pour la phase.
+ *
+ * ## Ce que ce facteur répare
+ *
+ * Avant la bascule sur squelette, le niveau décidait du contenu des séances
+ * dures par le prompt du plan entier (`LEVEL_RULES` : « NIVEAU DÉBUTANT — au
+ * plus une séance de qualité, courte et douce, fractionné court. Jamais de bloc
+ * de seuil long » contre « CONFIRMÉ — blocs de seuil plus longs »). Ce prompt a
+ * disparu avec le plan entier, et la règle avec lui : **mesuré sur un semi en
+ * 1 h 45 à 4 séances, une débutante recevait 9 séances de seuil à la structure
+ * exacte d'une confirmée, et `advanced` produisait un plan strictement identique
+ * à `intermediate`.** Seul le nombre de créneaux distinguait encore les niveaux.
+ *
+ * ## Pourquoi la récupération, et pas la longueur des répétitions
+ *
+ * Parce que c'est le seul paramètre qui produise les **deux** effets attendus
+ * d'un seul geste. À budget fixé, l'effort se déduit de la récupération
+ * (`roughEffortM = workTargetM / (reps × (1 + ratio))`) : allonger la
+ * récupération raccourcit mécaniquement les efforts. Une débutante obtient donc
+ * des efforts plus courts *et* plus de trot, sans qu'on ait à le demander deux
+ * fois.
+ *
+ * Le levier évident — resserrer les bornes de longueur de la zone
+ * ({@link ZONE_SHAPES}) — a été mesuré et écarté : ces bornes ne mordent que sur
+ * les bords du domaine. Sur un créneau de seuil de 9 km en développement, les
+ * bornes de `intermediate` (1 000–3 000 m) et celles d'un `advanced` élargi
+ * (1 400–4 200 m) rendent **le même déroulé**, `3 × 1 300 m` : la longueur
+ * retenue vient du budget, pas de la borne. Le défaut qu'on répare serait resté.
+ *
+ * ## Un seul bouton, et pas deux
+ *
+ * Le niveau n'agit donc **que** sur ce facteur — ni sur les bornes de longueur,
+ * ni sur l'enveloppe, ni sur le nombre de répétitions préféré. Deux réglages
+ * tirant tous les deux vers « plus facile » se composeraient sans que personne
+ * ne sache lequel a produit quoi, et le module a déjà tranché la question pour
+ * la phase : un seul levier, la récupération.
+ *
+ * Le facteur du niveau et celui de la phase se **multiplient**, et les bornes en
+ * mètres de chaque zone ({@link ZONE_SHAPES}) bornent le produit : une base pour
+ * une débutante (1,3 × 1,5) ne peut pas dépasser la récupération maximale de sa
+ * zone, une spécificité pour une confirmée (0,8 × 0,8) pas descendre sous sa
+ * minimale. Le balayage complet du domaine le vérifie zone par zone.
+ *
+ * - **`beginner`** — la qualité est neuve : des efforts courts, et de quoi
+ *   revenir au calme entre chacun. C'est ce que disait la règle de prompt
+ *   disparue, et c'est ce qui fait qu'une séance dure se termine fraîche.
+ * - **`intermediate`** — le format de référence, sans correction : le facteur
+ *   vaut exactement 1, et les déroulés d'aujourd'hui ne bougent pas d'un mètre.
+ * - **`advanced`** — on serre. Tenir l'allure sur une récupération incomplète
+ *   est ce qui distingue une athlète installée, et le budget rendu par le trot
+ *   part dans des blocs plus longs.
+ *
+ * ## Ce qu'il ne change pas, et c'est voulu
+ *
+ * La zone `marathon` a des bornes de récupération **égales** (200 m, cf.
+ * {@link ZONE_SHAPES}) : sa coupure est une respiration entre deux blocs, pas
+ * une récupération. Elle ne dépend déjà pas de la phase ; elle ne dépend pas
+ * davantage du niveau, et un bloc à allure objectif s'écrit pareil pour tout le
+ * monde. Ce que le niveau change alors est ailleurs — le *nombre* de créneaux
+ * ({@link qualitySlotCount}) et le volume que les cibles autorisent.
+ */
+const LEVEL_RECOVERY_FACTOR = {
+  beginner: 1.5,
+  intermediate: 1,
+  advanced: 0.8,
+} as const satisfies Record<PlanLevel, number>;
 
 /**
  * Les consignes écrites sur les étapes, zone par zone.
@@ -401,13 +472,21 @@ type SessionFormat = { reps: number; effortM: number; recoverM: number };
  * répétitions gagne — un choix arbitraire, mais **déterministe**, qui est ce que
  * ce module doit avant tout.
  */
-function chooseFormat(zone: QualityZone, phase: PlanPhase, workTargetM: number): SessionFormat | null {
+function chooseFormat(
+  zone: QualityZone,
+  phase: PlanPhase,
+  level: PlanLevel,
+  workTargetM: number,
+): SessionFormat | null {
   const shape = ZONE_SHAPES[zone];
   // Le contrat des étapes borne aussi les répétitions : au-delà, c'est un bloc
   // mal découpé, et le schéma refuserait le déroulé.
   const maxReps = Math.min(shape.reps.max, PLAN_STEP_BOUNDS.repeat.max);
   const preferredReps = Math.min(shape.reps.preferred, maxReps);
-  const ratio = shape.recovery.ratio * PHASE_RECOVERY_FACTOR[phase];
+  // Les deux seuls modulateurs du format, et ils tirent la même corde : la
+  // récupération. Le produit reste borné par les bornes en mètres de la zone.
+  const ratio =
+    shape.recovery.ratio * PHASE_RECOVERY_FACTOR[phase] * LEVEL_RECOVERY_FACTOR[level];
 
   let best: SessionFormat | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -465,13 +544,17 @@ function chooseFormat(zone: QualityZone, phase: PlanPhase, workTargetM: number):
  * `PLAN_OUTPUT_BOUNDS.distanceKm.min` (0,5 km), plancher que
  * {@link weeklySessionBudgets} ne franchit jamais. Le déroulé rendu couvre ce
  * budget au mètre près, arrondi du budget en mètres compris (au plus 0,5 m).
+ * @param level le niveau de l'athlète, second et dernier modulateur du format
+ * ({@link LEVEL_RECOVERY_FACTOR}). Sans lui, le repli écrirait à une débutante
+ * la séance d'une confirmée — c'est le défaut mesuré que ce paramètre répare.
  */
 export function qualitySessionTemplate(params: {
   zone: QualityZone;
   budgetKm: number;
   phase: PlanPhase;
+  level: PlanLevel;
 }): PlanSessionSteps {
-  const { zone, budgetKm, phase } = params;
+  const { zone, budgetKm, phase, level } = params;
 
   // Tout se calcule en mètres entiers : c'est la seule façon de faire retomber
   // une somme sur un total sans traîner d'erreur de flottant.
@@ -479,7 +562,7 @@ export function qualitySessionTemplate(params: {
   const targets = envelopeTargets(totalM);
   const workTargetM = totalM - targets.warmupM - targets.cooldownM;
 
-  const format = chooseFormat(zone, phase, workTargetM);
+  const format = chooseFormat(zone, phase, level, workTargetM);
   const notes = ZONE_NOTES[zone];
   const usedM = format === null ? workTargetM : format.reps * (format.effortM + format.recoverM);
 

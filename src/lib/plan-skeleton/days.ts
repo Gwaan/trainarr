@@ -91,6 +91,19 @@ export type PlaceSessionDaysParams = {
    * sur une première semaine entamée.
    */
   fromDay: number;
+  /**
+   * Dernier jour ISO disponible : 7 sur une semaine ordinaire, **le jour J** sur
+   * la semaine de la course.
+   *
+   * Le jour J est une borne, pas seulement un jour de plus. Sans elle, mesuré
+   * sur un marathon un lundi à 6 séances : la semaine de course portait
+   * **5 séances et 23,3 km après la course**, dont une le lendemain du
+   * marathon. Étaler des footings sur les jours qui suivent une compétition
+   * n'est pas un plan d'affûtage, et c'est ici que ça se corrige — la fenêtre
+   * `[fromDay, toDay]` est le seul endroit qui décide de ce qu'une semaine peut
+   * porter.
+   */
+  toDay: number;
 };
 
 /** L'écart entre deux jours de la semaine, en jours, la semaine étant refermée sur elle-même. */
@@ -235,13 +248,16 @@ function bestSpacedQualityDays(
  *
  * Le nombre de séances réellement posées est plafonné par les jours disponibles :
  * une semaine reprise le vendredi ne porte pas six séances, quoi qu'en dise le
- * réglage.
+ * réglage — et une semaine de course courue le mardi n'en porte pas plus de deux
+ * (cf. {@link PlaceSessionDaysParams.toDay}).
  */
 export function placeSessionDays(params: PlaceSessionDaysParams): SessionDayPlacement {
-  const { sessionsPerWeek, longRunDay, qualityCount, fromDay } = params;
+  const { sessionsPerWeek, longRunDay, qualityCount, fromDay, toDay } = params;
 
   const free: number[] = [];
-  for (let day = Math.max(1, fromDay); day <= DAYS_PER_WEEK; day += 1) free.push(day);
+  for (let day = Math.max(1, fromDay); day <= Math.min(DAYS_PER_WEEK, toDay); day += 1) {
+    free.push(day);
+  }
 
   const sessionCount = Math.min(Math.max(0, sessionsPerWeek), free.length);
   if (sessionCount === 0) return { longRunDay: null, qualityDays: [], easyDays: [] };

@@ -40,11 +40,23 @@ import 'server-only';
 
 /** L'avancement d'une génération, tel que le formulaire l'affiche. */
 export type PlanProgress = {
-  /** Part de la sortie attendue déjà reçue, de 0 à 99 (cf. `plan-service.ts`). */
+  /**
+   * Part du travail déjà faite, de 0 à 100.
+   *
+   * Deux producteurs, deux échelles, et c'est assumé (cf. `plan-service.ts`) :
+   * une **création** compte ses créneaux de qualité écrits et va jusqu'à 100,
+   * puisque rien ne peut plus la faire recommencer ; un **ajustement** ou une
+   * **révision** comptent des caractères reçus contre une taille estimée et
+   * plafonnent à 99, tant que la validation métier n'a pas parlé.
+   */
   percent: number;
   /** Tentative en cours dans la boucle de correction, à partir de 1. */
   attempt: number;
-  /** Nombre total de tentatives possibles. */
+  /**
+   * Nombre total de tentatives possibles — `1` quand le chemin n'en rejoue
+   * aucune, ce qui est le cas d'une création depuis la bascule sur squelette.
+   * Le formulaire n'affiche alors pas le rang.
+   */
   maxAttempts: number;
   /** Horodatage (ms epoch) du premier enregistrement — la base de l'éviction. */
   startedAt: number;

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import type { PlanLevel } from '@/data/db/schema';
 import {
   applyImposedPaces,
   validatePlanBusinessRules,
@@ -52,6 +53,16 @@ const ZONES: QualityZone[] = ['threshold', 'interval', 'repetition', 'marathon']
 const PHASES: PlanPhase[] = ['partial', 'base', 'build', 'specific', 'taper', 'race'];
 
 /**
+ * Les trois niveaux, tous balayés.
+ *
+ * Contrairement au squelette, qui n'en distingue que deux
+ * ({@link buildPlanSkeleton} ne s'en sert que pour compter les créneaux), le
+ * déroulé les distingue tous les trois : chacun ouvre son propre régime de
+ * récupération, donc son propre format, et aucun ne se déduit d'un autre.
+ */
+const LEVELS: PlanLevel[] = ['beginner', 'intermediate', 'advanced'];
+
+/**
  * Le plus petit budget qu'un créneau puisse porter, en km.
  *
  * Ce n'est pas un choix de test : `weeklySessionBudgets` arrondit chaque budget
@@ -84,20 +95,36 @@ const BUDGET_STEP_KM = 0.1;
  */
 const TOLERANCE_M = 100;
 
-type SweptCase = { zone: QualityZone; phase: PlanPhase; budgetKm: number; label: string };
+type SweptCase = {
+  zone: QualityZone;
+  phase: PlanPhase;
+  level: PlanLevel;
+  budgetKm: number;
+  label: string;
+};
 
-/** Le domaine complet : 4 zones × 6 phases × 146 budgets = 3 504 déroulés. */
+/**
+ * Le domaine complet : 4 zones × 6 phases × 3 niveaux × 146 budgets =
+ * 10 512 déroulés.
+ *
+ * Le niveau y entre de plein droit depuis qu'il module le format : c'est un
+ * second facteur sur la récupération, qui se multiplie à celui de la phase, et
+ * ce sont précisément les extrêmes du produit (base × débutante, spécificité ×
+ * confirmée) qui font travailler les bornes de récupération de chaque zone.
+ */
 const SWEEP: SweptCase[] = ZONES.flatMap((zone) =>
   PHASES.flatMap((phase) =>
-    Array.from(
-      { length: Math.round((MAX_BUDGET_KM - MIN_BUDGET_KM) / BUDGET_STEP_KM) + 1 },
-      (_, index) => {
-        // Reconstruit depuis un entier de dixièmes : une accumulation de 0,1 en
-        // flottant produirait des budgets comme 4,300000000000001, qui ne sont
-        // pas ceux que `weeklySessionBudgets` écrit.
-        const budgetKm = (Math.round(MIN_BUDGET_KM * 10) + index) / 10;
-        return { zone, phase, budgetKm, label: `${zone} ${phase} ${budgetKm} km` };
-      },
+    LEVELS.flatMap((level) =>
+      Array.from(
+        { length: Math.round((MAX_BUDGET_KM - MIN_BUDGET_KM) / BUDGET_STEP_KM) + 1 },
+        (_, index) => {
+          // Reconstruit depuis un entier de dixièmes : une accumulation de 0,1 en
+          // flottant produirait des budgets comme 4,300000000000001, qui ne sont
+          // pas ceux que `weeklySessionBudgets` écrit.
+          const budgetKm = (Math.round(MIN_BUDGET_KM * 10) + index) / 10;
+          return { zone, phase, level, budgetKm, label: `${zone} ${phase} ${level} ${budgetKm} km` };
+        },
+      ),
     ),
   ),
 );
@@ -385,6 +412,12 @@ describe('qualitySessionTemplate — le format des séances', () => {
    *
    * Les bornes sont écrites ici en toutes lettres plutôt qu'importées du module :
    * un test qui relit les constantes du code sous test ne prouve rien.
+   *
+   * Les fourchettes de récupération couvrent le **produit des deux
+   * modulateurs** : la phase l'étire de 0,8 à 1,3 et le niveau de 0,8 à 1,5,
+   * soit un rapport qui va de 0,64 à 1,95 fois celui de la zone. C'est pour cela
+   * qu'elles sont larges — ce qu'elles interdisent est le changement de nature
+   * (une VMA récupérée comme un seuil), pas le dosage.
    */
   const EXPECTED_SHAPES = {
     threshold: {
@@ -399,14 +432,16 @@ describe('qualitySessionTemplate — le format des séances', () => {
       // à la même vitesse.
       effort: { min: 400, max: 1_000 },
       maxReps: 10,
-      recoveryRatio: { min: 0.6, max: 2 },
+      recoveryRatio: { min: 0.55, max: 2 },
     },
     repetition: {
-      // Court, rapide, récupération au moins aussi longue que l'effort : c'est du
-      // travail de foulée, pas du travail cardiaque.
+      // Court, rapide, récupération de l'ordre de l'effort ou plus longue : c'est
+      // du travail de foulée, pas du travail cardiaque. Le bas de la fourchette
+      // est celui d'une confirmée en spécificité, la seule qui y récupère un peu
+      // moins que son effort.
       effort: { min: 200, max: 400 },
       maxReps: 14,
-      recoveryRatio: { min: 1, max: 3 },
+      recoveryRatio: { min: 0.8, max: 3 },
     },
     marathon: {
       // Un ou deux blocs longs, récupération symbolique : fractionner rendrait
@@ -485,14 +520,22 @@ describe('qualitySessionTemplate — le format des séances', () => {
       // Le quart et le cinquième au minimum ; au plus, ce que laisse un créneau
       // trop petit pour financer autre chose qu'un échauffement et un peu de
       // travail — le coût d'une mise en route ne se divise pas.
+      //
+      // Le plafond est monté de 0,85 à 0,89 avec le levier de niveau, et le
+      // coin est identifié : `répétitions × base ou affûtage × débutante`, entre
+      // 2,5 et 3,4 km de budget (14 déroulés sur 10 512). La récupération y est
+      // si longue qu'aucun format à deux répétitions ne tient dans le budget de
+      // travail, le module se rabat sur un bloc unique, et le reliquat va à
+      // l'enveloppe. Une séance de foulée à 3 km pour une débutante : c'est
+      // maigre, mais ce n'est pas faux.
       expect(share, swept.label).toBeGreaterThanOrEqual(0.44);
-      expect(share, swept.label).toBeLessThanOrEqual(0.85);
+      expect(share, swept.label).toBeLessThanOrEqual(0.89);
     }
   });
 
   it('fait croître la part de l’enveloppe à mesure que le budget baisse', () => {
     const shareAt = (budgetKm: number): number => {
-      const steps = qualitySessionTemplate({ zone: 'interval', budgetKm, phase: 'build' });
+      const steps = qualitySessionTemplate({ zone: 'interval', budgetKm, phase: 'build', level: 'intermediate' });
       const flat = flattenSteps(steps);
       return (
         ((flat[0].distanceM ?? 0) + (flat[flat.length - 1].distanceM ?? 0)) /
@@ -520,7 +563,12 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
    * dérive future soit visible en revue plutôt que noyée dans un balayage.
    */
   it('une VMA de 6 km : 4 × 400 m, récupération 400 m', () => {
-    expect(qualitySessionTemplate({ zone: 'interval', budgetKm: 6, phase: 'build' })).toEqual([
+    expect(qualitySessionTemplate({
+      zone: 'interval',
+      budgetKm: 6,
+      phase: 'build',
+      level: 'intermediate',
+    })).toEqual([
       {
         repeat: 1,
         steps: [
@@ -576,7 +624,12 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
   });
 
   it('un seuil de 8 km : 3 × 1 200 m, récupération 250 m', () => {
-    const steps = qualitySessionTemplate({ zone: 'threshold', budgetKm: 8, phase: 'build' });
+    const steps = qualitySessionTemplate({
+      zone: 'threshold',
+      budgetKm: 8,
+      phase: 'build',
+      level: 'intermediate',
+    });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
       [1, [2_050]],
@@ -589,7 +642,12 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
   });
 
   it('des répétitions de 4 km : 4 × 200 m, récupération 300 m', () => {
-    const steps = qualitySessionTemplate({ zone: 'repetition', budgetKm: 4, phase: 'build' });
+    const steps = qualitySessionTemplate({
+      zone: 'repetition',
+      budgetKm: 4,
+      phase: 'build',
+      level: 'intermediate',
+    });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
       [1, [1_200]],
@@ -599,7 +657,12 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
   });
 
   it('un spécifique de 12 km : 2 × 3 100 m à allure objectif, coupure 200 m', () => {
-    const steps = qualitySessionTemplate({ zone: 'marathon', budgetKm: 12, phase: 'build' });
+    const steps = qualitySessionTemplate({
+      zone: 'marathon',
+      budgetKm: 12,
+      phase: 'build',
+      level: 'intermediate',
+    });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
       [1, [3_000]],
@@ -617,7 +680,7 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
    */
   it('la phase resserre ou relâche la récupération, à budget égal', () => {
     const formatFor = (phase: PlanPhase): [number, (number | null)[]] => {
-      const block = body(qualitySessionTemplate({ zone: 'interval', budgetKm: 9, phase }));
+      const block = body(qualitySessionTemplate({ zone: 'interval', budgetKm: 9, phase, level: 'intermediate' }));
       return [block.repeat, block.steps.map((step) => step.distanceM)];
     };
 
@@ -629,11 +692,76 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
     expect(formatFor('taper')).toEqual(formatFor('base'));
   });
 
+  /*
+   * Le niveau, second modulateur du format — et le seul autre.
+   *
+   * Ce que ces cas protègent est une régression mesurée : après la bascule sur
+   * squelette, le niveau ne décidait plus que du **nombre** de créneaux, plus
+   * jamais de leur contenu. Un semi en 1 h 45, 4 séances, une **débutante**
+   * recevait 9 séances de seuil à la structure exacte d'une confirmée, et
+   * `advanced` produisait un plan strictement identique à `intermediate`.
+   *
+   * Le levier retenu est la **récupération**, comme celui de la phase : c'est le
+   * seul paramètre qui, à budget fixé, raccourcit les efforts ET allonge la
+   * récupération d'un même geste. Un levier sur la longueur des répétitions
+   * (bornes de la zone) ne mordrait que sur les bords — mesuré : `intermediate`
+   * et `advanced` rendaient encore le même déroulé.
+   */
+  describe('le niveau de l’athlète', () => {
+    /** Le corps de séance d'un même créneau, niveau par niveau. */
+    const formatFor = (
+      level: PlanLevel,
+      zone: QualityZone = 'threshold',
+      phase: PlanPhase = 'build',
+    ): [number, (number | null)[]] => {
+      const block = body(qualitySessionTemplate({ zone, budgetKm: 9, phase, level }));
+      return [block.repeat, block.steps.map((step) => step.distanceM)];
+    };
+
+    it('rend trois déroulés différents à budget, zone et phase égaux', () => {
+      // Le cas exact de la mesure : un créneau de seuil, où une débutante
+      // recevait la séance d'une confirmée et où `advanced` ne se distinguait
+      // pas d'`intermediate`.
+      expect(formatFor('beginner')).toEqual([3, [1_200, 400]]);
+      expect(formatFor('intermediate')).toEqual([3, [1_300, 300]]);
+      expect(formatFor('advanced')).toEqual([3, [1_400, 250]]);
+
+      // Et la VMA, dont le format bouge davantage : le nombre de répétitions
+      // suit la récupération.
+      const interval = LEVELS.map((level) => JSON.stringify(formatFor(level, 'interval')));
+      expect(new Set(interval).size).toBe(LEVELS.length);
+    });
+
+    /*
+     * L'invariant se mesure sur **tout le domaine**, pas sur un créneau : le
+     * choix du format est une recherche sur des entiers arrondis au décamètre,
+     * et deux niveaux voisins tombent parfois sur le même découpage. Ce qui doit
+     * tenir est la tendance, et elle est nette — à budget, zone et phase égaux,
+     * une débutante court moins de mètres à intensité et plus de mètres de trot
+     * qu'une confirmée.
+     */
+    it('donne à la débutante moins d’intensité et plus de récupération qu’à la confirmée', () => {
+      const totals = { beginner: { effortM: 0, recoverM: 0 }, advanced: { effortM: 0, recoverM: 0 } };
+
+      for (const swept of SWEEP) {
+        if (swept.level === 'intermediate') continue;
+        const block = body(qualitySessionTemplate(swept));
+        const bucket = totals[swept.level];
+        bucket.effortM += block.repeat * (block.steps[0].distanceM ?? 0);
+        bucket.recoverM += block.repeat * (block.steps[1]?.distanceM ?? 0);
+      }
+
+      expect(totals.beginner.effortM).toBeLessThan(totals.advanced.effortM);
+      expect(totals.beginner.recoverM).toBeGreaterThan(totals.advanced.recoverM);
+    });
+  });
+
   it('reste écrivable sur le plus petit budget qu’un créneau puisse porter', () => {
     const steps = qualitySessionTemplate({
       zone: 'repetition',
       budgetKm: MIN_BUDGET_KM,
       phase: 'base',
+      level: 'intermediate',
     });
 
     // 200 m d'échauffement, 200 m vite, 100 m pour rentrer : ce n'est plus une
