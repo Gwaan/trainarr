@@ -44,6 +44,7 @@
  * Module **pur** : ni base, ni réseau, ni `server-only`, ni horloge, ni aléa.
  */
 
+import { intentRampsQualityShare, type PlanIntent } from './intent';
 import type { PlanPhase } from './phases';
 
 /**
@@ -161,6 +162,18 @@ function rampShare(rank: number, total: number): number {
  * (`qualityZones` rend une liste vide), et `weeklySessionBudgets` multiplie la
  * part par un compte de créneaux nul.
  *
+ * ## Les intentions qui ne rampent pas
+ *
+ * `weight_loss` reçoit {@link QUALITY_SHARE.outsideRamp} sur **toutes** ses
+ * semaines, et c'est une décision de fond plutôt qu'un réglage : la rampe déplace
+ * des kilomètres du facile vers la qualité au fil du plan, or c'est le volume
+ * facile qui est l'actif à protéger quand le levier est la dépense (cf.
+ * `intent.ts`). `return` ne rampe pas non plus, faute d'ouvrir le moindre créneau
+ * — une part qui croîtrait sans rien multiplier raconterait une progression qui
+ * n'a pas lieu.
+ *
+ * @param intent ce que l'athlète vient chercher — seules `race` et `faster`
+ * font croître la part de qualité ({@link intentRampsQualityShare}).
  * @param phases une phase par semaine de la fenêtre, dans l'ordre.
  * @param anchor la position de la fenêtre dans le plan entier. **Absent = la
  * fenêtre EST le plan**, ce qui est le cas nominal d'une création : la rampe se
@@ -168,9 +181,12 @@ function rampShare(rank: number, total: number): number {
  * reconstruction rendra pour les mêmes semaines calendaires.
  */
 export function weeklyQualityShares(
+  intent: PlanIntent,
   phases: readonly PlanPhase[],
   anchor?: CompositionAnchor,
 ): number[] {
+  if (!intentRampsQualityShare(intent)) return phases.map(() => QUALITY_SHARE.outsideRamp);
+
   const total = anchor?.planDevelopmentWeeks ?? phases.filter(isDevelopmentPhase).length;
   const completed = anchor?.completedDevelopmentWeeks ?? 0;
 

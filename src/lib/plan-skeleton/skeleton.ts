@@ -54,6 +54,7 @@
  * Module **pur** : ni base, ni réseau, ni `server-only`, ni horloge, ni aléa.
  */
 
+import type { SessionBudget } from '@/lib/ai/format';
 import {
   weeklySessionBudgets,
   type PlanRaceGoal,
@@ -70,6 +71,13 @@ import {
   PlanSkeletonInfeasibleError,
   type PlanSkeletonUnderfundedWeek,
 } from './feasibility';
+import {
+  intentLongRunShareCap,
+  intentQualitySlots,
+  intentWalkRunBaseWeeks,
+  type PlanIntent,
+} from './intent';
+import { cappedLongRunBudgets, longRunCapCandidatesKm } from './long-run-cap';
 import { planPhases, type PlanPhase } from './phases';
 import { goalFamily, qualityZones, QUALITY_ZONE_KINDS, type QualityZone } from './quality';
 import {
@@ -80,6 +88,7 @@ import {
   weeklyEasyVariation,
   type EasyVariation,
 } from './variations';
+import { walkRunShape } from './walk-run';
 
 const DAYS_PER_WEEK = 7;
 
@@ -229,6 +238,40 @@ export type SkeletonWeek = {
 };
 
 export type PlanSkeletonParams = {
+  /**
+   * Ce que l'athlète vient chercher — le paramètre qui décide de la **forme** du
+   * plan : longueur de la base, existence d'une spécificité, nombre de créneaux
+   * de qualité, zones travaillées, plafond de la sortie longue et marche/course
+   * des premières semaines.
+   *
+   * Il ne décide en revanche d'**aucun kilomètre** : les cibles hebdomadaires
+   * arrivent toutes faites ({@link PlanSkeletonParams.targets}), et une intention
+   * qui les corrigerait ici les ferait diverger de celles que le prompt annonce et
+   * que la validation vérifie. Le détail de chaque structure, et la recherche qui
+   * la fonde, sont dans `intent.ts`.
+   */
+  intent: PlanIntent;
+  /**
+   * L'athlète déclare un **antécédent de blessure** — ne joue qu'en `return`.
+   *
+   * C'est le prédicteur le plus fort du dossier (OR 7,56, Relph 2023), et le seul
+   * qui déplace franchement un paramètre : il rallonge la base de 50 à 60 % du
+   * plan et double la fenêtre de marche/course.
+   */
+  returnInjuryHistory?: boolean;
+  /**
+   * Le plafond de la **première** sortie longue, en km — `null` ou absent quand
+   * rien ne la plafonne, ce qui est le comportement historique.
+   *
+   * L'appelant le calcule depuis les données réelles de l'athlète : la plus longue
+   * séance des trente derniers jours, majorée de 10 %. Le squelette ne saurait pas
+   * le faire — il ne voit ni activités ni historique —, et c'est aussi la raison
+   * pour laquelle il ne le devine pas : sans donnée, pas de plafond.
+   *
+   * Le plafond est **conservateur** : il cède devant les invariants de la semaine
+   * plutôt que de les casser (cf. `long-run-cap.ts`).
+   */
+  longRunCapKm?: number | null;
   /** Nombre de semaines du plan, la première (parfois entamée) comprise. */
   weeks: number;
   /** Jour ISO à partir duquel la première semaine porte des séances : 1 = lundi. */
@@ -391,9 +434,10 @@ function longRunShape(
 /**
  * Le nombre de créneaux de qualité d'une semaine, sous trois plafonds.
  *
- * 1 pour une débutante, 2 sinon : c'est le dosage classique (une séance dure par
- * semaine tant que le corps apprend encore à encaisser, deux ensuite), et la
- * sortie longue compte déjà comme une troisième sollicitation.
+ * Ce que l'**intention** veut d'abord ({@link intentQualitySlots}) : 1 pour une
+ * débutante et 2 sinon quand il y a une course à préparer ou de la vitesse à
+ * gagner, 1 quel que soit le niveau pour une perte de poids, 0 pour une reprise —
+ * chacun avec ses sources, dans `intent.ts`.
  *
  * Puis deux plafonds qui n'ont rien d'esthétique :
  *
@@ -405,11 +449,12 @@ function longRunShape(
  *   quoi la distribution cesse d'être polarisée et tout devient moyennement dur.
  */
 function qualitySlotCount(
+  intent: PlanIntent,
   level: PlanLevel,
   zoneCount: number,
   sessionCount: number,
 ): number {
-  const wanted = level === 'beginner' ? 1 : 2;
+  const wanted = intentQualitySlots(intent, level);
   return Math.max(0, Math.min(wanted, zoneCount, sessionCount - 2));
 }
 
@@ -448,7 +493,45 @@ type WeekPlan = {
    * occasions de diverger.
    */
   qualityShare: number;
+  /**
+   * Le rang (0-based) de la semaine dans la fenêtre de marche/course, `null`
+   * quand elle n'en est pas — c'est ce rang qui décide du ratio course/marche
+   * ({@link walkRunShape}).
+   */
+  walkRunRank: number | null;
 };
+
+/**
+ * Le rang de chaque semaine dans la fenêtre de **marche/course** — `null`
+ * partout dès que l'intention n'en ouvre aucune.
+ *
+ * La fenêtre est celle des `count` **premières semaines de base**, et pas des
+ * `count` premières semaines du plan : une première semaine entamée n'est pas une
+ * semaine de base, et la faire compter reviendrait à ne prescrire la marche/course
+ * qu'une seule fois sur un plan qui démarre un jeudi.
+ *
+ * Les phases étant ordonnées, un simple compteur suffit — les semaines de base
+ * sont contiguës et en tête.
+ *
+ * ## Ce que le compteur ne sait pas
+ *
+ * Il compte les semaines de base **de la fenêtre**, pas du plan : une
+ * reconstruction ouvrant en pleine base rouvrirait une fenêtre de marche/course.
+ * C'est le même angle mort que la parité de {@link weeklyEasyVariation}, et il a
+ * la même cause — le module ne reçoit pas de numéro de semaine plan-relatif. Il
+ * ne coûte aucun kilomètre (la marche/course ne change ni la distance des séances
+ * ni le volume de la semaine, seulement leur forme), et il se refermera avec
+ * l'ancrage que l'appelant passera.
+ */
+function walkRunBaseRanks(phases: readonly PlanPhase[], count: number): (number | null)[] {
+  let seen = 0;
+  return phases.map((phase) => {
+    if (phase !== 'base' || seen >= count) return null;
+    const rank = seen;
+    seen += 1;
+    return rank;
+  });
+}
 
 /**
  * Le nombre de séances plaçables dans la fenêtre `[fromDay, lastDay]`.
@@ -473,13 +556,14 @@ function sessionsFitting(sessionsPerWeek: number, fromDay: number, lastDay: numb
  */
 function fundableSessionsPerWeek(
   plans: readonly WeekPlan[],
+  intent: PlanIntent,
   level: PlanLevel,
   requested: number,
 ): number {
   for (let candidate = requested - 1; candidate >= 1; candidate -= 1) {
     const fits = plans.every((plan) => {
       const sessionCount = sessionsFitting(candidate, plan.fromDay, plan.lastDay);
-      const slotCount = qualitySlotCount(level, plan.zones.length, sessionCount);
+      const slotCount = qualitySlotCount(intent, level, plan.zones.length, sessionCount);
       // La part de qualité ne dépend que de la phase et du rang, jamais du
       // nombre de séances : celle de la semaine reste la bonne à tout candidat.
       return plan.target.targetKm >= minFundableWeeklyKm(sessionCount, slotCount, plan.qualityShare);
@@ -501,6 +585,7 @@ function fundableSessionsPerWeek(
  */
 function assertFundable(
   plans: readonly WeekPlan[],
+  intent: PlanIntent,
   level: PlanLevel,
   sessionsPerWeek: number,
 ): void {
@@ -523,7 +608,7 @@ function assertFundable(
   throw new PlanSkeletonInfeasibleError({
     weeks: underfunded,
     requestedSessionsPerWeek: sessionsPerWeek,
-    fundableSessionsPerWeek: fundableSessionsPerWeek(plans, level, sessionsPerWeek),
+    fundableSessionsPerWeek: fundableSessionsPerWeek(plans, intent, level, sessionsPerWeek),
   });
 }
 
@@ -566,6 +651,7 @@ function assertFundable(
  */
 export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   const {
+    intent,
     weeks,
     firstWeekFromDay,
     sessionsPerWeek,
@@ -577,12 +663,19 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   } = params;
   if (weeks <= 0) return [];
 
+  const returnInjuryHistory = params.returnInjuryHistory ?? false;
+
   // La périodisation de l'appelant quand il en a une (cf.
   // {@link PlanSkeletonParams.phases}) ; celle de la fenêtre sinon.
-  const phases = params.phases ?? planPhases({ weeks, firstWeekFromDay, race: params.race });
+  const phases =
+    params.phases ??
+    planPhases({ weeks, firstWeekFromDay, race: params.race, intent, returnInjuryHistory });
   // La composition de chaque semaine, décidée par sa position dans le PLAN et
   // non dans la fenêtre (cf. {@link PlanSkeletonParams.compositionAnchor}).
-  const qualityShares = weeklyQualityShares(phases, params.compositionAnchor);
+  const qualityShares = weeklyQualityShares(intent, phases, params.compositionAnchor);
+  // Les semaines de marche/course : les premières de la base, et elles seules.
+  const walkRunWeeks = intentWalkRunBaseWeeks(intent, returnInjuryHistory);
+  const walkRunRanks = walkRunBaseRanks(phases, walkRunWeeks);
 
   const plans: WeekPlan[] = [];
   for (let index = 0; index < weeks; index += 1) {
@@ -596,7 +689,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     // dont une le lendemain de l'épreuve.
     const lastDay = phase === 'race' && raceDay !== null ? raceDay : DAYS_PER_WEEK;
     const sessionCount = sessionsFitting(sessionsPerWeek, fromDay, lastDay);
-    const zones = qualityZones(phase, goalDistanceKm);
+    const zones = qualityZones(intent, phase, goalDistanceKm);
 
     plans.push({
       weekNumber: index + 1,
@@ -606,13 +699,19 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       lastDay,
       sessionCount,
       zones,
-      slotCount: qualitySlotCount(level, zones.length, sessionCount),
+      slotCount: qualitySlotCount(intent, level, zones.length, sessionCount),
       qualityShare: qualityShares[index],
+      walkRunRank: walkRunRanks[index],
     });
   }
 
   // Avant la première séance écrite : ce plan est-il seulement finançable ?
-  assertFundable(plans, level, sessionsPerWeek);
+  assertFundable(plans, intent, level, sessionsPerWeek);
+
+  const shareCapKm = intentLongRunShareCap(intent);
+  // Le **pic** de sortie longue déjà écrit : c'est lui qui borne les suivantes,
+  // et non le budget brut ni la semaine précédente (cf. `long-run-cap.ts`).
+  let peakLongRunKm: number | null = null;
 
   const skeleton: SkeletonWeek[] = [];
 
@@ -626,6 +725,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     zones,
     slotCount,
     qualityShare,
+    walkRunRank,
   } of plans) {
     // La décomposition part du nombre de séances **réellement plaçables** : les
     // kilomètres des séances qu'une borne a supprimées sont ainsi répartis sur
@@ -636,17 +736,16 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     // décomposition décide seule. Mesurée sur le plan de l'utilisatrice, elle
     // est déjà collée à son plafond réglementaire en développement (39,1 à
     // 39,9 % pour un maximum de 40 %) — une rampe n'y aurait rien à relever,
-    // et le raisonnement complet est dans `composition.ts`.
-    const budgets = weeklySessionBudgets(
+    // et le raisonnement complet est dans `composition.ts`. Le **plafond** de la
+    // sortie longue, lui, ne peut pas passer par ce paramètre : c'est un plancher
+    // déguisé, et la démonstration est dans `long-run-cap.ts`.
+    const rawBudgets = weeklySessionBudgets(
       target.targetKm,
       sessionCount,
       slotCount,
       undefined,
       qualityShare,
     );
-    const longBudget = budgets.find((budget) => budget.role === 'long');
-    const qualityBudgets = budgets.filter((budget) => budget.role === 'quality');
-    const easyBudgets = budgets.filter((budget) => budget.role === 'easy');
 
     // La semaine de course n'a pas de sortie longue : elle a une course, et
     // c'est le jour J qui porte le rôle `long` — son plus gros effort. Le jour
@@ -662,6 +761,39 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       fromDay,
       toDay: lastDay,
     });
+
+    // Le plafond ne s'applique qu'à une **sortie longue réellement écrite** : ni
+    // à la course du jour J (un repère, pas un entraînement), ni au budget d'une
+    // sortie longue que la semaine entamée ne peut plus placer.
+    //
+    // Annoté plutôt qu'inféré : la valeur dépend du pic de sortie longue déjà
+    // écrit, qui dépend lui-même de ce plafond — une boucle que l'inférence ne
+    // sait pas dérouler, et qui n'existe pas à l'exécution.
+    const capCandidates: number[] =
+      isRaceWeek || days.longRunDay === null
+        ? []
+        : longRunCapCandidatesKm(
+            params.longRunCapKm ?? null,
+            peakLongRunKm,
+            shareCapKm === null ? null : shareCapKm * target.targetKm,
+          );
+    // Du plus serré au plus large : le premier plafond que la semaine peut tenir
+    // l'emporte, et aucun ne peut en relever un autre (cf. `long-run-cap.ts`).
+    let budgets: SessionBudget[] = rawBudgets;
+    for (const allowedKm of capCandidates) {
+      const capped = cappedLongRunBudgets(rawBudgets, allowedKm, target.targetKm);
+      if (capped !== null) {
+        budgets = capped;
+        break;
+      }
+    }
+
+    const longBudget = budgets.find((budget) => budget.role === 'long');
+    const qualityBudgets = budgets.filter((budget) => budget.role === 'quality');
+    const easyBudgets = budgets.filter((budget) => budget.role === 'easy');
+    if (days.longRunDay !== null && !isRaceWeek && longBudget !== undefined) {
+      peakLongRunKm = Math.max(peakLongRunKm ?? 0, longBudget.km);
+    }
 
     // Un footing d'affûtage ou de semaine de course n'est pas un footing
     // ordinaire : il ne doit porter aucune cible, et c'est son `kind` qui le dit.
@@ -729,6 +861,22 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       // semaines infaisables ({@link assertFundable}) ; la garde reste parce
       // qu'une séance sans distance rendrait tout le plan invérifiable.
       if (km === undefined) return;
+
+      // Les premières semaines d'une reprise : **tous** les footings se courent
+      // en marche/course, et pas un seul « enrichi » comme le reste du temps. Ce
+      // n'est pas une variation qu'on saupoudre, c'est la forme de la séance —
+      // la seule qui ait un essai contrôlé derrière elle (cf. `walk-run.ts`).
+      const walkRun = walkRunRank === null ? undefined : walkRunShape(km, walkRunRank, walkRunWeeks);
+      if (walkRun !== undefined) {
+        sessions.push({
+          day,
+          kind: easyKind,
+          title: walkRun.title,
+          distanceKm: km,
+          steps: walkRun.steps,
+        });
+        return;
+      }
 
       // Un seul footing enrichi par semaine, et jamais sur une semaine de
       // récupération : `weeklyEasyVariation` rend déjà `plain` pour l'affûtage,

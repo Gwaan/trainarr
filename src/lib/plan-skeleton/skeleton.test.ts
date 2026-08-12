@@ -22,6 +22,7 @@ import { flattenSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import { isDevelopmentPhase } from './composition';
 import { PlanSkeletonInfeasibleError } from './feasibility';
+import { PLAN_INTENTS, type PlanIntent } from './intent';
 import { planPhases, type PlanPhase } from './phases';
 import { buildPlanSkeleton, type QualitySlot, type SkeletonWeek } from './skeleton';
 
@@ -265,9 +266,14 @@ const GOALS: Goal[] = [
   { label: 'marathon daté', goalDistanceKm: 42.195, race: { isMarathon: true } },
 ];
 
+const FREE_GOAL = GOALS[0];
 const TEN_K_GOAL = GOALS[3];
 const HALF_GOAL = GOALS[4];
+const MARATHON_SANS_DATE_GOAL = GOALS[5];
 const MARATHON_GOAL = GOALS[6];
+
+/** Les quatre objectifs **datés** — le domaine de l'intention `race`. */
+const DATED_GOALS = GOALS.filter((goal) => goal.race !== null);
 
 /** Les trois niveaux du contrat — ce que les tests ciblés éprouvent un par un. */
 const LEVELS: PlanLevel[] = ['beginner', 'intermediate', 'advanced'];
@@ -395,6 +401,18 @@ const DAY_SETTINGS: { longRunDay: number; firstWeekFromDay: number; raceDay: num
 ];
 
 type Combination = {
+  /**
+   * L'intention du plan — **déduite de l'objectif** quand elle n'est pas dite :
+   * un objectif daté est une préparation de course, tout le reste une recherche
+   * de vitesse. C'est exactement la correspondance que `plan-service` applique en
+   * attendant que le formulaire pose la question, et elle garde à ce fichier les
+   * cas qu'il éprouvait déjà.
+   */
+  intent?: PlanIntent;
+  /** Antécédent de blessure — ne joue qu'en `return`. */
+  returnInjuryHistory?: boolean;
+  /** Le plafond de la première sortie longue, quand l'appelant en a un. */
+  longRunCapKm?: number | null;
   weeks: number;
   sessionsPerWeek: number;
   longRunDay: number;
@@ -415,9 +433,17 @@ function raceDayOf(combination: Combination): number | null {
   return combination.goal.race === null ? null : combination.raceDay;
 }
 
+/** L'intention d'une combinaison, dite ou déduite de son objectif. */
+function intentOf(combination: Combination): PlanIntent {
+  return combination.intent ?? (combination.goal.race === null ? 'faster' : 'race');
+}
+
 function describeCombination(combination: Combination): string {
   const raceDay = raceDayOf(combination);
   return (
+    `intention ${intentOf(combination)}` +
+    `${combination.returnInjuryHistory === true ? ' (antécédent)' : ''}` +
+    `${combination.longRunCapKm == null ? '' : ` plafond SL ${combination.longRunCapKm} km`}, ` +
     `${combination.weeks} semaines, ${combination.sessionsPerWeek} séances, ` +
     `sortie longue jour ${combination.longRunDay}, départ jour ${combination.firstWeekFromDay}, ` +
     `${raceDay === null ? 'sans jour J' : `jour J ${raceDay}`}, ` +
@@ -440,6 +466,9 @@ function targetsFor(combination: Combination): WeeklyVolumeTarget[] {
 
 function skeletonFor(combination: Combination, targets: readonly WeeklyVolumeTarget[]) {
   return buildPlanSkeleton({
+    intent: intentOf(combination),
+    returnInjuryHistory: combination.returnInjuryHistory,
+    longRunCapKm: combination.longRunCapKm,
     weeks: combination.weeks,
     firstWeekFromDay: combination.firstWeekFromDay,
     sessionsPerWeek: combination.sessionsPerWeek,
@@ -489,25 +518,87 @@ function postProcessed(
   ];
 }
 
+/**
+ * Ce que chaque **intention** balaie, et ce qu'elle n'a pas besoin de balayer.
+ *
+ * Les quatre autres axes (durées, séances, jours, athlètes) restent exhaustifs
+ * pour toutes : ils portent chacun une branche du code, pas un échantillon d'un
+ * continuum. Ce qui se resserre est ce que l'intention rend **inerte** — et
+ * chaque resserrement porte sa démonstration, comme les deux d'origine.
+ *
+ * - **`race` — les quatre objectifs datés, les deux niveaux.** C'est la seule
+ *   intention dont la grille dépend de la distance visée (une famille par
+ *   colonne : 5 km, 10 km, semi, marathon) et dont le niveau change le nombre de
+ *   créneaux. Rien à retirer.
+ * - **`faster` — deux objectifs, les deux niveaux.** Sa grille ne regarde plus la
+ *   distance (`qualityZones` l'ignore hors `race`) : elle ne sert plus qu'à
+ *   `wantsSpecificLongRun`, dont les deux issues sont représentées — objectif
+ *   libre (aucune distance, pas de bloc spécifique) et marathon sans date (le
+ *   bloc s'écrit). Le niveau, lui, décide toujours du nombre de créneaux.
+ * - **`weight_loss` — un objectif, un niveau.** Un seul créneau quel que soit le
+ *   niveau, aucune phase spécifique, aucune distance lue : les trois axes
+ *   retirés ne changent pas une ligne du squelette. Le plafond de sortie longue y
+ *   est éprouvé sur son second variant.
+ * - **`return` — un objectif, un niveau, deux variants.** Aucun créneau, aucune
+ *   spécificité, aucune distance lue ; ce qui reste à éprouver est ce qui lui est
+ *   propre, et c'est ce que les variants portent : la marche/course avec et sans
+ *   antécédent, et le plafond de sortie longue.
+ */
+const SWEPT_INTENTS: {
+  intent: PlanIntent;
+  goals: Goal[];
+  levels: PlanLevel[];
+  /** Ce qui, en plus, distingue deux plans de même intention. */
+  variants: Pick<Combination, 'returnInjuryHistory' | 'longRunCapKm'>[];
+}[] = [
+  { intent: 'race', goals: DATED_GOALS, levels: SWEPT_LEVELS, variants: [{}] },
+  {
+    intent: 'faster',
+    goals: [FREE_GOAL, MARATHON_SANS_DATE_GOAL],
+    levels: SWEPT_LEVELS,
+    variants: [{}],
+  },
+  {
+    intent: 'weight_loss',
+    goals: [FREE_GOAL],
+    levels: ['beginner'],
+    // Le plafond hors reprise : il doit rester inoffensif partout où il ne
+    // s'applique pas, et céder proprement là où il ne peut pas s'appliquer.
+    variants: [{}, { longRunCapKm: 5 }],
+  },
+  {
+    intent: 'return',
+    goals: [FREE_GOAL],
+    levels: ['beginner'],
+    variants: [{}, { returnInjuryHistory: true, longRunCapKm: 5 }],
+  },
+];
+
 /** Toutes les combinaisons de la matrice, dans un ordre fixe. */
 function allCombinations(): Combination[] {
   const combinations: Combination[] = [];
   for (const weeks of WEEKS) {
     for (const sessionsPerWeek of SESSIONS_PER_WEEK) {
       for (const { longRunDay, firstWeekFromDay, raceDay } of DAY_SETTINGS) {
-        for (const level of SWEPT_LEVELS) {
-          for (const goal of GOALS) {
-            for (const athlete of ATHLETES) {
-              combinations.push({
-                weeks,
-                sessionsPerWeek,
-                longRunDay,
-                firstWeekFromDay,
-                raceDay,
-                level,
-                goal,
-                athlete,
-              });
+        for (const { intent, goals, levels, variants } of SWEPT_INTENTS) {
+          for (const level of levels) {
+            for (const goal of goals) {
+              for (const variant of variants) {
+                for (const athlete of ATHLETES) {
+                  combinations.push({
+                    intent,
+                    ...variant,
+                    weeks,
+                    sessionsPerWeek,
+                    longRunDay,
+                    firstWeekFromDay,
+                    raceDay,
+                    level,
+                    goal,
+                    athlete,
+                  });
+                }
+              }
             }
           }
         }
@@ -987,9 +1078,59 @@ describe('buildPlanSkeleton', () => {
     }
   });
 
+  /*
+   * L'affûtage **raccourcit** les séances, il n'en supprime aucune.
+   *
+   * C'est le point le mieux établi du dossier : la méta-analyse de Bosquet (2007,
+   * 27 études) associe le gain de performance à une baisse de **volume** de 41 à
+   * 60 %, à **fréquence maintenue** — réduire le nombre de séances est le seul
+   * geste d'affûtage que les données contredisent franchement. Le squelette le
+   * satisfait par construction (l'affûtage n'agit que sur les cibles
+   * hebdomadaires), et ce test le gèle.
+   */
+  it('garde toutes ses séances pendant l’affûtage : il raccourcit, il ne supprime pas', () => {
+    for (const sessionsPerWeek of [3, 4, 5, 6]) {
+      const combination: Combination = {
+        weeks: 16,
+        sessionsPerWeek,
+        longRunDay: 7,
+        firstWeekFromDay: 1,
+        raceDay: 7,
+        level: 'intermediate',
+        goal: MARATHON_GOAL,
+        athlete: ATHLETES[2],
+      };
+      const skeleton = skeletonFor(combination, targetsFor(combination));
+      const tapers = skeleton.filter((week) => week.phase === 'taper');
+      expect(tapers.length, `${sessionsPerWeek} séances`).toBeGreaterThan(0);
+
+      for (const week of tapers) {
+        expect(
+          week.sessions.length + week.qualitySlots.length,
+          `${sessionsPerWeek} séances, semaine ${week.weekNumber}`,
+        ).toBe(sessionsPerWeek);
+        // Et une séance de qualité y survit : ce qu'on retire est du volume, pas
+        // de l'intensité.
+        expect(week.qualitySlots.length, `semaine ${week.weekNumber}`).toBeGreaterThan(0);
+      }
+
+      // Ce qui baisse, c'est le kilométrage — strictement, chaque semaine.
+      const volumes = skeleton.map(
+        (week) =>
+          week.sessions.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0) +
+          week.qualitySlots.reduce((sum, slot) => sum + slot.budgetKm, 0),
+      );
+      for (const week of tapers) {
+        const index = week.weekNumber - 1;
+        expect(volumes[index], `semaine ${week.weekNumber}`).toBeLessThan(volumes[index - 1]);
+      }
+    }
+  });
+
   it('ne rend rien pour un plan sans semaine', () => {
     expect(
       buildPlanSkeleton({
+        intent: 'race',
         weeks: 0,
         firstWeekFromDay: 1,
         sessionsPerWeek: 4,
@@ -1462,6 +1603,7 @@ describe('buildPlanSkeleton', () => {
       for (const targetKm of [0, -0.6]) {
         expect(() =>
           buildPlanSkeleton({
+            intent: 'race',
             weeks: 1,
             firstWeekFromDay: 1,
             sessionsPerWeek: 5,
@@ -1509,6 +1651,7 @@ describe('buildPlanSkeleton', () => {
     it('reprend les phases de l’appelant plutôt que de les recalculer', () => {
       const targets = targetsFor(combination);
       const skeleton = buildPlanSkeleton({
+        intent: intentOf(combination),
         weeks: combination.weeks,
         firstWeekFromDay: combination.firstWeekFromDay,
         sessionsPerWeek: combination.sessionsPerWeek,
@@ -1586,6 +1729,7 @@ describe('la rampe de composition sur le plan de l’utilisatrice', () => {
 
   function userSkeleton(targets: readonly WeeklyVolumeTarget[]): SkeletonWeek[] {
     return buildPlanSkeleton({
+      intent: 'race',
       weeks: USER_WEEKS,
       firstWeekFromDay: 1,
       sessionsPerWeek: USER_SESSIONS,
@@ -1696,7 +1840,12 @@ describe('la rampe de composition sur le plan de l’utilisatrice', () => {
    * composition de l'arithmétique des volumes, qui a ses propres tests.
    */
   describe('création et reconstruction se rejoignent', () => {
-    const FULL_PHASES = planPhases({ weeks: USER_WEEKS, firstWeekFromDay: 1, race: USER_RACE });
+    const FULL_PHASES = planPhases({
+      intent: 'race',
+      weeks: USER_WEEKS,
+      firstWeekFromDay: 1,
+      race: USER_RACE,
+    });
     const PLAN_DEVELOPMENT_WEEKS = FULL_PHASES.filter(isDevelopmentPhase).length;
 
     /** La fenêtre restante de `weeks` semaines, telle que le service la construit. */
@@ -1707,6 +1856,7 @@ describe('la rampe de composition sur le plan de l’utilisatrice', () => {
       if (firstWeekFromDay > 1 && phases[0] !== 'race') phases[0] = 'partial';
 
       return buildPlanSkeleton({
+        intent: 'race',
         weeks,
         firstWeekFromDay,
         sessionsPerWeek: USER_SESSIONS,
@@ -1766,4 +1916,162 @@ describe('la rampe de composition sur le plan de l’utilisatrice', () => {
       }
     });
   });
+});
+
+/*
+ * ------------------------------------------------------------------------
+ * Création et reconstruction se rejoignent, **intention par intention**.
+ * ------------------------------------------------------------------------
+ *
+ * Le test ci-dessus prouve l'ancrage de composition sur le plan de
+ * l'utilisatrice ; celui-ci le rejoue pour les quatre intentions, parce que
+ * chacune apporte ses propres décisions de structure (longueur de la base,
+ * existence d'une spécificité, zones, plafond de sortie longue). Toutes doivent
+ * être des **fonctions pures de (intention, phase, position dans le plan)** :
+ * c'est ce qui permet à `rewriteRemainingPlan` de réécrire la fin d'un plan sans
+ * remettre la préparation au début de sa progression.
+ *
+ * La reconstruction reçoit les phases du plan entier, tranchées, et l'ancrage
+ * calculé par la même soustraction que le service — exactement comme en
+ * production.
+ */
+describe('création et reconstruction se rejoignent, intention par intention', () => {
+  const PLAN_WEEKS = 16;
+  const PLAN_SESSIONS = 4;
+
+  /**
+   * Ce que la reconstruction doit reproduire à l'identique, semaine par semaine.
+   *
+   * ## Ce qui n'y figure pas, et pourquoi
+   *
+   * La **répartition** des footings entre eux, et le footing qui porte la
+   * variation de la semaine. Les deux se décident sur la parité du numéro de
+   * semaine (`weeklyEasyVariation`), qui est celui de la **fenêtre** et non celui
+   * du plan : une fenêtre ouvrant sur un rang impair intervertit lignes droites et
+   * côtes courtes, et le rééquilibrage `spreadEasyDistances` change alors de
+   * donneur.
+   *
+   * C'est un défaut **antérieur à ce chantier**, et mesurable sur l'intention
+   * `race` seule : 16 semaines, 6 séances, débutante (donc un créneau de qualité
+   * et trois footings), fenêtre de 15 semaines — la semaine calendaire 5 sort en
+   * `6,1 · 6,8 · 6,8 · 7,4` à la création et en `7,5 · 6,8 · 6,8 · 6,0` à la
+   * reconstruction. Il ne se voyait pas jusqu'ici parce que le plan de
+   * l'utilisatrice (4 séances, 2 créneaux) n'a qu'un seul footing par semaine, et
+   * qu'un footing seul n'a personne avec qui échanger.
+   *
+   * Le corriger demande un numéro de semaine **plan-relatif**, que l'appelant
+   * seul connaît — c'est le même chaînon manquant que pour la fenêtre de
+   * marche/course, et il ne se règle pas dans ce module. Ce qui est vérifié ici
+   * est donc tout le reste, qui est bien ancré au plan : la phase, la sortie
+   * longue, les créneaux de qualité et le **total** des footings.
+   */
+  function composition(week: SkeletonWeek) {
+    const longRun = week.sessions.find(
+      (session) => session.kind === 'Sortie longue' || session.kind === 'Course',
+    );
+    const easy = week.sessions.filter((session) => session !== longRun);
+    return {
+      phase: week.phase,
+      longRunKm: longRun?.distanceKm ?? null,
+      quality: week.qualitySlots.map((slot) => `${slot.kind} ${slot.budgetKm}`),
+      easyCount: easy.length,
+      easyTotalKm: Math.round(
+        easy.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0) * 10,
+      ),
+    };
+  }
+
+  for (const intent of PLAN_INTENTS) {
+    describe(intent, () => {
+      const race: PlanRaceGoal | null = intent === 'race' ? { isMarathon: false } : null;
+      const goalDistanceKm = intent === 'race' ? HALF_GOAL.goalDistanceKm : null;
+      const returnInjuryHistory = intent === 'return';
+
+      const targets = weeklyVolumeTargets({
+        weeks: PLAN_WEEKS,
+        firstWeekFromDay: 1,
+        recentWeeklyKm: 30,
+        weeklyTimeMinutes: 240,
+        easyPaceSecPerKm: 443,
+        race,
+        level: 'intermediate',
+      });
+
+      const fullPhases = planPhases({
+        intent,
+        weeks: PLAN_WEEKS,
+        firstWeekFromDay: 1,
+        race,
+        returnInjuryHistory,
+      });
+      const planDevelopmentWeeks = fullPhases.filter(isDevelopmentPhase).length;
+
+      /** La fenêtre de `weeks` semaines finales, telle que le service la construit. */
+      function build(weeks: number, firstWeekFromDay: number): SkeletonWeek[] {
+        const offset = PLAN_WEEKS - weeks;
+        const isWindow = weeks < PLAN_WEEKS;
+        const phases: PlanPhase[] = fullPhases.slice(offset);
+        if (firstWeekFromDay > 1 && phases[0] !== 'race') phases[0] = 'partial';
+
+        return buildPlanSkeleton({
+          intent,
+          returnInjuryHistory,
+          weeks,
+          firstWeekFromDay,
+          sessionsPerWeek: PLAN_SESSIONS,
+          longRunDay: 7,
+          level: 'intermediate',
+          race,
+          raceDay: race === null ? null : 7,
+          goalDistanceKm,
+          targets: targets.slice(offset),
+          ...(isWindow
+            ? {
+                phases,
+                compositionAnchor: {
+                  planDevelopmentWeeks,
+                  completedDevelopmentWeeks:
+                    planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
+                },
+              }
+            : {}),
+        });
+      }
+
+      it('donne la même composition à une semaine calendaire, quelle que soit la fenêtre', () => {
+        const created = build(PLAN_WEEKS, 1);
+
+        for (let weeks = 1; weeks <= PLAN_WEEKS; weeks += 1) {
+          const offset = PLAN_WEEKS - weeks;
+          const rebuilt = build(weeks, 1);
+
+          for (let index = 0; index < weeks; index += 1) {
+            expect(
+              composition(rebuilt[index]),
+              `fenêtre de ${weeks} semaines, semaine calendaire ${offset + index + 1}`,
+            ).toEqual(composition(created[offset + index]));
+          }
+        }
+      });
+
+      it('garde le bon rang quand la fenêtre s’ouvre sur une semaine déjà entamée', () => {
+        const created = build(PLAN_WEEKS, 1);
+
+        for (const weeks of [10, 9, 7, 6, 5]) {
+          const offset = PLAN_WEEKS - weeks;
+          const rebuilt = build(weeks, 4);
+
+          // La première semaine d'une fenêtre entamée est démotée en `partial` :
+          // elle perd sa qualité, mais les suivantes gardent leur rang.
+          expect(rebuilt[0].qualitySlots, `fenêtre de ${weeks} semaines`).toEqual([]);
+          for (let index = 1; index < weeks; index += 1) {
+            expect(
+              composition(rebuilt[index]),
+              `fenêtre entamée de ${weeks} semaines, semaine calendaire ${offset + index + 1}`,
+            ).toEqual(composition(created[offset + index]));
+          }
+        }
+      });
+    });
+  }
 });

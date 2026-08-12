@@ -83,6 +83,7 @@ import {
   isDevelopmentPhase,
   planPhases,
   type CompositionAnchor,
+  type PlanIntent,
   type PlanPhase,
   type PlanSkeletonParams,
   type SkeletonWeek,
@@ -397,6 +398,22 @@ function referenceRacePaces(race: ReferenceRace | undefined): TrainingPaces | nu
  */
 function raceGoalOf(goalType: PlanGoalType, goalText: string): PlanRaceGoal | null {
   return goalType === 'race' ? { isMarathon: isMarathonGoal(goalText) } : null;
+}
+
+/**
+ * L'intention du plan, telle que le squelette la lit — **déduite du type
+ * d'objectif, faute de mieux**.
+ *
+ * Le formulaire ne demande pas encore laquelle des quatre intentions l'athlète
+ * poursuit (`race`, `faster`, `weight_loss`, `return`), et le plan ne la stocke
+ * pas : ce branchement-là est le chantier suivant. En attendant, un objectif daté
+ * est une préparation de course, et tout le reste est une recherche de vitesse —
+ * la structure la plus proche de celle que ces plans recevaient jusqu'ici, moins
+ * les séances « Spécifique allure course » qu'un objectif libre n'aurait jamais
+ * dû recevoir (cf. `plan-skeleton/quality.ts`).
+ */
+function planIntentOf(goalType: PlanGoalType): PlanIntent {
+  return goalType === 'race' ? 'race' : 'faster';
 }
 
 /**
@@ -1130,6 +1147,7 @@ async function writeGeneratedPlan(
   // 1. Le squelette : périodisation, volumes, jours, footings, sortie longue et
   //    séance du jour J. Tout ce qui se calcule est écrit ici, par l'appli.
   const skeleton = planSkeletonOrInvalid({
+    intent: planIntentOf(request.goalType),
     weeks: window.weeks,
     firstWeekFromDay: window.firstWeekFromDay,
     sessionsPerWeek: request.sessionsPerWeek,
@@ -1475,6 +1493,7 @@ function remainingComposition(
 ): { phases: PlanPhase[]; compositionAnchor: CompositionAnchor } {
   const race = raceGoalOf(plan.goalType, plan.goalText);
   const full = planPhases({
+    intent: planIntentOf(plan.goalType),
     weeks: plan.weeks,
     // La périodisation d'origine : celle qu'a connue le plan quand il a été
     // écrit, jour de départ compris.
@@ -2483,6 +2502,7 @@ export async function rewriteRemainingPlan(
 
   // 1. Le squelette de la fenêtre — périodisation conservée, volumes recalculés.
   const skeleton = planSkeletonOrInvalid({
+    intent: planIntentOf(plan.goalType),
     weeks: window.weeks,
     firstWeekFromDay: window.firstWeekFromDay,
     sessionsPerWeek: effectiveSettings.sessionsPerWeek,

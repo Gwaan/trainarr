@@ -29,6 +29,12 @@
 
 import { taperWeekCount, type PlanRaceGoal } from '@/lib/ai/plan-schema';
 
+import {
+  intentBasePhaseShare,
+  intentHasSpecificPhase,
+  type PlanIntent,
+} from './intent';
+
 /**
  * Ce qu'une semaine du plan est, du point de vue de l'entraînement.
  *
@@ -56,27 +62,45 @@ export type PlanPhasesParams = {
   firstWeekFromDay: number;
   /** L'objectif, quand c'est une course : elle impose un affûtage et un jour J. */
   race: PlanRaceGoal | null;
+  /**
+   * Ce que l'athlète vient chercher — ce qui décide de la longueur de la base et
+   * de l'existence d'une spécificité (cf. `intent.ts`).
+   */
+  intent: PlanIntent;
+  /** Antécédent de blessure déclaré : ne rallonge la base qu'en `return`. */
+  returnInjuryHistory?: boolean;
 };
 
 /**
- * La répartition de la fenêtre de développement entre ses trois phases.
+ * Le partage de ce qui **reste** après la base, entre développement et
+ * spécificité.
  *
- * 30 / 40 / 30 : le bloc de développement est le plus long parce que c'est celui
- * qui fait progresser, la base et la spécificité l'encadrent à parts égales. Ce
- * sont des ordres de grandeur de la littérature (Lydiard pour la base longue,
- * Daniels et Pfitzinger pour la spécificité terminale), pas des constantes
- * physiologiques : ce qui compte est que les trois existent et se succèdent dans
- * cet ordre.
+ * 4 contre 3 : le bloc de développement est le plus long parce que c'est celui
+ * qui fait progresser, et la spécificité le referme. Ce sont des ordres de
+ * grandeur de la littérature (Lydiard pour la base longue, Daniels et Pfitzinger
+ * pour la spécificité terminale), pas des constantes physiologiques : ce qui
+ * compte est que les phases existent et se succèdent dans cet ordre.
+ *
+ * La part de la **base**, elle, dépend de l'intention ({@link
+ * intentBasePhaseShare}) : c'est le paramètre qui distingue une reprise (la
+ * moitié du plan en construction) d'une recherche de vitesse (un quart). Avec les
+ * 30 % de `race`, ce partage-ci redonne exactement le 30 / 40 / 30 d'origine.
  */
-const DEVELOPMENT_SHARES = { base: 0.3, build: 0.4, specific: 0.3 } as const;
+const DEVELOPMENT_SHARES = { build: 0.4, specific: 0.3 } as const;
 
 /**
- * En deçà de ce nombre de semaines, un plan n'a pas de temps à donner à la base.
+ * En deçà de ce nombre de semaines, un plan **daté** n'a pas de temps à donner à
+ * la base.
  *
  * Sur sept semaines, 30 % de base valent deux semaines prises sur les quatre qui
  * font réellement progresser — pour une athlète qui a une échéance, c'est du
  * temps perdu. La base est alors ramenée à une semaine de mise en route, et tout
  * le reste va au développement et à la spécificité.
+ *
+ * **Le raccourci suppose l'échéance**, et il ne s'applique donc qu'aux plans qui
+ * en ont une. Sans date, rien ne presse : rogner la base d'un plan de reprise de
+ * six semaines pour « gagner » deux semaines de développement retirerait à ce
+ * plan-là exactement ce qu'il est venu construire.
  */
 const SHORT_PLAN_WEEKS = 8;
 
@@ -87,6 +111,16 @@ function clamp(value: number, min: number, max: number): number {
 function repeatPhase(phase: DevelopmentPhase, count: number): DevelopmentPhase[] {
   return Array.from({ length: count }, () => phase);
 }
+
+/** Ce que l'intention impose au découpage de la fenêtre de développement. */
+type DevelopmentShape = {
+  /** La part de la fenêtre qui revient à la base ({@link intentBasePhaseShare}). */
+  baseShare: number;
+  /** L'intention converge-t-elle vers quelque chose ({@link intentHasSpecificPhase}) ? */
+  hasSpecific: boolean;
+  /** Un plan daté trop court pour s'offrir une base ({@link SHORT_PLAN_WEEKS}). */
+  isShortPlan: boolean;
+};
 
 /**
  * La fenêtre de développement découpée en base / build / spécifique, dans
@@ -104,13 +138,27 @@ function repeatPhase(phase: DevelopmentPhase, count: number): DevelopmentPhase[]
  * retomberaient pas sur le compte. Chaque phase garde au moins une semaine :
  * c'est ce que les bornes garantissent, et une phase absente au milieu d'une
  * progression est une progression cassée.
+ *
+ * **Sans spécificité** (`weight_loss`, `return`), il n'y a plus que deux phases à
+ * répartir : la base prend sa part, tout le reste est du développement — le
+ * « build prolongé » d'une perte de poids, la remise en route d'une reprise. La
+ * base peut alors aller jusqu'à `count − 1` : elle n'a plus à laisser de place à
+ * une troisième phase.
  */
-function developmentPhases(count: number, isShortPlan: boolean): DevelopmentPhase[] {
+function developmentPhases(count: number, shape: DevelopmentShape): DevelopmentPhase[] {
   if (count <= 0) return [];
   if (count === 1) return ['build'];
+
+  if (!shape.hasSpecific) {
+    const base = clamp(Math.round(count * shape.baseShare), 1, count - 1);
+    return [...repeatPhase('base', base), ...repeatPhase('build', count - base)];
+  }
+
   if (count === 2) return ['build', 'specific'];
 
-  const base = isShortPlan ? 1 : clamp(Math.round(count * DEVELOPMENT_SHARES.base), 1, count - 2);
+  const base = shape.isShortPlan
+    ? 1
+    : clamp(Math.round(count * shape.baseShare), 1, count - 2);
   const rest = count - base;
   const buildShareOfRest =
     DEVELOPMENT_SHARES.build / (DEVELOPMENT_SHARES.build + DEVELOPMENT_SHARES.specific);
@@ -133,20 +181,27 @@ function developmentPhases(count: number, isShortPlan: boolean): DevelopmentPhas
  * décide — et c'est le bon, puisque c'est celui que les volumes appliqueront.
  */
 export function planPhases(params: PlanPhasesParams): PlanPhase[] {
-  const { weeks, firstWeekFromDay, race } = params;
+  const { weeks, firstWeekFromDay, race, intent } = params;
   if (weeks <= 0) return [];
 
   const firstFull = firstWeekFromDay > 1 ? 1 : 0;
+  // L'affûtage se déduit de la **date**, jamais de l'intention : les volumes
+  // cibles ne connaissent qu'elle, et deux arithmétiques pour un même découpage
+  // finissent toujours par diverger (cf. l'en-tête). Trois intentions sur quatre
+  // n'ont pas de date, donc pas d'affûtage — sans qu'on ait à l'écrire ici.
   const taper = taperWeekCount(weeks, race);
   const lastBuild = weeks - taper - 1;
 
   const phases = new Array<PlanPhase>(weeks).fill('build');
 
-  developmentPhases(lastBuild - firstFull + 1, weeks < SHORT_PLAN_WEEKS).forEach(
-    (phase, offset) => {
-      phases[firstFull + offset] = phase;
-    },
-  );
+  const shape: DevelopmentShape = {
+    baseShare: intentBasePhaseShare(intent, params.returnInjuryHistory ?? false),
+    hasSpecific: intentHasSpecificPhase(intent),
+    isShortPlan: race !== null && weeks < SHORT_PLAN_WEEKS,
+  };
+  developmentPhases(lastBuild - firstFull + 1, shape).forEach((phase, offset) => {
+    phases[firstFull + offset] = phase;
+  });
 
   // La course occupe la dernière semaine, l'affûtage celles qui la précèdent.
   const taperFrom = weeks - taper;

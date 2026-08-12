@@ -6,6 +6,12 @@
  * réseau, ni `server-only`, ni horloge, ni aléa —, et l'ensemble se teste sans
  * rien monter.
  *
+ * Ce que le plan **est** se décide d'abord par l'{@link PlanIntent} : préparer
+ * une course, courir plus vite, perdre du poids ou reprendre. Ces quatre
+ * intentions ne sont pas quatre libellés d'un même plan — elles changent la
+ * périodisation, la grille de qualité, le nombre de séances dures et la sortie
+ * longue. Chaque paramètre et la recherche qui le fonde vivent dans `intent.ts`.
+ *
  * Le contrat, du plus gros au plus fin : {@link buildPlanSkeleton} rend une
  * semaine par semaine du plan, dont les footings et la sortie longue sont
  * entièrement écrits et dont les séances de qualité ne sont que des créneaux
@@ -31,6 +37,7 @@ export {
   PlanSkeletonInfeasibleError,
   type PlanSkeletonUnderfundedWeek,
 } from './feasibility';
+export { PLAN_INTENTS, type PlanIntent } from './intent';
 export { planPhases, type PlanPhase, type PlanPhasesParams } from './phases';
 export { goalFamily, qualityZones, QUALITY_ZONE_KINDS, type QualityZone } from './quality';
 export {

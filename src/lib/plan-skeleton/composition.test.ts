@@ -39,9 +39,17 @@ const SIXTEEN: PlanPhase[] = [
 /** Les dix rangs de développement de ce plan-là — ceux que la rampe traverse. */
 const DEVELOPMENT_INDEXES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
+/**
+ * La rampe telle qu'une préparation de course la voit — l'intention historique,
+ * et celle que tous les cas ci-dessous éprouvent. Les intentions qui ne rampent
+ * pas ont leur propre bloc, plus bas.
+ */
+const raceShares = (phases: readonly PlanPhase[], anchor?: CompositionAnchor): number[] =>
+  weeklyQualityShares('race', phases, anchor);
+
 describe('weeklyQualityShares', () => {
   it('laisse la base et l’affûtage hors de la rampe', () => {
-    const shares = weeklyQualityShares(SIXTEEN);
+    const shares = raceShares(SIXTEEN);
 
     for (const index of [0, 1, 2, 3, 14, 15]) {
       expect(shares[index], `semaine ${index + 1}`).toBe(QUALITY_SHARE.outsideRamp);
@@ -49,7 +57,7 @@ describe('weeklyQualityShares', () => {
   });
 
   it('monte du bas au haut de la rampe sur le développement, sans jamais redescendre', () => {
-    const shares = weeklyQualityShares(SIXTEEN);
+    const shares = raceShares(SIXTEEN);
     const ramp = DEVELOPMENT_INDEXES.map((index) => shares[index]);
 
     expect(ramp[0]).toBeCloseTo(QUALITY_SHARE.ramp.from, 10);
@@ -60,15 +68,15 @@ describe('weeklyQualityShares', () => {
   });
 
   it('rend une part par semaine, et rien du tout sans semaine', () => {
-    expect(weeklyQualityShares(SIXTEEN)).toHaveLength(16);
-    expect(weeklyQualityShares([])).toEqual([]);
+    expect(raceShares(SIXTEEN)).toHaveLength(16);
+    expect(raceShares([])).toEqual([]);
   });
 
   it('donne le milieu de la rampe à un développement d’une seule semaine', () => {
     // Ni un début ni une fin de progression : le milieu est la seule réponse qui
     // ne soit pas arbitraire, et la plus proche des 16 % historiques.
     const middle = (QUALITY_SHARE.ramp.from + QUALITY_SHARE.ramp.to) / 2;
-    expect(weeklyQualityShares(['base', 'build', 'taper'])[1]).toBeCloseTo(middle, 10);
+    expect(raceShares(['base', 'build', 'taper'])[1]).toBeCloseTo(middle, 10);
   });
 
   /*
@@ -79,7 +87,7 @@ describe('weeklyQualityShares', () => {
    */
   describe('ancrage plan-relatif', () => {
     it('rend, sur une fenêtre, exactement ce que la création rend aux mêmes semaines', () => {
-      const full = weeklyQualityShares(SIXTEEN);
+      const full = raceShares(SIXTEEN);
 
       // Toutes les fenêtres possibles, de la plus longue à la plus courte.
       for (let windowWeeks = 1; windowWeeks <= SIXTEEN.length; windowWeeks += 1) {
@@ -91,7 +99,7 @@ describe('weeklyQualityShares', () => {
           completedDevelopmentWeeks: planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
         };
 
-        expect(weeklyQualityShares(phases, anchor), `fenêtre de ${windowWeeks} semaines`).toEqual(
+        expect(raceShares(phases, anchor), `fenêtre de ${windowWeeks} semaines`).toEqual(
           full.slice(offset),
         );
       }
@@ -101,13 +109,13 @@ describe('weeklyQualityShares', () => {
       // Le piège de la soustraction : `remainingComposition` démote la première
       // semaine d'une fenêtre entamée, ce qui lui retire son rang de
       // développement. Un décompte du préfixe décalerait toutes les suivantes.
-      const full = weeklyQualityShares(SIXTEEN);
+      const full = raceShares(SIXTEEN);
       const offset = 6; // la fenêtre ouvre sur une semaine `build`
       const phases: PlanPhase[] = [...SIXTEEN.slice(offset)];
       phases[0] = 'partial';
 
       const planDevelopmentWeeks = SIXTEEN.filter(isDevelopmentPhase).length;
-      const shares = weeklyQualityShares(phases, {
+      const shares = raceShares(phases, {
         planDevelopmentWeeks,
         completedDevelopmentWeeks: planDevelopmentWeeks - phases.filter(isDevelopmentPhase).length,
       });
@@ -119,8 +127,8 @@ describe('weeklyQualityShares', () => {
     });
 
     it('sans ancrage, se mesure sur la fenêtre — ce qui est le cas d’une création', () => {
-      expect(weeklyQualityShares(SIXTEEN)).toEqual(
-        weeklyQualityShares(SIXTEEN, {
+      expect(raceShares(SIXTEEN)).toEqual(
+        raceShares(SIXTEEN, {
           planDevelopmentWeeks: DEVELOPMENT_INDEXES.length,
           completedDevelopmentWeeks: 0,
         }),
@@ -131,12 +139,43 @@ describe('weeklyQualityShares', () => {
       // Un plan dont la durée enregistrée aurait divergé de sa fenêtre. La part
       // reste dans ses bornes plutôt que d'en sortir — et de là le minimum
       // finançable avec elle.
-      const shares = weeklyQualityShares(['build', 'build'], {
+      const shares = raceShares(['build', 'build'], {
         planDevelopmentWeeks: 2,
         completedDevelopmentWeeks: 40,
       });
       expect(shares).toEqual([QUALITY_SHARE.ramp.to, QUALITY_SHARE.ramp.to]);
     });
+  });
+});
+
+/*
+ * Les deux intentions qui ne rampent pas.
+ *
+ * `weight_loss` par décision d'entraînement — déplacer des kilomètres du facile
+ * vers la qualité échangerait de la dépense contre une intensité dont la
+ * littérature ne montre aucun bénéfice sur la masse grasse (cf. `intent.ts`) —
+ * et `return` par construction, puisqu'elle n'ouvre aucun créneau.
+ */
+describe('weeklyQualityShares, hors des intentions qui rampent', () => {
+  it('tient la part de qualité plate sur une perte de poids', () => {
+    const shares = weeklyQualityShares('weight_loss', SIXTEEN);
+
+    expect(new Set(shares)).toEqual(new Set([QUALITY_SHARE.outsideRamp]));
+    expect(shares).toHaveLength(SIXTEEN.length);
+  });
+
+  it('la tient plate sur une reprise, qui n’a de toute façon aucun créneau', () => {
+    expect(weeklyQualityShares('return', SIXTEEN)).toEqual(
+      SIXTEEN.map(() => QUALITY_SHARE.outsideRamp),
+    );
+  });
+
+  it('fait ramper une recherche de vitesse comme une préparation de course', () => {
+    // `faster` n'a ni affûtage ni semaine de course, mais sa progression de
+    // composition est la même : c'est le seul levier qui reste quand le budget
+    // temps plafonne le kilométrage.
+    const phases: PlanPhase[] = SIXTEEN.slice(0, 14);
+    expect(weeklyQualityShares('faster', phases)).toEqual(raceShares(phases));
   });
 });
 
