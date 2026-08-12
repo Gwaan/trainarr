@@ -98,6 +98,7 @@ import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/d
 import { formatPace } from '@/lib/ai/format';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import { stepsToIntervalsSyntax } from '@/lib/plan-steps/intervals-syntax';
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import {
   createWorkoutEvents,
@@ -145,9 +146,62 @@ export function planSessionExternalId(
 }
 
 /**
+ * Le déroulé d'une séance qui n'en a pas : une étape unique, sur la mesure que
+ * le plan déclare — ou `null` quand il n'en déclare aucune.
+ *
+ * **Ce n'est pas inventer la séance**, c'est en écrire la seule chose qu'elle
+ * dise déjà : un footing de 7 km à 7:08/km *est* une étape de course de 7 km à
+ * 7:08/km. Rien n'est ajouté (pas d'échauffement fabriqué, pas de fractionné
+ * déduit d'un intitulé), rien n'est supposé : sans allure cible, l'étape reste
+ * libre.
+ *
+ * Ce qui le rend nécessaire est un fait constaté à la montre : l'app Companion
+ * ne pousse **que** les événements dont la description est en syntaxe workout.
+ * Une séance décrite en texte plat s'affiche au calendrier et n'atteint jamais
+ * le poignet — c'est ainsi qu'une semaine entière de footings et de sorties
+ * longues, correctement synchronisée, restait invisible à l'entraînement.
+ *
+ * La distance prime sur la durée quand le plan donne les deux : c'est la mesure
+ * sur laquelle la séance se court (et celle que `distanceTargetM` porte déjà
+ * dans l'event), la durée n'en étant que l'estimation à l'allure prévue.
+ *
+ * Les bornes du schéma ne sont pas revalidées ici : ces valeurs viennent de la
+ * base, où le DAL les a déjà validées, et une séance hors bornes doit être
+ * refusée à l'écriture — pas silencieusement dégradée à la publication.
+ */
+function singleRunSteps(session: PlanSessionDto): PlanSessionSteps | null {
+  const measure =
+    session.volumeM !== null
+      ? { distanceM: session.volumeM, durationS: null }
+      : session.durationS !== null
+        ? { distanceM: null, durationS: session.durationS }
+        : null;
+
+  if (measure === null) return null;
+
+  return [
+    {
+      repeat: 1,
+      steps: [
+        {
+          role: 'run',
+          ...measure,
+          // Une allure cible unique, écrite comme une plage de bornes égales :
+          // c'est la forme que `stepsToIntervalsSyntax` ramène à `7:08/km Pace`.
+          paceMinSecPerKm: session.targetPaceSecPerKm,
+          paceMaxSecPerKm: session.targetPaceSecPerKm,
+          hrZone: null,
+          note: null,
+        },
+      ],
+    },
+  ];
+}
+
+/**
  * Description de la séance, telle qu'elle s'affiche dans le calendrier.
  *
- * Deux régimes, selon ce que le plan porte :
+ * Trois régimes, selon ce que le plan porte :
  *
  * 1. **Séance structurée** (`steps`) : la description est le déroulé écrit dans
  *    la syntaxe native du workout builder d'intervals.icu, et **rien d'autre**.
@@ -156,13 +210,30 @@ export function planSessionExternalId(
  *    plat ne servirait qu'à donner au parseur des lignes à mal interpréter,
  *    alors que les étapes disent déjà l'échauffement, les récupérations, le
  *    retour au calme et les allures.
- * 2. **Séance en texte libre** (plans écrits avant les étapes structurées) : du
- *    texte plat assumé — fabriquer une syntaxe à partir d'un intitulé
- *    reviendrait à inventer la séance. Ce qui manque au plan ne produit pas de
- *    ligne.
+ * 2. **Séance mesurée mais non détaillée** (distance ou durée, sans `steps`) :
+ *    la même syntaxe, réduite à l'étape unique que la séance décrit
+ *    (cf. {@link singleRunSteps}). C'est ce qui la fait exister sur la montre.
+ *
+ *    Le résumé en texte plat **disparaît** alors, échauffement et conseils
+ *    compris — il n'est pas conservé en préfixe. Trois raisons, dans cet ordre :
+ *    rien ne garantit qu'une ligne non parsable laisse le workout parsable, et
+ *    le risque porte précisément sur ce qu'on cherche à réparer ; c'est déjà la
+ *    règle du régime 1, et faire cohabiter deux dialectes dans un même champ
+ *    selon l'origine de la séance ne se justifierait par rien ; enfin ce qui
+ *    disparaît n'est presque rien — l'intitulé et la nature de la séance
+ *    restent lisibles au calendrier dans le `name` de l'event, et un footing
+ *    sans déroulé n'a par construction ni échauffement ni récupération à
+ *    détailler.
+ * 3. **Séance sans mesure** : du texte plat assumé — sans distance ni durée, il
+ *    n'y a aucune étape à écrire, et fabriquer une syntaxe à partir d'un
+ *    intitulé reviendrait à inventer la séance. Ce qui manque au plan ne produit
+ *    pas de ligne.
  */
 function describeSession(session: PlanSessionDto): string {
   if (session.steps !== null) return stepsToIntervalsSyntax(session.steps);
+
+  const synthesized = singleRunSteps(session);
+  if (synthesized !== null) return stepsToIntervalsSyntax(synthesized);
 
   const lines: string[] = [];
 

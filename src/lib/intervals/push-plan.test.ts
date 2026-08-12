@@ -155,29 +155,17 @@ describe('buildWorkoutEvents', () => {
     expect(workout.type).toBe('Run');
   });
 
-  it("détaille la séance et son allure cible, sans inventer ce qui manque", () => {
+  it('porte les cibles que le plan déclare, et aucune autre', () => {
     const [workout] = buildWorkoutEvents(3, [
       session({
         scheduledOn: '2026-08-18',
         title: '6 × 800 m',
-        warmup: '15 min footing',
-        recovery: '400 m trot',
-        cooldown: '10 min souple',
         targetPaceSecPerKm: 235,
         durationS: 3_600,
         volumeM: 12_000,
       }),
     ]);
 
-    expect(workout.description).toBe(
-      [
-        'Échauffement : 15 min footing',
-        'Séance : 6 × 800 m',
-        'Récupération : 400 m trot',
-        'Retour au calme : 10 min souple',
-        'Allure cible : 3:55/km',
-      ].join('\n'),
-    );
     expect(workout.timeTargetS).toBe(3_600);
     expect(workout.distanceTargetM).toBe(12_000);
     expect(workout.target).toBe('PACE');
@@ -263,13 +251,28 @@ describe('buildWorkoutEvents', () => {
     expect(workout.target).toBe('PACE');
   });
 
-  it('reste en texte plat pour une séance sans déroulé structuré', () => {
+  it('reste en texte plat pour une séance sans mesure : rien à structurer', () => {
+    // Sans distance ni durée, il n'y a aucune étape à écrire — et en fabriquer
+    // une à partir de l'intitulé reviendrait à inventer la séance.
     const [workout] = buildWorkoutEvents(3, [
-      session({ scheduledOn: '2026-08-18', title: '45 min souple', warmup: '10 min de marche' }),
+      session({
+        scheduledOn: '2026-08-18',
+        title: '45 min souple',
+        warmup: '10 min de marche',
+        recovery: '400 m trot',
+        cooldown: '5 min souple',
+        targetPaceSecPerKm: 235,
+      }),
     ]);
 
     expect(workout.description).toBe(
-      ['Échauffement : 10 min de marche', 'Séance : 45 min souple'].join('\n'),
+      [
+        'Échauffement : 10 min de marche',
+        'Séance : 45 min souple',
+        'Récupération : 400 m trot',
+        'Retour au calme : 5 min souple',
+        'Allure cible : 3:55/km',
+      ].join('\n'),
     );
   });
 
@@ -285,6 +288,115 @@ describe('buildWorkoutEvents', () => {
       'trainarr-p3-2026-08-18-1',
       'trainarr-p3-2026-08-19-0',
     ]);
+  });
+});
+
+describe('buildWorkoutEvents — séance mesurée sans déroulé', () => {
+  // Le constat qui motive tout ce bloc : l'app Companion ne pousse à la montre
+  // que les events dont la description est en syntaxe workout. Une séance en
+  // texte plat se synchronise, s'affiche au calendrier… et n'atteint jamais le
+  // poignet. Ces sorties sont donc figées : c'est ce qu'on relira si Companion
+  // change de comportement.
+
+  it('écrit un footing en une étape de course, distance et allure cible', () => {
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-18',
+        kind: 'Footing',
+        title: '7 km en endurance',
+        volumeM: 7_000,
+        targetPaceSecPerKm: 428,
+      }),
+    ]);
+
+    expect(workout.description).toBe('- Course 7km 7:08/km Pace');
+  });
+
+  it("écrit une sortie longue sans allure cible en étape libre : aucune intensité inventée", () => {
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-23',
+        kind: 'Sortie longue',
+        title: '18 km',
+        volumeM: 18_000,
+      }),
+    ]);
+
+    expect(workout.description).toBe('- Course 18km');
+  });
+
+  it('écrit en durée la séance qui ne porte que sa durée', () => {
+    const [workout] = buildWorkoutEvents(3, [
+      session({ scheduledOn: '2026-08-18', title: '45 min souple', durationS: 2_700 }),
+    ]);
+
+    expect(workout.description).toBe('- Course 45m');
+  });
+
+  it('mesure la séance en distance quand le plan donne les deux', () => {
+    // La distance est ce sur quoi la séance se court ; la durée n'en est que
+    // l'estimation à l'allure prévue.
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-18',
+        volumeM: 10_000,
+        durationS: 3_600,
+        targetPaceSecPerKm: 360,
+      }),
+    ]);
+
+    expect(workout.description).toBe('- Course 10km 6:00/km Pace');
+  });
+
+  it('ne mêle aucun texte plat à la syntaxe', () => {
+    // Rien ne garantit qu'une ligne non parsable laisse le workout parsable, et
+    // le risque porterait précisément sur ce qu'on cherche à réparer. Ce qui
+    // disparaît reste lisible au calendrier : le `name` porte nature et intitulé.
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-18',
+        kind: 'Footing',
+        title: 'Footing avec accélérations',
+        warmup: '10 min de marche',
+        recovery: '400 m trot',
+        cooldown: '5 min souple',
+        volumeM: 8_000,
+        targetPaceSecPerKm: 420,
+      }),
+    ]);
+
+    expect(workout.description).toBe('- Course 8km 7:00/km Pace');
+    expect(workout.name).toBe('Footing — Footing avec accélérations');
+  });
+
+  it("laisse strictement intacte la description d'une séance qui a un déroulé", () => {
+    // Un `steps` présent l'emporte toujours : la synthèse ne se déclenche que
+    // faute de déroulé, elle n'en remplace jamais un.
+    const [workout] = buildWorkoutEvents(3, [
+      session({
+        scheduledOn: '2026-08-18',
+        volumeM: 7_000,
+        targetPaceSecPerKm: 428,
+        steps: [
+          {
+            repeat: 1,
+            steps: [
+              {
+                role: 'warmup',
+                distanceM: 2_000,
+                durationS: null,
+                paceMinSecPerKm: null,
+                paceMaxSecPerKm: null,
+                hrZone: 2,
+                note: null,
+              },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    expect(workout.description).toBe('- Echauffement 2km Z2 HR');
   });
 });
 
