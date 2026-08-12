@@ -4,6 +4,7 @@ import type { PlanLevel } from '@/data/db/schema';
 import {
   applyDerivedMeasures,
   applyImposedPaces,
+  isIntensitySession,
   PLAN_OUTPUT_BOUNDS,
   sessionPaceZone,
   validatePlanBusinessRules,
@@ -713,21 +714,31 @@ describe('buildPlanSkeleton', () => {
       expect(raceWeek.sessions.map((session) => session.kind)).not.toContain('Sortie longue');
     });
 
-    it('ne laisse aucune séance écrite porter un déroulé, sauf la sortie longue spécifique', () => {
+    /*
+     * Ce que le déroulé d'une séance écrite peut être, depuis que les séances
+     * faciles varient (cf. `variations.ts`) : une sortie longue découpée, ou
+     * **un** footing enrichi par semaine — jamais deux, et jamais une course.
+     */
+    it('ne laisse porter un déroulé qu’à la sortie longue et à un seul footing par semaine', () => {
       for (const week of skeleton) {
-        for (const session of week.sessions) {
-          if (session.steps === undefined) continue;
-          expect(session.kind, `semaine ${week.weekNumber}`).toBe('Sortie longue');
-          expect(week.phase, `semaine ${week.weekNumber}`).toBe('specific');
+        const withSteps = week.sessions.filter((session) => session.steps !== undefined);
+        const easyWithSteps = withSteps.filter((session) => session.kind !== 'Sortie longue');
+        expect(easyWithSteps.length, `semaine ${week.weekNumber}`).toBeLessThanOrEqual(1);
+        for (const session of easyWithSteps) {
+          expect(session.kind, `semaine ${week.weekNumber}`).toBe('Endurance fondamentale');
         }
       }
     });
 
     it('découpe la sortie longue spécifique en mise en route, allure objectif, retour au calme', () => {
       const specific = skeleton.find(
-        (week) => week.phase === 'specific' && week.sessions.some((s) => s.steps !== undefined),
+        (week) =>
+          week.phase === 'specific' &&
+          week.sessions.some((s) => s.kind === 'Sortie longue' && s.steps !== undefined),
       );
-      const longRun = specific?.sessions.find((session) => session.steps !== undefined);
+      const longRun = specific?.sessions.find(
+        (session) => session.kind === 'Sortie longue' && session.steps !== undefined,
+      );
       const steps = flattenSteps(longRun?.steps ?? []);
 
       expect(steps.map((step) => step.role)).toEqual(['warmup', 'run', 'cooldown']);
@@ -739,6 +750,25 @@ describe('buildPlanSkeleton', () => {
       // l'allure de l'objectif en aval.
       expect((steps[1].distanceM ?? 0) / covered).toBeCloseTo(1 / 3, 2);
       expect(steps[1].note).toContain('allure objectif');
+    });
+
+    /*
+     * Répéter l'allure de course sur la fatigue est le travail de la
+     * **spécificité** : en base et en développement, la sortie longue reste du
+     * temps passé en endurance (au plus une fin de parcours appuyée). Sans ce
+     * cas, élargir `wantsSpecificLongRun` au développement passerait inaperçu.
+     */
+    it('réserve le bloc à allure objectif à la phase spécifique', () => {
+      const weeks = skeleton.filter((week) =>
+        week.sessions.some((session) => session.title === 'Sortie longue avec bloc à allure objectif'),
+      );
+      // Et il existe vraiment sur cette préparation marathon : sans cela, la
+      // règle ci-dessous ne prouverait rien.
+      expect(weeks.length).toBeGreaterThan(0);
+
+      for (const week of weeks) {
+        expect(week.phase, `semaine ${week.weekNumber}`).toBe('specific');
+      }
     });
 
     it('ne programme pas de qualité la semaine de la course', () => {
@@ -1053,6 +1083,299 @@ describe('buildPlanSkeleton', () => {
         }
       }
       expect(checked).toBeGreaterThan(0);
+    });
+  });
+
+  /*
+   * La variété **à l'intérieur** des séances faciles.
+   *
+   * Le constat de l'utilisatrice sur son premier plan : « pas trop de variété,
+   * beaucoup de séances d'endurance ». La proportion d'endurance, elle, est
+   * juste — ce qui manquait était la variété dans ces séances-là : deux footings
+   * par semaine écrits à l'identique (« Footing en endurance » 6,7 km lundi,
+   * « Footing en endurance » 6,7 km jeudi), seize semaines durant.
+   *
+   * Ce bloc rejoue son cas exact et éprouve chaque variation sur les trois
+   * choses qui pourraient casser en aval : la couverture du déroulé, la
+   * traversée des deux post-traitements, et le classement de la séance (une
+   * séance facile enrichie reste facile).
+   */
+  describe('la variété des séances faciles', () => {
+    /**
+     * L'athlète du constat : 16 semaines, 4 séances, objectif libre, 4 h par
+     * semaine — et une table d'allures, pour que `applyImposedPaces` ait de quoi
+     * écrire.
+     */
+    const GWEN: Athlete = {
+      label: 'l’utilisatrice du constat',
+      recentWeeklyKm: 22,
+      weeklyTimeMinutes: 240,
+      easyPaceSecPerKm: 420,
+      paces: trainingPacesFromRace(10_000, 55 * 60),
+    };
+
+    const combination: Combination = {
+      weeks: 16,
+      sessionsPerWeek: 4,
+      longRunDay: 7,
+      firstWeekFromDay: 1,
+      raceDay: 7,
+      level: 'beginner',
+      goal: GOALS[0],
+      athlete: GWEN,
+    };
+    const targets = targetsFor(combination);
+    const skeleton = skeletonFor(combination, targets);
+
+    /** Les séances faciles d'une semaine, sortie longue et créneaux exclus. */
+    const easySessions = (week: SkeletonWeek): PlanSessionOutput[] =>
+      week.sessions.filter((session) => session.kind !== 'Sortie longue' && session.kind !== 'Course');
+
+    /** Ce qui distingue deux séances sur la timeline : son titre, sa distance, son déroulé. */
+    const signature = (session: PlanSessionOutput): string =>
+      `${session.title}|${session.distanceKm}|${JSON.stringify(session.steps ?? null)}`;
+
+    it('ne laisse plus deux footings jumeaux dans une même semaine', () => {
+      for (const week of skeleton) {
+        const signatures = easySessions(week).map(signature);
+        expect(signatures.length, `semaine ${week.weekNumber}`).toBe(2);
+        expect(new Set(signatures).size, `semaine ${week.weekNumber}`).toBe(signatures.length);
+      }
+    });
+
+    it('n’enrichit qu’un footing par semaine, jamais les deux', () => {
+      for (const week of skeleton) {
+        const enriched = easySessions(week).filter((session) => session.steps !== undefined);
+        expect(enriched.length, `semaine ${week.weekNumber}`).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('différencie les longueurs sans bouger la somme de la semaine', () => {
+      for (const week of skeleton) {
+        const total = [
+          ...week.sessions.map((session) => session.distanceKm ?? 0),
+          ...week.qualitySlots.map((slot) => slot.budgetKm),
+        ].reduce((sum, km) => sum + km, 0);
+        expect(total, `semaine ${week.weekNumber}`).toBeCloseTo(week.target.targetKm, 1);
+
+        // Et la sortie longue reste la plus longue séance de sa semaine : c'est
+        // la borne que le rééquilibrage des footings ne doit pas franchir.
+        const longRun = week.sessions.find((session) => session.kind === 'Sortie longue');
+        for (const session of week.sessions) {
+          expect(longRun?.distanceKm ?? 0, `semaine ${week.weekNumber}`).toBeGreaterThanOrEqual(
+            session.distanceKm ?? 0,
+          );
+        }
+      }
+    });
+
+    it('couvre exactement la distance déclarée par chaque déroulé', () => {
+      let checked = 0;
+      for (const week of skeleton) {
+        for (const session of week.sessions) {
+          if (session.steps === undefined) continue;
+          checked += 1;
+          const covered = flattenSteps(session.steps).reduce(
+            (sum, step) => sum + (step.distanceM ?? 0),
+            0,
+          );
+          expect(covered, `semaine ${week.weekNumber}, ${session.title}`).toBe(
+            Math.round((session.distanceKm ?? 0) * 1_000),
+          );
+          // Aucune étape en durée : c'est la contrainte qui fait tenir les
+          // volumes une fois `imposedDistanceKm` passé.
+          for (const step of flattenSteps(session.steps)) {
+            expect(step.durationS, `semaine ${week.weekNumber}`).toBeNull();
+            expect(step.distanceM).not.toBeNull();
+          }
+        }
+      }
+      expect(checked).toBeGreaterThan(0);
+    });
+
+    it('traverse les deux post-traitements sans qu’aucune distance ne bouge', () => {
+      const filled = fillSkeleton(skeleton);
+      for (const pass of postProcessed(filled, GWEN)) {
+        pass.weeks.forEach((week, index) => {
+          week.sessions.forEach((session, position) => {
+            expect(session.distanceKm, `${pass.label}, semaine ${index + 1}`).toBe(
+              filled[index].sessions[position].distanceKm,
+            );
+          });
+          const total = week.sessions.reduce((sum, session) => sum + (session.distanceKm ?? 0), 0);
+          expect(total, `${pass.label}, semaine ${index + 1}`).toBeCloseTo(
+            targets[index].targetKm,
+            1,
+          );
+        });
+      }
+    });
+
+    /*
+     * Un footing enrichi n'est **pas** une séance de qualité : son `kind` reste
+     * « Endurance fondamentale », donc `sessionPaceZone` le range en `easy` et
+     * `isIntensitySession` le laisse tranquille — sans quoi la validation lui
+     * réclamerait un échauffement et un retour au calme, et le plan basculerait
+     * hors de sa répartition 80/20.
+     */
+    it('garde les footings enrichis en zone facile', () => {
+      for (const week of skeleton) {
+        for (const session of easySessions(week)) {
+          expect(sessionPaceZone(session.kind), `semaine ${week.weekNumber}`).toBe('easy');
+          expect(isIntensitySession(session), `semaine ${week.weekNumber}`).toBe(false);
+        }
+      }
+    });
+
+    /*
+     * Aucune note ne déplace la zone d'une étape (`STEP_NOTE_ZONES` ne réagit
+     * qu'à « seuil/tempo » et « allure objectif / course / spécifique /
+     * marathon ») : après `applyImposedPaces`, toutes les étapes d'effort d'un
+     * footing enrichi portent la **plage d'endurance**, et rien d'autre.
+     */
+    it('ne fait sortir aucune étape de la plage d’endurance après imposition des allures', () => {
+      const easy = GWEN.paces?.easy;
+      const imposed = applyImposedPaces(fillSkeleton(skeleton), GWEN.paces ?? REFERENCE_PACES, null);
+
+      let checked = 0;
+      for (const week of imposed) {
+        for (const session of week.sessions) {
+          if (session.kind !== 'Endurance fondamentale' || session.steps === undefined) continue;
+          checked += 1;
+          for (const step of flattenSteps(session.steps)) {
+            if (step.role === 'run') {
+              checked += 1;
+              expect(step.paceMinSecPerKm).toBe(easy?.minSecPerKm);
+              expect(step.paceMaxSecPerKm).toBe(easy?.maxSecPerKm);
+            } else {
+              // Enveloppe et récupérations d'une séance d'endurance : aucune
+              // cible, la note dit tout (cf. `envelopePaceZone`).
+              expect(step.paceMinSecPerKm).toBeNull();
+            }
+          }
+        }
+      }
+      expect(checked).toBeGreaterThan(0);
+    });
+
+    it('termine un footing par 4 à 6 lignes droites, récupération comprise', () => {
+      const strides = skeleton
+        .flatMap((week) => easySessions(week))
+        .find((session) => session.title === 'Footing avec lignes droites');
+
+      expect(strides).toBeDefined();
+      const blocks = strides?.steps ?? [];
+      expect(blocks).toHaveLength(2);
+      // Le corps d'abord, la section d'accélérations ensuite : les lignes droites
+      // se courent sur une foulée déjà chaude.
+      expect(blocks[0].repeat).toBe(1);
+      expect(blocks[0].steps[0].role).toBe('run');
+      expect(blocks[1].repeat).toBeGreaterThanOrEqual(4);
+      expect(blocks[1].repeat).toBeLessThanOrEqual(6);
+      expect(blocks[1].steps.map((step) => step.role)).toEqual(['run', 'recover']);
+      // ~20 s d'accélération, soit 80 à 100 m — au-dessus du plancher de 10 m des
+      // étapes, et sous les 200 m d'une « étape courte » pour la validation.
+      expect(blocks[1].steps[0].distanceM).toBeGreaterThanOrEqual(80);
+      expect(blocks[1].steps[0].distanceM).toBeLessThanOrEqual(100);
+      // La section reste une fin de séance, pas la séance.
+      const section = blocks[1].repeat * (blocks[1].steps[0].distanceM ?? 0);
+      expect(section / ((strides?.distanceKm ?? 1) * 1_000)).toBeLessThan(0.1);
+    });
+
+    it('réserve les côtes courtes à la phase de base', () => {
+      for (const week of skeleton) {
+        const hills = easySessions(week).filter(
+          (session) => session.title === 'Footing avec côtes courtes',
+        );
+        if (hills.length === 0) continue;
+        expect(week.phase, `semaine ${week.weekNumber}`).toBe('base');
+      }
+      // Et elles existent : sans cela, la règle ci-dessus ne prouverait rien.
+      const base = skeleton.filter((week) => week.phase === 'base');
+      expect(
+        base.flatMap(easySessions).filter((s) => s.title === 'Footing avec côtes courtes').length,
+      ).toBeGreaterThan(0);
+    });
+
+    it('monte le footing progressif en trois tranches décroissantes, hors phase de base', () => {
+      const weeks = skeleton.filter((week) =>
+        easySessions(week).some((session) => session.title === 'Footing progressif'),
+      );
+      expect(weeks.length).toBeGreaterThan(0);
+
+      for (const week of weeks) {
+        expect(['build', 'specific'], `semaine ${week.weekNumber}`).toContain(week.phase);
+        const progressive = easySessions(week).find((s) => s.title === 'Footing progressif');
+        const steps = flattenSteps(progressive?.steps ?? []);
+        // Une mise en route sans cible d'allure, puis deux tranches d'effort de
+        // plus en plus courtes : c'est la forme d'un progressif.
+        expect(steps.map((step) => step.role)).toEqual(['warmup', 'run', 'run']);
+        expect(steps[0].distanceM ?? 0).toBeGreaterThan(steps[1].distanceM ?? 0);
+        expect(steps[1].distanceM ?? 0).toBeGreaterThan(steps[2].distanceM ?? 0);
+      }
+    });
+
+    it('appuie la fin d’une sortie longue sur trois, en développement et en spécificité', () => {
+      const finishes = skeleton.filter((week) =>
+        week.sessions.some((session) => session.title === 'Sortie longue, fin de parcours appuyée'),
+      );
+      expect(finishes.length).toBeGreaterThan(0);
+
+      for (const week of finishes) {
+        expect(['build', 'specific'], `semaine ${week.weekNumber}`).toContain(week.phase);
+        expect(week.weekNumber % 3, `semaine ${week.weekNumber}`).toBe(0);
+        const steps = flattenSteps(
+          week.sessions.find((s) => s.title === 'Sortie longue, fin de parcours appuyée')?.steps ??
+            [],
+        );
+        expect(steps.map((step) => step.role)).toEqual(['run', 'run']);
+        // Le dernier cinquième, pas plus : une sortie longue reste du temps passé
+        // en endurance.
+        const covered = steps.reduce((sum, step) => sum + (step.distanceM ?? 0), 0);
+        expect((steps[1].distanceM ?? 0) / covered).toBeCloseTo(0.2, 2);
+      }
+
+      // La plupart des sorties longues restent nues : la variation est
+      // périodique, pas systématique.
+      const longRuns = skeleton.flatMap((week) =>
+        week.sessions.filter((session) => session.kind === 'Sortie longue'),
+      );
+      expect(finishes.length * 2).toBeLessThan(longRuns.length);
+    });
+
+    /*
+     * Deux semaines n'ont rien à recevoir : la première d'un plan démarré en
+     * cours de route (on ignore ce qui y a déjà été couru) et celle de la course
+     * (ses footings sont des récupérations, dont le seul contrat est « plus lent
+     * que l'endurance »).
+     */
+    it('n’enrichit ni la semaine entamée ni l’affûtage ni la semaine de course', () => {
+      const dated: Combination = {
+        weeks: 12,
+        sessionsPerWeek: 5,
+        longRunDay: 7,
+        firstWeekFromDay: 5,
+        raceDay: 7,
+        level: 'intermediate',
+        goal: TEN_K_GOAL,
+        athlete: ATHLETES[2],
+      };
+      const raced = skeletonFor(dated, targetsFor(dated));
+
+      for (const week of raced) {
+        if (week.phase !== 'partial' && week.phase !== 'taper' && week.phase !== 'race') continue;
+        for (const session of week.sessions) {
+          expect(session.steps, `semaine ${week.weekNumber} (${week.phase})`).toBeUndefined();
+        }
+      }
+      // Les trois phases sont bien représentées dans ce plan-là.
+      expect(raced.map((week) => week.phase)).toEqual(
+        expect.arrayContaining(['partial', 'taper', 'race']),
+      );
+    });
+
+    it('reste déterministe : mêmes paramètres, mêmes variations', () => {
+      expect(skeletonFor(combination, targets)).toEqual(skeletonFor(combination, targetsFor(combination)));
     });
   });
 

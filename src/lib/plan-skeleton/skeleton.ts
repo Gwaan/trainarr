@@ -16,7 +16,9 @@
  *
  * - la périodisation ({@link planPhases}) ;
  * - les jours de chaque séance ({@link placeSessionDays}) ;
- * - les footings et la sortie longue, **entièrement écrits**, kilométrage compris ;
+ * - les footings et la sortie longue, **entièrement écrits**, kilométrage compris,
+ *   déroulé compris quand la séance en porte un ({@link weeklyEasyVariation},
+ *   {@link longRunFinishSteps}, {@link specificLongRunSteps}) ;
  * - et, pour les séances de qualité, des **créneaux** — jour, zone, `kind`,
  *   budget kilométrique — dont il ne reste au modèle qu'à écrire le déroulé.
  *
@@ -41,10 +43,13 @@
  * ## Ce que ce module n'écrit surtout pas
  *
  * **Ni allure, ni durée.** Les séances sortent d'ici avec un jour, un `kind`, un
- * titre et une distance, rien d'autre. `applyImposedPaces` (avec table VDOT) et
- * `applyDerivedMeasures` (sans) les posent en aval, exactement comme sur la
- * sortie du modèle — un seul endroit décide des allures, et ce n'est pas ici.
- * Écrire une allure ici la ferait diverger de celle que le reste du plan reçoit.
+ * titre, une distance et parfois un déroulé — mais aucune cible chiffrée.
+ * `applyImposedPaces` (avec table VDOT) et `applyDerivedMeasures` (sans) les
+ * posent en aval, exactement comme sur la sortie du modèle — un seul endroit
+ * décide des allures, et ce n'est pas ici. Écrire une allure ici la ferait
+ * diverger de celle que le reste du plan reçoit ; ce que les déroulés d'ici
+ * portent, ce sont des **notes** en français, dont aucune ne déplace la zone
+ * d'une étape (cf. `variations.ts`).
  *
  * Module **pur** : ni base, ni réseau, ni `server-only`, ni horloge, ni aléa.
  */
@@ -56,7 +61,7 @@ import {
   type WeeklyVolumeTarget,
 } from '@/lib/ai/plan-schema';
 import type { PlanLevel } from '@/data/db/schema';
-import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import { placeSessionDays } from './days';
 import {
@@ -66,6 +71,14 @@ import {
 } from './feasibility';
 import { planPhases, type PlanPhase } from './phases';
 import { goalFamily, qualityZones, QUALITY_ZONE_KINDS, type QualityZone } from './quality';
+import {
+  distanceStep,
+  easySessionSteps,
+  longRunFinishSteps,
+  spreadEasyDistances,
+  weeklyEasyVariation,
+  type EasyVariation,
+} from './variations';
 
 const DAYS_PER_WEEK = 7;
 
@@ -94,8 +107,25 @@ const SESSION_TITLES = {
   recovery: 'Footing de récupération',
   longRun: 'Sortie longue en endurance',
   specificLongRun: 'Sortie longue avec bloc à allure objectif',
+  longRunFinish: 'Sortie longue, fin de parcours appuyée',
   race: 'Jour J : la course',
 } as const;
+
+/**
+ * Le titre de chaque variation de footing ({@link EasyVariation}).
+ *
+ * Ces titres sont ce que l'utilisatrice lit sur sa timeline, et c'est par eux
+ * que deux footings d'une même semaine cessent d'être deux jumeaux. Ils ne sont
+ * lus par aucun classement d'allure — seul le `kind` l'est
+ * (`sessionPaceZone`, `isIntensitySession`), et il reste « Endurance
+ * fondamentale » : un footing à lignes droites n'est pas une séance de qualité.
+ */
+const EASY_VARIATION_TITLES = {
+  plain: SESSION_TITLES.easy,
+  strides: 'Footing avec lignes droites',
+  hillStrides: 'Footing avec côtes courtes',
+  progressive: 'Footing progressif',
+} as const satisfies Record<EasyVariation, string>;
 
 /**
  * Part de la sortie longue courue à l'allure de l'objectif, en phase spécifique.
@@ -260,19 +290,6 @@ export type PlanSkeletonParams = {
   phases?: readonly PlanPhase[];
 };
 
-/** Une étape mesurée en distance, sans aucune cible : toutes les clés, `null` pour le reste. */
-function distanceStep(role: PlanStep['role'], distanceM: number, note: string): PlanStep {
-  return {
-    role,
-    distanceM,
-    durationS: null,
-    paceMinSecPerKm: null,
-    paceMaxSecPerKm: null,
-    hrZone: null,
-    note,
-  };
-}
-
 /**
  * Le déroulé d'une sortie longue spécifique : mise en route, bloc à allure
  * objectif, retour au calme — `undefined` quand la séance est trop courte pour
@@ -315,6 +332,42 @@ function wantsSpecificLongRun(phase: PlanPhase, goalDistanceKm: number | null): 
   if (phase !== 'specific') return false;
   const family = goalFamily(goalDistanceKm);
   return family === 'half' || family === 'marathon';
+}
+
+/** Le titre et le déroulé d'une sortie longue — les deux se décident ensemble. */
+type LongRunShape = { title: string; steps?: PlanSessionSteps };
+
+/**
+ * Ce que porte la sortie longue d'une semaine, dans l'ordre de priorité :
+ *
+ * 1. le **bloc à allure objectif** de la phase spécifique, quand la course visée
+ *    est assez longue pour qu'on ait à en répéter l'allure sur la fatigue ;
+ * 2. sinon, une **fin de parcours appuyée**, une semaine sur trois en
+ *    développement et en spécificité ({@link longRunFinishSteps}) ;
+ * 3. sinon la sortie longue nue, qui reste le cas majoritaire — une sortie
+ *    longue est d'abord du temps passé en endurance.
+ *
+ * Le repli sur le titre nu quand le déroulé n'a pas pu s'écrire (séance trop
+ * courte pour être découpée) n'est pas cosmétique : un titre qui annonce un
+ * découpage absent est un mensonge sur la timeline.
+ */
+function longRunShape(
+  phase: PlanPhase,
+  weekNumber: number,
+  goalDistanceKm: number | null,
+  distanceKm: number,
+): LongRunShape {
+  if (wantsSpecificLongRun(phase, goalDistanceKm)) {
+    const steps = specificLongRunSteps(distanceKm);
+    return steps === undefined
+      ? { title: SESSION_TITLES.longRun }
+      : { title: SESSION_TITLES.specificLongRun, steps };
+  }
+
+  const finish = longRunFinishSteps(phase, weekNumber, distanceKm);
+  return finish === undefined
+    ? { title: SESSION_TITLES.longRun }
+    : { title: SESSION_TITLES.longRunFinish, steps: finish };
 }
 
 /**
@@ -572,20 +625,16 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     const sessions: PlanSessionOutput[] = [];
 
     if (days.longRunDay !== null && longBudget !== undefined) {
-      // Aucun déroulé le jour J : `wantsSpecificLongRun` n'accepte que la phase
-      // `specific`, et la semaine de course n'en est pas une.
-      const steps = wantsSpecificLongRun(phase, goalDistanceKm)
-        ? specificLongRunSteps(longBudget.km)
-        : undefined;
+      // Aucun déroulé le jour J : ni `wantsSpecificLongRun` ni
+      // `longRunFinishSteps` n'acceptent la phase `race`, et une course ne se
+      // découpe pas.
+      const shape = longRunShape(phase, weekNumber, goalDistanceKm, longBudget.km);
+      const steps = isRaceWeek ? undefined : shape.steps;
 
       sessions.push({
         day: days.longRunDay,
         kind: isRaceWeek ? SESSION_KINDS.race : SESSION_KINDS.longRun,
-        title: isRaceWeek
-          ? SESSION_TITLES.race
-          : steps === undefined
-            ? SESSION_TITLES.longRun
-            : SESSION_TITLES.specificLongRun,
+        title: isRaceWeek ? SESSION_TITLES.race : shape.title,
         // **Le budget de la décomposition, jamais la distance réelle de la
         // course.** C'est une décision assumée, et elle mérite d'être écrite :
         // un plan d'entraînement porte des volumes d'**entraînement**, et
@@ -604,13 +653,28 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       });
     }
 
+    // La variation de la semaine se décide sur le nombre de footings **budgétés**
+    // : c'est le rang dans cette liste-là que `spreadEasyDistances` et l'écriture
+    // ci-dessous partagent.
+    const variation = weeklyEasyVariation(phase, weekNumber, easyBudgets.length);
+    // La sortie longue reste la séance la plus longue de sa semaine : c'est elle
+    // qui plafonne le footing qui s'allonge. Quand elle n'a pas lieu, son budget
+    // est devenu le plus gros footing et joue le même rôle de plafond.
+    const ceilingKm = longBudget?.km ?? Number.POSITIVE_INFINITY;
+    const spreadKms = spreadEasyDistances(
+      easyBudgets.map((budget) => budget.km),
+      variation.index,
+      ceilingKm,
+    );
+
     // Sortie longue non plaçable : son budget rejoint les footings plutôt que
-    // d'être abandonné, sans quoi la semaine passerait sous sa cible.
-    const withLongRun =
-      days.longRunDay === null && longBudget !== undefined
-        ? [longBudget, ...easyBudgets]
-        : easyBudgets;
-    const easyKms = withLongRun.map((budget) => budget.km);
+    // d'être abandonné, sans quoi la semaine passerait sous sa cible. Il reste en
+    // tête et hors du rééquilibrage — c'est le plus gros de la semaine, il n'a
+    // rien à céder.
+    const reversedLongKm =
+      days.longRunDay === null && longBudget !== undefined ? [longBudget.km] : [];
+    const easyKms = [...reversedLongKm, ...spreadKms];
+    const enrichedIndex = reversedLongKm.length + variation.index;
 
     days.easyDays.forEach((day, easyIndex) => {
       const km = easyKms[easyIndex];
@@ -618,7 +682,22 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       // semaines infaisables ({@link assertFundable}) ; la garde reste parce
       // qu'une séance sans distance rendrait tout le plan invérifiable.
       if (km === undefined) return;
-      sessions.push({ day, kind: easyKind, title: easyTitle, distanceKm: km });
+
+      // Un seul footing enrichi par semaine, et jamais sur une semaine de
+      // récupération : `weeklyEasyVariation` rend déjà `plain` pour l'affûtage,
+      // la semaine de course et la semaine entamée.
+      const steps =
+        easyIndex === enrichedIndex ? easySessionSteps(variation.variation, km) : undefined;
+
+      sessions.push({
+        day,
+        kind: easyKind,
+        // Le titre suit le déroulé réellement écrit : une séance trop courte pour
+        // porter des lignes droites reste un footing, titre compris.
+        title: steps === undefined ? easyTitle : EASY_VARIATION_TITLES[variation.variation],
+        distanceKm: km,
+        ...(steps === undefined ? {} : { steps }),
+      });
     });
 
     const qualitySlots = days.qualityDays.map((day, slotIndex) => {
