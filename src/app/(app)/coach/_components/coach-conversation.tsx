@@ -13,22 +13,26 @@ import type { AiUnavailableReason } from "@/lib/ai/errors";
 import { cn } from "@/lib/utils";
 
 import { parseRefusal, scanCoachStream } from "../_lib/coach-stream";
+import { COACH_THREAD_VIEWPORT_CLASS } from "./coach-thread-viewport";
 
 /**
  * Le fil de discussion avec le coach, et la saisie qui l'alimente.
  *
- * ## Mise en page : tout est dans le flux
+ * ## Mise en page : un fil borné, une saisie dans le flux
  *
- * Ni saisie fixée en bas d'écran, ni fil à défilement propre. Le `<main>` de
- * l'appli réserve déjà `pb-[calc(5rem+env(safe-area-inset-bottom))]` pour la
- * bottom-nav `fixed` : empiler un second élément fixe demanderait d'accorder à
- * la main trois hauteurs (nav, saisie, encoche) qui changent toutes les trois —
- * et sur iOS, un élément collant en bas se cale sur le viewport de mise en page,
- * pas sur le viewport visuel, donc passe **sous** le clavier logiciel dès la
- * prise de focus. Une saisie dans le flux évite tout cela : le navigateur la
- * fait défiler lui-même à la vue quand elle prend le focus, ce qu'il sait faire
- * mieux que nous. Le prix — descendre au bas du fil pour écrire — est payé une
- * fois, au montage, par un défilement automatique vers le dernier échange.
+ * Le fil défile chez lui, sous un plafond de hauteur (`COACH_THREAD_VIEWPORT_CLASS`) ;
+ * la saisie le suit immédiatement, **dans le flux**. Rien n'est ancré au
+ * viewport, et c'est délibéré : le `<main>` de l'appli réserve déjà
+ * `pb-[calc(5rem+env(safe-area-inset-bottom))]` pour la bottom-nav `fixed`, et
+ * empiler un second élément fixe demanderait d'accorder à la main trois hauteurs
+ * (nav, saisie, encoche) qui changent toutes les trois — mais surtout, sur iOS,
+ * un élément collant en bas se cale sur le viewport de mise en page, pas sur le
+ * viewport visuel, donc passe **sous** le clavier logiciel dès la prise de
+ * focus. Borner le fil suffit : la page cesse de grandir d'un écran par échange,
+ * et le navigateur amène lui-même la saisie à la vue quand elle prend le focus,
+ * ce qu'il sait faire mieux que nous. Le prix — descendre au bas du fil pour
+ * écrire — est payé une fois, au montage, par un défilement automatique du fil
+ * vers le dernier échange.
  *
  * ## Un tour de parole
  *
@@ -115,12 +119,14 @@ export function CoachConversation({ messages, unavailableReason }: CoachConversa
   const [draft, setDraft] = useState("");
 
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const atBottomRef = useRef(true);
   const wasStreamingRef = useRef(false);
 
   const streaming = turn !== null;
   const suspended = unavailableReason !== null;
+  const empty = thread.length === 0 && !streaming;
 
   /* Une génération en cours n'a plus de destinataire une fois l'écran quitté. */
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -130,27 +136,38 @@ export function CoachConversation({ messages, unavailableReason }: CoachConversa
    * on ne lui reprend pas la main. Le repère est mis à jour au défilement plutôt
    * que lu à chaque delta : la lecture forcerait un recalcul de mise en page à
    * chaque fragment reçu.
+   *
+   * L'écouteur est posé sur le fil lui-même, qui défile pour son compte. Il
+   * n'existe pas tant que la conversation est vide (un état vide le remplace),
+   * d'où la dépendance à `empty` : elle repose l'écouteur au moment où le
+   * premier tour fait apparaître le conteneur.
    */
   useEffect(() => {
+    const viewport = viewportRef.current;
+    if (viewport === null) return;
+
     const readPosition = () => {
-      const remaining =
-        document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+      const remaining = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
       atBottomRef.current = remaining <= NEAR_BOTTOM_PX;
     };
 
-    window.addEventListener("scroll", readPosition, { passive: true });
-    return () => window.removeEventListener("scroll", readPosition);
-  }, []);
+    viewport.addEventListener("scroll", readPosition, { passive: true });
+    return () => viewport.removeEventListener("scroll", readPosition);
+  }, [empty]);
 
   /* Au montage, on arrive au dernier échange : c'est ce qu'on vient lire. */
   useEffect(() => {
-    window.scrollTo({ top: document.documentElement.scrollHeight });
+    const viewport = viewportRef.current;
+    if (viewport === null) return;
+    viewport.scrollTop = viewport.scrollHeight;
     atBottomRef.current = true;
   }, []);
 
   useEffect(() => {
     if (!atBottomRef.current) return;
-    window.scrollTo({ top: document.documentElement.scrollHeight });
+    const viewport = viewportRef.current;
+    if (viewport === null) return;
+    viewport.scrollTop = viewport.scrollHeight;
   }, [thread, turn]);
 
   /* La saisie épouse son contenu, jusqu'à un plafond au-delà duquel elle défile. */
@@ -282,8 +299,6 @@ export function CoachConversation({ messages, unavailableReason }: CoachConversa
     send();
   }
 
-  const empty = thread.length === 0 && !streaming;
-
   /*
    * Confort de saisie, et rien d'autre : `maxLength` évite d'écrire une
    * question que la route refuserait en 400, le compteur dit pourquoi la frappe
@@ -310,7 +325,19 @@ export function CoachConversation({ messages, unavailableReason }: CoachConversa
             }
           />
         ) : (
-          <div className="flex flex-col gap-5 p-4 sm:p-5">
+          /*
+            Région à défilement : sans `tabIndex`, Safari et Chrome n'y donnent
+            aucun accès au clavier — on ne pourrait pas lire un fil long sans
+            souris ni doigt. Un nom l'accompagne, comme pour tout point d'arrêt
+            de tabulation.
+          */
+          <div
+            ref={viewportRef}
+            role="region"
+            aria-label="Fil de la conversation"
+            tabIndex={0}
+            className={COACH_THREAD_VIEWPORT_CLASS}
+          >
             {thread.map((message) =>
               message.role === "user" ? (
                 <AthleteMessage key={message.key} content={message.content} />

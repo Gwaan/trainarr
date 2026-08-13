@@ -1,5 +1,7 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
+import { COACH_THREAD_VIEWPORT_CLASS } from "./coach-thread-viewport";
+
 /**
  * Squelette de la page « Coach ».
  *
@@ -10,7 +12,9 @@ import { Skeleton } from "@/components/ui/skeleton";
  *
  * Deux tours plutôt qu'un fil complet : la hauteur exacte du fil est inconnue
  * avant lecture, et un squelette plus haut que la conversation réelle ferait
- * remonter la page à l'arrivée des données.
+ * remonter la page à l'arrivée des données. Le fil réel étant plafonné, le
+ * squelette porte le même plafond — deux tours restent en dessous partout sauf
+ * en paysage sur téléphone, où sans lui il dépasserait.
  */
 export function CoachSkeleton() {
   return (
@@ -31,7 +35,7 @@ export function CoachSkeleton() {
           <Skeleton className="h-3 w-24" />
         </div>
 
-        <div className="flex flex-col gap-5 p-4 sm:p-5">
+        <div className={COACH_THREAD_VIEWPORT_CLASS}>
           {/* Une question, puis sa réponse — deux fois. */}
           <div className="flex justify-end">
             <Skeleton className="h-[3.4rem] w-3/5" />
