@@ -115,8 +115,14 @@ const DAYS_PER_WEEK = 7;
  * toute cible d'allure en aval (`RECOVERY_KIND_PATTERN`), ce qui est exactement ce
  * qu'on veut d'un footing d'affûtage ou de semaine de course — le seul contrat qui
  * vaille y est « plus lent que l'endurance ».
+ *
+ * **Exporté** parce que ce vocabulaire est aussi celui qu'on relit : les règles
+ * de déplacement du calendrier (`lib/plan-calendar/move-rules.ts`) doivent
+ * reconnaître la sortie longue, que `sessionPaceZone` range en endurance comme
+ * tout footing. Le recopier là-bas ferait diverger deux définitions d'un même
+ * libellé.
  */
-const SESSION_KINDS = {
+export const SESSION_KINDS = {
   easy: 'Endurance fondamentale',
   recovery: 'Récupération',
   longRun: 'Sortie longue',

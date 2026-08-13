@@ -55,6 +55,7 @@ export {
 } from './quality-load';
 export {
   buildPlanSkeleton,
+  SESSION_KINDS,
   type PlanSkeletonParams,
   type QualitySlot,
   type SkeletonWeek,

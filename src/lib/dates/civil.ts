@@ -36,6 +36,24 @@ export function civilDateToMs(date: string): number {
   return Date.parse(`${date}T00:00:00Z`);
 }
 
+const CIVIL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `true` pour une date civile `YYYY-MM-DD` qui existe réellement au calendrier.
+ *
+ * Vit ici plutôt que dans le DAL parce que des modules **purs** en ont besoin
+ * (les règles de déplacement du calendrier, par exemple) et ne peuvent pas
+ * importer un module `server-only`. `src/data/athlete.ts` la réexporte : tous
+ * ses appelants historiques la trouvent où ils l'ont toujours trouvée.
+ */
+export function isCivilDate(value: string): boolean {
+  if (!CIVIL_DATE_PATTERN.test(value)) return false;
+  const ms = civilDateToMs(value);
+  // Le round-trip écarte les dates syntaxiquement correctes mais inexistantes
+  // (2026-02-31), que certains parseurs normaliseraient en silence.
+  return !Number.isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === value;
+}
+
 /** Date civile décalée de `days` jours (négatif pour reculer). */
 export function shiftCivilDate(date: string, days: number): string {
   return new Date(civilDateToMs(date) + days * DAY_MS).toISOString().slice(0, 10);

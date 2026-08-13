@@ -10,6 +10,7 @@ import {
   ConcurrentDraftError,
   InvalidPlanError,
   PlanNotFoundError,
+  SessionNotMovableError,
   acceptDraftPlan,
   applyPlanUpdate,
   archiveActivePlan,
@@ -19,6 +20,7 @@ import {
   getDraftPlanWithSessions,
   getPlannedSessionForActivity,
   planEndExclusive,
+  rescheduleSession,
   toPlanDto,
   toPlanSessionDto,
   validatePlanInput,
@@ -1383,5 +1385,87 @@ describe('getPlannedSessionForActivity', () => {
     dbState.rows = { athlete: [] };
 
     await expect(getPlannedSessionForActivity(42)).resolves.toBeNull();
+  });
+});
+
+describe('rescheduleSession', () => {
+  /** Le plan des fixtures démarre le lundi 10 août et couvre 8 semaines. */
+  function activePlan(): void {
+    dbState.rows.plans = [PLAN_ROW];
+    dbState.returning.planned_sessions = [{ id: 7 }];
+    dbState.returning.plans = [{ id: 3 }];
+  }
+
+  it('déplace la séance et touche la date de mise à jour du plan, en transaction', async () => {
+    activePlan();
+
+    await rescheduleSession(3, 7, '2026-08-20');
+
+    expect(dbState.transactions).toBe(1);
+    const sessionUpdate = dbState.updates.find((entry) => entry.table === 'planned_sessions');
+    // Une colonne, et une seule : déplacer une séance ne la réécrit pas.
+    expect(sessionUpdate?.values).toEqual({ scheduledOn: '2026-08-20' });
+
+    const planUpdate = dbState.updates.find((entry) => entry.table === 'plans');
+    expect(planUpdate?.values).toEqual({ updatedAt: expect.any(Date) });
+  });
+
+  it('porte toutes ses gardes dans le `WHERE` de l’UPDATE', async () => {
+    activePlan();
+
+    await rescheduleSession(3, 7, '2026-08-20');
+
+    const where = renderWhere(
+      dbState.updates.find((entry) => entry.table === 'planned_sessions')?.where,
+    );
+    // id de séance, plan, athlète, puis le plancher du jour courant.
+    expect(where.params).toEqual([7, 3, 1, '2026-08-10']);
+    expect(where.sql).toContain('"completed_activity_id" is null');
+    expect(where.sql).toContain('"scheduled_on" >= $4');
+  });
+
+  it('lève SessionNotMovableError quand aucune ligne n’a bougé', async () => {
+    activePlan();
+    dbState.returning.planned_sessions = [];
+
+    await expect(rescheduleSession(3, 7, '2026-08-20')).rejects.toBeInstanceOf(
+      SessionNotMovableError,
+    );
+  });
+
+  it('refuse un plan qui n’est pas celui, actif, de l’athlète', async () => {
+    dbState.rows.plans = [];
+
+    await expect(rescheduleSession(3, 7, '2026-08-20')).rejects.toBeInstanceOf(PlanNotFoundError);
+    expect(dbState.updates).toEqual([]);
+  });
+
+  it('refuse une date malformée avant toute lecture', async () => {
+    await expect(rescheduleSession(3, 7, '20/08/2026')).rejects.toBeInstanceOf(InvalidPlanError);
+    expect(dbState.transactions).toBe(0);
+  });
+
+  it('refuse une destination passée avant toute lecture', async () => {
+    await expect(rescheduleSession(3, 7, '2026-08-09')).rejects.toBeInstanceOf(InvalidPlanError);
+    expect(dbState.transactions).toBe(0);
+  });
+
+  it('accepte le jour même', async () => {
+    activePlan();
+
+    await expect(rescheduleSession(3, 7, '2026-08-10')).resolves.toBeUndefined();
+  });
+
+  it('refuse une destination hors de la fenêtre du plan, sans rien écrire', async () => {
+    activePlan();
+
+    await expect(rescheduleSession(3, 7, '2026-10-05')).rejects.toBeInstanceOf(InvalidPlanError);
+    expect(dbState.updates).toEqual([]);
+  });
+
+  it('refuse sans athlète', async () => {
+    dbState.rows = { athlete: [] };
+
+    await expect(rescheduleSession(3, 7, '2026-08-20')).rejects.toBeInstanceOf(PlanNotFoundError);
   });
 });

@@ -2,7 +2,15 @@ import 'server-only';
 
 import { asc, eq } from 'drizzle-orm';
 
-import { toCivilDate } from '@/lib/dates/civil';
+import { isCivilDate, toCivilDate } from '@/lib/dates/civil';
+
+/**
+ * Réexport : la validation d'une date civile vit désormais dans
+ * `@/lib/dates/civil` (des modules purs en ont besoin, et ne peuvent pas
+ * importer un module `server-only`). Elle reste importable d'ici, où tous ses
+ * appelants la cherchent.
+ */
+export { isCivilDate };
 
 import { db } from './db/client';
 import { isUniqueViolation } from './db/errors';
@@ -118,17 +126,6 @@ export function toAthleteProfileDto(row: Athlete): AthleteProfileDto {
  */
 export function todayCivilDate(): string {
   return toCivilDate(new Date());
-}
-
-const CIVIL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-/** `true` pour une date civile `YYYY-MM-DD` qui existe réellement au calendrier. */
-export function isCivilDate(value: string): boolean {
-  if (!CIVIL_DATE_PATTERN.test(value)) return false;
-  const ms = Date.parse(`${value}T00:00:00Z`);
-  // Le round-trip écarte les dates syntaxiquement correctes mais inexistantes
-  // (2026-02-31), que certains parseurs normaliseraient en silence.
-  return !Number.isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === value;
 }
 
 function requireIntegerInRange(

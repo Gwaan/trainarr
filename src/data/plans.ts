@@ -325,6 +325,22 @@ export class PlanNotFoundError extends Error {
 }
 
 /**
+ * La séance visée n'est pas replanifiable : elle n'existe pas, elle n'est pas
+ * dans ce plan, elle a déjà été courue, ou son jour est passé.
+ *
+ * Comme {@link PlanNotFoundError}, les causes partagent une seule erreur : elles
+ * se distinguent en amont — `lib/plan-calendar/move-rules.ts` rend un refus
+ * motivé avant toute écriture —, et les séparer ici ne servirait qu'à renseigner
+ * un appelant qui n'aurait pas dû arriver jusque-là.
+ */
+export class SessionNotMovableError extends Error {
+  constructor() {
+    super("Cette séance ne peut plus être déplacée : recharge la page.");
+    this.name = 'SessionNotMovableError';
+  }
+}
+
+/**
  * Deux générations ont voulu écrire une proposition en même temps, et l'index
  * partiel `plans_draft_per_athlete` a tranché.
  *
@@ -1205,6 +1221,87 @@ export async function applyPlanUpdate(planId: number, update: PlanUpdate): Promi
     await replacePlanSessions(tx, plan, update.fromDate, update.sessions);
     // Pas de « touch » séparé de `updatedAt` : l'écriture des réglages le fait.
     await writePlanSettings(tx, planId, athleteId, values);
+  });
+}
+
+/**
+ * Replanifie **une** séance du plan actif à un autre jour.
+ *
+ * L'écriture la plus étroite du module : une colonne, une ligne, et rien
+ * d'autre. Le déroulé, le volume et le rapprochement ne bougent pas — déplacer
+ * une séance ne la réécrit pas.
+ *
+ * Les gardes sont dans le `WHERE` de l'`UPDATE`, pas dans une lecture préalable :
+ * une lecture laisserait une fenêtre entre le contrôle et l'écriture, et c'est
+ * exactement l'intervalle pendant lequel un import peut rapprocher la séance
+ * d'une activité. Quatre conditions, chacune pour une raison :
+ *
+ * - `plan_id` **et** `athlete_id` : la séance appartient bien à ce plan-là, et le
+ *   plan à cet athlète (anti-IDOR, cf. {@link requireActivePlan}) ;
+ * - `completed_activity_id IS NULL` : une séance courue est de l'histoire ;
+ * - `scheduled_on >= today` : le passé ne se replanifie pas — la synchronisation
+ *   ne le propagerait pas (cf. l'en-tête de `lib/intervals/push-plan.ts`), et
+ *   l'appli divergerait en silence du calendrier de la montre.
+ *
+ * La destination est bornée par la fenêtre du plan, la même que celle de
+ * {@link validatePlanSessions} : une séance hors fenêtre serait invisible de
+ * l'écran du plan et de la synchronisation.
+ *
+ * @throws {InvalidPlanError} si la destination n'est pas une date civile, est
+ * passée, ou sort de la fenêtre du plan.
+ * @throws {PlanNotFoundError} si le plan n'est pas celui, actif, de l'athlète.
+ * @throws {SessionNotMovableError} si la séance n'est pas replanifiable.
+ */
+export async function rescheduleSession(
+  planId: number,
+  sessionId: number,
+  toDate: string,
+): Promise<void> {
+  if (!isCivilDate(toDate)) {
+    throw new InvalidPlanError('sessions', 'Date de destination : format AAAA-MM-JJ attendu.');
+  }
+
+  const today = todayCivilDate();
+  if (toDate < today) {
+    throw new InvalidPlanError(
+      'sessions',
+      'Date de destination : le passé ne se replanifie pas.',
+    );
+  }
+
+  const athleteId = await getAthleteId();
+  if (athleteId === null) throw new PlanNotFoundError();
+
+  await db.transaction(async (tx) => {
+    const plan = await requireActivePlan(tx, planId, athleteId);
+    const endExclusive = planEndExclusive(plan.startsOn, plan.weeks);
+    if (toDate < plan.startsOn || toDate >= endExclusive) {
+      throw new InvalidPlanError(
+        'sessions',
+        `Séance du ${toDate} : hors de la fenêtre du plan (${plan.startsOn} → ${endExclusive} exclu).`,
+      );
+    }
+
+    const moved = await tx
+      .update(plannedSessions)
+      .set({ scheduledOn: toDate })
+      .where(
+        and(
+          eq(plannedSessions.id, sessionId),
+          eq(plannedSessions.planId, planId),
+          eq(plannedSessions.athleteId, athleteId),
+          isNull(plannedSessions.completedActivityId),
+          gte(plannedSessions.scheduledOn, today),
+        ),
+      )
+      .returning({ id: plannedSessions.id });
+
+    if (moved.length === 0) throw new SessionNotMovableError();
+
+    // Le plan a changé, même si aucune de ses colonnes n'a bougé : sans ce
+    // « touch », `updatedAt` daterait de la dernière génération et non du
+    // calendrier tel qu'il est.
+    await writePlanSettings(tx, planId, athleteId, {});
   });
 }
 

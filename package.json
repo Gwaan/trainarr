@@ -16,6 +16,8 @@
     "db:seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/utilities": "^3.2.2",
     "@garmin/fitsdk": "^21.212.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
