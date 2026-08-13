@@ -2068,6 +2068,45 @@ describe('applyImposedPaces', () => {
     });
   });
 
+  /*
+   * Le **test chronométré** : un effort maximal libre. Aucune cible sur son
+   * bloc d'effort — ni allure, ni fréquence cardiaque —, l'endurance sur son
+   * enveloppe. C'est le contrat que `plan-skeleton/fitness-test.ts` suppose, et
+   * il se joue entièrement ici.
+   */
+  it('ne prescrit aucune cible au bloc d’effort d’un test chronométré', () => {
+    const testSession = session(3, {
+      kind: 'Test 5 km',
+      title: 'Test chronométré : 5 km à fond',
+      distanceKm: 7.5,
+      steps: [
+        { repeat: 1, steps: [step('warmup', { distanceM: 1500 })] },
+        { repeat: 1, steps: [step('run', { distanceM: 5000 })] },
+        { repeat: 1, steps: [step('cooldown', { distanceM: 1000 })] },
+      ],
+    });
+
+    // Avec FC max au profil : c'est le régime où l'endurance passe en zone
+    // cardiaque, et où un test mal classé recevrait « reste en Z2 » sur un
+    // effort maximal.
+    const [imposed] = applyImposedPaces([{ sessions: [testSession] }], PACES, null, 184);
+    const blocks = imposed.sessions[0].steps ?? [];
+
+    // Ni cible de séance, ni allure, ni zone cardiaque sur l'effort.
+    expect(imposed.sessions[0].targetPaceSecPerKm).toBeUndefined();
+    expect(blocks[1].steps[0]).toMatchObject({
+      paceMinSecPerKm: null,
+      paceMaxSecPerKm: null,
+      hrZone: null,
+    });
+    // L'échauffement et le retour au calme, eux, gardent l'endurance : ils se
+    // courent, et l'athlète doit savoir à quelle allure.
+    expect(blocks[0].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+    expect(blocks[2].steps[0]).toMatchObject({ paceMinSecPerKm: 335, paceMaxSecPerKm: 370 });
+    // Et la distance déclarée ne bouge pas : le déroulé la couvre exactement.
+    expect(imposed.sessions[0].distanceKm).toBe(7.5);
+  });
+
   it('ne pose pas de cible de séance quand le déroulé ne cible qu’en fréquence cardiaque', () => {
     // Deux systèmes de cible pour une séance : « Allure cible 6:14/km » affichée à
     // côté d'étapes en Z2, dont personne n'a demandé la première.

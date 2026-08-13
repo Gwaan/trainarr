@@ -365,6 +365,27 @@ export const plans = pgTable(
      */
     referenceDistance: text('reference_distance', { enum: PLAN_REFERENCE_DISTANCES }),
     referenceTimeS: integer('reference_time_s'),
+    /**
+     * Date civile de la dernière **mise à jour** du chrono de référence par un
+     * test chronométré. `NULL` tant qu'aucun test ne l'a fait bouger — le chrono
+     * est alors celui de la création, et c'est `starts_on` qui sert d'ancre.
+     *
+     * Cette date porte la **cadence** de Daniels : pas plus d'une mise à jour
+     * toutes les quatre semaines (`REFERENCE_UPDATE_MIN_GAP_DAYS`). Ce n'est
+     * donc pas un champ d'affichage qu'on pourrait dériver d'ailleurs, c'est
+     * l'état d'une règle.
+     */
+    referenceUpdatedOn: date('reference_updated_on'),
+    /**
+     * Ce que le dernier test a donné, en une phrase française destinée à
+     * l'athlète — `NULL` tant qu'aucun test n'a été couru.
+     *
+     * Écrite **quel que soit le verdict**, y compris quand rien ne bouge : une
+     * contre-performance qui ne dégrade rien doit se lire, sans quoi le plan
+     * aurait des décisions que personne ne voit. C'est le strict minimum qui
+     * informe vraiment, en attendant un journal du coach.
+     */
+    lastTestNote: text('last_test_note'),
     /** Approche du plan rédigée par le coach (markdown). `NULL` tant qu'il n'a rien écrit. */
     summary: text('summary'),
     /**

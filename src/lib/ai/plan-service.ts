@@ -80,6 +80,7 @@ import {
 import {
   PlanSkeletonInfeasibleError,
   buildPlanSkeleton,
+  fitnessTestWeekNumbers,
   isDevelopmentPhase,
   planPhases,
   type CompositionAnchor,
@@ -1626,7 +1627,11 @@ function planRaceIsoDay(plan: PlanDto, window: RemainingPlanWindow): number | nu
  * - le **rang plan-relatif** des semaines, dont dépendent la variation
  *   d'endurance et la cadence des sorties longues à fin appuyée ;
  * - les **semaines de base déjà passées**, qui referment la fenêtre de
- *   marche/course d'une reprise au lieu de la rouvrir.
+ *   marche/course d'une reprise au lieu de la rouvrir ;
+ * - les **semaines de test** ({@link fitnessTestWeekNumbers}), qui se comptent
+ *   depuis la fin de la phase de base du plan : recalculées sur la fenêtre,
+ *   elles reposeraient un « premier test de fin de base » à chaque
+ *   réadaptation.
  *
  * Les trois se comptent par **soustraction** (ce que la fenêtre ne porte pas),
  * pour la raison décrite plus bas : la démotion de la première semaine en
@@ -1641,15 +1646,20 @@ function remainingComposition(
   compositionAnchor: CompositionAnchor;
   planWeekOffset: number;
   completedBaseWeeks: number;
+  testWeeks: number[];
 } {
   const race = raceGoalOf(plan.goalType, plan.goalText);
+  // Le jour de départ du **plan**, pas celui de la fenêtre : c'est de lui que
+  // dépendent la périodisation d'origine et la première semaine de test
+  // évaluable, toutes deux comptées depuis le premier jour du plan.
+  const planFirstWeekFromDay = isoDayIndex(plan.startsOn) + 1;
   const full = planPhases({
     intent: plan.intent,
     returnInjuryHistory: plan.returnInjuryHistory,
     weeks: plan.weeks,
     // La périodisation d'origine : celle qu'a connue le plan quand il a été
     // écrit, jour de départ compris.
-    firstWeekFromDay: isoDayIndex(plan.startsOn) + 1,
+    firstWeekFromDay: planFirstWeekFromDay,
     race,
   });
 
@@ -1682,6 +1692,10 @@ function remainingComposition(
     // Les semaines du plan qui précèdent la fenêtre : elle en est le suffixe.
     planWeekOffset: full.length - phases.length,
     completedBaseWeeks: full.filter(isBase).length - phases.filter(isBase).length,
+    // Calculées sur la périodisation **d'origine**, celle que la création a
+    // connue : un test tombe donc à la même semaine calendaire, qu'il ait été
+    // écrit ce jour-là ou par n'importe quelle réadaptation ultérieure.
+    testWeeks: fitnessTestWeekNumbers(plan.intent, full, planFirstWeekFromDay),
   };
 }
 

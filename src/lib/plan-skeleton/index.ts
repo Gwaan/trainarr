@@ -37,6 +37,13 @@ export {
   PlanSkeletonInfeasibleError,
   type PlanSkeletonUnderfundedWeek,
 } from './feasibility';
+export {
+  fitnessTestWeekNumbers,
+  FITNESS_TEST_CADENCE_WEEKS,
+  FITNESS_TEST_EFFORT_M,
+  FITNESS_TEST_KIND,
+  FITNESS_TEST_SESSION_KM,
+} from './fitness-test';
 export { PLAN_INTENTS, type PlanIntent } from './intent';
 export { planPhases, type PlanPhase, type PlanPhasesParams } from './phases';
 export { goalFamily, qualityZones, QUALITY_ZONE_KINDS, type QualityZone } from './quality';

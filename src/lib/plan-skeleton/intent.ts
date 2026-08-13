@@ -215,6 +215,40 @@ export function intentLongRunShareCap(intent: PlanIntent): number | null {
 }
 
 /**
+ * L'intention programme-t-elle des **tests chronométrés** dans sa
+ * périodisation ({@link fitnessTestWeekNumbers}) ?
+ *
+ * Deux intentions sur quatre, et chaque exclusion a sa raison.
+ *
+ * - **`faster` : oui, et c'est le cas qui fait exister ce paramètre.** Un plan
+ *   sans échéance dérive toutes ses allures d'un chrono de référence qui, lui,
+ *   ne bouge jamais : l'athlète progresse, le plan reste calé sur ce qu'elle
+ *   valait au premier jour. Le test est la seule **mesure externe** qui remette
+ *   ce chrono à jour ; c'est aussi la méthode de Daniels, qui calcule un VDOT à
+ *   partir de n'importe quelle performance récente, test de terrain compris.
+ * - **`weight_loss` : oui.** Elle porte une séance dure par semaine, dont
+ *   l'objet est la VO2max (cf. {@link intentQualitySlots}) : mesurer où en est
+ *   cette VO2max est exactement dans le sujet, et c'est la seule progression
+ *   que ce plan-là puisse montrer à qui ne regarde pas la balance.
+ * - **`return` : non.** Elle n'ouvre aucun créneau de qualité, donc aucun
+ *   créneau qu'un test puisse remplacer ; et une reprise se joue sur la
+ *   fréquence, pas sur un 5 km à fond.
+ * - **`race` : non**, et c'est le seul arbitrage discutable des quatre. La
+ *   course elle-même est une mesure externe datée, qui satisfait déjà la
+ *   cadence de Daniels (une mise à jour toutes les 4 à 6 semaines). Surtout,
+ *   une mise à jour du chrono de référence en cours de préparation
+ *   **déplacerait l'allure objectif** que la phase spécifique fait répéter
+ *   (zone `marathon`, cf. `quality.ts`) : le plan changerait, en silence, la
+ *   cible d'une course à laquelle l'athlète s'est déjà engagée. Ce n'est pas
+ *   une décision d'algorithme. Un test d'échauffement à mi-préparation reste
+ *   une pratique valide — il se courra comme une course, et l'athlète mettra
+ *   son chrono à jour elle-même.
+ */
+export function intentRunsFitnessTests(intent: PlanIntent): boolean {
+  return intent === 'faster' || intent === 'weight_loss';
+}
+
+/**
  * Combien de **premières semaines de base** se courent en marche/course —
  * `0` hors reprise.
  *

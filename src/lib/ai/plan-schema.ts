@@ -541,8 +541,33 @@ const INTENSITY_ZONES = ['threshold', 'interval', 'repetition'] as const;
  * imposé par le prompt n'en contient qu'un seul porteur (« Spécifique allure
  * course »), déjà rangé en M par ailleurs — le motif ne change donc rien aux
  * libellés attendus.
+ *
+ * **Ce que ce motif fait d'un test, et ce qu'il ne fait pas.** Il le sort de
+ * l'endurance, et c'est tout ce qu'on lui demande : l'échauffement et le retour
+ * au calme d'un test reçoivent ainsi la plage d'endurance
+ * ({@link envelopePaceZone}), et la prescription en fréquence cardiaque —
+ * réservée aux séances faciles — ne s'y applique pas. Le **corps** du test,
+ * lui, ne reçoit aucune cible : c'est {@link TEST_KIND_PATTERN} qui le coupe,
+ * un cran plus loin.
  */
 const RACE_DAY_PATTERN = /\bcourse\b|competition|\btest\b/;
+
+/**
+ * Ce qui, dans un `kind`, désigne un **test chronométré**.
+ *
+ * Un test est un effort **maximal libre** : lui prescrire une allure serait une
+ * contradiction dans les termes (on ne demande pas de tenir 4:50/km, on demande
+ * de tout donner), et lui prescrire une zone cardiaque dirait de ralentir au
+ * moment précis où l'on veut le contraire. Le corps de la séance ressort donc
+ * **sans cible du tout**, exactement comme une récupération et par le même
+ * chemin ({@link imposeSessionPaces}) — l'enveloppe, elle, garde son endurance.
+ *
+ * Le sous-motif de {@link RACE_DAY_PATTERN} est réutilisé tel quel : il n'y a
+ * qu'une définition de ce qu'est un test dans ce module, et deux finiraient par
+ * diverger. Le `kind` que l'appli écrit est `FITNESS_TEST_KIND`
+ * (`plan-skeleton/fitness-test.ts`).
+ */
+const TEST_KIND_PATTERN = /\btest\b/;
 
 /**
  * Ce qui, dans un `kind`, désigne une séance de **récupération**.
@@ -1235,11 +1260,17 @@ function imposeSessionPaces(
   goal: PaceZone | null,
   prescribeHr: boolean,
 ): PlanSessionOutput {
+  const kind = normalizeText(session.kind);
   const kindZone = sessionPaceZone(session.kind);
   // Une séance de récupération ne porte aucune cible, ni au niveau séance ni sur
   // ses étapes d'effort : le seul contrat qui vaille est « plus lent que E.max ».
-  const isRecovery = kindZone === 'easy' && RECOVERY_KIND_PATTERN.test(normalizeText(session.kind));
-  const zone = isRecovery ? null : paces[kindZone];
+  const isRecovery = kindZone === 'easy' && RECOVERY_KIND_PATTERN.test(kind);
+  // Un test chronométré non plus, pour la raison inverse : c'est un effort
+  // maximal libre (cf. {@link TEST_KIND_PATTERN}). Son enveloppe, elle, garde
+  // l'endurance que `envelopePaceZone` lui donne — un test n'est pas une séance
+  // facile, donc `kindZone` n'est pas `easy`.
+  const isTest = TEST_KIND_PATTERN.test(kind);
+  const zone = isRecovery || isTest ? null : paces[kindZone];
   const envelope = envelopePaceZone(kindZone, paces);
 
   /*
@@ -1305,8 +1336,9 @@ function imposeSessionPaces(
  * retour au calme en endurance sur une séance de qualité et sans cible sur une
  * séance d'endurance ({@link envelopePaceZone}), récupérations sans cible.
  *
- * Deux cas ressortent **sans** cible de séance : les séances de récupération
- * ({@link RECOVERY_KIND_PATTERN}) et celles qui ne ciblent qu'en fréquence
+ * Trois cas ressortent **sans** cible de séance : les séances de récupération
+ * ({@link RECOVERY_KIND_PATTERN}), les tests chronométrés
+ * ({@link TEST_KIND_PATTERN}) et celles qui ne ciblent qu'en fréquence
  * cardiaque ({@link targetsHeartRateOnly}).
  *
  * La **durée** de chaque séance est recalculée dans la foulée

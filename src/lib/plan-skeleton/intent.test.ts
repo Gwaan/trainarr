@@ -14,6 +14,7 @@ import {
 import { trainingPacesFromRace } from '@/lib/metrics/vdot';
 import { flattenSteps, PLAN_STEP_BOUNDS } from '@/lib/plan-steps/schema';
 
+import { FITNESS_TEST_KIND } from './fitness-test';
 import { intentQualitySlots, intentWalkRunBaseWeeks, type PlanIntent } from './intent';
 import { buildPlanSkeleton, type SkeletonWeek } from './skeleton';
 
@@ -152,17 +153,22 @@ describe('le plan type de chaque intention', () => {
       'S02 base     | Sortie longue en endurance 14,5 | Répétitions 5,5 | Footing avec côtes courtes 8,2 · Footing en endurance 10,0',
       'S03 base     | Sortie longue en endurance 15,5 | Répétitions 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
       'S04 base     | Sortie longue en endurance 13,0 | Répétitions 5,0 | Footing avec côtes courtes 7,5 · Footing en endurance 9,0',
-      'S05 build    | Sortie longue en endurance 14,8 | Seuil 5,5 + VMA 5,5 | Footing avec lignes droites 11,4',
+      // Le premier test tombe en S05, et pas à la fin de la base (S04) : c'est
+      // la première semaine dont **tous** les jours sont à 28 jours ou plus du
+      // départ, donc la première où la cadence de Daniels le rend évaluable
+      // (`firstEvaluableTestWeek`). Le créneau qu'il remplace est le second de
+      // la semaine — celui qui reste est le plus important des deux.
+      'S05 build    | Sortie longue en endurance 14,8 | Seuil 5,5 | Footing avec lignes droites 9,4 · Test chronométré : 5 km à fond 7,5',
       'S06 build    | Sortie longue, fin de parcours appuyée 16,0 | Seuil 6,0 + VMA 6,0 | Footing progressif 12,1',
       'S07 build    | Sortie longue en endurance 16,2 | Seuil 6,5 + VMA 6,5 | Footing avec lignes droites 11,5',
       'S08 build    | Sortie longue en endurance 13,8 | Seuil 5,5 + VMA 5,5 | Footing progressif 9,7',
       'S09 build    | Sortie longue, fin de parcours appuyée 14,8 | Seuil 6,0 + VMA 6,0 | Footing avec lignes droites 10,4',
-      'S10 build    | Sortie longue en endurance 16,0 | Seuil 6,5 + VMA 6,5 | Footing progressif 11,1',
+      'S10 build    | Sortie longue en endurance 16,0 | Seuil 6,5 | Footing progressif 10,1 · Test chronométré : 5 km à fond 7,5',
       'S11 build    | Sortie longue en endurance 16,2 | Seuil 7,0 + VMA 7,0 | Footing avec lignes droites 10,5',
       'S12 specific | Sortie longue, fin de parcours appuyée 13,8 | VMA 6,0 + Seuil 6,0 | Footing progressif 8,7',
       'S13 specific | Sortie longue en endurance 14,5 | VMA 6,5 + Seuil 6,5 | Footing avec lignes droites 9,7',
       'S14 specific | Sortie longue en endurance 15,5 | VMA 7,5 + Seuil 7,5 | Footing progressif 9,6',
-      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | VMA 7,5 + Seuil 7,5 | Footing avec lignes droites 10,2',
+      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | VMA 7,5 | Footing avec lignes droites 10,2 · Test chronométré : 5 km à fond 7,5',
       'S16 specific | Sortie longue en endurance 13,0 | VMA 6,5 + Seuil 6,5 | Footing progressif 8,5',
     ]);
   });
@@ -180,16 +186,18 @@ describe('le plan type de chaque intention', () => {
       'S03 base     | Sortie longue en endurance 15,5 | Répétitions 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
       'S04 base     | Sortie longue en endurance 13,0 | Répétitions 5,0 | Footing avec côtes courtes 7,5 · Footing en endurance 9,0',
       'S05 base     | Sortie longue en endurance 14,0 | Répétitions 5,0 | Footing avec lignes droites 8,2 · Footing en endurance 10,0',
-      'S06 base     | Sortie longue en endurance 15,5 | Répétitions 5,5 | Footing avec côtes courtes 8,6 · Footing en endurance 10,5',
+      'S06 base     | Sortie longue en endurance 15,5 | — | Footing avec côtes courtes 7,7 · Test chronométré : 5 km à fond 7,5 · Footing en endurance 9,4',
       'S07 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
       'S08 build    | Sortie longue en endurance 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
       'S09 build    | Sortie longue, fin de parcours appuyée 14,0 | VMA 5,0 | Footing avec lignes droites 8,2 · Footing en endurance 10,0',
       'S10 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing en endurance 10,6 · Footing progressif 8,5',
-      'S11 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
+      'S11 build    | Sortie longue en endurance 15,5 | — | Footing avec lignes droites 8,0 · Test chronométré : 5 km à fond 7,5 · Footing en endurance 9,7',
       'S12 build    | Sortie longue, fin de parcours appuyée 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
       'S13 build    | Sortie longue en endurance 14,0 | VMA 5,0 | Footing avec lignes droites 8,2 · Footing en endurance 10,0',
       'S14 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing en endurance 10,6 · Footing progressif 8,5',
       'S15 build    | Sortie longue, fin de parcours appuyée 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
+      // Pas de troisième test en S16 : un test sur la dernière semaine d'un
+      // plan n'a plus une seule semaine à recalibrer.
       'S16 build    | Sortie longue en endurance 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
     ]);
   });
@@ -246,6 +254,12 @@ describe('le plan type de chaque intention', () => {
           expect(session.title, `${intent}, semaine ${week.weekNumber}`).not.toContain(
             'allure objectif',
           );
+          // Le test chronométré est la seule séance que `sessionPaceZone` range
+          // hors endurance sans qu'aucune allure de course ne soit prescrite :
+          // le classement ne sert qu'à donner l'endurance à son enveloppe, et
+          // `TEST_KIND_PATTERN` lui coupe ensuite toute cible (vérifié dans
+          // `plan-schema.test.ts`).
+          if (session.kind === FITNESS_TEST_KIND) continue;
           expect(sessionPaceZone(session.kind), `${intent}, ${session.kind}`).not.toBe('marathon');
         }
       }
@@ -265,8 +279,13 @@ describe('le plan type de chaque intention', () => {
     };
 
     expect(slotsOf('race')).toEqual([0, 1, 2]); // base et affûtage à 1, course à 0
+    // Le `0` de `weight_loss` est celui d'une **semaine de test** : le test
+    // remplace un créneau de qualité, et une semaine qui n'en ouvrait qu'un (la
+    // base, dont la grille ne propose qu'une zone) se retrouve sans créneau à
+    // faire remplir par le modèle. `faster` n'en a plus : ses tests tombent tous
+    // hors de la base, sur des semaines à deux créneaux, dont il en reste un.
     expect(slotsOf('faster')).toEqual([1, 2]);
-    expect(slotsOf('weight_loss')).toEqual([1]);
+    expect(slotsOf('weight_loss')).toEqual([0, 1]);
     expect(slotsOf('return')).toEqual([0]);
 
     // Et une débutante n'en reçoit jamais deux, sauf là où l'intention en veut un

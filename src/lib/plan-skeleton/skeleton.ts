@@ -19,6 +19,9 @@
  * - les footings et la sortie longue, **entièrement écrits**, kilométrage compris,
  *   déroulé compris quand la séance en porte un ({@link weeklyEasyVariation},
  *   {@link longRunFinishSteps}, {@link specificLongRunSteps}) ;
+ * - les **tests chronométrés** de la périodisation, eux aussi entièrement
+ *   écrits — un 5 km à fond qui remplace un créneau de qualité et remet à jour
+ *   le chrono de référence du plan (`fitness-test.ts`) ;
  * - et, pour les séances de qualité, des **créneaux** — jour, zone, `kind`,
  *   budget kilométrique — dont il ne reste au modèle qu'à écrire le déroulé.
  *
@@ -71,6 +74,14 @@ import {
   PlanSkeletonInfeasibleError,
   type PlanSkeletonUnderfundedWeek,
 } from './feasibility';
+import {
+  fitnessTestBudgets,
+  fitnessTestSteps,
+  fitnessTestWeekNumbers,
+  FITNESS_TEST_KIND,
+  FITNESS_TEST_TITLE,
+  pickFitnessTestDay,
+} from './fitness-test';
 import {
   intentLongRunShareCap,
   intentQualitySlots,
@@ -394,6 +405,21 @@ export type PlanSkeletonParams = {
    * décalerait toutes les suivantes.
    */
   completedBaseWeeks?: number;
+  /**
+   * Les semaines du **plan entier** qui portent un test chronométré, par leur
+   * numéro 1-based ({@link fitnessTestWeekNumbers}) — absent quand la fenêtre
+   * *est* le plan, ce qui est le cas nominal d'une création.
+   *
+   * Même esprit que {@link phases} et {@link compositionAnchor}, et même piège
+   * fermé : le placement des tests se déduit de la périodisation du **plan**
+   * (la fin de la phase de base, puis tous les cinq semaines), et une fenêtre
+   * reconstruite ne voit qu'une tranche de cette périodisation — elle y
+   * replacerait un premier test « en fin de base » qui n'a plus lieu d'être, ou
+   * en perdrait un que la création avait posé. L'appelant calcule donc les
+   * semaines de test sur le plan entier et passe la liste telle quelle ; ce
+   * module se contente de retenir celles qui tombent dans sa fenêtre.
+   */
+  testWeeks?: readonly number[];
 };
 
 /**
@@ -737,6 +763,14 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   // Où la fenêtre commence dans le plan : tout ce qui se décide de la **forme**
   // d'une semaine se compte à partir de là (cf. `planWeekOffset`).
   const planWeekOffset = params.planWeekOffset ?? 0;
+  // Les semaines de test, en numérotation du **plan** : celles de l'appelant
+  // quand il en a (reconstruction), celles de la fenêtre sinon — auquel cas la
+  // fenêtre est le plan (cf. `testWeeks`).
+  // `params.firstWeekFromDay` est ici celui du plan : la branche sans
+  // `testWeeks` est exactement celle où la fenêtre *est* le plan (cf. le champ).
+  const testWeeks = new Set(
+    params.testWeeks ?? fitnessTestWeekNumbers(intent, phases, params.firstWeekFromDay),
+  );
 
   const plans: WeekPlan[] = [];
   for (let index = 0; index < weeks; index += 1) {
@@ -851,8 +885,37 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       }
     }
 
+    // Le **test chronométré**, quand la périodisation en pose un cette
+    // semaine-là : il prend la place d'un créneau de qualité (il ne s'y ajoute
+    // pas), et la différence entre son coût et le budget de ce créneau est
+    // reprise aux footings — la somme de la semaine ne bouge pas. Il cède
+    // devant les invariants comme le plafond de sortie longue : une semaine qui
+    // ne peut pas le financer garde simplement sa qualité ordinaire.
+    const testDay =
+      testWeeks.has(planWeekNumber) && days.qualityDays.length > 0
+        ? pickFitnessTestDay(days.qualityDays, [
+            ...(days.longRunDay === null ? [] : [days.longRunDay]),
+            ...days.qualityDays,
+          ])
+        : null;
+    const testedBudgets = testDay === null ? null : fitnessTestBudgets(budgets);
+    let test: { day: number; km: number } | null = null;
+    if (testDay !== null && testedBudgets !== null) {
+      budgets = testedBudgets;
+      // Le test consomme le **premier** créneau de qualité — celui dont
+      // `fitnessTestBudgets` vient de relever le budget.
+      const testBudget = testedBudgets.find((budget) => budget.role === 'quality');
+      if (testBudget !== undefined) test = { day: testDay, km: testBudget.km };
+    }
+
     const longBudget = budgets.find((budget) => budget.role === 'long');
-    const qualityBudgets = budgets.filter((budget) => budget.role === 'quality');
+    // Les créneaux qui restent après le test reprennent les zones dans l'ordre
+    // de leur priorité : sur une semaine à deux créneaux, celui qui survit au
+    // test est le plus important des deux.
+    const allQualityBudgets = budgets.filter((budget) => budget.role === 'quality');
+    const qualityBudgets = test === null ? allQualityBudgets : allQualityBudgets.slice(1);
+    const qualityDays =
+      test === null ? days.qualityDays : days.qualityDays.filter((day) => day !== test.day);
     const easyBudgets = budgets.filter((budget) => budget.role === 'easy');
     if (days.longRunDay !== null && !isRaceWeek && longBudget !== undefined) {
       peakLongRunKm = Math.max(peakLongRunKm ?? 0, longBudget.km);
@@ -968,7 +1031,17 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       });
     });
 
-    const qualitySlots = days.qualityDays.map((day, slotIndex) => {
+    if (test !== null) {
+      sessions.push({
+        day: test.day,
+        kind: FITNESS_TEST_KIND,
+        title: FITNESS_TEST_TITLE,
+        distanceKm: test.km,
+        steps: fitnessTestSteps(),
+      });
+    }
+
+    const qualitySlots = qualityDays.map((day, slotIndex) => {
       const zone = zones[slotIndex];
       return {
         day,

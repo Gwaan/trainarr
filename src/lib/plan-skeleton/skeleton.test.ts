@@ -22,6 +22,7 @@ import { flattenSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import { isDevelopmentPhase } from './composition';
 import { PlanSkeletonInfeasibleError } from './feasibility';
+import { fitnessTestWeekNumbers, FITNESS_TEST_KIND } from './fitness-test';
 import { PLAN_INTENTS, type PlanIntent } from './intent';
 import { planPhases, type PlanPhase } from './phases';
 import { buildPlanSkeleton, type QualitySlot, type SkeletonWeek } from './skeleton';
@@ -1300,9 +1301,18 @@ describe('buildPlanSkeleton', () => {
     const targets = targetsFor(combination);
     const skeleton = skeletonFor(combination, targets);
 
-    /** Les séances faciles d'une semaine, sortie longue et créneaux exclus. */
+    /**
+     * Les **footings** d'une semaine : ni la sortie longue, ni la course, ni le
+     * test chronométré — les trois séances que le squelette écrit en propre à
+     * côté d'eux.
+     */
     const easySessions = (week: SkeletonWeek): PlanSessionOutput[] =>
-      week.sessions.filter((session) => session.kind !== 'Sortie longue' && session.kind !== 'Course');
+      week.sessions.filter(
+        (session) =>
+          session.kind !== 'Sortie longue' &&
+          session.kind !== 'Course' &&
+          session.kind !== FITNESS_TEST_KIND,
+      );
 
     /** Ce qui distingue deux séances sur la timeline : son titre, sa distance, son déroulé. */
     const signature = (session: PlanSessionOutput): string =>
@@ -2082,6 +2092,14 @@ describe('création et reconstruction se rejoignent, intention par intention', (
                 completedBaseWeeks:
                   fullPhases.filter((phase) => phase === 'base').length -
                   phases.filter((phase) => phase === 'base').length,
+                // Les semaines de test se comptent sur la périodisation du plan
+                // entier, comme `remainingComposition` les compte : recalculées
+                // sur la fenêtre, elles reposeraient un « premier test de fin de
+                // base » à chaque réadaptation.
+                // Le jour de départ est celui du **plan** (1), jamais celui de
+                // la fenêtre : c'est de lui que dépend la première semaine
+                // évaluable.
+                testWeeks: fitnessTestWeekNumbers(intent, fullPhases, 1),
               }
             : {}),
         });

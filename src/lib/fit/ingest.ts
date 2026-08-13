@@ -8,6 +8,7 @@ import {
 } from '@/data/activities';
 import { getAthleteId } from '@/data/athlete';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
+import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
 
 import { parseFitActivity } from './parse';
@@ -92,22 +93,32 @@ async function linkToPlannedSession(activityId: number): Promise<void> {
 }
 
 /**
- * Demande au coach de relire le plan au vu de cette séance — **sans l'attendre**.
+ * Confie la séance au plan — **sans attendre** : d'abord le test chronométré
+ * qu'elle réalise peut-être, puis la relecture du plan par le coach.
  *
  * Le rapprochement, lui, reste dans le fil de l'import : c'est lui qui décide si
- * la séance vient d'être réalisée. La révision, elle, appelle un modèle de
- * langage et dure des minutes ; l'attendre bloquerait le watcher (et le
- * rapatriement intervals.icu derrière lui) sur chaque fichier déposé, pour une
- * décision qui n'a aucune influence sur le rapport d'import.
+ * la séance vient d'être réalisée. Ces deux-là appellent un modèle de langage et
+ * durent des minutes ; les attendre bloquerait le watcher (et le rapatriement
+ * intervals.icu derrière lui) sur chaque fichier déposé, pour des décisions qui
+ * n'ont aucune influence sur le rapport d'import.
  *
- * Le service ne lève pas et journalise ses propres échecs en `[plan/review]` ;
- * le `catch` est un dernier recours — une promesse abandonnée sans lui ferait
- * remonter un rejet non géré au niveau du process.
+ * **L'ordre compte, et c'est pourquoi ils s'enchaînent au lieu de partir
+ * ensemble.** Un test qui améliore le chrono de référence réécrit la fin du
+ * plan ; une révision lancée en parallèle relirait un plan en train de changer,
+ * et l'une des deux écritures écraserait l'autre. Enchaînés, la révision part
+ * sur l'état à jour — et son contrôle de fraîcheur n'a rien à rattraper.
+ *
+ * Les deux services ne lèvent pas et journalisent leurs propres échecs
+ * (`[plan/test]`, `[plan/review]`) ; le `catch` est un dernier recours — une
+ * promesse abandonnée sans lui ferait remonter un rejet non géré au niveau du
+ * process.
  */
-function scheduleActivePlanReview(): void {
-  void maybeReviewActivePlan().catch((error: unknown) => {
-    console.error('[fit] révision du plan impossible —', error);
-  });
+function scheduleActivePlanFollowUp(activityId: number): void {
+  void maybeApplyFitnessTest(activityId)
+    .then(() => maybeReviewActivePlan())
+    .catch((error: unknown) => {
+      console.error('[fit] suivi du plan impossible —', error);
+    });
 }
 
 /**
@@ -143,7 +154,7 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
   }
 
   await linkToPlannedSession(activityId);
-  scheduleActivePlanReview();
+  scheduleActivePlanFollowUp(activityId);
 
   return { status, activityId };
 }

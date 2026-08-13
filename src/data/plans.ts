@@ -106,6 +106,16 @@ export type PlanDto = {
    */
   referenceDistance: PlanReferenceDistance | null;
   referenceTimeS: number | null;
+  /**
+   * Date civile `YYYY-MM-DD` de la dernière mise à jour du chrono de référence
+   * par un test chronométré, `null` quand aucun test ne l'a fait bouger.
+   */
+  referenceUpdatedOn: string | null;
+  /**
+   * Ce que le dernier test a donné, en une phrase — `null` tant qu'il n'y en a
+   * pas eu. Affichée telle quelle sur la page du plan, quel que soit le verdict.
+   */
+  lastTestNote: string | null;
   summary: string | null;
   /**
    * Dernière révision automatique du plan par le coach, sérialisée en ISO-8601,
@@ -227,6 +237,21 @@ export type PlanSettingsPatch = {
   longRunDay?: number;
   /** `null` efface l'approche rédigée. */
   summary?: string | null;
+  /**
+   * Le **chrono de référence** mis à jour par un test chronométré, avec la date
+   * de cette mise à jour — les trois vont ensemble ou aucun ne bouge.
+   *
+   * Sa place ici n'est pas cosmétique : un chrono de référence qui changerait
+   * hors de la transaction qui réécrit les séances laisserait, entre les deux
+   * écritures, un plan dont les allures ne viennent pas du chrono qu'il affiche.
+   * C'est exactement l'invariant que {@link applyPlanUpdate} existe pour tenir.
+   */
+  referenceDistance?: PlanReferenceDistance;
+  referenceTimeS?: number;
+  /** Date civile de la mise à jour, qui porte la cadence de Daniels. */
+  referenceUpdatedOn?: string;
+  /** Ce que le dernier test a donné, en une phrase pour l'athlète. */
+  lastTestNote?: string;
 };
 
 /**
@@ -339,6 +364,8 @@ export function toPlanDto(row: Plan): PlanDto {
     longRunDay: row.longRunDay,
     referenceDistance: row.referenceDistance,
     referenceTimeS: row.referenceTimeS,
+    referenceUpdatedOn: row.referenceUpdatedOn,
+    lastTestNote: row.lastTestNote,
     summary: row.summary,
     reviewedAt: row.reviewedAt === null ? null : row.reviewedAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
@@ -900,6 +927,25 @@ function toPlanSettingsValues(patch: PlanSettingsPatch): Partial<NewPlan> {
   }
 
   if (patch.summary !== undefined) values.summary = patch.summary;
+
+  // Le chrono de référence passe par la même validation qu'à la création : le
+  // couple est complet, le temps est dans ses bornes, et le résultat décrit bien
+  // une course. Un chrono issu d'un test n'a aucun privilège sur un chrono saisi.
+  if (patch.referenceDistance !== undefined || patch.referenceTimeS !== undefined) {
+    const reference = validateReferenceRace(patch);
+    values.referenceDistance = reference.referenceDistance;
+    values.referenceTimeS = reference.referenceTimeS;
+  }
+  if (patch.referenceUpdatedOn !== undefined) {
+    if (!isCivilDate(patch.referenceUpdatedOn)) {
+      throw new InvalidPlanError(
+        'referenceTimeS',
+        'Date de mise à jour du chrono : format AAAA-MM-JJ attendu.',
+      );
+    }
+    values.referenceUpdatedOn = patch.referenceUpdatedOn;
+  }
+  if (patch.lastTestNote !== undefined) values.lastTestNote = patch.lastTestNote;
 
   return values;
 }

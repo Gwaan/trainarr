@@ -1,4 +1,4 @@
-import { CalendarRange, Dumbbell, Flag } from "lucide-react";
+import { CalendarRange, Dumbbell, Flag, Timer } from "lucide-react";
 
 import { MarkdownLite } from "@/components/markdown-lite";
 import type { PlanDto } from "@/data/plans";
@@ -69,6 +69,31 @@ function StrengthNote({ plan }: { plan: PlanDto }) {
   );
 }
 
+/**
+ * Le résultat du **dernier test chronométré**, et ce qu'il a changé.
+ *
+ * L'encart n'apparaît qu'une fois un test couru, et il apparaît **quel que soit
+ * le verdict** — y compris quand le chrono n'a pas bougé. C'est le garde-fou du
+ * chantier, pris dans les deux sens : aucun recalcul qui échapperait à
+ * l'athlète, aucun refus qu'elle prendrait pour un oubli. Le texte est écrit
+ * côté serveur (`lib/ai/fitness-test-service`), qui est le seul à connaître le
+ * chrono d'avant et celui d'après.
+ *
+ * Ton `accent-soft` plutôt que `surface-2` : c'est la seule chose de cette carte
+ * qui vient d'arriver, et le système réserve l'accent à ce qui est actif.
+ */
+function LastTestNote({ note }: { note: string }) {
+  return (
+    <div className="mt-4 flex gap-2.5 rounded-button bg-accent-soft px-3 py-2.5">
+      <Timer aria-hidden="true" strokeWidth={1.8} className="mt-0.5 size-4 shrink-0 text-accent" />
+      <div className="min-w-0">
+        <p className="eyebrow">Dernier test chronométré</p>
+        <p className="mt-1 text-[0.8rem] leading-relaxed text-fg-muted">{note}</p>
+      </div>
+    </div>
+  );
+}
+
 /** Une contrainte du plan : label discret, valeur chiffrée en mono. */
 function Setting({ label, value }: { label: string; value: string }) {
   return (
@@ -119,11 +144,17 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
         */}
         {plan.referenceDistance === null || plan.referenceTimeS === null ? null : (
           <Setting
-            label="Chrono de référence"
+            label={
+              plan.referenceUpdatedOn === null
+                ? "Chrono de référence"
+                : `Chrono de référence · ${formatCivilDay(plan.referenceUpdatedOn)}`
+            }
             value={`${REFERENCE_DISTANCE_LABELS[plan.referenceDistance]} · ${formatRaceTimeSeconds(plan.referenceTimeS)}`}
           />
         )}
       </div>
+
+      {plan.lastTestNote === null ? null : <LastTestNote note={plan.lastTestNote} />}
 
       {/*
         Le résumé vient du modèle : rien ne l'empêche d'y glisser du markdown,

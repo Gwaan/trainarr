@@ -13,6 +13,7 @@ const { mocks } = vi.hoisted(() => ({
     hasActivityStreams: vi.fn(),
     linkActivityToPlannedSession: vi.fn(),
     maybeReviewActivePlan: vi.fn(),
+    maybeApplyFitnessTest: vi.fn(),
   },
 }));
 
@@ -36,6 +37,10 @@ vi.mock('@/data/plan-reconciliation', () => ({
 
 vi.mock('@/lib/ai/review-service', () => ({
   maybeReviewActivePlan: mocks.maybeReviewActivePlan,
+}));
+
+vi.mock('@/lib/ai/fitness-test-service', () => ({
+  maybeApplyFitnessTest: mocks.maybeApplyFitnessTest,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -81,6 +86,7 @@ beforeEach(() => {
   mocks.hasActivityStreams.mockResolvedValue(false);
   mocks.linkActivityToPlannedSession.mockResolvedValue(true);
   mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
+  mocks.maybeApplyFitnessTest.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
@@ -181,6 +187,28 @@ describe('ingestFitBuffer', () => {
     );
   });
 
+  /*
+   * L'ordre n'est pas cosmétique : un test chronométré peut réécrire la fin du
+   * plan, et une révision lancée en parallèle relirait un plan en train de
+   * changer — l'une des deux écritures écraserait l'autre.
+   */
+  it('applique le test chronométré avant de demander une révision', async () => {
+    let reviewStarted = false;
+    mocks.maybeApplyFitnessTest.mockImplementation(async () => {
+      expect(reviewStarted).toBe(false);
+    });
+    mocks.maybeReviewActivePlan.mockImplementation(async () => {
+      reviewStarted = true;
+    });
+
+    await ingestFitBuffer(BUFFER);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42);
+    expect(reviewStarted).toBe(true);
+  });
+
   it('n’attend jamais la révision du plan', async () => {
     // Une génération dure des minutes : l'import ne peut pas s'y suspendre, sans
     // quoi le watcher (et le rapatriement derrière lui) s'arrêterait sur chaque
@@ -200,7 +228,7 @@ describe('ingestFitBuffer', () => {
     // tour de boucle pour l'observer.
     await Promise.resolve();
     expect(logged).toHaveBeenCalledWith(
-      expect.stringContaining('[fit] révision du plan impossible'),
+      expect.stringContaining('[fit] suivi du plan impossible'),
       expect.any(Error),
     );
     logged.mockRestore();
