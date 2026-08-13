@@ -117,6 +117,55 @@
   }
 }
 
+/* =========================================================================
+   Changement d'onglet — fondu enchaîné du contenu (React `<ViewTransition>`,
+   posé par `src/app/(app)/_components/content-transition.tsx`). La classe est
+   portée par `share` (paire sortie/entrée) et par `enter`, jamais par `update`.
+
+   La coquille de navigation ne bouge pas : seul le bloc de contenu est
+   remplacé, et l'animation dit « même endroit, autre contenu » plutôt que
+   « nouvelle page ». D'où un fondu, jamais un glissement latéral.
+
+   Durée alignée sur le système (120–180 ms, ease-out) : au-delà, l'attente
+   redevient perceptible — c'est précisément le défaut qu'on corrige ici.
+   ========================================================================= */
+@keyframes content-swap-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes content-swap-in {
+  from {
+    opacity: 0;
+    /* Six pixels : assez pour que l'arrivée ait un sens, trop peu pour qu'on
+       ait à la suivre des yeux. */
+    transform: translateY(6px);
+  }
+}
+
+::view-transition-old(.content-swap) {
+  animation: content-swap-out 120ms var(--default-transition-timing-function) both;
+}
+
+::view-transition-new(.content-swap) {
+  animation: content-swap-in 150ms var(--default-transition-timing-function) both;
+}
+
+/* Le contenu n'a pas la même hauteur d'un onglet à l'autre : sans cette règle,
+   la boîte se redimensionnerait sur les 250 ms par défaut du navigateur, bien
+   après la fin du fondu. */
+::view-transition-group(.content-swap) {
+  animation-duration: 150ms;
+  animation-timing-function: var(--default-transition-timing-function);
+}
+
+/* Le calque de transition capte les clics tant qu'il est affiché : sans cela,
+   toucher un onglet pendant l'animation ne ferait rien. */
+::view-transition {
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,
@@ -125,5 +174,14 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Les pseudo-éléments de transition de vue vivent hors de l'arbre visé
+     ci-dessus : il faut les neutraliser nommément. */
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
   }
 }

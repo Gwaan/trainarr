@@ -7,7 +7,11 @@ import { SidebarNav } from "./sidebar-nav";
 export function Sidebar({ athlete }: { athlete: AthleteProfile }) {
   return (
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-[212px] flex-col border-r border-border bg-surface lg:flex">
-      <div className="flex h-16 shrink-0 items-center px-5">
+      {/* Sur iPad en PWA installée, la barre d'état est translucide et le header
+          mobile qui lui réserve sa marge est masqué à partir de `lg` : sans ce
+          padding, la marque passerait dessous. Hauteur recalculée plutôt que
+          `h-16`, sinon l'encoche mangerait les 64 px au lieu de s'y ajouter. */}
+      <div className="flex min-h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center px-5 pt-[env(safe-area-inset-top)]">
         <Logo />
       </div>
 
