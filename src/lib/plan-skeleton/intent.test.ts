@@ -156,19 +156,26 @@ describe('le plan type de chaque intention', () => {
       // Le premier test tombe en S05, et pas à la fin de la base (S04) : c'est
       // la première semaine dont **tous** les jours sont à 28 jours ou plus du
       // départ, donc la première où la cadence de Daniels le rend évaluable
-      // (`firstEvaluableTestWeek`). Le créneau qu'il remplace est le second de
-      // la semaine — celui qui reste est le plus important des deux.
-      'S05 build    | Sortie longue en endurance 14,8 | Seuil 5,5 | Footing avec lignes droites 9,4 · Test chronométré : 5 km à fond 7,5',
+      // (`firstEvaluableTestWeek`).
+      //
+      // **La semaine de test ne porte que le test comme séance dure** : les deux
+      // créneaux de qualité qu'elle ouvrait ont disparu, leurs kilomètres sont
+      // repartis aux footings, et la somme est restée sur sa cible au dixième
+      // (14,8 + 6,7 + 8,2 + 7,5 = 37,2 km). Sans cela, la semaine cumulait le
+      // 5 km à fond **et** un seuil deux jours plus tard : 24,7 % de son volume
+      // à haute intensité contre 10,7 à 15,5 % sur les autres semaines du plan.
+      // Le raisonnement complet est dans l'en-tête de `fitness-test.ts`.
+      'S05 build    | Sortie longue en endurance 14,8 | — | Footing avec lignes droites 6,7 · Footing en endurance 8,2 · Test chronométré : 5 km à fond 7,5',
       'S06 build    | Sortie longue, fin de parcours appuyée 16,0 | Seuil 6,0 + VMA 6,0 | Footing progressif 12,1',
       'S07 build    | Sortie longue en endurance 16,2 | Seuil 6,5 + VMA 6,5 | Footing avec lignes droites 11,5',
       'S08 build    | Sortie longue en endurance 13,8 | Seuil 5,5 + VMA 5,5 | Footing progressif 9,7',
       'S09 build    | Sortie longue, fin de parcours appuyée 14,8 | Seuil 6,0 + VMA 6,0 | Footing avec lignes droites 10,4',
-      'S10 build    | Sortie longue en endurance 16,0 | Seuil 6,5 | Footing progressif 10,1 · Test chronométré : 5 km à fond 7,5',
+      'S10 build    | Sortie longue en endurance 16,0 | — | Footing en endurance 9,1 · Footing progressif 7,5 · Test chronométré : 5 km à fond 7,5',
       'S11 build    | Sortie longue en endurance 16,2 | Seuil 7,0 + VMA 7,0 | Footing avec lignes droites 10,5',
       'S12 specific | Sortie longue, fin de parcours appuyée 13,8 | VMA 6,0 + Seuil 6,0 | Footing progressif 8,7',
       'S13 specific | Sortie longue en endurance 14,5 | VMA 6,5 + Seuil 6,5 | Footing avec lignes droites 9,7',
       'S14 specific | Sortie longue en endurance 15,5 | VMA 7,5 + Seuil 7,5 | Footing progressif 9,6',
-      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | VMA 7,5 | Footing avec lignes droites 10,2 · Test chronométré : 5 km à fond 7,5',
+      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | — | Footing avec lignes droites 8,0 · Footing en endurance 9,7 · Test chronométré : 5 km à fond 7,5',
       'S16 specific | Sortie longue en endurance 13,0 | VMA 6,5 + Seuil 6,5 | Footing progressif 8,5',
     ]);
   });
@@ -279,12 +286,12 @@ describe('le plan type de chaque intention', () => {
     };
 
     expect(slotsOf('race')).toEqual([0, 1, 2]); // base et affûtage à 1, course à 0
-    // Le `0` de `weight_loss` est celui d'une **semaine de test** : le test
-    // remplace un créneau de qualité, et une semaine qui n'en ouvrait qu'un (la
-    // base, dont la grille ne propose qu'une zone) se retrouve sans créneau à
-    // faire remplir par le modèle. `faster` n'en a plus : ses tests tombent tous
-    // hors de la base, sur des semaines à deux créneaux, dont il en reste un.
-    expect(slotsOf('faster')).toEqual([1, 2]);
+    // Le `0` de `faster` et de `weight_loss` est celui d'une **semaine de
+    // test** : cette semaine-là ne porte que le test comme séance dure, et
+    // n'ouvre donc aucun créneau à faire remplir par le modèle — que la semaine
+    // en ait ouvert un (la base de `weight_loss`, dont la grille ne propose
+    // qu'une zone) ou deux (le développement de `faster`).
+    expect(slotsOf('faster')).toEqual([0, 1, 2]);
     expect(slotsOf('weight_loss')).toEqual([0, 1]);
     expect(slotsOf('return')).toEqual([0]);
 

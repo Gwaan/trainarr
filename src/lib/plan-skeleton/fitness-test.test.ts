@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { PLAN_OUTPUT_BOUNDS, weeklyVolumeTargets } from '@/lib/ai/plan-schema';
+import { isIntensitySession, PLAN_OUTPUT_BOUNDS, weeklyVolumeTargets } from '@/lib/ai/plan-schema';
 import type { SessionBudget } from '@/lib/ai/format';
 import { REFERENCE_UPDATE_MIN_GAP_DAYS } from '@/lib/metrics/fitness-test';
 import { flattenSteps } from '@/lib/plan-steps/schema';
@@ -11,12 +11,15 @@ import {
   fitnessTestSteps,
   fitnessTestWeekNumbers,
   FITNESS_TEST_CADENCE_WEEKS,
+  FITNESS_TEST_EFFORT_M,
   FITNESS_TEST_KIND,
   FITNESS_TEST_SESSION_KM,
   pickFitnessTestDay,
 } from './fitness-test';
 import { PLAN_INTENTS, type PlanIntent } from './intent';
 import { planPhases, type PlanPhase } from './phases';
+import { sessionEffortKm } from './quality-load';
+import { qualitySessionTemplate } from './quality-template';
 import { buildPlanSkeleton } from './skeleton';
 
 /*
@@ -366,7 +369,9 @@ describe('fitnessTestBudgets', () => {
     ).toBeNull();
   });
 
-  it('ne convertit qu’un seul créneau quand la semaine en porte deux', () => {
+  it('efface les autres créneaux de qualité et rend leurs kilomètres aux footings', () => {
+    // La semaine de test ne porte **que** le test comme séance dure : le second
+    // créneau devient un footing, et le pot des footings se repartage à égalité.
     const two: SessionBudget[] = [
       { role: 'long', km: 14 },
       { role: 'quality', km: 6 },
@@ -375,34 +380,69 @@ describe('fitnessTestBudgets', () => {
     ];
     const budgets = fitnessTestBudgets(two) ?? [];
     expect(budgets.filter((budget) => budget.role === 'quality').map((budget) => budget.km)).toEqual(
-      [FITNESS_TEST_SESSION_KM, 6],
+      [FITNESS_TEST_SESSION_KM],
     );
+    // 6 + 10 − (7,5 − 6) = 14,5 km à deux, au dixième.
+    expect(budgets.filter((budget) => budget.role === 'easy').map((budget) => budget.km)).toEqual([
+      7.3, 7.2,
+    ]);
+    expect(budgets.find((budget) => budget.role === 'long')?.km).toBe(14);
     expect(budgets.reduce((sum, budget) => sum + budget.km, 0)).toBeCloseTo(36, 6);
+  });
+
+  it('laisse la semaine à un seul créneau exactement où elle était', () => {
+    // La régression à ne pas commettre : `weight_loss` n'ouvre qu'un créneau de
+    // qualité, donc le dépeuplement n'a rien à y retirer.
+    const budgets = fitnessTestBudgets(WEEK) ?? [];
+    expect(budgets.map((budget) => budget.role)).toEqual(['long', 'quality', 'easy', 'easy']);
   });
 });
 
 describe('pickFitnessTestDay', () => {
   it('choisit le jour de qualité le plus éloigné du jour dur précédent', () => {
     // Sortie longue le dimanche, qualité mardi et vendredi : le mardi n'a que
-    // deux jours depuis le dimanche, le vendredi en a trois.
-    expect(pickFitnessTestDay([2, 5], [7, 2, 5])).toBe(5);
+    // deux jours depuis le dimanche, le vendredi en a cinq.
+    expect(pickFitnessTestDay([2, 5], 7)).toBe(5);
   });
 
   it('compte la semaine comme circulaire : un lundi suit un dimanche', () => {
     // Sortie longue le dimanche, qualité lundi et jeudi : le lundi est le
     // lendemain de la sortie longue, le jeudi est à quatre jours.
-    expect(pickFitnessTestDay([1, 4], [7, 1, 4])).toBe(4);
+    expect(pickFitnessTestDay([1, 4], 7)).toBe(4);
+  });
+
+  it('ignore les créneaux que le test efface — le cas du plan de production', () => {
+    // Sortie longue le samedi, créneaux le mardi et le jeudi : la semaine exacte
+    // du plan de l'utilisatrice. Le jeudi n'était pénalisé que par le mardi qui
+    // le précède — or ce mardi devient un footing le jour où le test tombe. Il
+    // ne reste devant le jeudi que la sortie longue, à cinq jours, contre trois
+    // pour le mardi.
+    //
+    // C'est le **cœur de la régression** : l'ancien calcul posait le test le
+    // mardi, et la séance de seuil du jeudi tombait 48 h après un effort
+    // maximal.
+    expect(pickFitnessTestDay([2, 4], 6)).toBe(4);
+  });
+
+  it('compte encore les créneaux de la semaine précédente', () => {
+    // Sortie longue le mercredi, créneaux le lundi et le samedi. Le lundi est à
+    // cinq jours de la sortie longue, mais à **deux jours** du créneau du samedi
+    // précédent — la semaine d'avant n'est pas une semaine de test, ce créneau-là
+    // est bien une séance dure. Le samedi, lui, n'a devant lui que la sortie
+    // longue à trois jours et un lundi devenu footing.
+    expect(pickFitnessTestDay([1, 6], 3)).toBe(6);
   });
 
   it('départage à égalité par le jour le plus tôt, et reste déterministe', () => {
-    // Deux candidats à écart égal du seul jour dur : le plus tôt gagne, deux
-    // fois de suite.
-    expect(pickFitnessTestDay([2, 5], [2, 5])).toBe(2);
-    expect(pickFitnessTestDay([2, 5], [2, 5])).toBe(2);
+    // Sortie longue le vendredi, créneaux le mardi et le dimanche : le mardi est
+    // à deux jours du dimanche précédent, le dimanche à deux jours du vendredi.
+    // Le plus tôt gagne, deux fois de suite.
+    expect(pickFitnessTestDay([2, 7], 5)).toBe(2);
+    expect(pickFitnessTestDay([2, 7], 5)).toBe(2);
   });
 
   it('ne rend rien quand la semaine ne pose aucune qualité', () => {
-    expect(pickFitnessTestDay([], [7])).toBeNull();
+    expect(pickFitnessTestDay([], 7)).toBeNull();
   });
 });
 
@@ -454,6 +494,80 @@ describe('le test dans le squelette', () => {
         week.sessions.length + week.qualitySlots.length,
         `semaine ${week.weekNumber}`,
       ).toBe(4);
+    }
+  });
+
+  /*
+   * La régression mesurée en production, et les trois faits qui la ferment.
+   *
+   * Sur ce plan-là, chaque semaine de test ouvrait **deux** créneaux de qualité :
+   * le test en consommait un, l'autre restait. La semaine cumulait donc un 5 km
+   * à fond et une séance de seuil — 7,2 km d'intensité sur 29,2 km, soit 24,7 %,
+   * contre 10,7 à 15,5 % sur les autres semaines du même plan — et le seuil
+   * tombait **48 h après** l'effort maximal.
+   */
+  it('ne laisse aucune autre séance dure dans la semaine du test', () => {
+    expect(testWeeks.length).toBeGreaterThan(0);
+    for (const week of testWeeks) {
+      // Aucun créneau à faire remplir : le test est la séance dure de sa semaine.
+      expect(week.qualitySlots, `semaine ${week.weekNumber}`).toEqual([]);
+
+      const test = week.sessions.find((session) => session.kind === FITNESS_TEST_KIND);
+      expect(test, `semaine ${week.weekNumber}`).toBeDefined();
+      if (test === undefined) continue;
+
+      // Et rien de dur derrière lui : ce qui suit le test dans sa semaine est du
+      // footing, la sortie longue mise à part — elle se court en endurance.
+      const after = week.sessions.filter((session) => session.day > test.day);
+      for (const session of after) {
+        expect(isIntensitySession(session), `semaine ${week.weekNumber}, ${session.kind}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it('rend la semaine de test aussi calme que les autres', () => {
+    // La mesure du dossier, refaite ici : le volume à haute intensité d'une
+    // semaine de test, bloc d'effort du test compris, ne dépasse plus le double
+    // de ce que porte une semaine ordinaire. Il vaut exactement les 5 km du
+    // test, qui sont son plancher incompressible.
+    const intensityKm = (week: (typeof skeleton)[number]): number => {
+      const fromSlots = week.qualitySlots.reduce(
+        (sum, slot) =>
+          sum +
+          sessionEffortKm(
+            slot.zone,
+            qualitySessionTemplate({
+              zone: slot.zone,
+              budgetKm: slot.budgetKm,
+              phase: slot.phase,
+              level: slot.level,
+              weeklyTargetKm: slot.weeklyTargetKm,
+            }),
+          ),
+        0,
+      );
+      const fromTest = week.sessions.some((session) => session.kind === FITNESS_TEST_KIND)
+        ? FITNESS_TEST_EFFORT_M / 1_000
+        : 0;
+      return fromSlots + fromTest;
+    };
+
+    for (const week of testWeeks) {
+      expect(intensityKm(week), `semaine ${week.weekNumber}`).toBeCloseTo(
+        FITNESS_TEST_EFFORT_M / 1_000,
+        6,
+      );
+    }
+
+    // Et la part de volume qui en résulte reste du même ordre que celle des
+    // semaines ordinaires : 15,7 à 17,1 % contre 10,7 à 15,5 %, là où le cumul
+    // faisait monter la semaine de test à 24,0 voire 25,4 %.
+    for (const week of testWeeks) {
+      expect(intensityKm(week) / week.target.targetKm, `semaine ${week.weekNumber}`).toBeLessThan(
+        0.18,
+      );
     }
   });
 

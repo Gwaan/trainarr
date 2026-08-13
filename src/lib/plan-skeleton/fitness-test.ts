@@ -43,14 +43,55 @@
  *
  * ## Ce que le test coûte à la semaine
  *
- * Il **remplace** un créneau de qualité, il ne s'y ajoute pas : un 5 km à fond
- * est une séance dure, et deux séances dures de plus dans la même semaine
- * seraient une séance dure et une séance courue fatiguée. Son budget
- * kilométrique sort donc de la décomposition existante — à ceci près qu'un
- * créneau de qualité pèse 15 à 19 % de la semaine (4,5 km sur 30) quand un test
- * en pèse {@link FITNESS_TEST_SESSION_KM}. La différence est **prise aux
- * footings** de la semaine, jamais à la sortie longue, et la somme ne bouge pas
- * d'un dixième : la semaine retombe sur sa cible ({@link fitnessTestBudgets}).
+ * **La semaine d'un test ne porte que le test comme séance dure.** Il ne
+ * s'ajoute pas aux créneaux de qualité, et il ne se contente pas d'en remplacer
+ * un : tous les autres redeviennent des footings ({@link fitnessTestBudgets}).
+ *
+ * Ce n'est pas de la prudence de principe, c'est ce que la mesure a imposé. Sur
+ * le plan réel de l'utilisatrice (`faster`, 4 séances, 4 h, 8 semaines), le test
+ * ne remplaçait qu'un créneau — et la semaine qui le portait devenait la plus
+ * dure du plan :
+ *
+ * - le test, c'est **5 km à fond**, courus plus vite que l'allure de seuil ;
+ * - la semaine gardait **en plus** un créneau de seuil de 2,2 km d'effort ;
+ * - soit **7,2 km d'intensité sur 29,2 km — 24,7 %**, contre 10,7 à 15,5 % sur
+ *   toutes les autres semaines du même plan ;
+ * - et le seuil tombait **48 h après** l'effort maximal (test mardi, seuil
+ *   jeudi), là où l'espacement des jours durs ne voyait qu'un créneau de qualité
+ *   ordinaire.
+ *
+ * Le test est **plus dur** que la séance qu'il remplace : le remplacement seul
+ * fait donc monter la charge de la semaine au lieu de la faire baisser. Et il
+ * échappe par construction aux plafonds de volume d'intensité
+ * (`quality-load.ts`), qui se calculent par zone d'allure — un effort maximal
+ * libre n'en a aucune. Retirer les autres séances dures est le seul garde-fou
+ * qui morde.
+ *
+ * Deux raisons, dont une n'est pas un confort :
+ *
+ * - un test couru sur des jambes fatiguées produit un VDOT faux, et ce VDOT
+ *   recalcule ensuite **toutes** les allures du plan. La fraîcheur est la
+ *   condition de validité de la mesure elle-même ;
+ * - la semaine de test cesse d'être une semaine surchargée déguisée en semaine
+ *   ordinaire. Mesuré après correction sur le même plan : 17,1 % au lieu de
+ *   24,7 %.
+ *
+ * **Ce que la correction ne peut pas faire**, et il faut le dire ici plutôt que
+ * de laisser croire l'inverse : une semaine de test ne descendra jamais sous la
+ * plus chargée des semaines ordinaires. Son intensité vaut désormais
+ * *exactement* les 5 km du test — vérifié sur 8 200 semaines de test d'un
+ * balayage (intentions × durées × comptes de séances × volumes), toutes à 5,0 km
+ * contre 9,4 km au pire avant —, et c'est un **coût fixe** là où l'intensité
+ * d'une semaine ordinaire suit son volume (3 à 4,6 km sur ces plans-là). Sur une
+ * semaine à 29,2 km, 5 km font 17,1 % ; sur une semaine à 18,4 km, 27,2 %. Il
+ * n'y a plus rien à retirer : ce qui reste est la mesure elle-même.
+ *
+ * Les budgets kilométriques, eux, ne se perdent pas : celui du créneau que le
+ * test consomme et ceux des créneaux effacés retournent au pot des footings, la
+ * différence entre le coût du test ({@link FITNESS_TEST_SESSION_KM}) et le
+ * budget d'un créneau (15 à 19 % de la semaine, 4,5 km sur 30) y étant reprise.
+ * La sortie longue n'est jamais touchée et la somme ne bouge pas d'un dixième :
+ * la semaine retombe sur sa cible ({@link fitnessTestBudgets}).
  *
  * Module **pur** : ni base, ni réseau, ni `server-only`, ni horloge, ni aléa.
  * Tout ce qu'il rend est fonction de la périodisation et des budgets — c'est ce
@@ -346,15 +387,32 @@ export function fitnessTestSteps(): PlanSessionSteps {
 }
 
 /**
- * Les budgets de la semaine, un créneau de qualité converti en **test** et la
- * différence prise aux footings — `null` quand la conversion casserait un
- * invariant, à charge de l'appelant de laisser la semaine telle quelle (elle
- * garde alors sa séance de qualité ordinaire, et n'a pas de test).
+ * Les budgets de la semaine, **une seule séance dure** : le test. Le premier
+ * créneau de qualité devient le test, tous les autres deviennent des footings,
+ * et le pot des footings se repartage à égalité — `null` quand la conversion
+ * casserait un invariant, à charge de l'appelant de laisser la semaine telle
+ * quelle (elle garde alors ses séances de qualité ordinaires, et n'a pas de
+ * test).
  *
- * Même mécanique et même prudence que le plafond de sortie longue
- * (`long-run-cap.ts`) : la somme ne bouge jamais d'un dixième — ce qui est
- * donné au test est repris aux footings —, et au moindre invariant menacé la
- * semaine repart intacte. Trois invariants, tous vérifiés par
+ * Le pourquoi du dépeuplement — la mesure à 24,7 % contre 10,7 à 15,5 % — est
+ * dans l'en-tête du module. Ce qu'il faut savoir ici est comment les kilomètres
+ * se conservent :
+ *
+ * 1. le budget du créneau consommé et ceux des créneaux effacés entrent au pot
+ *    des footings ;
+ * 2. le coût du test ({@link FITNESS_TEST_SESSION_KM}) en sort ;
+ * 3. le pot se repartage **à égalité** entre tous les footings de la semaine,
+ *    les créneaux reconvertis compris — au dixième, les premiers servis
+ *    absorbant le reliquat de la division, exactement comme
+ *    `weeklySessionBudgets` le fait à la décomposition.
+ *
+ * Le repartage égal plutôt que le simple changement de rôle : une semaine de
+ * test doit ressembler à une semaine ordinaire à un seul créneau, pas à une
+ * semaine bancale où un footing porterait le kilométrage d'un créneau supprimé.
+ *
+ * Même prudence que le plafond de sortie longue (`long-run-cap.ts`) : la somme
+ * ne bouge jamais d'un dixième, et au moindre invariant menacé la semaine
+ * repart intacte. Trois invariants, tous vérifiés par
  * `validatePlanBusinessRules` en aval :
  *
  * - la **sortie longue reste la séance la plus longue** de sa semaine (une
@@ -373,34 +431,38 @@ export function fitnessTestSteps(): PlanSessionSteps {
  * ({@link pickFitnessTestDay}).
  */
 export function fitnessTestBudgets(budgets: readonly SessionBudget[]): SessionBudget[] | null {
-  const quality = budgets.find((budget) => budget.role === 'quality');
+  const testIndex = budgets.findIndex((budget) => budget.role === 'quality');
   const long = budgets.find((budget) => budget.role === 'long');
-  const easyCount = budgets.filter((budget) => budget.role === 'easy').length;
-  // Sans créneau de qualité, il n'y a rien à remplacer ; sans footing, il n'y a
-  // nulle part où prendre la différence.
-  if (quality === undefined || long === undefined || easyCount === 0) return null;
+  // Sans créneau de qualité, il n'y a rien à remplacer ; sans sortie longue, pas
+  // de plafond auquel comparer ce qu'on écrit.
+  if (testIndex < 0 || long === undefined) return null;
 
-  const testTenths = tenths(FITNESS_TEST_SESSION_KM);
-  const deltaTenths = testTenths - tenths(quality.km);
+  // Tout ce qui n'est ni la sortie longue ni le test devient un footing : les
+  // créneaux de qualité qui restaient s'effacent devant lui.
+  const easyIndexes: number[] = [];
+  budgets.forEach((budget, index) => {
+    if (index !== testIndex && budget.role !== 'long') easyIndexes.push(index);
+  });
+  // Sans footing, il n'y a nulle part où prendre la différence.
+  if (easyIndexes.length === 0) return null;
 
-  // Le partage se fait au dixième, les premiers footings servis absorbant le
-  // reliquat de la division : ils restent au plus à un dixième les uns des
-  // autres, ce qui est déjà l'écart que la décomposition leur laisse.
-  const perEasy = Math.trunc(deltaTenths / easyCount);
-  const remainder = Math.abs(deltaTenths - perEasy * easyCount);
-  const step = Math.sign(deltaTenths);
+  const easyTenths =
+    easyIndexes.reduce((sum, index) => sum + tenths(budgets[index].km), 0) +
+    tenths(budgets[testIndex].km) -
+    tenths(FITNESS_TEST_SESSION_KM);
 
-  let qualitySeen = 0;
-  let easyIndex = 0;
-  const converted = budgets.map((budget) => {
-    if (budget.role === 'quality') {
-      qualitySeen += 1;
-      return qualitySeen === 1 ? { role: budget.role, km: FITNESS_TEST_SESSION_KM } : budget;
-    }
-    if (budget.role !== 'easy') return budget;
-    const taken = perEasy + (easyIndex < remainder ? step : 0);
-    easyIndex += 1;
-    return { role: budget.role, km: (tenths(budget.km) - taken) / 10 };
+  const perEasy = Math.floor(easyTenths / easyIndexes.length);
+  const remainder = easyTenths - perEasy * easyIndexes.length;
+
+  const easyKm = new Map<number, number>();
+  easyIndexes.forEach((index, rank) => {
+    easyKm.set(index, (perEasy + (rank < remainder ? 1 : 0)) / 10);
+  });
+
+  const converted = budgets.map((budget, index): SessionBudget => {
+    if (index === testIndex) return { role: 'quality', km: FITNESS_TEST_SESSION_KM };
+    const km = easyKm.get(index);
+    return km === undefined ? budget : { role: 'easy', km };
   });
 
   return breaksInvariants(converted, long.km) ? null : converted;
@@ -444,6 +506,30 @@ function daysSince(day: number, other: number): number {
  * séparent le candidat du **jour dur précédent**, la semaine étant refermée
  * sur elle-même (une sortie longue du dimanche précède bien un mardi).
  *
+ * ## Quels jours durs précèdent, exactement
+ *
+ * C'est là que le dépeuplement de la semaine de test (cf. l'en-tête, et
+ * {@link fitnessTestBudgets}) change le calcul, et il fallait le refaire :
+ *
+ * - la **sortie longue** est dure dans les deux semaines, celle du test comme
+ *   la précédente — elle compte toujours ;
+ * - les **autres créneaux de qualité** ne sont durs que dans la semaine
+ *   **précédente**, puisque le test les efface dans la sienne. Un créneau
+ *   n'est donc à compter que s'il tombe *après* le candidat dans l'ordre de la
+ *   semaine : c'est alors son occurrence de la semaine d'avant qui précède le
+ *   test. Un créneau placé avant le candidat, lui, est devenu un footing.
+ *
+ * La semaine précédente est bien réputée porter les mêmes créneaux : la cadence
+ * des tests est de cinq semaines, jamais deux d'affilée, et le placement des
+ * jours ne dépend pas du numéro de semaine (`placeSessionDays`).
+ *
+ * Ce que cela change, sur la semaine exacte du plan de l'utilisatrice — sortie
+ * longue le samedi, créneaux le mardi et le jeudi : l'ancien calcul pénalisait
+ * le jeudi du mardi qui le précède (deux jours) et posait le test le **mardi**,
+ * la séance de seuil du jeudi tombant alors 48 h après un effort maximal. Le
+ * nouveau le pose le **jeudi**, à cinq jours de la sortie longue, derrière un
+ * mardi devenu footing.
+ *
  * Le candidat le mieux isolé l'emporte ; à égalité, le plus tôt dans la semaine
  * — un départage arbitraire, mais déterministe, et c'est ce qui compte pour que
  * création et reconstruction posent le test le même jour.
@@ -452,24 +538,27 @@ function daysSince(day: number, other: number): number {
  * placement ne laisse deux jours durs séparés (cf. l'en-tête de `days.ts`, où
  * 293 cellules sur 1 372 sont dans ce cas). Ce que cette fonction garantit est
  * qu'on prend le meilleur des jours disponibles, et `placeSessionDays` a déjà
- * maximisé cet espacement en amont.
+ * maximisé cet espacement en amont. Ce qui est en revanche garanti est l'**aval**
+ * du test : les jours qui le suivent dans sa propre semaine ne portent plus que
+ * des footings et, au plus, la sortie longue.
  *
  * @param qualityDays les jours ISO des créneaux de qualité de la semaine.
- * @param hardDays **tous** les jours durs de la semaine, sortie longue et
- * créneaux de qualité compris — le candidat lui-même en fait donc partie, et
- * il est ignoré.
+ * @param longRunDay le jour ISO de la sortie longue — `null` quand la semaine
+ * n'en place pas.
  */
 export function pickFitnessTestDay(
   qualityDays: readonly number[],
-  hardDays: readonly number[],
+  longRunDay: number | null,
 ): number | null {
   let best: number | null = null;
   let bestFreshness = -1;
 
   for (const day of qualityDays) {
-    let freshness = Number.POSITIVE_INFINITY;
-    for (const other of hardDays) {
-      if (other === day) continue;
+    let freshness = longRunDay === null ? Number.POSITIVE_INFINITY : daysSince(day, longRunDay);
+    for (const other of qualityDays) {
+      // Les créneaux d'avant le candidat sont devenus des footings ; ceux
+      // d'après ne pèsent que par leur occurrence de la semaine précédente.
+      if (other <= day) continue;
       freshness = Math.min(freshness, daysSince(day, other));
     }
     if (freshness > bestFreshness) {

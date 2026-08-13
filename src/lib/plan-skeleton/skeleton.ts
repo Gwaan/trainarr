@@ -20,8 +20,8 @@
  *   déroulé compris quand la séance en porte un ({@link weeklyEasyVariation},
  *   {@link longRunFinishSteps}, {@link specificLongRunSteps}) ;
  * - les **tests chronométrés** de la périodisation, eux aussi entièrement
- *   écrits — un 5 km à fond qui remplace un créneau de qualité et remet à jour
- *   le chrono de référence du plan (`fitness-test.ts`) ;
+ *   écrits — un 5 km à fond qui reste la **seule séance dure de sa semaine** et
+ *   remet à jour le chrono de référence du plan (`fitness-test.ts`) ;
  * - et, pour les séances de qualité, des **créneaux** — jour, zone, `kind`,
  *   budget kilométrique — dont il ne reste au modèle qu'à écrire le déroulé.
  *
@@ -903,37 +903,42 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     }
 
     // Le **test chronométré**, quand la périodisation en pose un cette
-    // semaine-là : il prend la place d'un créneau de qualité (il ne s'y ajoute
-    // pas), et la différence entre son coût et le budget de ce créneau est
-    // reprise aux footings — la somme de la semaine ne bouge pas. Il cède
-    // devant les invariants comme le plafond de sortie longue : une semaine qui
-    // ne peut pas le financer garde simplement sa qualité ordinaire.
+    // semaine-là. Il ne s'ajoute pas aux créneaux de qualité et ne se contente
+    // pas d'en remplacer un : cette semaine-là ne porte **que lui** comme séance
+    // dure, les autres créneaux redevenant des footings — le raisonnement et la
+    // mesure qui l'imposent sont dans l'en-tête de `fitness-test.ts`. Les
+    // kilomètres, eux, restent dans la semaine : ils repartent au pot des
+    // footings, et la somme ne bouge pas. Il cède devant les invariants comme le
+    // plafond de sortie longue : une semaine qui ne peut pas le financer garde
+    // simplement sa qualité ordinaire.
     const testDay =
       testWeeks.has(planWeekNumber) && days.qualityDays.length > 0
-        ? pickFitnessTestDay(days.qualityDays, [
-            ...(days.longRunDay === null ? [] : [days.longRunDay]),
-            ...days.qualityDays,
-          ])
+        ? pickFitnessTestDay(days.qualityDays, days.longRunDay)
         : null;
     const testedBudgets = testDay === null ? null : fitnessTestBudgets(budgets);
     let test: { day: number; km: number } | null = null;
     if (testDay !== null && testedBudgets !== null) {
       budgets = testedBudgets;
       // Le test consomme le **premier** créneau de qualité — celui dont
-      // `fitnessTestBudgets` vient de relever le budget.
+      // `fitnessTestBudgets` vient de relever le budget, et le seul qui reste.
       const testBudget = testedBudgets.find((budget) => budget.role === 'quality');
       if (testBudget !== undefined) test = { day: testDay, km: testBudget.km };
     }
 
     const longBudget = budgets.find((budget) => budget.role === 'long');
-    // Les créneaux qui restent après le test reprennent les zones dans l'ordre
-    // de leur priorité : sur une semaine à deux créneaux, celui qui survit au
-    // test est le plus important des deux.
-    const allQualityBudgets = budgets.filter((budget) => budget.role === 'quality');
-    const qualityBudgets = test === null ? allQualityBudgets : allQualityBudgets.slice(1);
-    const qualityDays =
-      test === null ? days.qualityDays : days.qualityDays.filter((day) => day !== test.day);
+    // Une semaine de test n'ouvre **aucun** créneau à faire remplir : le test
+    // est écrit ici de bout en bout, et les créneaux qu'il a effacés sont
+    // devenus des footings — budget compris (`fitnessTestBudgets`), jour compris
+    // (ci-dessous).
+    const slotBudgets = test === null ? budgets.filter((budget) => budget.role === 'quality') : [];
+    const slotDays = test === null ? days.qualityDays : [];
     const easyBudgets = budgets.filter((budget) => budget.role === 'easy');
+    const easyDays =
+      test === null
+        ? days.easyDays
+        : [...days.easyDays, ...days.qualityDays.filter((day) => day !== test.day)].sort(
+            (left, right) => left - right,
+          );
     if (days.longRunDay !== null && !isRaceWeek && longBudget !== undefined) {
       peakLongRunKm = Math.max(peakLongRunKm ?? 0, longBudget.km);
     }
@@ -1008,7 +1013,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     const easyKms = [...reversedLongKm, ...spreadKms];
     const enrichedIndex = reversedLongKm.length + variation.index;
 
-    days.easyDays.forEach((day, easyIndex) => {
+    easyDays.forEach((day, easyIndex) => {
       const km = easyKms[easyIndex];
       // Plus de budget que de jours ne se produit plus depuis le refus des
       // semaines infaisables ({@link assertFundable}) ; la garde reste parce
@@ -1058,7 +1063,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       });
     }
 
-    const qualitySlots = qualityDays.map((day, slotIndex) => {
+    const qualitySlots = slotDays.map((day, slotIndex) => {
       const zone = zones[slotIndex];
       return {
         day,
@@ -1066,7 +1071,7 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
         level,
         zone,
         kind: QUALITY_ZONE_KINDS[zone],
-        budgetKm: qualityBudgets[slotIndex].km,
+        budgetKm: slotBudgets[slotIndex].km,
         // La cible de la semaine, pas la somme réellement écrite : c'est elle
         // que la décomposition a répartie, et c'est sur elle que les plafonds de
         // volume d'effort se calculent.
