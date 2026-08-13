@@ -6,6 +6,7 @@ import {
   createWorkoutEvents,
   deleteCalendarEvents,
   downloadFitFile,
+  fetchRunMaxHr,
   formatIntervalsDate,
   IntervalsAbortError,
   IntervalsApiError,
@@ -701,6 +702,77 @@ describe('deleteCalendarEvents', () => {
     await expect(
       deleteCalendarEvents({ athleteId: ATHLETE_ID, apiKey: API_KEY, ids: [1], fetchImpl }),
     ).rejects.toBeInstanceOf(IntervalsApiError);
+  });
+});
+
+describe('fetchRunMaxHr', () => {
+  /**
+   * La réponse réelle, réduite aux champs lus : quatre profils sport, un par
+   * famille, dont un seul déclare `Run` (relevé sur le compte le 2026-08-12).
+   */
+  const SPORT_SETTINGS = [
+    { id: 2773318, types: ['Ride', 'VirtualRide', 'GravelRide'], max_hr: 205, lthr: 186 },
+    { id: 2773319, types: ['Run', 'VirtualRun', 'TrailRun'], max_hr: 205, lthr: 186 },
+    { id: 2773320, types: ['Swim', 'OpenWaterSwim'], max_hr: 205, lthr: 186 },
+  ];
+
+  it('lit la FC max du profil sport qui déclare la course à pied', async () => {
+    const { fetchImpl, calls } = stubFetch(json(SPORT_SETTINGS));
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).resolves.toBe(205);
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/athlete/i123456/sport-settings');
+    expect(calls[0].init?.method).toBe('GET');
+    expect(decodeBasic(authorizationOf(calls[0]))).toBe(`API_KEY:${API_KEY}`);
+  });
+
+  it("rend null quand aucun profil sport ne déclare la course à pied", async () => {
+    const { fetchImpl } = stubFetch(
+      json([{ id: 1, types: ['Ride'], max_hr: 205 }, { id: 2, types: null, max_hr: 190 }]),
+    );
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).resolves.toBeNull();
+  });
+
+  it('rend null quand le profil course à pied ne porte pas de FC max', async () => {
+    // Une absence, pas une réponse malformée : le compte n'a simplement jamais
+    // reçu de FC max.
+    const { fetchImpl } = stubFetch(json([{ id: 2, types: ['Run'], max_hr: null }]));
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).resolves.toBeNull();
+  });
+
+  it('lève une erreur typée sur une réponse de forme inattendue', async () => {
+    // L'API rend un tableau ; un objet nu signale un changement de contrat, pas
+    // une absence de FC max.
+    const { fetchImpl } = stubFetch(json({ types: ['Run'], max_hr: 205 }));
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).rejects.toBeInstanceOf(IntervalsApiError);
+  });
+
+  it('lève sur une erreur HTTP — c’est à l’appelant de décider du repli', async () => {
+    const { fetchImpl } = stubFetch(new Response('boom', { status: 500 }));
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).rejects.toBeInstanceOf(IntervalsApiError);
+  });
+
+  it('traduit un 401 en IntervalsAuthError', async () => {
+    const { fetchImpl } = stubFetch(new Response('nope', { status: 401 }));
+
+    await expect(
+      fetchRunMaxHr({ athleteId: ATHLETE_ID, apiKey: API_KEY, fetchImpl }),
+    ).rejects.toBeInstanceOf(IntervalsAuthError);
   });
 });
 

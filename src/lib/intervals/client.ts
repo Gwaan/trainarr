@@ -67,6 +67,13 @@
  *     {@link deleteCalendarEvents}. La suppression par `external_id` existe mais
  *     est **réservée aux applications OAuth** : avec une clé API, on ne supprime
  *     que par `id`, donc uniquement des events qu'un GET vient de nous rendre.
+ * - **Réglages sport** (vérifié contre l'API réelle le 2026-08-12) —
+ *   `GET /api/v1/athlete/{id}/sport-settings` rend un **tableau** de profils, un
+ *   par famille de sports : chacun porte `types` (`["Run","VirtualRun",
+ *   "TrailRun"]`, `["Ride",…]`, …) et, entre bien d'autres champs, `max_hr` et
+ *   `lthr`. C'est la FC max **du compte**, celle sur laquelle intervals.icu
+ *   résout les cibles en pourcentage — elle n'a aucune raison d'égaler celle du
+ *   profil Trainarr, et {@link fetchRunMaxHr} n'en lit que le profil `Run`.
  *
  * ## Points ambigus, tranchés au plus prudent
  *
@@ -618,7 +625,7 @@ function toEventPayload(event: IntervalsWorkoutEvent): Record<string, unknown> {
   return payload;
 }
 
-/** Ce dont tout appel au calendrier a besoin. */
+/** Ce dont tout appel porté par un athlète a besoin. */
 type CalendarParams = {
   /** Identifiant d'athlète intervals.icu (`i123456`, ou `0` pour le porteur de la clé). */
   athleteId: string;
@@ -772,4 +779,63 @@ export async function deleteCalendarEvents(params: DeleteCalendarEventsParams): 
   const report = deleteReportSchema.safeParse(payload);
   const reported = report.success ? report.data.eventsDeleted : null;
   return reported ?? params.ids.length;
+}
+
+/*
+ * Réglages sport : la FC max telle qu'intervals.icu la connaît.
+ */
+
+/**
+ * Les seuls champs des réglages sport dont la publication du plan a besoin.
+ *
+ * Le reste — une cinquantaine de champs, des zones de puissance aux préférences
+ * d'affichage — est écarté par le schéma. `types` et `max_hr` sont déclarés
+ * tolérants (`nullish`) parce qu'un profil sport peut légitimement n'avoir
+ * jamais reçu de FC max : c'est une absence, pas une réponse malformée.
+ */
+const sportSettingsSchema = z.array(
+  z.object({
+    types: z.array(z.string()).nullish(),
+    max_hr: z.number().nullish(),
+  }),
+);
+
+/** Le sport dont les réglages font foi pour Trainarr, qui ne planifie que ça. */
+const RUN_SPORT_TYPE = 'Run';
+
+export type FetchRunMaxHrParams = CalendarParams;
+
+/**
+ * La FC max que le compte intervals.icu porte pour la **course à pied**, ou
+ * `null` s'il n'en porte pas.
+ *
+ * Elle ne prescrit rien : c'est le dénominateur sur lequel le service résout les
+ * cibles écrites en pourcentage (`65-79% HR`). La lire est ce qui permet
+ * d'exprimer une plage en battements décidée par Trainarr dans le seul dialecte
+ * que son parseur accepte — cf. `lib/plan-steps/intervals-syntax`.
+ *
+ * `null` couvre les deux absences : aucun profil sport ne déclare `Run`, ou
+ * celui qui le déclare n'a pas de `max_hr`. Une erreur HTTP, elle, **lève** :
+ * l'appelant seul sait quoi faire d'un calendrier qu'il ne pourra pas annoter.
+ */
+export async function fetchRunMaxHr(params: FetchRunMaxHrParams): Promise<number | null> {
+  const url = athleteUrl(params, '/sport-settings');
+
+  const context = 'réglages sport intervals.icu';
+  const response = await authorizedRequest(
+    url.toString(),
+    params.apiKey,
+    params.fetchImpl ?? globalThis.fetch,
+    context,
+    { signal: params.signal },
+  );
+
+  if (!response.ok) {
+    throw new IntervalsApiError(`${context} : HTTP ${response.status}.`, response.status);
+  }
+
+  const settings = await parseJsonBody(response, context, sportSettingsSchema);
+  const run = settings.find((entry) => entry.types?.includes(RUN_SPORT_TYPE) === true);
+
+  return run?.max_hr ?? null;
 }

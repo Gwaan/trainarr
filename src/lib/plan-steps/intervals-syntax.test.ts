@@ -86,55 +86,114 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     );
   });
 
-  it('rend une zone cardiaque', () => {
-    expect(serializeOne({ role: 'warmup', distanceM: null, durationS: 900, hrZone: 2 })).toBe(
-      '- Echauffement 15m Z2 HR',
-    );
+  /**
+   * ## Forme **vérifiée empiriquement le 12/08/2026 sur le compte réel**
+   *
+   * 29 events de test poussés puis relus dans leur `workout_doc.steps[].hr` :
+   * `65-79% HR` y arrive en `{start:65, end:79, units:"%hr"}`, soit un
+   * pourcentage de la FC max du compte. Toutes les formes en bpm absolus
+   * (`120-145 bpm HR` compris, qui sortait d'ici avant ce correctif) n'y
+   * produisent **aucune** cible : du texte mort, une montre sans plage.
+   *
+   * Le pourcentage émis est calculé sur la FC max **distante**, pas sur celle du
+   * profil : c'est ce qui fait que 120–145 bpm restent 120–145 bpm au poignet,
+   * quelle que soit la valeur configurée en face.
+   */
+  it('exprime la cible en pourcentage de la FC max distante', () => {
+    const endurance: PlanSessionSteps = [{ repeat: 1, steps: [step({ hrZone: 2 })] }];
+
+    // La FC max du compte réel (205) diverge de la vraie (184) : les 120–145 bpm
+    // prescrits sur 184 valent 59–71 % de 205.
+    expect(
+      stepsToIntervalsSyntax(endurance, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+    ).toBe('- Course 2km 59-71% HR');
+
+    // Références confondues : le pourcentage redonne exactement le créneau
+    // prescrit (65–79 % de FC max, cf. `lib/metrics/hr-targets`).
+    expect(
+      stepsToIntervalsSyntax(endurance, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 }),
+    ).toBe('- Course 2km 65-79% HR');
   });
 
   /**
-   * ## Forme figée, **non vérifiée empiriquement**
+   * ## Le piège du suffixe
    *
-   * `120-145 bpm HR` est le décalque de la plage d'allure documentée
-   * (`4:25-4:35/km Pace`) : même position dans la ligne, borne basse d'abord,
-   * suffixe de type à la fin. Aucun exemple de plage cardiaque ne figure dans la
-   * documentation du workout builder, et ce test n'a **pas** été confronté au
-   * parseur d'intervals.icu sur le compte réel — il fige une hypothèse pour
-   * qu'une correction future soit une décision explicite, au même titre que les
-   * faits d'API notés dans `push-plan.ts`.
+   * `65-79% MaxHR`, `65-79% HRmax` et `65-79% Max HR` sont les trois façons
+   * « évidentes » d'écrire un pourcentage de FC max — et les trois parsent en
+   * **puissance** (`power {units:"%ftp"}`), mesuré le 12/08/2026. Une coureuse
+   * n'a pas de capteur de puissance : la cible serait silencieusement fausse, et
+   * sur une grandeur qu'elle ne mesure même pas.
    *
-   * Ce qu'il garantit en revanche sans réserve : la cible poussée ne référence
-   * **aucune** configuration de zones distante.
+   * Seuls ` HR` (pourcentage de FC max) et ` LTHR` (pourcentage du seuil)
+   * atteignent le domaine cardiaque. Ce test fige le fait que rien d'autre ne
+   * sort d'ici.
    */
-  it('rend une plage en battements dès que la FC max est connue', () => {
-    expect(
-      stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], 184),
-    ).toBe('- Course 2km 120-145 bpm HR');
+  it('ne suffixe jamais autrement que par ` HR` — `MaxHR` partirait en puissance', () => {
+    const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], {
+      profileMaxHrBpm: 184,
+      intervalsMaxHrBpm: 205,
+    });
+
+    expect(line).toMatch(/ \d+-\d+% HR$/);
+    for (const trap of ['MaxHR', 'HRmax', 'Max HR', 'LTHR', 'bpm']) {
+      expect(line, `suffixe interdit : ${trap}`).not.toContain(trap);
+    }
   });
 
-  it('ne pousse jamais un numéro de zone quand elle peut pousser des battements', () => {
-    const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], 184);
+  it('ne pousse jamais un numéro de zone, qui référencerait les zones du compte', () => {
+    const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], {
+      profileMaxHrBpm: 184,
+      intervalsMaxHrBpm: 205,
+    });
     expect(line).not.toContain('Z2');
   });
 
-  it('retombe sur le numéro de zone sans FC max exploitable', () => {
+  it("n'émet aucune cible cardiaque quand elle n'est pas exprimable", () => {
     const steps: PlanSessionSteps = [{ repeat: 1, steps: [step({ hrZone: 2 })] }];
-    expect(stepsToIntervalsSyntax(steps, null)).toBe('- Course 2km Z2 HR');
-    // Hors bornes de plausibilité : rien n'est calculé, rien n'est deviné.
-    expect(stepsToIntervalsSyntax(steps, 40)).toBe('- Course 2km Z2 HR');
+
+    // Aucune référence du tout.
+    expect(stepsToIntervalsSyntax(steps)).toBe('- Course 2km');
+    // FC max distante illisible (API en erreur, champ absent) : le repli.
+    expect(
+      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: null }),
+    ).toBe('- Course 2km');
+    // FC max distante aberrante : rien n'est calculé, rien n'est deviné.
+    expect(stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 40 })).toBe(
+      '- Course 2km',
+    );
+    // FC max du profil absente : plus rien ne prescrit, le dénominateur seul ne
+    // suffit pas.
+    expect(
+      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: null, intervalsMaxHrBpm: 205 }),
+    ).toBe('- Course 2km');
     // Zone sans créneau de prescription déclaré (cf. `lib/metrics/hr-targets`).
     expect(
-      stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 4 })] }], 184),
-    ).toBe('- Course 2km Z4 HR');
+      stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 4 })] }], {
+        profileMaxHrBpm: 184,
+        intervalsMaxHrBpm: 205,
+      }),
+    ).toBe('- Course 2km');
   });
 
-  it('laisse la cible d’allure intacte quand la FC max est connue', () => {
-    // La FC max ne déplace **que** les étapes ciblées en zone : la qualité reste
-    // prescrite en allure de bout en bout.
+  it('retombe sur la cible d’allure, qui elle ne dépend d’aucune référence distante', () => {
+    // Le repli qui compte à la montre : sans FC max distante, l'étape qui porte
+    // une allure la garde — c'est la forme dont on sait qu'elle fonctionne.
+    const withPace: PlanSessionSteps = [
+      { repeat: 1, steps: [step({ paceMinSecPerKm: 265, paceMaxSecPerKm: 275, hrZone: 2 })] },
+    ];
+
+    expect(
+      stepsToIntervalsSyntax(withPace, { profileMaxHrBpm: 184, intervalsMaxHrBpm: null }),
+    ).toBe('- Course 2km 4:25-4:35/km Pace');
+  });
+
+  it('laisse la cible d’allure intacte quand les FC max sont connues', () => {
+    // Les FC max ne déplacent **que** les étapes ciblées en zone : la qualité
+    // reste prescrite en allure de bout en bout.
     expect(
       stepsToIntervalsSyntax(
         [{ repeat: 1, steps: [step({ paceMinSecPerKm: 265, paceMaxSecPerKm: 275 })] }],
-        184,
+        { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 },
       ),
     ).toBe('- Course 2km 4:25-4:35/km Pace');
   });
@@ -156,8 +215,10 @@ describe('stepsToIntervalsSyntax — blocs', () => {
       },
     ];
 
+    // Sans référence cardiaque, les étapes en zone sortent sur leur seule
+    // mesure : ce test éprouve la mise en page des blocs, pas les cibles.
     expect(stepsToIntervalsSyntax(steps)).toBe(
-      ['- Echauffement 15m Z2 HR', '- Retour au calme 10m Z1 HR'].join('\n'),
+      ['- Echauffement 15m', '- Retour au calme 10m'].join('\n'),
     );
   });
 
@@ -177,15 +238,19 @@ describe('stepsToIntervalsSyntax — blocs', () => {
       },
     ];
 
-    expect(stepsToIntervalsSyntax(steps)).toBe(
+    expect(
+      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+    ).toBe(
       [
-        '- Echauffement 15m Z2 HR',
+        '- Echauffement 15m 59-71% HR',
         '',
         '3x',
         '- Course 800mtr 3:50-4:00/km Pace',
         '- Recuperation - trot 400mtr',
         '',
-        '- Retour au calme 10m Z1 HR',
+        // Z1 n'a pas de créneau de prescription déclaré : aucune cible, plutôt
+        // qu'un `Z1 HR` qui référencerait les zones du compte distant.
+        '- Retour au calme 10m',
       ].join('\n'),
     );
   });
@@ -245,15 +310,17 @@ describe('stepsToIntervalsSyntax — séance complète', () => {
     // s'éprouve que sur des entrées que le DAL accepterait d'écrire.
     expect(planSessionStepsSchema.safeParse(steps).success).toBe(true);
 
-    expect(stepsToIntervalsSyntax(steps)).toBe(
+    expect(
+      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+    ).toBe(
       [
-        '- Echauffement - très souple 15m Z2 HR',
+        '- Echauffement - très souple 15m 59-71% HR',
         '',
         '6x',
         '- Course 800mtr 3:55-4:05/km Pace',
         '- Recuperation - trot 1m30s',
         '',
-        '- Retour au calme 10m Z1 HR',
+        '- Retour au calme 10m',
       ].join('\n'),
     );
   });

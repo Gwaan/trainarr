@@ -97,12 +97,14 @@ import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/d
 // ferait diverger la description d'une séance de ce que le coach en écrit.
 import { formatPace } from '@/lib/ai/format';
 import { shiftCivilDate } from '@/lib/dates/civil';
-import { stepsToIntervalsSyntax } from '@/lib/plan-steps/intervals-syntax';
+import { canPrescribeHeartRate } from '@/lib/metrics/hr-targets';
+import { stepsToIntervalsSyntax, type HrReference } from '@/lib/plan-steps/intervals-syntax';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import {
   createWorkoutEvents,
   deleteCalendarEvents,
+  fetchRunMaxHr,
   listWorkoutEvents,
   type IntervalsEvent,
   type IntervalsEventId,
@@ -229,15 +231,15 @@ function singleRunSteps(session: PlanSessionDto): PlanSessionSteps | null {
  *    intitulé reviendrait à inventer la séance. Ce qui manque au plan ne produit
  *    pas de ligne.
  *
- * @param maxHrBpm la FC max du profil, qui traduit les zones cardiaques des
- * étapes en battements explicites — la cible ne dépend alors d'aucun réglage de
- * zones côté intervals.icu (cf. `lib/plan-steps/intervals-syntax`).
+ * @param hr les deux FC max — celle du profil, qui traduit les zones des étapes
+ * en battements, et celle du compte intervals.icu, qui les ramène dans le seul
+ * dialecte que son parseur accepte (cf. `lib/plan-steps/intervals-syntax`).
  */
-function describeSession(session: PlanSessionDto, maxHrBpm: number | null): string {
-  if (session.steps !== null) return stepsToIntervalsSyntax(session.steps, maxHrBpm);
+function describeSession(session: PlanSessionDto, hr: HrReference | null): string {
+  if (session.steps !== null) return stepsToIntervalsSyntax(session.steps, hr);
 
   const synthesized = singleRunSteps(session);
-  if (synthesized !== null) return stepsToIntervalsSyntax(synthesized, maxHrBpm);
+  if (synthesized !== null) return stepsToIntervalsSyntax(synthesized, hr);
 
   const lines: string[] = [];
 
@@ -259,16 +261,16 @@ function describeSession(session: PlanSessionDto, maxHrBpm: number | null): stri
  * puis `id`) : c'est cet ordre qui donne son index à une deuxième séance du même
  * jour, et donc la stabilité de son `external_id`.
  *
- * @param maxHrBpm la FC max du profil, `null` quand l'athlète ne l'a pas saisie.
- * Elle n'est **pas** lue depuis la séance : les étapes ne stockent qu'un rang de
- * zone, et c'est ici, à la publication, que les battements se calculent — une FC
- * max corrigée au profil repart donc à la synchronisation suivante sans qu'un
- * seul plan soit réécrit.
+ * @param hr les deux FC max de la publication. Aucune n'est lue depuis la
+ * séance : les étapes ne stockent qu'un rang de zone, et c'est ici, à la
+ * publication, que la cible se calcule — une FC max corrigée au profil, comme
+ * une FC max changée côté intervals.icu, repart donc à la synchronisation
+ * suivante sans qu'un seul plan soit réécrit.
  */
 export function buildWorkoutEvents(
   planId: number,
   sessions: readonly PlanSessionDto[],
-  maxHrBpm: number | null = null,
+  hr: HrReference | null = null,
 ): IntervalsWorkoutEvent[] {
   const countPerDay = new Map<string, number>();
   const events: IntervalsWorkoutEvent[] = [];
@@ -284,7 +286,7 @@ export function buildWorkoutEvents(
       // Même composition que la ligne du plan dans l'UI : la nature de la
       // séance, puis son intitulé.
       name: `${session.kind} — ${session.title}`,
-      description: describeSession(session, maxHrBpm),
+      description: describeSession(session, hr),
     };
 
     // Aucune valeur inventée : un champ que le plan ne donne pas n'est pas
@@ -366,6 +368,42 @@ export type PushReport =
   | { status: 'synced'; pushed: number; deleted: number };
 
 /**
+ * La FC max du compte intervals.icu, ou `null` si elle n'est pas lisible —
+ * **une seule lecture par synchronisation**, pas une par séance.
+ *
+ * Elle ne prescrit rien : c'est le dénominateur sur lequel intervals.icu résout
+ * les cibles en pourcentage, donc le seul moyen d'y faire arriver les battements
+ * que le profil Trainarr prescrit (cf. `lib/plan-steps/intervals-syntax`).
+ *
+ * **Ne lève jamais, et dit toujours pourquoi elle rend `null`.** Un calendrier
+ * publié sans cible cardiaque reste un calendrier utile — les distances, les
+ * durées et les allures y sont — alors qu'une synchronisation qui échoue en
+ * entier laisse la montre sur le plan précédent. Mais le silence serait pire que
+ * les deux : sans cette ligne, des footings partiraient sans plage de FC des
+ * semaines durant sans que rien ne l'explique.
+ */
+async function readIntervalsMaxHr(credentials: {
+  athleteId: string;
+  apiKey: string;
+}): Promise<number | null> {
+  try {
+    const maxHrBpm = await fetchRunMaxHr(credentials);
+    if (maxHrBpm === null) {
+      console.error(
+        "[plan/intervals] FC max absente des réglages sport intervals.icu (profil Run) — séances publiées sans cible de fréquence cardiaque.",
+      );
+    }
+    return maxHrBpm;
+  } catch (error) {
+    console.error(
+      '[plan/intervals] réglages sport intervals.icu illisibles — séances publiées sans cible de fréquence cardiaque :',
+      error,
+    );
+    return null;
+  }
+}
+
+/**
  * Aligne le calendrier intervals.icu sur le plan actif de l'athlète.
  *
  * Sans plan actif — archivage — le plan voulu est vide : toutes les séances
@@ -384,9 +422,22 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
   if (!activation.active) return { status: 'unconfigured', reason: activation.reason };
 
   const today = todayCivilDate();
+  const credentials = { athleteId: activation.athleteId, apiKey: activation.apiKey };
+
   // Le profil est lu à **chaque** synchronisation, et jamais figé dans le plan :
   // c'est ce qui fait suivre une FC max corrigée sur tout le calendrier.
   const [active, profile] = await Promise.all([getActivePlanWithSessions(), getAthleteProfile()]);
+  const profileMaxHrBpm = profile?.maxHrBpm ?? null;
+
+  // La FC max distante n'a de sens qu'en dénominateur d'une prescription qui
+  // existe : sans FC max exploitable au profil, aucune zone ne se traduit en
+  // battements, et l'appel — comme l'avertissement qui l'accompagne — n'aurait
+  // rien à dire.
+  const intervalsMaxHrBpm =
+    active !== null && canPrescribeHeartRate(profileMaxHrBpm)
+      ? await readIntervalsMaxHr(credentials)
+      : null;
+
   const desired =
     active === null
       ? []
@@ -395,11 +446,10 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
           // Comparaison lexicographique : sur des dates civiles `YYYY-MM-DD`,
           // elle coïncide avec l'ordre chronologique.
           active.sessions.filter((session) => session.scheduledOn >= today),
-          profile?.maxHrBpm ?? null,
+          { profileMaxHrBpm, intervalsMaxHrBpm },
         );
 
   const range = syncWindow(today);
-  const credentials = { athleteId: activation.athleteId, apiKey: activation.apiKey };
 
   const existing = await listWorkoutEvents({ ...credentials, ...range });
   const replacement = planCalendarReplacement(desired, existing);

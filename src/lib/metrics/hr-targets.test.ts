@@ -4,6 +4,7 @@ import {
   EASY_HR_ZONE,
   PRESCRIBED_HR_ZONES,
   canPrescribeHeartRate,
+  hrTargetPercentOfMax,
   hrZoneTargetBpm,
 } from './hr-targets';
 
@@ -77,6 +78,53 @@ describe('hrZoneTargetBpm', () => {
     for (const zone of [1, 3, 4, 5]) {
       expect(hrZoneTargetBpm(zone, 184)).toBeNull();
     }
+  });
+});
+
+describe('hrTargetPercentOfMax', () => {
+  /** L'endurance de cette athlète : 120–145 bpm, prescrits sur une FC max de 184. */
+  const ENDURANCE = { minBpm: 120, maxBpm: 145 };
+
+  it('ramène les battements au pourcentage de la référence donnée', () => {
+    // La FC max que porte le compte intervals.icu de l'athlète.
+    expect(hrTargetPercentOfMax(ENDURANCE, 205)).toEqual({ minPercent: 59, maxPercent: 71 });
+  });
+
+  it('redonne le créneau prescrit quand la référence est celle du profil', () => {
+    // L'aller-retour zone → bpm → pourcentage doit être neutre : c'est ce qui
+    // dicte l'arrondi au plus proche plutôt qu'un resserrement vers l'intérieur.
+    expect(hrTargetPercentOfMax(ENDURANCE, 184)).toEqual({ minPercent: 65, maxPercent: 79 });
+    expect(PRESCRIBED_HR_ZONES[EASY_HR_ZONE]).toMatchObject({
+      minPercentOfMax: 65,
+      maxPercentOfMax: 79,
+    });
+  });
+
+  it('reste à un demi-point de FC max de la cible, quelle que soit la référence', () => {
+    // L'écart que l'arrondi à l'entier peut introduire, et rien de plus : un
+    // demi-point de la référence, soit environ 1 bpm — le bruit d'un cardio.
+    for (let reference = 150; reference <= 220; reference += 1) {
+      const percent = hrTargetPercentOfMax(ENDURANCE, reference);
+      if (percent === null) throw new Error(`référence ${reference} refusée`);
+
+      const tolerance = reference / 200 + 1e-9;
+      const min = (percent.minPercent / 100) * reference;
+      const max = (percent.maxPercent / 100) * reference;
+      expect(Math.abs(min - ENDURANCE.minBpm), `min à ${reference}`).toBeLessThanOrEqual(tolerance);
+      expect(Math.abs(max - ENDURANCE.maxBpm), `max à ${reference}`).toBeLessThanOrEqual(tolerance);
+    }
+  });
+
+  it('rend null sur une référence absente ou aberrante', () => {
+    expect(hrTargetPercentOfMax(ENDURANCE, null)).toBeNull();
+    expect(hrTargetPercentOfMax(ENDURANCE, Number.NaN)).toBeNull();
+    // Mêmes bornes de plausibilité que la prescription elle-même.
+    expect(hrTargetPercentOfMax(ENDURANCE, 119)).toBeNull();
+    expect(hrTargetPercentOfMax(ENDURANCE, 231)).toBeNull();
+  });
+
+  it('accepte une référence non entière — ce n’est qu’un dénominateur', () => {
+    expect(hrTargetPercentOfMax(ENDURANCE, 184.5)).not.toBeNull();
   });
 });
 

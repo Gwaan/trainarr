@@ -25,6 +25,7 @@ const { api } = vi.hoisted(() => ({
     listWorkoutEvents: vi.fn(),
     createWorkoutEvents: vi.fn(),
     deleteCalendarEvents: vi.fn(),
+    fetchRunMaxHr: vi.fn(),
   },
 }));
 const { dal } = vi.hoisted(() => ({
@@ -126,6 +127,8 @@ beforeEach(() => {
   api.deleteCalendarEvents.mockImplementation(
     async ({ ids }: { ids: readonly unknown[] }) => ids.length,
   );
+  // La FC max du compte distant : 205, là où le profil Trainarr en porte 184.
+  api.fetchRunMaxHr.mockResolvedValue(205);
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
   // Profil sans FC max par défaut : le régime de repli, celui que tous les cas
   // ci-dessous décrivent. Ceux qui prescrivent en fréquence cardiaque la posent
@@ -254,7 +257,9 @@ describe('buildWorkoutEvents', () => {
 
     expect(workout.description).toBe(
       [
-        '- Echauffement 15m Z2 HR',
+        // Aucune FC max n'est fournie ici : l'échauffement en zone sort sur sa
+        // seule mesure, le fractionné garde ses allures.
+        '- Echauffement 15m',
         '',
         '6x',
         '- Course 800mtr 3:55-4:05/km Pace',
@@ -269,11 +274,12 @@ describe('buildWorkoutEvents', () => {
   });
 
   /**
-   * La FC max ne vit **que** dans le profil : elle n'est jamais figée dans une
-   * étape. Elle entre ici, à la publication — donc une correction du profil
-   * repart au calendrier à la synchronisation suivante, sans réécrire un plan.
+   * Les deux FC max entrent ici, à la publication : celle du profil (jamais
+   * figée dans une étape) et celle du compte intervals.icu (relue à chaque
+   * synchronisation). Corriger l'une ou l'autre repart donc au calendrier à la
+   * synchronisation suivante, sans réécrire un plan.
    */
-  it('traduit les zones cardiaques en battements quand la FC max est connue', () => {
+  it('traduit les zones cardiaques en pourcentage de la FC max distante', () => {
     const easySession = session({
       scheduledOn: '2026-08-18',
       kind: 'Endurance fondamentale',
@@ -298,13 +304,25 @@ describe('buildWorkoutEvents', () => {
       ],
     });
 
-    const [withHr] = buildWorkoutEvents(3, [easySession], 184);
-    expect(withHr.description).toBe('- Course 7km 120-145 bpm HR');
+    // 120–145 bpm prescrits sur une FC max de 184, ramenés au dénominateur du
+    // compte distant (205) : la même prescription, en battements exacts chez eux.
+    const [withHr] = buildWorkoutEvents(3, [easySession], {
+      profileMaxHrBpm: 184,
+      intervalsMaxHrBpm: 205,
+    });
+    expect(withHr.description).toBe('- Course 7km 59-71% HR');
 
-    // Sans FC max, la zone part telle quelle : le comportement d'avant, au bit
-    // près. C'est le repli si le parseur refusait la plage en battements.
+    // FC max distante illisible : aucune cible cardiaque n'est écrite. Un
+    // `Z2 HR` prescrirait les zones du compte (77–81 % de la max) à la place de
+    // l'endurance — une cible fausse est pire qu'une cible absente.
+    const [withoutRemote] = buildWorkoutEvents(3, [easySession], {
+      profileMaxHrBpm: 184,
+      intervalsMaxHrBpm: null,
+    });
+    expect(withoutRemote.description).toBe('- Course 7km');
+
     const [without] = buildWorkoutEvents(3, [easySession]);
-    expect(without.description).toBe('- Course 7km Z2 HR');
+    expect(without.description).toBe('- Course 7km');
   });
 
   it('reste en texte plat pour une séance sans mesure : rien à structurer', () => {
@@ -452,7 +470,9 @@ describe('buildWorkoutEvents — séance mesurée sans déroulé', () => {
       }),
     ]);
 
-    expect(workout.description).toBe('- Echauffement 2km Z2 HR');
+    // La séance porte pourtant une allure cible : elle n'est pas reprise, et
+    // l'étape en zone sort sans cible faute de FC max fournie.
+    expect(workout.description).toBe('- Echauffement 2km');
   });
 });
 
@@ -636,15 +656,20 @@ describe('syncPlanToIntervals', () => {
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
   });
 
-  it('lit la FC max du profil et la fait descendre jusqu’à la description', async () => {
-    dal.getAthleteProfile.mockResolvedValue({
+  /** Un profil qui porte la vraie FC max de l'athlète. */
+  function profileWithMaxHr(maxHrBpm: number | null): Record<string, unknown> {
+    return {
       displayName: 'Gwen',
       sex: 'female',
-      maxHrBpm: 184,
+      maxHrBpm,
       restingHrBpm: null,
       weightKg: null,
       birthDate: null,
-    });
+    };
+  }
+
+  /** Un plan d'une seule séance d'endurance, ciblée en zone cardiaque. */
+  function planWithEnduranceSession(): void {
     dal.getActivePlanWithSessions.mockResolvedValue({
       plan: PLAN,
       sessions: [
@@ -670,11 +695,95 @@ describe('syncPlanToIntervals', () => {
         }),
       ],
     });
+  }
+
+  /** La description du premier event publié. */
+  function publishedDescription(): string {
+    const { events } = api.createWorkoutEvents.mock.calls[0][0];
+    return events[0].description as string;
+  }
+
+  it('croise la FC max du profil et celle du compte distant dans la description', async () => {
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    planWithEnduranceSession();
 
     await syncPlanToIntervals();
 
-    const { events } = api.createWorkoutEvents.mock.calls[0][0];
-    expect(events[0].description).toBe('- Course 7km 120-145 bpm HR');
+    // 120–145 bpm sur une FC max de 184, exprimés en pourcentage de la FC max
+    // du compte (205) : la montre y retrouve les mêmes battements.
+    expect(publishedDescription()).toBe('- Course 7km 59-71% HR');
+  });
+
+  it('ne lit la FC max distante qu’une fois par synchronisation', async () => {
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN,
+      sessions: [
+        session({ id: 1, scheduledOn: '2026-08-18' }),
+        session({ id: 2, scheduledOn: '2026-08-19' }),
+        session({ id: 3, scheduledOn: '2026-08-20' }),
+      ],
+    });
+
+    await syncPlanToIntervals();
+
+    expect(api.fetchRunMaxHr).toHaveBeenCalledTimes(1);
+    expect(api.fetchRunMaxHr).toHaveBeenCalledWith(
+      expect.objectContaining({ athleteId: '0', apiKey: API_KEY }),
+    );
+  });
+
+  it('publie sans cible cardiaque, et le dit, quand les réglages sport sont illisibles', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.fetchRunMaxHr.mockRejectedValue(new Error('HTTP 500'));
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    planWithEnduranceSession();
+
+    // L'échec de cette lecture n'emporte pas la synchronisation : le calendrier
+    // reste publié, distances et durées comprises.
+    await expect(syncPlanToIntervals()).resolves.toEqual({
+      status: 'synced',
+      pushed: 1,
+      deleted: 0,
+    });
+    expect(publishedDescription()).toBe('- Course 7km');
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining('réglages sport intervals.icu illisibles'),
+      expect.any(Error),
+    );
+  });
+
+  it('publie sans cible cardiaque, et le dit, quand le compte distant n’a pas de FC max', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.fetchRunMaxHr.mockResolvedValue(null);
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    planWithEnduranceSession();
+
+    await syncPlanToIntervals();
+
+    expect(publishedDescription()).toBe('- Course 7km');
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('FC max absente des réglages sport'));
+  });
+
+  it('n’interroge pas les réglages sport sans FC max au profil', async () => {
+    // Rien à traduire : sans FC max au profil, aucune zone ne se prescrit, et le
+    // dénominateur distant n'aurait rien à dénommer.
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(null));
+    planWithEnduranceSession();
+
+    await syncPlanToIntervals();
+
+    expect(api.fetchRunMaxHr).not.toHaveBeenCalled();
+    expect(publishedDescription()).toBe('- Course 7km');
+  });
+
+  it('n’interroge pas les réglages sport sans plan actif', async () => {
+    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getActivePlanWithSessions.mockResolvedValue(null);
+
+    await syncPlanToIntervals();
+
+    expect(api.fetchRunMaxHr).not.toHaveBeenCalled();
   });
 
   it("n'émet aucune suppression quand la publication échoue", async () => {

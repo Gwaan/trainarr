@@ -19,7 +19,7 @@
  *   `mtr` pour les mètres, jamais `m`, qui vaut « minutes ».
  * - Allure : `4:30/km Pace`, ou une plage `4:25-4:35/km Pace` (la borne rapide,
  *   c'est-à-dire le plus petit nombre de secondes par kilomètre, d'abord).
- * - Zone cardiaque : `Z2 HR`.
+ * - Fréquence cardiaque : `65-79% HR` — cf. la section dédiée.
  * - Bloc répété : une ligne `3x` seule, puis les étapes du bloc, **encadrée de
  *   lignes vides** — c'est cette séparation qui délimite le bloc pour le
  *   parseur. Pas d'imbrication (le schéma ne l'autorise pas davantage).
@@ -28,30 +28,88 @@
  * d'allure ni de fréquence cardiaque reste une étape libre, on ne lui invente
  * pas d'intensité.
  *
- * ## Fréquence cardiaque : une plage en bpm, pas un numéro de zone
+ * ## Fréquence cardiaque : forme vérifiée empiriquement le 12/08/2026 sur le compte réel
  *
- * `Z2 HR` référence la **configuration de zones du compte intervals.icu**, que
- * Trainarr ne contrôle pas : si l'athlète y a laissé les zones par défaut d'une
- * montre grand public, le « Z2 » poussé vaudrait 60–70 % de FC max là où le plan
- * en veut 65–79 % (cf. `lib/metrics/hr-targets`). La prescription changerait de
- * sens en chemin, sans que rien ne le signale.
+ * Le `workout_doc` envoyé avec un event est **ignoré** : intervals.icu le
+ * régénère depuis le texte de `description`. Le dialecte textuel est donc le seul
+ * canal, et une cible qu'il ne parse pas est du texte mort — elle s'affiche au
+ * calendrier et la montre n'en voit rien, ni plage ni alerte.
  *
- * Dès que la FC max est connue, la cible part donc en **battements explicites**,
- * sur le modèle exact de la plage d'allure : `120-145 bpm HR`. Elle ne dépend
- * plus d'aucun réglage distant.
+ * 29 events de test ont été poussés sur le compte réel puis relus (champ
+ * `workout_doc.steps[].hr` de l'event enregistré) avant d'être supprimés. Ce qui
+ * en ressort :
  *
- * **Cette forme n'est pas vérifiée empiriquement** sur le compte réel — la
- * documentation du builder n'en donne pas d'exemple, et le parseur n'est pas
- * public. Elle est le décalque de `4:25-4:35/km Pace`, qui est documentée et
- * fonctionne : même position dans la ligne, même ordre des bornes, même suffixe
- * de type (`HR`). Un test la fige pour qu'une correction future soit une
- * décision et non une dérive. Si le parseur la refuse, le repli connu est
- * `Z2 HR` — c'est ce qui sort déjà sans FC max.
+ * | Forme écrite      | Ce qu'intervals.icu en fait                 |
+ * |-------------------|---------------------------------------------|
+ * | `65-79% HR`       | `hr {start:65, end:79, units:"%hr"}` — pourcentage de la **FC max du compte** |
+ * | `65-79% LTHR`     | `units:"%lthr"` — pourcentage du **seuil**  |
+ * | `Z2 HR`           | `units:"hr_zone"` — les **zones du compte** |
+ * | `65-79% MaxHR`    | **`power {units:"%ftp"}`** — de la puissance |
+ * | `65-79% HRmax`    | idem : puissance                            |
+ * | `65-79% Max HR`   | idem : puissance                            |
+ * | `120-145 bpm HR`, `120-145bpm`, `145bpm`, `HR 120-145`, `120-145hr` | **rien** : aucune cible |
+ *
+ * Trois conséquences, dans cet ordre :
+ *
+ * 1. **Aucune forme en bpm absolus ne parse.** La cible ne peut partir qu'en
+ *    pourcentage, quelle que soit l'envie qu'on ait d'écrire des battements.
+ * 2. **Le suffixe est porteur, et `MaxHR` est un piège** : il a l'air du plus
+ *    explicite des trois, et c'est le seul qui quitte le domaine cardiaque pour
+ *    atterrir en puissance — une cible silencieusement fausse, sur une grandeur
+ *    qu'une coureuse ne mesure même pas. Seuls ` HR` et ` LTHR` atteignent la FC.
+ *    Un test le fige.
+ * 3. **`Z2 HR` est écarté** : il référence la configuration de zones du compte,
+ *    que Trainarr ne contrôle pas. Mesuré sur ce compte, il vaut 77–81 % de la FC
+ *    max là où le plan en veut 65–79 % (cf. `lib/metrics/hr-targets`) — la
+ *    prescription changerait de sens en chemin, sans que rien ne le signale.
+ *
+ * ## Le pourcentage émis est celui de **leur** FC max, pas de la nôtre
+ *
+ * `% HR` se résout sur la FC max du compte intervals.icu, et rien ne dit qu'elle
+ * égale celle du profil Trainarr : celui de cette athlète porte 205, sa vraie FC
+ * max est 184. Écrire les 65–79 % du créneau prescrit tel quel donnerait
+ * 133–162 bpm à la montre — du seuil au lieu d'une endurance.
+ *
+ * La chaîne est donc : la zone se résout en **battements** sur la FC max du
+ * profil (`hrZoneTargetBpm`, source unique de vérité), puis ces battements se
+ * ramènent en pourcentage de la FC max **distante**, lue à chaque publication
+ * (`hrTargetPercentOfMax`). 120–145 bpm deviennent `59-71% HR` sur une référence
+ * de 205, `65-79% HR` sur une référence de 184 : la même prescription, exprimée
+ * dans les termes du destinataire.
+ *
+ * ## Sans référence distante, pas de cible cardiaque du tout
+ *
+ * Si la FC max distante manque — API en erreur, champ absent, valeur aberrante —
+ * l'étape ne reçoit **aucune** cible de fréquence cardiaque. Ni `Z2 HR`, dont on
+ * sait qu'il prescrit autre chose, ni un pourcentage calculé sur une référence
+ * devinée. Une cible fausse est pire qu'une cible absente : elle se surveille.
+ * Ce qui reste est ce qui a toujours fonctionné — la mesure de l'étape, et sa
+ * cible d'allure quand elle en porte une.
  */
 
-import { hrZoneTargetBpm } from '@/lib/metrics/hr-targets';
+import { hrTargetPercentOfMax, hrZoneTargetBpm } from '@/lib/metrics/hr-targets';
 
 import { toSingleLine, type PlanSessionSteps, type PlanStep, type PlanStepRole } from './schema';
+
+/**
+ * Les deux fréquences cardiaques maximales que la sérialisation doit tenir
+ * ensemble — cf. l'en-tête.
+ *
+ * Elles ne jouent pas le même rôle et ne sont pas interchangeables : la première
+ * **prescrit**, la seconde **traduit**.
+ */
+export type HrReference = {
+  /**
+   * La FC max du profil Trainarr, seule source de la prescription : c'est elle
+   * qui dit à quels battements se court la zone.
+   */
+  profileMaxHrBpm: number | null;
+  /**
+   * La FC max que porte le compte intervals.icu, lue à la publication : le
+   * dénominateur du pourcentage émis, et rien d'autre.
+   */
+  intervalsMaxHrBpm: number | null;
+};
 
 /**
  * Intitulés de rôle, en ASCII pur.
@@ -106,13 +164,19 @@ function formatDistanceToken(distanceM: number): string {
 }
 
 /**
- * La cible de l'étape, ou `null` quand elle n'en porte pas.
+ * La cible de l'étape, ou `null` quand elle n'en porte pas — et **jamais** une
+ * cible qu'on ne sait pas exprimer.
  *
- * @param maxHrBpm la FC max du profil : elle seule permet de traduire un rang de
- * zone en battements (cf. l'en-tête). `null` — ou une zone dont le créneau n'est
- * pas déclaré — laisse sortir le `Z<n> HR` d'origine.
+ * L'allure passe devant : elle est absolue, elle ne dépend d'aucun réglage
+ * distant, et une étape qui en porte une est prescrite en allure. Le suffixe
+ * cardiaque est écrit ` HR` et rien d'autre — ` MaxHR` partirait en puissance
+ * (cf. l'en-tête).
+ *
+ * @param hr les deux FC max, celle qui prescrit et celle qui traduit. `null`,
+ * l'une manquante, hors bornes, ou une zone sans créneau de prescription
+ * déclaré : l'étape sort **sans** cible cardiaque.
  */
-function formatTargetToken(step: PlanStep, maxHrBpm: number | null): string | null {
+function formatTargetToken(step: PlanStep, hr: HrReference | null): string | null {
   if (step.paceMinSecPerKm !== null && step.paceMaxSecPerKm !== null) {
     const min = paceClock(step.paceMinSecPerKm);
     // Bornes égales : une allure unique, pas une plage de largeur nulle.
@@ -120,12 +184,15 @@ function formatTargetToken(step: PlanStep, maxHrBpm: number | null): string | nu
     return `${min}-${paceClock(step.paceMaxSecPerKm)}/km Pace`;
   }
 
-  if (step.hrZone === null) return null;
+  if (step.hrZone === null || hr === null) return null;
 
-  const target = hrZoneTargetBpm(step.hrZone, maxHrBpm);
-  if (target === null) return `Z${step.hrZone} HR`;
+  const target = hrZoneTargetBpm(step.hrZone, hr.profileMaxHrBpm);
+  if (target === null) return null;
 
-  return `${target.minBpm}-${target.maxBpm} bpm HR`;
+  const percent = hrTargetPercentOfMax(target, hr.intervalsMaxHrBpm);
+  if (percent === null) return null;
+
+  return `${percent.minPercent}-${percent.maxPercent}% HR`;
 }
 
 /**
@@ -140,7 +207,7 @@ function formatTargetToken(step: PlanStep, maxHrBpm: number | null): string | nu
  * ce sérialiseur reçoit aussi des `steps` écrits en base avant cette contrainte,
  * et un retour à la ligne y ouvrirait une étape fantôme.
  */
-function stepLine(step: PlanStep, maxHrBpm: number | null): string {
+function stepLine(step: PlanStep, hr: HrReference | null): string {
   const label = ROLE_LABELS[step.role];
   const note = step.note === null ? '' : toSingleLine(step.note);
   const cue = note === '' ? label : `${label} - ${note}`;
@@ -153,7 +220,7 @@ function stepLine(step: PlanStep, maxHrBpm: number | null): string {
         ? formatDurationToken(step.durationS)
         : null;
 
-  const parts = [cue, measure, formatTargetToken(step, maxHrBpm)].filter(
+  const parts = [cue, measure, formatTargetToken(step, hr)].filter(
     (part): part is string => part !== null,
   );
 
@@ -168,13 +235,13 @@ function stepLine(step: PlanStep, maxHrBpm: number | null): string {
  * bruit, et une ligne vide de séparation inviterait le parseur à découper là où
  * il n'y a rien à découper.
  *
- * @param maxHrBpm la FC max du profil, qui traduit les zones cardiaques en
- * battements explicites (cf. l'en-tête). Omise ou `null` : les zones sortent en
- * `Z<n> HR`, exactement comme avant.
+ * @param hr les deux FC max qui rendent une cible cardiaque exprimable (cf.
+ * l'en-tête). Omise ou incomplète : les étapes ciblées en zone sortent sans
+ * cible, plutôt qu'avec une cible que Trainarr ne contrôle pas.
  */
 export function stepsToIntervalsSyntax(
   steps: PlanSessionSteps,
-  maxHrBpm: number | null = null,
+  hr: HrReference | null = null,
 ): string {
   const lines: string[] = [];
 
@@ -187,12 +254,12 @@ export function stepsToIntervalsSyntax(
     if (block.repeat > 1) {
       separate();
       lines.push(`${block.repeat}x`);
-      lines.push(...block.steps.map((step) => stepLine(step, maxHrBpm)));
+      lines.push(...block.steps.map((step) => stepLine(step, hr)));
       lines.push('');
       continue;
     }
 
-    lines.push(...block.steps.map((step) => stepLine(step, maxHrBpm)));
+    lines.push(...block.steps.map((step) => stepLine(step, hr)));
   }
 
   // La ligne vide qui suit un bloc répété final n'a rien à séparer.

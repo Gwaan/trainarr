@@ -143,6 +143,66 @@ export function hrZoneTargetBpm(zone: number, maxHrBpm: number | null): HrTarget
   };
 }
 
+/** Une cible cardiaque exprimée en **pourcentage d'une FC max de référence**. */
+export type HrTargetPercentOfMax = {
+  minPercent: number;
+  maxPercent: number;
+};
+
+/**
+ * La même cible, ramenée en pourcentage d'une FC max **de référence** — `null`
+ * quand cette référence est inutilisable (absente, non finie, hors des bornes de
+ * plausibilité {@link PRESCRIPTION_MAX_HR_BOUNDS}).
+ *
+ * ## Pourquoi une deuxième FC max
+ *
+ * La prescription, elle, ne dépend que du profil : `hrZoneTargetBpm` en tire des
+ * **battements**, qui sont la vérité de la séance. Mais certains destinataires
+ * n'acceptent pas de battements et ne savent lire qu'un pourcentage de *leur*
+ * propre FC max — c'est le cas du dialecte de séance d'intervals.icu, dont le
+ * parseur ignore toute forme en bpm absolus (vérifié le 12/08/2026 sur le compte
+ * réel, cf. `lib/plan-steps/intervals-syntax`). Repasser par le pourcentage de
+ * **leur** référence est alors le seul moyen que la cible se résolve chez eux sur
+ * les battements que nous avons prescrits — et non sur une zone qu'ils auraient
+ * configurée à leur idée.
+ *
+ * La référence n'est donc **pas** une source de prescription : c'est un
+ * dénominateur. Elle n'a aucune raison d'égaler la FC max du profil (le compte
+ * intervals.icu de cette athlète porte 205 là où son profil porte 184), et c'est
+ * précisément l'écart que cette conversion absorbe.
+ *
+ * ## L'arrondi
+ *
+ * Les deux bornes sont arrondies **au plus proche**, et pas resserrées vers
+ * l'intérieur : le pourcentage émis doit redonner les battements d'origine quand
+ * la référence est celle du profil — 120–145 bpm sur une FC max de 184 valent
+ * 65–79 %, exactement les bornes du créneau prescrit. Resserrer donnerait
+ * 66–78 %, c'est-à-dire une plage plus étroite que celle que le plan prescrit,
+ * sans que rien ne l'ait décidé. L'écart maximal introduit est d'un demi-point
+ * de FC max, soit environ 1 bpm — l'ordre de grandeur du bruit d'un cardio.
+ *
+ * Contrairement à {@link hrZoneTargetBpm}, la référence n'a pas à être entière :
+ * un entier y signale une saisie humaine saine, alors qu'ici la valeur vient
+ * d'un service tiers et ne sert qu'à diviser.
+ */
+export function hrTargetPercentOfMax(
+  target: HrTargetBpm,
+  referenceMaxHrBpm: number | null,
+): HrTargetPercentOfMax | null {
+  if (referenceMaxHrBpm === null || !Number.isFinite(referenceMaxHrBpm)) return null;
+  if (
+    referenceMaxHrBpm < PRESCRIPTION_MAX_HR_BOUNDS.min ||
+    referenceMaxHrBpm > PRESCRIPTION_MAX_HR_BOUNDS.max
+  ) {
+    return null;
+  }
+
+  return {
+    minPercent: Math.round((target.minBpm / referenceMaxHrBpm) * 100),
+    maxPercent: Math.round((target.maxBpm / referenceMaxHrBpm) * 100),
+  };
+}
+
 /**
  * `true` quand l'appli est en mesure de prescrire en fréquence cardiaque.
  *
