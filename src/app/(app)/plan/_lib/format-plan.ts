@@ -94,13 +94,21 @@ export function formatCivilRange(from: string, to: string): string {
 }
 
 /**
- * Jour d'une séance dans sa semaine, ex. `Lun 18`.
+ * Abréviation du jour de la semaine, ex. `Lun`.
  *
- * Le point abréviatif de `Intl` (« lun. ») est retiré : la colonne est en
- * chiffres tabulaires, un point flottant en casserait l'alignement.
+ * Le point abréviatif de `Intl` (« lun. ») est retiré : ces libellés voisinent
+ * des chiffres tabulaires, et un point flottant en casserait l'alignement.
  */
+export function formatWeekdayShort(civilDate: string): string {
+  return capitalize(shortWeekdayFormatter.format(asDate(civilDate)).replace(".", ""));
+}
+
+/** Quantième du mois, ex. `18` — sans zéro de tête. */
+export function formatDayNumber(civilDate: string): string {
+  return dayNumberFormatter.format(asDate(civilDate));
+}
+
+/** Jour d'une séance dans sa semaine, ex. `Lun 18`. */
 export function formatSessionDay(civilDate: string): string {
-  const date = asDate(civilDate);
-  const weekday = shortWeekdayFormatter.format(date).replace(".", "");
-  return `${capitalize(weekday)} ${dayNumberFormatter.format(date)}`;
+  return `${formatWeekdayShort(civilDate)} ${formatDayNumber(civilDate)}`;
 }

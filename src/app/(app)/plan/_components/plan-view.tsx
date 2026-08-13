@@ -18,7 +18,14 @@ import { PlanWeekCard } from "./plan-week-card";
  * l'ajustement, qui exige le modèle, disparaît au profit d'une note.
  */
 
-const SUSPENDED_NOTE: Record<AiUnavailableReason, string> = {
+/**
+ * Ce que dit le panneau « Ajuster le plan » quand le coach ne répond pas.
+ *
+ * Exporté parce que la vue **calendrier** porte le même panneau : la note doit y
+ * être la même au caractère près, sans quoi la même panne se raconterait de deux
+ * façons selon l'onglet ouvert.
+ */
+export const SUSPENDED_NOTE: Record<AiUnavailableReason, string> = {
   unconfigured:
     "Ajustement suspendu : aucune API IA n'est configurée (AI_BASE_URL). Ton plan reste consultable.",
   unreachable:

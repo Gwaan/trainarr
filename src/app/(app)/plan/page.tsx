@@ -4,15 +4,30 @@ import { connection } from "next/server";
 
 import { AiSuspendedPanel, type SuspendedAiFeature } from "@/components/ai-suspended-panel";
 import { PageHeader } from "@/components/page-header";
+import { Panel } from "@/components/panel";
 import { getAthleteProfile } from "@/data/athlete";
+import { getCalendarRange } from "@/data/calendar";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
+import { PlanAdjustForm } from "./_components/plan-adjust-form";
+import { PlanCalendar } from "./_components/plan-calendar";
+import { PlanCalendarToolbar } from "./_components/plan-calendar-toolbar";
+import { PlanOverview } from "./_components/plan-overview";
 import { PlanCreatePanel } from "./_components/plan-create-panel";
 import { PlanProposal } from "./_components/plan-proposal";
 import { PlanSkeleton } from "./_components/plan-skeleton";
-import { PlanView } from "./_components/plan-view";
+import { PlanView, SUSPENDED_NOTE } from "./_components/plan-view";
+import { toCalendarActivityView } from "./_lib/calendar-model";
+import {
+  civilMonth,
+  monthGridRange,
+  MONTH_PARAM,
+  parseMonthParam,
+  parsePlanViewParam,
+  PLAN_VIEW_PARAM,
+} from "./_lib/calendar-params";
 import {
   earliestPlanStart,
   earliestRaceDate,
@@ -24,11 +39,16 @@ export const metadata: Metadata = {
   title: "Plan",
 };
 
+type PageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+};
+
 const SUBTITLES = {
   create:
     "Décris ton objectif : le coach écrit le plan autour de ta charge d'entraînement actuelle.",
   review: "Le coach te propose un plan. Lis-le en entier, puis adopte-le ou refuse-le.",
-  view: "Ton programme semaine par semaine, ajusté à ta charge réelle.",
+  calendar: "Glisse une séance d'un jour à l'autre pour la replanifier.",
+  list: "Ton programme semaine par semaine, ajusté à ta charge réelle.",
 } as const;
 
 /** Ce que cette page perd quand le coach ne répond pas. */
@@ -52,16 +72,27 @@ const PLAN_CREATION: SuspendedAiFeature = {
  * conversion se fait à l'affichage, jamais à l'écriture du plan — une FC max
  * corrigée met donc tout le programme à jour au rechargement suivant.
  */
-async function PlanContent() {
+async function PlanContent({ searchParams }: PageProps) {
   await connection();
-  const [active, draft, availability, profile] = await Promise.all([
+
+  const today = toCivilDate(new Date());
+  const currentMonth = civilMonth(today);
+
+  // Lus avant le `Promise.all` : c'est le mois demandé qui décide de la plage à
+  // lire, et la vue n'est qu'un aiguillage d'affichage.
+  const params = await searchParams;
+  const view = parsePlanViewParam(params[PLAN_VIEW_PARAM]);
+  const month = parseMonthParam(params[MONTH_PARAM], currentMonth);
+  const range = monthGridRange(month);
+
+  const [active, draft, availability, profile, calendar] = await Promise.all([
     getActivePlanWithSessions(),
     getDraftPlanWithSessions(),
     getAiAvailability(),
     getAthleteProfile(),
+    getCalendarRange(range.from, range.to),
   ]);
 
-  const today = toCivilDate(new Date());
   const maxHrBpm = profile?.maxHrBpm ?? null;
 
   /*
@@ -129,26 +160,84 @@ async function PlanContent() {
     );
   }
 
+  /*
+   * Plan actif : deux lectures du même programme, et c'est le **calendrier** qui
+   * ouvre. C'est la vue qui répond à la question qu'on se pose en arrivant —
+   * « qu'est-ce que je cours, et quand ? » — et la seule où une séance se
+   * déplace. La liste, qui déroule le détail semaine par semaine et porte les
+   * actions sur le plan (ajuster, archiver, resynchroniser), reste à une tape.
+   */
   return (
     <>
-      <PageHeader title="Plan" subtitle={SUBTITLES.view} />
-      {/* Le plan reste consultable même coach éteint : seule l'IA est suspendue. */}
-      <PlanView
-        plan={active.plan}
-        sessions={active.sessions}
-        today={today}
-        maxHrBpm={maxHrBpm}
-        unavailableReason={availability.available ? null : availability.reason}
+      <PageHeader
+        title="Plan"
+        subtitle={view === "calendrier" ? SUBTITLES.calendar : SUBTITLES.list}
       />
+
+      <PlanCalendarToolbar view={view} month={month} currentMonth={currentMonth} />
+
+      {view === "calendrier" ? (
+        <>
+          {/*
+            Le calendrier étant la vue par défaut, ces deux blocs ne peuvent pas
+            vivre dans la seule vue liste : l'objectif est ce qui donne son sens
+            à la grille, et le champ d'ajustement est le seul endroit d'où le
+            plan se modifie — c'est là que le coach renvoie l'athlète, dans son
+            prompt système. Le reste des actions (resynchro, archivage) reste
+            en liste : on les cherche, on ne tombe pas dessus.
+          */}
+          <Panel title="Objectif">
+            <PlanOverview plan={active.plan} />
+          </Panel>
+          <PlanCalendar
+            month={month}
+            range={range}
+            today={today}
+            plan={calendar.plan}
+            sessions={calendar.sessions}
+            // Projeté ici, pas au passage de la frontière client : le DTO du DAL
+            // porte le type de sport et l'allure moyenne, dont le calendrier ne
+            // fait rien — et rien de superflu ne franchit la frontière.
+            activities={calendar.activities.map(toCalendarActivityView)}
+          />
+          <Panel title="Ajuster le plan">
+            {availability.available ? (
+              <PlanAdjustForm />
+            ) : (
+              // La même note que la vue liste : sans elle, l'athlète ne peut pas
+              // distinguer « suspendu » de « n'existe pas ».
+              <p className="text-[0.82rem] leading-relaxed text-fg-faint">
+                {SUSPENDED_NOTE[availability.reason]}
+              </p>
+            )}
+          </Panel>
+        </>
+      ) : (
+        // Le plan reste consultable même coach éteint : seule l'IA est suspendue.
+        <PlanView
+          plan={active.plan}
+          sessions={active.sessions}
+          today={today}
+          maxHrBpm={maxHrBpm}
+          unavailableReason={availability.available ? null : availability.reason}
+        />
+      )}
     </>
   );
 }
 
-export default function PlanPage() {
+/**
+ * Le `searchParams` n'est pas attendu ici mais dans l'enfant suspendu, et
+ * `connection()` y bascule la route en Partial Prerender : coquille statique
+ * immédiate, données streamées à la requête. Sans lui, `cacheComponents: true`
+ * prérendrait la page pendant `next build` (image Docker), où ni la base ni
+ * l'API IA n'existent. Cf. `.claude/rules/nextjs.md`.
+ */
+export default function PlanPage({ searchParams }: PageProps) {
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
       <Suspense fallback={<PlanSkeleton />}>
-        <PlanContent />
+        <PlanContent searchParams={searchParams} />
       </Suspense>
     </div>
   );

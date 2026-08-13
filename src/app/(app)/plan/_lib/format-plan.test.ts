@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   formatCivilDay,
   formatCivilRange,
+  formatDayNumber,
   formatIsoDay,
   formatSessionDay,
+  formatWeekdayShort,
   ISO_DAY_LABELS,
 } from './format-plan';
 
@@ -46,6 +48,21 @@ describe('formatCivilRange', () => {
     expect(formatCivilRange('2026-12-28', '2027-01-03')).toBe(
       '28 déc. 2026 – 3 janv. 2027',
     );
+  });
+});
+
+describe('formatWeekdayShort', () => {
+  it('capitalise et retire le point abréviatif d’`Intl`', () => {
+    // 18 août 2026 est un mardi, le 23 un dimanche.
+    expect(formatWeekdayShort('2026-08-18')).toBe('Mar');
+    expect(formatWeekdayShort('2026-08-23')).toBe('Dim');
+  });
+});
+
+describe('formatDayNumber', () => {
+  it('rend le quantième sans zéro de tête', () => {
+    expect(formatDayNumber('2026-08-01')).toBe('1');
+    expect(formatDayNumber('2026-08-18')).toBe('18');
   });
 });
 
