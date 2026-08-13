@@ -3,7 +3,12 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import type { TrainingPaces } from '@/lib/metrics/vdot';
-import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
+import {
+  planSessionStepsSchema,
+  type PlanSessionSteps,
+  type PlanStep,
+  type PlanStepRole,
+} from '@/lib/plan-steps/schema';
 
 import type { SessionBudget } from './format';
 import {
@@ -44,6 +49,8 @@ function step(role: PlanStepRole, overrides: Partial<PlanStep> = {}): PlanStep {
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     note: null,
     ...overrides,
   };
@@ -2742,6 +2749,91 @@ describe('applyImposedPaces — endurance en fréquence cardiaque', () => {
 
   it('ne prescrit rien en FC sur une FC max implausible', () => {
     expect(imposeEasy({ distanceKm: 7 }, 60).steps).toBeUndefined();
+  });
+
+  /**
+   * Le **sous-créneau** que le squelette écrit sur certains blocs (« le haut de
+   * la plage » d'une fin de sortie longue, les trois tranches d'un progressif,
+   * cf. `plan-skeleton/variations`).
+   *
+   * Il traverse le post-traitement quand la séance se prescrit en fréquence
+   * cardiaque, et il est **effacé** dès qu'elle se prescrit en allure : une
+   * étape ne porte jamais deux cibles, et le contrat d'étapes refuserait le
+   * déroulé.
+   */
+  describe('le sous-créneau d’endurance', () => {
+    /** Une sortie longue à fin appuyée, telle que le squelette l'écrit. */
+    const finishSteps: PlanSessionSteps = [
+      { repeat: 1, steps: [step('run', { distanceM: 16_000, note: 'Sortie longue en endurance' })] },
+      {
+        repeat: 1,
+        steps: [
+          step('run', {
+            distanceM: 4_000,
+            note: 'Fin de parcours plus appuyée',
+            hrPercentMin: 74,
+            hrPercentMax: 79,
+          }),
+        ],
+      },
+    ];
+
+    it('survit à la pose de la zone, sur le bloc qui le porte et lui seul', () => {
+      const steps =
+        imposeEasy({ kind: 'Sortie longue', steps: finishSteps, distanceKm: 20 }).steps ?? [];
+
+      expect(steps[0].steps[0]).toMatchObject({
+        hrZone: 2,
+        hrPercentMin: null,
+        hrPercentMax: null,
+      });
+      expect(steps[1].steps[0]).toMatchObject({
+        hrZone: 2,
+        hrPercentMin: 74,
+        hrPercentMax: 79,
+        paceMinSecPerKm: null,
+      });
+    });
+
+    it('est effacé quand la séance se prescrit finalement en allure', () => {
+      const steps =
+        imposeEasy({ kind: 'Sortie longue', steps: finishSteps, distanceKm: 20 }, null).steps ?? [];
+
+      for (const block of steps) {
+        for (const candidate of block.steps) {
+          expect(candidate.hrPercentMin).toBeNull();
+          expect(candidate.hrPercentMax).toBeNull();
+          expect(candidate.paceMinSecPerKm).toBe(PACES.easy.minSecPerKm);
+        }
+      }
+      // Et le déroulé reste écrivable : allure et sous-créneau sont exclusifs.
+      expect(planSessionStepsSchema.safeParse(steps).success).toBe(true);
+    });
+
+    /**
+     * Ce que la tâche exige de prouver : **la cible change d'amplitude, pas la
+     * mesure**. Le même déroulé, bande retirée, rend la même distance, la même
+     * durée et la même allure de séance — donc le même budget temps.
+     */
+    it('ne change ni distance, ni durée, ni budget temps', () => {
+      const stripped: PlanSessionSteps = finishSteps.map((block) => ({
+        repeat: block.repeat,
+        steps: block.steps.map((candidate) => ({
+          ...candidate,
+          hrPercentMin: null,
+          hrPercentMax: null,
+        })),
+      }));
+
+      for (const maxHrBpm of [MAX_HR, null]) {
+        const banded = imposeEasy({ kind: 'Sortie longue', steps: finishSteps, distanceKm: 20 }, maxHrBpm);
+        const plain = imposeEasy({ kind: 'Sortie longue', steps: stripped, distanceKm: 20 }, maxHrBpm);
+
+        expect(banded.distanceKm, `FC max ${maxHrBpm}`).toBe(plain.distanceKm);
+        expect(banded.durationMin, `FC max ${maxHrBpm}`).toBe(plain.durationMin);
+        expect(banded.targetPaceSecPerKm, `FC max ${maxHrBpm}`).toBe(plain.targetPaceSecPerKm);
+      }
+    });
   });
 });
 

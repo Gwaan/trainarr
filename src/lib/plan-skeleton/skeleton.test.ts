@@ -1480,11 +1480,16 @@ describe('buildPlanSkeleton', () => {
         expect(['build', 'specific'], `semaine ${week.weekNumber}`).toContain(week.phase);
         const progressive = easySessions(week).find((s) => s.title === 'Footing progressif');
         const steps = flattenSteps(progressive?.steps ?? []);
-        // Une mise en route sans cible d'allure, puis deux tranches d'effort de
-        // plus en plus courtes : c'est la forme d'un progressif.
-        expect(steps.map((step) => step.role)).toEqual(['warmup', 'run', 'run']);
+        // Trois tranches de course, de plus en plus courtes : c'est la forme
+        // d'un progressif. La première en est une aussi — elle pèse 40 % de la
+        // séance, et l'avoir laissée en `warmup` la privait de toute cible.
+        expect(steps.map((step) => step.role)).toEqual(['run', 'run', 'run']);
         expect(steps[0].distanceM ?? 0).toBeGreaterThan(steps[1].distanceM ?? 0);
         expect(steps[1].distanceM ?? 0).toBeGreaterThan(steps[2].distanceM ?? 0);
+        // Et trois cibles distinctes, du bas vers le haut de la plage
+        // d'endurance : c'est ce qui rend la progression visible sur la montre.
+        expect(steps.map((step) => step.hrPercentMin)).toEqual([65, 70, 74]);
+        expect(steps.map((step) => step.hrPercentMax)).toEqual([71, 75, 79]);
       }
     });
 

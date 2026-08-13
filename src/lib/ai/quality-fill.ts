@@ -14,7 +14,7 @@ import 'server-only';
  * sait pas faire, c'est de l'arithmétique sur seize semaines (le constat
  * chiffré est en tête de `plan-skeleton/skeleton.ts`).
  *
- * ## Trois choses que le modèle n'écrit pas, et qu'il ne *peut* pas écrire
+ * ## Quatre choses que le modèle n'écrit pas, et qu'il ne *peut* pas écrire
  *
  * 1. **Le jour et le `kind`** : ils viennent du créneau. Ce sont eux qui font
  *    tenir la semaine (un jour) et qui décident de l'allure posée en aval (un
@@ -37,6 +37,14 @@ import 'server-only';
  *    Le déroulé déterministe, lui, *écrit* des notes — mais les siennes sont
  *    choisies pour ce mécanisme, pas malgré lui (cf. `ZONE_NOTES` dans
  *    `plan-skeleton/quality-template.ts`).
+ * 4. **Le titre.** Vu en production : « Seuil en 3 × 1,5 km + 1 × 1,0 km » sur
+ *    une séance de 5 km dont le déroulé ne portait que **deux** efforts — un
+ *    titre annonçant 5,5 km d'effort dans une séance de 5 km, que rien ne
+ *    pouvait voir puisque rien ne comparait les deux champs. C'est le même
+ *    arbitrage que ci-dessus : le titre est de l'arithmétique sur le déroulé,
+ *    donc il revient à l'appli ({@link qualitySessionTitle}), qui l'écrit
+ *    depuis les étapes — le repli déterministe compris, par le même
+ *    générateur.
  *
  * ## Le modèle structure, l'appli chiffre
  *
@@ -69,6 +77,7 @@ import { z } from 'zod';
 import type { PlanLevel } from '@/data/db/schema';
 import type { PlanPhase, QualitySlot, QualityZone } from '@/lib/plan-skeleton';
 import { qualitySessionTemplate } from '@/lib/plan-skeleton/quality-template';
+import { LAST_RESORT_TITLE, qualitySessionTitle } from '@/lib/plan-skeleton/quality-title';
 import {
   PLAN_STEP_BOUNDS,
   PLAN_STEP_ROLES,
@@ -241,9 +250,18 @@ const qualityStepsOutputSchema = z
   )
   .pipe(planSessionStepsSchema);
 
-/** Ce que le modèle rend pour un créneau : un titre et un déroulé. */
+/**
+ * Ce que le modèle rend pour un créneau : **un déroulé, et rien d'autre**.
+ *
+ * Le titre n'y est plus, et ce n'est pas une économie de tokens (il en coûtait
+ * une dizaine) : c'est la même règle que pour les durées et les allures. Vu en
+ * production, « Seuil en 3 × 1,5 km + 1 × 1,0 km » sur une séance de 5 km dont
+ * le déroulé ne portait que deux efforts — le titre annonçait 5,5 km d'effort
+ * dans une séance de 5 km, et rien ne pouvait le voir puisque rien ne comparait
+ * les deux champs. L'appli l'écrit désormais depuis les étapes
+ * ({@link qualitySessionTitle}), où il ne peut plus les contredire.
+ */
 export const qualitySessionOutputSchema = z.object({
-  title: z.string().min(1).max(PLAN_OUTPUT_BOUNDS.titleChars),
   steps: qualityStepsOutputSchema,
 });
 
@@ -258,19 +276,18 @@ export type QualitySessionOutput = z.infer<typeof qualitySessionOutputSchema>;
  * traduit pas toujours. `additionalProperties: false` partout — sans lui, la
  * grammaire autorise des champs inventés, que le modèle s'empresse d'inventer.
  *
- * Ce qui compte ici est autant ce qui **n'y est pas** : ni `durationS`, ni
- * `paceMinSecPerKm`, ni `paceMaxSecPerKm`, ni `hrZone`, ni `note`, ni `day`, ni
- * `kind`, ni `distanceKm`. Une clé absente de la grammaire ne peut pas être
- * écrite, là où une consigne de prompt se discute (et se perd, mesuré). À
- * l'inverse, `distanceM` est **obligatoire** sur chaque étape : c'est ce qui
- * rend un déroulé chronométré littéralement inexprimable.
+ * Ce qui compte ici est autant ce qui **n'y est pas** : ni `title`, ni
+ * `durationS`, ni `paceMinSecPerKm`, ni `paceMaxSecPerKm`, ni `hrZone`, ni
+ * `note`, ni `day`, ni `kind`, ni `distanceKm`. Une clé absente de la grammaire
+ * ne peut pas être écrite, là où une consigne de prompt se discute (et se perd,
+ * mesuré). À l'inverse, `distanceM` est **obligatoire** sur chaque étape : c'est
+ * ce qui rend un déroulé chronométré littéralement inexprimable.
  */
 export const qualitySessionJsonSchema: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
-  required: ['title', 'steps'],
+  required: ['steps'],
   properties: {
-    title: { type: 'string', minLength: 1, maxLength: PLAN_OUTPUT_BOUNDS.titleChars },
     steps: {
       type: 'array',
       minItems: QUALITY_BLOCKS.min,
@@ -336,18 +353,22 @@ export const qualitySessionJsonSchema: Record<string, unknown> = {
  * L'exemple à recopier : la forme exacte attendue, sur une séance dont le total
  * est **annoncé** (8 km) et **atteint** (1 500 + 3 × 1 800 + 1 100 = 8 000 m).
  *
+ * Sans titre, comme la grammaire : un exemple qui en porterait un ferait écrire
+ * une clé que `additionalProperties: false` refuse, et le créneau tomberait au
+ * repli.
+ *
  * L'annonce n'est pas décorative : c'est elle qui montre la relation que la
  * consigne demande — la somme des étapes, répétitions comprises, fait le total.
  * Un exemple sans son total serait un exemple de forme, pas de contrat.
  */
 const QUALITY_EXAMPLE_JSON =
-  '{"title":"Seuil en 3 × 1,5 km","steps":[' +
+  '{"steps":[' +
   '{"steps":[{"role":"warmup","distanceM":1500}]},' +
   '{"repeat":3,"steps":[{"role":"run","distanceM":1500},{"role":"recover","distanceM":300}]},' +
   '{"steps":[{"role":"cooldown","distanceM":1100}]}]}';
 
 const QUALITY_SYSTEM_PROMPT = [
-  "Tu es entraîneur de course à pied. Tu écris le déroulé d'UNE séance : un titre court en français, et la suite des blocs qui la composent.",
+  "Tu es entraîneur de course à pied. Tu écris le déroulé d'UNE séance : la suite des blocs qui la composent.",
   '',
   'Chaque étape porte un rôle et une distance en mètres :',
   'warmup = échauffement, run = effort, recover = récupération trottée, cooldown = retour au calme.',
@@ -358,7 +379,7 @@ const QUALITY_SYSTEM_PROMPT = [
   '- tout bloc répété contient une étape recover ;',
   '- la somme des distances, répétitions comprises, fait le total demandé.',
   '',
-  "Tu n'écris aucune allure, aucune fréquence cardiaque, aucune durée — ni dans les étapes, ni dans le titre : l'application les calcule et les pose elle-même.",
+  "Tu n'écris aucune allure, aucune fréquence cardiaque, aucune durée, et aucun titre : l'application les calcule et les pose elle-même.",
   '',
   "Réponds par un objet de cette forme exacte. Exemple pour un total demandé de 8 km, en seuil :",
   QUALITY_EXAMPLE_JSON,
@@ -544,7 +565,7 @@ function stepsKm(steps: PlanSessionSteps): number {
 
 /**
  * La séance telle qu'elle entrera dans le plan : le jour et le `kind` du
- * créneau, le titre et le déroulé du modèle.
+ * créneau, le déroulé du modèle, et le titre que l'appli en tire.
  *
  * `distanceKm` vaut **exactement la somme du déroulé**, arrondie au dixième, et
  * c'est ce qui verrouille le piège à 98,3 % : `imposedDistanceKm` compare la
@@ -559,7 +580,9 @@ function qualitySessionFor(slot: QualitySlot, output: QualitySessionOutput): Pla
     // l'allure posée en aval.
     day: slot.day,
     kind: slot.kind,
-    title: output.title,
+    // Écrit depuis le déroulé, jamais recopié du modèle : c'est ce qui rend
+    // impossible un titre qui contredit ses propres étapes.
+    title: qualitySessionTitle(slot.zone, output.steps),
     distanceKm: roundKm(stepsKm(output.steps)),
     steps: output.steps,
   };
@@ -772,25 +795,6 @@ export function buildQualityViolationsMessage(violations: readonly string[]): st
  */
 
 /**
- * Le titre d'une séance écrite par l'appli.
- *
- * Court et neutre : le déroulé dit déjà ce que la séance contient, et un titre
- * qui recopierait ses chiffres (« 3 × 1,5 km ») serait à refaire à chaque budget.
- */
-const QUALITY_FALLBACK_TITLES: Record<QualityZone, string> = {
-  threshold: 'Séance de seuil',
-  interval: 'Séance de VMA',
-  repetition: 'Séance de répétitions',
-  marathon: "Bloc à l'allure de l'objectif",
-};
-
-/**
- * Le titre de l'ultime recours, qui ne peut nommer aucune zone — c'est
- * précisément parce que la zone n'est pas exploitable qu'on en est là.
- */
-const LAST_RESORT_TITLE = 'Séance de qualité';
-
-/**
  * Les parts de l'ultime recours : échauffement, effort, retour au calme.
  *
  * Approximativement celles du déroulé déterministe (25 % d'échauffement, 20 à
@@ -808,6 +812,8 @@ function distanceStep(role: PlanStep['role'], distanceM: number): PlanStep {
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     // Aucune note : `STEP_NOTE_ZONES` en relit le texte pour poser un créneau
     // d'allure, et une séance écrite dans ces circonstances n'a rien à lui dire.
     note: null,
@@ -910,10 +916,15 @@ export function deterministicQualitySession(slot: QualitySlot): PlanSessionOutpu
   return {
     day: slot.day,
     kind: slot.kind,
-    // La zone est nécessairement dans le contrat quand le déroulé déterministe a
-    // abouti : c'est elle qu'il indexe en premier, et il lève sinon. Quand il
-    // n'a pas abouti, aucun titre de zone n'est fiable.
-    title: template === null ? LAST_RESORT_TITLE : QUALITY_FALLBACK_TITLES[slot.zone],
+    /*
+     * Le **même** générateur que pour la séance du modèle, et c'est tout
+     * l'intérêt : le repli avait ses titres fixes, si bien qu'une séance écrite
+     * par l'appli et la même séance écrite par le modèle ne s'annonçaient pas
+     * pareil. Le déroulé de l'ultime recours, lui, n'a rien à annoncer — un
+     * bloc de course nu entre deux étapes d'enveloppe —, et son titre est celui
+     * qui ne nomme aucune zone.
+     */
+    title: template === null ? LAST_RESORT_TITLE : qualitySessionTitle(slot.zone, steps),
     distanceKm: roundKm(stepsKm(steps)),
     steps,
   };
@@ -994,7 +1005,7 @@ export async function fillQualitySlot(slot: QualitySlot): Promise<PlanSessionOut
     if (violations.length === 0) {
       const absorbed = absorbBudget(output.steps, slot);
       if (absorbed !== null) {
-        const adjusted = qualitySessionFor(slot, { title: output.title, steps: absorbed });
+        const adjusted = qualitySessionFor(slot, { steps: absorbed });
         // Revalidée, pas supposée : c'est cette séance-là qui entre dans le
         // plan, et l'absorption a déplacé une de ses étapes.
         if (qualitySessionViolations(adjusted, slot).length === 0) return adjusted;

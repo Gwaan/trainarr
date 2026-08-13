@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { EASY_HR_BANDS } from '@/lib/metrics/hr-targets';
+
 import { stepsToIntervalsSyntax } from './intervals-syntax';
 import { planSessionStepsSchema, type PlanSessionSteps, type PlanStep } from './schema';
 
@@ -12,6 +14,8 @@ function step(overrides: Partial<PlanStep> = {}): PlanStep {
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     note: null,
     ...overrides,
   };
@@ -113,6 +117,49 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     expect(
       stepsToIntervalsSyntax(endurance, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 }),
     ).toBe('- Course 2km 65-79% HR');
+  });
+
+  /**
+   * Le sous-créneau, et le défaut qu'il répare : la fin appuyée d'une sortie
+   * longue partait avec **la même** cible que les 80 % qui la précèdent, donc
+   * rien de discernable au poignet. La chaîne est la même — la bande se résout
+   * en battements sur la FC max du profil, puis ces battements se ramènent en
+   * pourcentage de la référence distante.
+   */
+  it('émet les bornes du sous-créneau, pas celles de la zone qu’il précise', () => {
+    const longRun: PlanSessionSteps = [
+      {
+        repeat: 1,
+        steps: [
+          step({ hrZone: 2, distanceM: 16_000 }),
+          step({
+            hrZone: 2,
+            distanceM: 4_000,
+            hrPercentMin: EASY_HR_BANDS.high.minPercentOfMax,
+            hrPercentMax: EASY_HR_BANDS.high.maxPercentOfMax,
+          }),
+        ],
+      },
+    ];
+
+    // 74–79 % de 184 = 136–145 bpm, soit 66–71 % d'une référence à 205.
+    expect(
+      stepsToIntervalsSyntax(longRun, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+    ).toBe(['- Course 16km 59-71% HR', '- Course 4km 66-71% HR'].join('\n'));
+
+    // Références confondues : le sous-créneau ressort tel qu'il est prescrit.
+    expect(
+      stepsToIntervalsSyntax(longRun, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 }),
+    ).toBe(['- Course 16km 65-79% HR', '- Course 4km 74-79% HR'].join('\n'));
+  });
+
+  it('prescrit sur la seule bande, même sans rang de zone', () => {
+    expect(
+      stepsToIntervalsSyntax(
+        [{ repeat: 1, steps: [step({ hrPercentMin: 65, hrPercentMax: 71 })] }],
+        { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 },
+      ),
+    ).toBe('- Course 2km 65-71% HR');
   });
 
   /**

@@ -34,6 +34,13 @@
  * seuil sur ces blocs — un choix défendable pour un athlète confirmé, mais qui
  * déplace la proportion d'intensité que personne n'a demandé de bouger.
  *
+ * Ce que la note ne peut pas faire, en revanche, c'est se prescrire : « dans le
+ * haut de la plage » se lit, il ne se surveille pas. Les étapes concernées
+ * portent donc un **sous-créneau** explicite ({@link EASY_HR_BANDS}) — deux
+ * bornes en pourcentage de FC max, **à l'intérieur** de la plage d'endurance.
+ * La cible change d'amplitude, jamais de zone : ni les durées, ni les distances,
+ * ni le budget temps ne bougent, et un test le prouve.
+ *
  * ## Deux contraintes dures, héritées et non négociables
  *
  * 1. **Toutes les étapes se mesurent en distance** (`distanceM`), jamais en
@@ -52,12 +59,28 @@
  */
 
 import { PLAN_OUTPUT_BOUNDS } from '@/lib/ai/plan-schema';
+import { EASY_HR_BANDS, type HrPercentBand } from '@/lib/metrics/hr-targets';
 import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
 
 import type { PlanPhase } from './phases';
 
-/** Une étape mesurée en distance, sans aucune cible : toutes les clés, `null` pour le reste. */
-export function distanceStep(role: PlanStep['role'], distanceM: number, note: string): PlanStep {
+/**
+ * Une étape mesurée en distance : toutes les clés, `null` pour le reste.
+ *
+ * @param band le **sous-créneau** d'endurance que l'étape vise, quand elle en
+ * vise un autre que la plage entière. Ce n'est pas une cible posée — le module
+ * n'en pose aucune, cf. l'en-tête — mais une précision que le post-traitement
+ * honore en même temps qu'il pose la zone (`imposeStepPace`), et qu'il **efface**
+ * quand la séance se prescrit finalement en allure. Sans elle, « le haut de la
+ * plage » n'existe que dans la note, et la montre affiche la même cible du début
+ * à la fin.
+ */
+export function distanceStep(
+  role: PlanStep['role'],
+  distanceM: number,
+  note: string,
+  band: HrPercentBand | null = null,
+): PlanStep {
   return {
     role,
     distanceM,
@@ -65,6 +88,8 @@ export function distanceStep(role: PlanStep['role'], distanceM: number, note: st
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: band === null ? null : band.minPercentOfMax,
+    hrPercentMax: band === null ? null : band.maxPercentOfMax,
     note,
   };
 }
@@ -272,11 +297,21 @@ function stridesSteps(totalM: number, uphill: boolean): PlanSessionSteps {
  * Le footing progressif : trois tranches, de plus en plus courtes et de plus en
  * plus soutenues.
  *
- * La première porte le rôle `warmup`, et ce n'est pas cosmétique : sur une
- * séance d'endurance, l'enveloppe ne reçoit **aucune cible d'allure**
- * (`envelopePaceZone`), là où les deux tranches suivantes reçoivent la plage
- * d'endurance. Le déroulé affiche donc trois consignes distinctes plutôt que
- * trois fois la même plage.
+ * ## Les trois tranches sont de la course, y compris la première
+ *
+ * Elle portait le rôle `warmup`, ce qui la rendait **invisible** : sur une
+ * séance d'endurance, l'enveloppe ne reçoit aucune cible (`envelopePaceZone`),
+ * et cette tranche-là pèse 40 % de la séance. Quarante pour cent d'une séance
+ * n'est pas une mise en route, c'est de la vraie course — elle prend donc le
+ * rôle `run` et la cible qui va avec. Rien ne s'en trouve cassé :
+ * `sessionStepViolations` n'exige d'échauffement que des séances d'intensité,
+ * qu'un footing n'est pas (`isIntensitySession` se lit sur le `kind`).
+ *
+ * La progression se lit désormais dans les cibles elles-mêmes — bas, milieu,
+ * haut de la plage d'endurance ({@link EASY_HR_BANDS}) — et plus seulement dans
+ * les notes. Trois consignes distinctes, dont trois cibles distinctes, sans que
+ * la séance sorte de l'endurance : le 80/20 du plan ne bouge pas d'un
+ * pourcent.
  */
 function progressiveSteps(totalM: number): PlanSessionSteps {
   // Des tranches à la centaine de mètres : « 2,3 km puis 2,0 km puis 1,4 km » se
@@ -287,12 +322,32 @@ function progressiveSteps(totalM: number): PlanSessionSteps {
   const thirdM = totalM - firstM - secondM;
 
   return [
-    { repeat: 1, steps: [distanceStep('warmup', firstM, 'Départ très souple, sans regarder la montre')] },
-    { repeat: 1, steps: [distanceStep('run', secondM, 'Installe-toi en endurance, régulière')] },
     {
       repeat: 1,
       steps: [
-        distanceStep('run', thirdM, 'Dernière tranche plus soutenue, dans le haut de la plage'),
+        distanceStep(
+          'run',
+          firstM,
+          'Départ très souple, sans regarder la montre',
+          EASY_HR_BANDS.low,
+        ),
+      ],
+    },
+    {
+      repeat: 1,
+      steps: [
+        distanceStep('run', secondM, 'Installe-toi en endurance, régulière', EASY_HR_BANDS.mid),
+      ],
+    },
+    {
+      repeat: 1,
+      steps: [
+        distanceStep(
+          'run',
+          thirdM,
+          'Dernière tranche plus soutenue, dans le haut de la plage',
+          EASY_HR_BANDS.high,
+        ),
       ],
     },
   ];
@@ -321,11 +376,19 @@ export function easySessionSteps(
  * Le déroulé d'une sortie longue à fin appuyée — `undefined` partout ailleurs.
  *
  * Deux blocs : le parcours en endurance, puis son dernier cinquième un cran plus
- * haut. Aucune note ne déplace la zone (cf. l'en-tête du module) : « dans le
- * haut de la plage » veut dire le bord rapide de la plage d'endurance que le
- * post-traitement pose sur les deux étapes, ce qui est exactement ce qu'on
- * demande à une fin de sortie longue — et jamais un bloc à allure objectif, qui
- * n'aurait aucun sens sur un objectif libre.
+ * haut. « Un cran plus haut » se dit désormais dans la **cible** et plus
+ * seulement dans la note : le bloc final vise le haut de la plage d'endurance
+ * ({@link EASY_HR_BANDS.high}), là où il portait exactement la même cible que
+ * les 80 % qui le précèdent — donc rien de discernable sur la montre. Toujours
+ * dans l'endurance, jamais un bloc à allure objectif, qui n'aurait aucun sens
+ * sur un objectif libre.
+ *
+ * Les deux segments tombent sur la **centaine de mètres**, comme partout
+ * ailleurs dans ce module : « 8,64 km puis 2,16 km » est sorti en production, et
+ * un centième de kilomètre ne se court pas. Le corps est arrondi, la fin prend
+ * le complément exact — la couverture vaut la distance déclarée au mètre, et
+ * quand la distance est au dixième de kilomètre (ce que les budgets écrivent
+ * toujours) les deux segments sont ronds.
  *
  * Réservé au développement et à la spécificité : la base construit, elle ne
  * finit pas ses sorties longues en appuyant.
@@ -340,17 +403,23 @@ export function longRunFinishSteps(
   if (distanceKm < LONG_RUN_FINISH_MIN_KM) return undefined;
 
   const totalM = Math.round(distanceKm * 1_000);
-  const finishM = Math.round(totalM * LONG_RUN_FINISH_SHARE);
+  const bodyM = roundHundredM(totalM * (1 - LONG_RUN_FINISH_SHARE));
+  const finishM = totalM - bodyM;
 
   return [
     {
       repeat: 1,
-      steps: [distanceStep('run', totalM - finishM, 'Sortie longue en endurance, allure régulière')],
+      steps: [distanceStep('run', bodyM, 'Sortie longue en endurance, allure régulière')],
     },
     {
       repeat: 1,
       steps: [
-        distanceStep('run', finishM, 'Fin de parcours plus appuyée, dans le haut de la plage'),
+        distanceStep(
+          'run',
+          finishM,
+          'Fin de parcours plus appuyée, dans le haut de la plage',
+          EASY_HR_BANDS.high,
+        ),
       ],
     },
   ];

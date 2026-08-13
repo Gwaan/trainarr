@@ -48,6 +48,15 @@
  * prescription veut dire. Aucune conversion ne se fait ailleurs qu'ici : c'est
  * ce qui empêche les deux jeux de bornes de se croiser.
  *
+ * ## Le rang ne dit pas tout : les sous-créneaux
+ *
+ * Un entier ne peut pas exprimer « le haut de l'endurance ». C'est ce que
+ * {@link EASY_HR_BANDS} ajoute — des bornes en pourcentage, portées par l'étape
+ * elle-même ({@link PlanStep.hrPercentMin}), qui **précisent** la plage sans
+ * jamais en sortir. Un rang de plus dans cette table aurait été le contraire :
+ * un nouvel ordinal à faire cohabiter avec `hr-zones.ts`, où le 3 veut déjà
+ * dire autre chose.
+ *
  * ## Extension
  *
  * La table ne porte **que** la zone effectivement prescrite. Déclarer les cinq
@@ -58,12 +67,22 @@
 
 import type { HrZoneNumber } from './hr-zones';
 
-/** Un créneau de prescription : ses bornes en % de FC max, et son nom. */
-export type PrescribedHrZone = {
-  /** Le créneau en toutes lettres, tel que l'UI peut l'annoncer. */
-  label: string;
+/**
+ * Un créneau cardiaque **nu** : deux bornes en pourcentage de FC max.
+ *
+ * C'est la forme la plus expressive que le projet manipule — un rang de zone
+ * n'en désigne qu'une par entier, là où une bande dit exactement ce qu'elle
+ * veut dire. {@link EASY_HR_BANDS} en tire les sous-créneaux de l'endurance.
+ */
+export type HrPercentBand = {
   minPercentOfMax: number;
   maxPercentOfMax: number;
+};
+
+/** Un créneau de prescription : ses bornes en % de FC max, et son nom. */
+export type PrescribedHrZone = HrPercentBand & {
+  /** Le créneau en toutes lettres, tel que l'UI peut l'annoncer. */
+  label: string;
 };
 
 /**
@@ -92,6 +111,45 @@ export const PRESCRIBED_HR_ZONES: Partial<Record<HrZoneNumber, PrescribedHrZone>
     maxPercentOfMax: 79,
   },
 };
+
+/**
+ * Les **sous-créneaux de l'endurance** : le bas, le milieu, le haut de la plage.
+ *
+ * ## Ce qu'ils réparent
+ *
+ * Un rang de zone ne dit qu'une chose, et la même pour toute la séance : les
+ * deux blocs d'une sortie longue à fin appuyée recevaient exactement la même
+ * cible (124–150 bpm sur une FC max de 190), donc la fin appuyée était
+ * **indiscernable** sur la montre — la distinction ne vivait que dans la note.
+ * Symétriquement, la première tranche d'un footing progressif ne recevait
+ * aucune cible du tout. Une bande explicite dit ce qu'un rang ne peut pas dire :
+ * « la même zone, mais son haut ».
+ *
+ * ## Les bornes, et pourquoi elles ne déplacent pas le 80/20
+ *
+ * Tout reste **dans** la plage d'endurance (65–79 % de FC max, cf.
+ * {@link PRESCRIBED_HR_ZONES}) : la borne haute du sous-créneau haut est celle
+ * de la zone elle-même, au point de pourcentage près. Chez Daniels, l'allure
+ * marathon commence vers 80 % et le seuil vers 86–88 % — 79 % en reste à neuf
+ * points, et aucune de ces trois bandes n'est de la qualité déguisée. La
+ * répartition des intensités du plan est, au pourcent près, celle d'avant.
+ *
+ * Trois bandes de 5 à 6 points (9 à 11 bpm sur une FC max de 184), qui se
+ * **recouvrent d'un point ou deux** : une progression continue plutôt que trois
+ * marches, et une largeur qu'on peut réellement tenir au poignet — une bande de
+ * deux points vaudrait 4 bpm, soit le bruit d'un cardio.
+ *
+ * | Bande | % de FC max | À 184 bpm | Où elle sert |
+ * |-------|-------------|-----------|--------------|
+ * | `low`  | 65–71 | 120–131 | 1ʳᵉ tranche d'un footing progressif |
+ * | `mid`  | 70–75 | 129–138 | 2ᵉ tranche d'un footing progressif |
+ * | `high` | 74–79 | 136–145 | 3ᵉ tranche, et fin appuyée d'une sortie longue |
+ */
+export const EASY_HR_BANDS = {
+  low: { minPercentOfMax: 65, maxPercentOfMax: 71 },
+  mid: { minPercentOfMax: 70, maxPercentOfMax: 75 },
+  high: { minPercentOfMax: 74, maxPercentOfMax: 79 },
+} as const satisfies Record<'low' | 'mid' | 'high', HrPercentBand>;
 
 /** Une cible cardiaque, en battements par minute — bornes incluses. */
 export type HrTargetBpm = {
@@ -129,13 +187,24 @@ export const PRESCRIPTION_MAX_HR_BOUNDS = { min: 120, max: 230 } as const;
  * fondée sur une donnée qui n'en est pas une.
  */
 export function hrZoneTargetBpm(zone: number, maxHrBpm: number | null): HrTargetBpm | null {
+  const band = PRESCRIBED_HR_ZONES[zone as HrZoneNumber];
+  return band === undefined ? null : hrPercentTargetBpm(band, maxHrBpm);
+}
+
+/**
+ * La cible en bpm d'une bande **explicite** — les mêmes règles que
+ * {@link hrZoneTargetBpm}, à ceci près que les bornes viennent de l'étape et
+ * non de la table.
+ *
+ * C'est la seule façon d'exprimer un sous-créneau ({@link EASY_HR_BANDS}) : le
+ * rang de zone, lui, est un entier et ne distingue pas le haut d'une plage de
+ * son bas.
+ */
+export function hrPercentTargetBpm(band: HrPercentBand, maxHrBpm: number | null): HrTargetBpm | null {
   if (maxHrBpm === null || !Number.isInteger(maxHrBpm)) return null;
   if (maxHrBpm < PRESCRIPTION_MAX_HR_BOUNDS.min || maxHrBpm > PRESCRIPTION_MAX_HR_BOUNDS.max) {
     return null;
   }
-
-  const band = PRESCRIBED_HR_ZONES[zone as HrZoneNumber];
-  if (band === undefined) return null;
 
   return {
     minBpm: Math.round((maxHrBpm * band.minPercentOfMax) / 100),

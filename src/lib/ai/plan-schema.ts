@@ -919,6 +919,14 @@ function imposeStepPace(
     zone === session &&
     !isShortStep(step)
   ) {
+    /*
+     * Le **sous-créneau** que l'étape porte déjà est conservé tel quel (il
+     * traverse par le `...step`) : c'est le squelette qui l'a écrit, sur les
+     * deux ou trois blocs d'une séance où « le haut de la plage » veut dire
+     * quelque chose (`plan-skeleton/variations`). Le rang, lui, est posé ici
+     * comme sur toutes les autres étapes — la bande le précise, elle ne le
+     * remplace pas.
+     */
     return { ...step, paceMinSecPerKm: null, paceMaxSecPerKm: null, hrZone };
   }
 
@@ -926,6 +934,16 @@ function imposeStepPace(
     ...step,
     paceMinSecPerKm: zone === null ? null : zone.minSecPerKm,
     paceMaxSecPerKm: zone === null ? null : zone.maxSecPerKm,
+    /*
+     * Et il est **effacé** dès que l'étape ne se prescrit plus en fréquence
+     * cardiaque : sans FC max au profil, sur une séance de qualité, ou sur une
+     * étape trop courte pour qu'une FC veuille dire quelque chose. Un
+     * sous-créneau cardiaque à côté d'une allure est refusé par le contrat
+     * d'étapes, et il le doit — deux cibles se contredisent dès la première
+     * côte.
+     */
+    hrPercentMin: null,
+    hrPercentMax: null,
   };
 }
 
@@ -1198,6 +1216,8 @@ function singleEasyRunSteps(session: PlanSessionOutput): PlanSessionSteps | unde
           paceMinSecPerKm: null,
           paceMaxSecPerKm: null,
           hrZone: null,
+          hrPercentMin: null,
+          hrPercentMax: null,
           note: null,
         },
       ],

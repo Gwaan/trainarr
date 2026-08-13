@@ -17,6 +17,8 @@ function step(overrides: Partial<PlanStep> = {}): PlanStep {
     paceMinSecPerKm: 270,
     paceMaxSecPerKm: 280,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     note: null,
     ...overrides,
   };
@@ -159,6 +161,51 @@ describe('planSessionStepsSchema', () => {
     expect(planSessionStepsSchema.safeParse([{ repeat: 1, steps: [withZone(2.5)] }]).success).toBe(
       false,
     );
+  });
+
+  /*
+   * Le sous-créneau cardiaque : deux bornes en % de FC max qui précisent une
+   * zone (« le haut de l'endurance »), et que le rang seul ne pouvait pas dire.
+   */
+  describe('sous-créneau cardiaque', () => {
+    const banded = (overrides: Partial<PlanStep>): PlanStep =>
+      step({ paceMinSecPerKm: null, paceMaxSecPerKm: null, ...overrides });
+
+    const accepts = (candidate: PlanStep): boolean =>
+      planSessionStepsSchema.safeParse([{ repeat: 1, steps: [candidate] }]).success;
+
+    it('accepte deux bornes ordonnées, avec ou sans rang de zone', () => {
+      expect(accepts(banded({ hrZone: 2, hrPercentMin: 74, hrPercentMax: 79 }))).toBe(true);
+      expect(accepts(banded({ hrPercentMin: 65, hrPercentMax: 71 }))).toBe(true);
+    });
+
+    /** Les plans déjà en base n'ont pas ces clés : elles ne peuvent pas être exigées. */
+    it('accepte une étape qui ne les porte pas du tout', () => {
+      const legacy = { ...step(), hrPercentMin: undefined, hrPercentMax: undefined };
+      expect(accepts(legacy)).toBe(true);
+
+      const withoutKeys: Record<string, unknown> = { ...step() };
+      delete withoutKeys.hrPercentMin;
+      delete withoutKeys.hrPercentMax;
+      expect(
+        planSessionStepsSchema.safeParse([{ repeat: 1, steps: [withoutKeys] }]).success,
+      ).toBe(true);
+    });
+
+    it('refuse une borne seule et des bornes inversées', () => {
+      expect(accepts(banded({ hrPercentMin: 74 }))).toBe(false);
+      expect(accepts(banded({ hrPercentMax: 79 }))).toBe(false);
+      expect(accepts(banded({ hrPercentMin: 79, hrPercentMax: 74 }))).toBe(false);
+    });
+
+    it('refuse un sous-créneau à côté d’une allure — une seule cible par étape', () => {
+      expect(accepts(step({ hrPercentMin: 74, hrPercentMax: 79 }))).toBe(false);
+    });
+
+    it('borne les pourcentages à ce qu’un % de FC max peut vouloir dire', () => {
+      expect(accepts(banded({ hrPercentMin: 29, hrPercentMax: 79 }))).toBe(false);
+      expect(accepts(banded({ hrPercentMin: 74, hrPercentMax: 101 }))).toBe(false);
+    });
   });
 
   it('refuse un rôle inconnu et une note vide', () => {

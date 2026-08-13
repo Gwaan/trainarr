@@ -24,6 +24,8 @@ function step(overrides: Partial<PlanStep> = {}): PlanStep {
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     note: null,
     ...overrides,
   };
@@ -124,6 +126,25 @@ describe('formatStepTarget', () => {
   it('rend null quand l’étape n’a pas de cible', () => {
     expect(formatStepTarget(step())).toBeNull();
   });
+
+  /**
+   * Le défaut de production : la fin appuyée d'une sortie longue affichait
+   * exactement la cible des 80 % qui la précèdent, et la distinction ne vivait
+   * que dans la note.
+   */
+  it('affiche le sous-créneau, pas la plage entière de la zone', () => {
+    expect(
+      formatStepTarget(step({ hrZone: 2, hrPercentMin: 74, hrPercentMax: 79 }), 184),
+    ).toBe('136–145 bpm');
+    expect(formatStepTarget(step({ hrZone: 2 }), 184)).toBe('120–145 bpm');
+  });
+
+  it('affiche un sous-créneau sans rang de zone, et retombe à null sans FC max', () => {
+    expect(formatStepTarget(step({ hrPercentMin: 65, hrPercentMax: 71 }), 184)).toBe(
+      '120–131 bpm',
+    );
+    expect(formatStepTarget(step({ hrPercentMin: 65, hrPercentMax: 71 }), null)).toBeNull();
+  });
 });
 
 /**
@@ -188,6 +209,30 @@ describe('séance prescrite en fréquence cardiaque', () => {
     });
 
     expect(planSessionSummary(mixed, 184)).toEqual(['12 km', '@ 7:08/km']);
+  });
+
+  /**
+   * Une sortie longue à fin appuyée : deux cibles cardiaques différentes sur ses
+   * deux blocs. La ligne repliée annonce la plage que la séance couvre — celle
+   * du premier au dernier kilomètre —, et le déroulé déplié dit bloc par bloc.
+   */
+  it('annonce l’enveloppe des cibles quand les blocs visent des sous-créneaux', () => {
+    const finish = session({
+      kind: 'Sortie longue',
+      volumeM: 20000,
+      steps: [
+        { repeat: 1, steps: [step({ distanceM: 16000, hrZone: 2 })] },
+        {
+          repeat: 1,
+          steps: [step({ distanceM: 4000, hrZone: 2, hrPercentMin: 74, hrPercentMax: 79 })],
+        },
+      ],
+    });
+
+    expect(planSessionSummary(finish, 184)).toEqual(['20 km', '120–145 bpm']);
+    expect(
+      planSessionDetail(finish, 184).blocks.map((block) => block.steps[0].target),
+    ).toEqual(['120–145 bpm', '136–145 bpm']);
   });
 
   it('ignore les étapes qui ne sont pas du corps de séance', () => {

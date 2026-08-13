@@ -472,6 +472,8 @@ function distanceStep(role: PlanStep['role'], distanceM: number, note: string): 
     paceMinSecPerKm: null,
     paceMaxSecPerKm: null,
     hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
     note,
   };
 }

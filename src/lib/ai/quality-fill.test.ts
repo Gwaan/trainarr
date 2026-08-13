@@ -94,11 +94,21 @@ const VALID_STEPS = [
   { steps: [{ role: 'cooldown', distanceM: 1100 }] },
 ];
 
-const VALID_OUTPUT = { title: 'Seuil en 3 × 1,5 km', steps: VALID_STEPS };
+const VALID_OUTPUT = { steps: VALID_STEPS };
+
+/**
+ * Ce qui distingue une séance écrite par **l'appli** de celle du modèle.
+ *
+ * Ce n'est plus le titre : les deux chemins le tirent du même générateur
+ * (`plan-skeleton/quality-title`), et c'est précisément ce qu'on voulait. Ce
+ * sont les **notes** — le modèle n'a pas le droit d'en écrire (elles sont
+ * effacées à l'entrée), le déroulé déterministe en pose une sur chaque étape.
+ */
+const writtenByApp = (session: PlanSessionOutput): boolean =>
+  (session.steps ?? []).every((block) => block.steps.every((step) => step.note !== null));
 
 /** Les mêmes blocs, au double du budget — le déroulé « en durée » d'antan. */
 const OVER_BUDGET_OUTPUT = {
-  title: 'Seuil en 5 × 2 km',
   steps: [
     { steps: [{ role: 'warmup', distanceM: 2000 }] },
     { repeat: 5, steps: [{ role: 'run', distanceM: 2000 }, { role: 'recover', distanceM: 400 }] },
@@ -213,16 +223,19 @@ describe('buildQualitySessionMessages', () => {
     }
   });
 
-  it('interdit les allures dans le titre comme dans les étapes', () => {
+  it('interdit les allures et le titre : le modèle n’écrit que des étapes', () => {
     const [system] = buildQualitySessionMessages(SLOT);
 
     expect(system.content).toContain('aucune allure');
-    expect(system.content).toContain('ni dans le titre');
+    expect(system.content).toContain('aucun titre');
+    // Et l'exemple à recopier n'en porte pas non plus : une clé hors grammaire
+    // ferait tomber le créneau au repli.
+    expect(system.content).not.toContain('"title"');
   });
 
   it("porte un exemple JSON dont la somme fait le total annoncé", () => {
     const [system] = buildQualitySessionMessages(SLOT);
-    const example = system.content.slice(system.content.indexOf('{"title"'));
+    const example = system.content.slice(system.content.indexOf('{"steps"'));
     const distances = [...example.matchAll(/"distanceM":(\d+)/g)].map((match) => Number(match[1]));
 
     // 1500 + 3 × (1500 + 300) + 1100 = 8 000 m, le total annoncé.
@@ -244,6 +257,35 @@ describe('fillQualitySlot — sortie conforme', () => {
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Le défaut de production, de bout en bout : « Seuil en 3 × 1,5 km +
+   * 1 × 1,0 km » sur un créneau de 5 km dont le déroulé ne portait que **deux**
+   * efforts. Le modèle n'écrit plus le titre, donc il ne peut plus le
+   * contredire — et un provider qui en enverrait un quand même le verrait
+   * écarté comme le reste de ce qu'il n'a pas le droit d'écrire.
+   */
+  it('écrit un titre qui décrit le déroulé, même si le modèle en dicte un autre', async () => {
+    respondsWith({
+      title: 'Seuil en 3 × 1,5 km + 1 × 1,0 km',
+      steps: [
+        { steps: [{ role: 'warmup', distanceM: 1200 }] },
+        {
+          steps: [
+            { role: 'run', distanceM: 1500 },
+            { role: 'recover', distanceM: 300 },
+            { role: 'run', distanceM: 1000 },
+          ],
+        },
+        { steps: [{ role: 'cooldown', distanceM: 1000 }] },
+      ],
+    });
+
+    const session = await fillQualitySlot({ ...SLOT, budgetKm: 5 });
+
+    expect(session.title).toBe('Seuil en 1,5 km + 1 km');
+    expect(session.distanceKm).toBe(5);
+  });
+
   it("impose le jour et le kind du créneau, quoi que le modèle en dise", async () => {
     respondsWith({ ...VALID_OUTPUT, day: 1, kind: 'Footing', distanceKm: 42 });
 
@@ -258,7 +300,6 @@ describe('fillQualitySlot — sortie conforme', () => {
     // 8,3 km pour 8 km demandés : dans les 5 % (0,4 km). Le modèle a écrit une
     // séance acceptable — c'est l'appli qui fait la monnaie, pas lui.
     respondsWith({
-      title: 'Seuil en 3 × 1,6 km',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         {
@@ -306,7 +347,6 @@ describe('fillQualitySlot — reprise', () => {
   it("reprend un bloc répété sans récupération", async () => {
     respondsWith(
       {
-        title: 'Seuil enchaîné',
         steps: [
           { steps: [{ role: 'warmup', distanceM: 1500 }] },
           { repeat: 4, steps: [{ role: 'run', distanceM: 1350 }] },
@@ -324,16 +364,16 @@ describe('fillQualitySlot — reprise', () => {
 });
 
 describe('fillQualitySlot — repli déterministe', () => {
-  /** Le repli est reconnaissable à son titre : l'appli ne recopie pas le modèle. */
-  const FALLBACK_TITLES = ['Séance de seuil', 'Séance de VMA', 'Séance de répétitions'];
-
   it('écrit la séance lui-même quand toutes les tentatives échouent', async () => {
     respondsWith(OVER_BUDGET_OUTPUT, OVER_BUDGET_OUTPUT);
 
     const session = await fillQualitySlot(SLOT);
 
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    expect(FALLBACK_TITLES).toContain(session.title);
+    expect(writtenByApp(session)).toBe(true);
+    // Le titre, lui, se lit comme celui d'une séance du modèle : c'est le même
+    // générateur, et il décrit le déroulé que l'appli vient d'écrire.
+    expect(session.title).toMatch(/^Seuil en /);
     expect(session.day).toBe(3);
     expect(session.kind).toBe('Seuil');
     expect(session.distanceKm).toBe(8);
@@ -427,14 +467,13 @@ describe('fillQualitySlot — ce que le modèle ne peut pas écrire', () => {
   it('rejette une étape mesurée en durée seule, et se replie', async () => {
     respondsWith(
       {
-        title: 'Seuil en minutes',
         steps: [
           { steps: [{ role: 'warmup', durationS: 900 }] },
           { repeat: 3, steps: [{ role: 'run', durationS: 480 }, { role: 'recover', durationS: 120 }] },
           { steps: [{ role: 'cooldown', durationS: 600 }] },
         ],
       },
-      { title: 'Encore en minutes', steps: [{ steps: [{ role: 'run', durationS: 480 }] }] },
+      { steps: [{ steps: [{ role: 'run', durationS: 480 }] }] },
     );
 
     const session = await fillQualitySlot(SLOT);
@@ -487,7 +526,6 @@ describe('fillQualitySlot — le piège à 98,3 %', () => {
     // ramène à 8 000 m pile, donc la distance déclarée et la couverture sont
     // encore la même valeur — c'est ce qui neutralise `imposedDistanceKm`.
     respondsWith({
-      title: 'Seuil en 3 × 1,55 km',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         {
@@ -515,7 +553,6 @@ describe('qualitySessionOutputSchema — la grammaire, portée aussi par Zod', (
    */
   it('refuse une séance à un seul bloc', () => {
     const parsed = qualitySessionOutputSchema.safeParse({
-      title: 'Seuil en un bloc',
       steps: [{ steps: [{ role: 'run', distanceM: 8000 }] }],
     });
 
@@ -524,7 +561,6 @@ describe('qualitySessionOutputSchema — la grammaire, portée aussi par Zod', (
 
   it('refuse un bloc de plus de quatre étapes', () => {
     const parsed = qualitySessionOutputSchema.safeParse({
-      title: 'Seuil en escalier',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         {
@@ -565,7 +601,6 @@ describe("fillQualitySlot — l'enveloppe, quel que soit le kind", () => {
   };
 
   const BARE_RUN_OUTPUT = {
-    title: 'Allure course',
     steps: [
       { steps: [{ role: 'run', distanceM: 2000 }] },
       { steps: [{ role: 'run', distanceM: 4000 }] },
@@ -599,7 +634,6 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
   it("reporte l'écart sur le retour au calme et retombe au mètre près", async () => {
     // 8,3 km pour 8 km demandés : dans ce que l'appli accepte de retoucher.
     respondsWith({
-      title: 'Seuil en 3 × 1,6 km',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         {
@@ -626,7 +660,6 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
     // 8,35 km : l'écart est dans ce que l'appli retoucherait, mais le reporter
     // annulerait le retour au calme (250 − 350 = −100 m).
     respondsWith({
-      title: 'Seuil en 3 × 2 km',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         {
@@ -640,7 +673,7 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
     const session = await fillQualitySlot(SLOT);
 
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
-    expect(session.title).toBe('Séance de seuil');
+    expect(writtenByApp(session)).toBe(true);
     expect(totalKm(session.steps ?? [])).toBeCloseTo(8, 3);
   });
 
@@ -648,7 +681,6 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
     // 7,8 km, à retoucher de +200 m — mais le seul `cooldown` est répété deux
     // fois : lui ajouter l'écart l'ajouterait deux fois.
     respondsWith({
-      title: 'Seuil en deux fois',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 1500 }] },
         { steps: [{ role: 'run', distanceM: 1500 }] },
@@ -665,7 +697,7 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
 
     const session = await fillQualitySlot(SLOT);
 
-    expect(session.title).toBe('Séance de seuil');
+    expect(writtenByApp(session)).toBe(true);
     expect(totalKm(session.steps ?? [])).toBeCloseTo(8, 3);
   });
 
@@ -673,7 +705,6 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
     // 200 m rendus sur un créneau de 0,5 km : l'ancienne tolérance (plancher de
     // 300 m) l'acceptait tel quel, sous `PLAN_OUTPUT_BOUNDS.distanceKm.min`.
     respondsWith({
-      title: 'Mini-séance',
       steps: [
         { steps: [{ role: 'warmup', distanceM: 50 }] },
         { steps: [{ role: 'run', distanceM: 100 }] },
@@ -711,7 +742,6 @@ describe('fillQualitySlot — balayage : la couverture vaut toujours le budget',
     const round = (share: number): number => Math.round(budgetM * share);
 
     return {
-      title: 'Séance balayée',
       steps: [
         { steps: [{ role: 'warmup', distanceM: round(0.25) }] },
         {
@@ -742,8 +772,8 @@ describe('fillQualitySlot — balayage : la couverture vaut toujours le budget',
         const slot: QualitySlot = { ...SLOT, budgetKm };
         const session = await fillQualitySlot(slot);
         const covered = totalKm(session.steps ?? []);
-        if (session.title === 'Séance balayée') issues.kept += 1;
-        else issues.fallback += 1;
+        if (writtenByApp(session)) issues.fallback += 1;
+        else issues.kept += 1;
 
         if (Math.abs(covered - budgetKm) > 0.001) {
           failures.push(`${budgetKm} km ${offsetShare} → couverture ${covered} km`);
@@ -795,14 +825,21 @@ describe('fillQualitySlot — délai de garde', () => {
 
 describe('fillQualitySlots', () => {
   it('remplit les créneaux un par un, dans l’ordre', async () => {
-    respondsWith(VALID_OUTPUT, { ...VALID_OUTPUT, title: 'VMA en 8 × 400 m' });
+    respondsWith(VALID_OUTPUT, {
+      steps: [
+        { steps: [{ role: 'warmup', distanceM: 1500 }] },
+        { repeat: 4, steps: [{ role: 'run', distanceM: 1000 }, { role: 'recover', distanceM: 400 }] },
+        { steps: [{ role: 'cooldown', distanceM: 900 }] },
+      ],
+    });
 
     const sessions = await fillQualitySlots([SLOT, { ...SLOT, day: 6, kind: 'VMA' }]);
 
     expect(sessions.map((session) => session.day)).toEqual([3, 6]);
+    // Chaque titre décrit **son** déroulé, et rien d'autre.
     expect(sessions.map((session) => session.title)).toEqual([
       'Seuil en 3 × 1,5 km',
-      'VMA en 8 × 400 m',
+      'Seuil en 4 × 1 km',
     ]);
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
   });
@@ -873,9 +910,12 @@ describe('l’allure d’objectif ne s’écrit que sous une intention datée', 
                 checked += 1;
                 const where = `${intent}, ${sessionsPerWeek} séances, semaine ${week.weekNumber}`;
                 expect(slot.zone, where).not.toBe('marathon');
-                expect(deterministicQualitySession(slot).title, where).not.toBe(
-                  "Bloc à l'allure de l'objectif",
-                );
+                // Le titre est désormais écrit depuis le déroulé : ce qui se
+                // gèle est le **mot** que seule la zone marathon fait sortir.
+                expect(
+                  deterministicQualitySession(slot).title.toLowerCase(),
+                  where,
+                ).not.toContain('objectif');
               }
             }
           }
@@ -894,6 +934,6 @@ describe('l’allure d’objectif ne s’écrit que sous une intention datée', 
       goalDistanceKm: 21.0975,
     }).flatMap((week) => week.qualitySlots.map((slot) => deterministicQualitySession(slot).title));
 
-    expect(titles).toContain("Bloc à l'allure de l'objectif");
+    expect(titles.some((title) => title.toLowerCase().includes('objectif'))).toBe(true);
   });
 });

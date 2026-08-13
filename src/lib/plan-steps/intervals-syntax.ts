@@ -77,6 +77,13 @@
  * de 205, `65-79% HR` sur une référence de 184 : la même prescription, exprimée
  * dans les termes du destinataire.
  *
+ * Le point de départ de cette chaîne est la cible **de l'étape**
+ * (`stepHrTargetBpm`), sous-créneau compris : une fin de sortie longue qui vise
+ * le haut de l'endurance (74–79 % du profil, soit 136–145 bpm à 184) part en
+ * `66-71% HR` sur une référence de 205, quand le reste du parcours part en
+ * `59-71% HR`. Sans cela, la montre affichait la même plage du premier au
+ * dernier kilomètre.
+ *
  * ## Sans référence distante, pas de cible cardiaque du tout
  *
  * Si la FC max distante manque — API en erreur, champ absent, valeur aberrante —
@@ -87,8 +94,9 @@
  * cible d'allure quand elle en porte une.
  */
 
-import { hrTargetPercentOfMax, hrZoneTargetBpm } from '@/lib/metrics/hr-targets';
+import { hrTargetPercentOfMax } from '@/lib/metrics/hr-targets';
 
+import { stepHrTargetBpm } from './hr-target';
 import { toSingleLine, type PlanSessionSteps, type PlanStep, type PlanStepRole } from './schema';
 
 /**
@@ -184,9 +192,12 @@ function formatTargetToken(step: PlanStep, hr: HrReference | null): string | nul
     return `${min}-${paceClock(step.paceMaxSecPerKm)}/km Pace`;
   }
 
-  if (step.hrZone === null || hr === null) return null;
+  if (hr === null) return null;
 
-  const target = hrZoneTargetBpm(step.hrZone, hr.profileMaxHrBpm);
+  // La cible de l'étape, sous-créneau compris : un bloc qui vise le haut de
+  // l'endurance doit partir sur ses propres bornes, sinon la fin appuyée d'une
+  // sortie longue arrive sur la montre avec la cible du reste du parcours.
+  const target = stepHrTargetBpm(step, hr.profileMaxHrBpm);
   if (target === null) return null;
 
   const percent = hrTargetPercentOfMax(target, hr.intervalsMaxHrBpm);

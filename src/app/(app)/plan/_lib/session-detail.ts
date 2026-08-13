@@ -14,7 +14,8 @@
  */
 
 import type { PlanSessionDto } from "@/data/plans";
-import { hrZoneTargetBpm, type HrTargetBpm } from "@/lib/metrics/hr-targets";
+import type { HrTargetBpm } from "@/lib/metrics/hr-targets";
+import { stepHrTargetBpm } from "@/lib/plan-steps/hr-target";
 import {
   sessionStepsTotals,
   type PlanStep,
@@ -138,8 +139,11 @@ export function formatHrTarget(target: HrTargetBpm): string {
  * footing se court sans consigne.
  *
  * La cible cardiaque s'affiche en **battements** (`120–145 bpm`) dès que la FC
- * max est connue : c'est ce qui se surveille au poignet. « Z2 » ne se lit que
- * faute de FC max au profil — un rang de zone nu ne dit rien à qui court.
+ * max est connue : c'est ce qui se surveille au poignet. Elle tient compte du
+ * **sous-créneau** de l'étape quand elle en porte un — une fin de sortie longue
+ * appuyée affiche `136–145 bpm` là où le reste du parcours affiche
+ * `120–145 bpm`. « Z2 » ne se lit que faute de FC max au profil — un rang de
+ * zone nu ne dit rien à qui court.
  *
  * La conversion se fait **ici, à l'affichage**, et jamais à l'écriture du plan :
  * une FC max corrigée au profil met à jour tout le plan d'un coup.
@@ -156,20 +160,30 @@ export function formatStepTarget(step: PlanStep, maxHrBpm: number | null = null)
   if (min !== null) return formatPace(min);
   if (max !== null) return formatPace(max);
 
-  if (step.hrZone === null) return null;
+  const target = stepHrTargetBpm(step, maxHrBpm);
+  if (target !== null) return formatHrTarget(target);
 
-  const target = hrZoneTargetBpm(step.hrZone, maxHrBpm);
-  return target === null ? `Z${step.hrZone}` : formatHrTarget(target);
+  return step.hrZone === null ? null : `Z${step.hrZone}`;
 }
 
 /**
  * La cible cardiaque de la **séance**, quand elle en porte une — `null` sinon.
  *
- * Elle se lit sur le déroulé, jamais sur un champ dédié : c'est la zone que
+ * Elle se lit sur le déroulé, jamais sur un champ dédié : c'est la cible que
  * portent les étapes de **course**, et elle n'existe que si elles la portent
- * toutes, à l'identique. Une séance dont un bloc est prescrit autrement (le bloc
- * à allure objectif d'une sortie longue spécifique, par exemple) n'a pas de
- * cible cardiaque unique à annoncer — ses étapes disent chacune la leur.
+ * toutes. Une séance dont un bloc est prescrit autrement (le bloc à allure
+ * objectif d'une sortie longue spécifique, par exemple) n'a pas de cible
+ * cardiaque à annoncer — ses étapes disent chacune la leur.
+ *
+ * ## Des étapes à sous-créneaux différents ne cassent pas l'annonce
+ *
+ * C'est l'**enveloppe** des cibles d'étapes qui est rendue : la plus basse des
+ * bornes basses, la plus haute des bornes hautes. Une sortie longue à fin
+ * appuyée (120–145 puis 136–145 bpm) s'annonce donc toujours « 120–145 bpm » sur
+ * sa ligne repliée, ce qui est exactement la plage dans laquelle elle se court,
+ * et le déroulé déplié dit ensuite bloc par bloc. Quand toutes les étapes
+ * portent la même cible — le cas de tous les footings — l'enveloppe *est* cette
+ * cible, au bpm près : la ligne de séance ne bouge pas d'un battement.
  *
  * Fonction pure, exportée pour les tests.
  */
@@ -182,11 +196,19 @@ export function sessionHrTarget(
   );
   if (runs.length === 0) return null;
 
-  const zone = runs[0].hrZone;
-  if (zone === null) return null;
-  if (!runs.every((step) => step.hrZone === zone)) return null;
+  const targets: HrTargetBpm[] = [];
+  for (const step of runs) {
+    const target = stepHrTargetBpm(step, maxHrBpm);
+    // Une seule étape de course sans cible cardiaque, et la séance n'en a plus
+    // à annoncer : c'est elle qui dirait autre chose que ce qu'on affiche.
+    if (target === null) return null;
+    targets.push(target);
+  }
 
-  return hrZoneTargetBpm(zone, maxHrBpm);
+  return {
+    minBpm: Math.min(...targets.map((target) => target.minBpm)),
+    maxBpm: Math.max(...targets.map((target) => target.maxBpm)),
+  };
 }
 
 export type PlanStepView = {

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  EASY_HR_BANDS,
   EASY_HR_ZONE,
   PRESCRIBED_HR_ZONES,
   canPrescribeHeartRate,
+  hrPercentTargetBpm,
   hrTargetPercentOfMax,
   hrZoneTargetBpm,
 } from './hr-targets';
@@ -29,6 +31,60 @@ describe('PRESCRIBED_HR_ZONES', () => {
 
   it('ne déclare aucun autre créneau : rien de prescrit, rien de publié', () => {
     expect(Object.keys(PRESCRIBED_HR_ZONES)).toEqual([String(EASY_HR_ZONE)]);
+  });
+});
+
+describe('EASY_HR_BANDS', () => {
+  const BANDS = [EASY_HR_BANDS.low, EASY_HR_BANDS.mid, EASY_HR_BANDS.high];
+
+  /**
+   * Le contrat non négociable : un sous-créneau **précise** l'endurance, il n'en
+   * sort pas. Une bande qui déborderait déplacerait la répartition d'intensité
+   * du plan — le 80/20 — sans que rien ne le signale.
+   */
+  it('reste à l’intérieur de la plage d’endurance', () => {
+    const easy = PRESCRIBED_HR_ZONES[EASY_HR_ZONE];
+
+    for (const band of BANDS) {
+      expect(band.minPercentOfMax).toBeGreaterThanOrEqual(easy?.minPercentOfMax ?? 0);
+      expect(band.maxPercentOfMax).toBeLessThanOrEqual(easy?.maxPercentOfMax ?? 0);
+    }
+    // Les deux bords de la plage sont bien atteints : sans cela, les bandes
+    // décriraient autre chose que l'endurance.
+    expect(EASY_HR_BANDS.low.minPercentOfMax).toBe(easy?.minPercentOfMax);
+    expect(EASY_HR_BANDS.high.maxPercentOfMax).toBe(easy?.maxPercentOfMax);
+  });
+
+  it('monte du bas vers le haut, sans laisser de trou', () => {
+    expect(EASY_HR_BANDS.low.minPercentOfMax).toBeLessThan(EASY_HR_BANDS.mid.minPercentOfMax);
+    expect(EASY_HR_BANDS.mid.minPercentOfMax).toBeLessThan(EASY_HR_BANDS.high.minPercentOfMax);
+    // Un recouvrement d'un point ou deux : une progression continue, pas trois
+    // marches.
+    expect(EASY_HR_BANDS.mid.minPercentOfMax).toBeLessThan(EASY_HR_BANDS.low.maxPercentOfMax);
+    expect(EASY_HR_BANDS.high.minPercentOfMax).toBeLessThan(EASY_HR_BANDS.mid.maxPercentOfMax);
+  });
+
+  it('reste tenable au poignet : au moins 5 points de large', () => {
+    for (const band of BANDS) {
+      expect(band.maxPercentOfMax - band.minPercentOfMax).toBeGreaterThanOrEqual(5);
+    }
+  });
+});
+
+describe('hrPercentTargetBpm', () => {
+  it('rend le haut de l’endurance en battements — 136-145 bpm à 184', () => {
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.high, 184)).toEqual({ minBpm: 136, maxBpm: 145 });
+  });
+
+  it('rend le bas et le milieu, distincts du haut', () => {
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.low, 184)).toEqual({ minBpm: 120, maxBpm: 131 });
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.mid, 184)).toEqual({ minBpm: 129, maxBpm: 138 });
+  });
+
+  it('applique les mêmes gardes que la zone : rien sans FC max exploitable', () => {
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.high, null)).toBeNull();
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.high, 119)).toBeNull();
+    expect(hrPercentTargetBpm(EASY_HR_BANDS.high, 184.5)).toBeNull();
   });
 });
 

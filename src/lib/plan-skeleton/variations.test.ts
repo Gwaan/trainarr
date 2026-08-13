@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { EASY_HR_BANDS, EASY_HR_ZONE, PRESCRIBED_HR_ZONES } from '@/lib/metrics/hr-targets';
 import { flattenSteps } from '@/lib/plan-steps/schema';
 
 import type { PlanPhase } from './phases';
@@ -137,6 +138,83 @@ describe('longRunFinishSteps', () => {
   it('couvre exactement la distance déclarée, au mètre près', () => {
     for (let meters = 6_000; meters <= 35_000; meters += 100) {
       expect(coveredM(longRunFinishSteps('build', 3, meters / 1_000)), `${meters} m`).toBe(meters);
+    }
+  });
+
+  /**
+   * « 8,64 km puis 2,16 km » est sorti en production : le découpage 80/20 ne
+   * ramenait pas ses étapes sur la grille des 100 m, contrairement à toutes les
+   * autres variations. Un centième de kilomètre ne se court pas.
+   */
+  it('pose ses deux segments sur la centaine de mètres', () => {
+    for (let meters = 6_000; meters <= 35_000; meters += 100) {
+      const steps = flattenSteps(longRunFinishSteps('build', 3, meters / 1_000) ?? []);
+      for (const step of steps) {
+        expect((step.distanceM ?? 0) % 100, `${meters} m`).toBe(0);
+      }
+      // La fin garde son cinquième, au demi-cran de grille près : c'est tout
+      // ce que l'arrondi peut lui coûter.
+      expect(Math.abs((steps[1].distanceM ?? 0) - meters * 0.2), `${meters} m`).toBeLessThanOrEqual(
+        50,
+      );
+    }
+  });
+
+  /**
+   * Le défaut que la grille ne réparait pas : la fin appuyée portait **la même**
+   * cible que les 80 % qui la précèdent (124–150 bpm de part et d'autre), donc
+   * rien de discernable sur la montre. Elle vise désormais le haut de la plage
+   * d'endurance — sans en sortir : le 80/20 du plan ne bouge pas.
+   */
+  it('vise le haut de la plage d’endurance sur sa fin, et elle seule', () => {
+    const steps = flattenSteps(longRunFinishSteps('build', 3, 14) ?? []);
+
+    expect(steps[0].hrPercentMin).toBeNull();
+    expect(steps[0].hrPercentMax).toBeNull();
+    expect(steps[1].hrPercentMin).toBe(EASY_HR_BANDS.high.minPercentOfMax);
+    expect(steps[1].hrPercentMax).toBe(EASY_HR_BANDS.high.maxPercentOfMax);
+  });
+});
+
+/**
+ * Le contrat que ces sous-créneaux ne doivent jamais rompre : ils **précisent**
+ * la plage d'endurance, ils n'en sortent pas. Une bande qui déborderait
+ * déplacerait la répartition d'intensité du plan sans que rien ne le dise.
+ */
+describe('les sous-créneaux restent dans la plage d’endurance', () => {
+  it('n’écrit aucune borne hors de 65–79 % de FC max', () => {
+    const easy = PRESCRIBED_HR_ZONES[EASY_HR_ZONE];
+    const steps = [
+      ...flattenSteps(easySessionSteps('progressive', 9) ?? []),
+      ...flattenSteps(longRunFinishSteps('build', 3, 18) ?? []),
+    ];
+
+    const banded = steps.filter((step) => step.hrPercentMin != null);
+    expect(banded.length).toBeGreaterThan(0);
+
+    for (const step of banded) {
+      expect(step.hrPercentMin).toBeGreaterThanOrEqual(easy?.minPercentOfMax ?? 0);
+      expect(step.hrPercentMax).toBeLessThanOrEqual(easy?.maxPercentOfMax ?? 0);
+      expect(step.hrPercentMin ?? 0).toBeLessThan(step.hrPercentMax ?? 0);
+    }
+  });
+
+  it('monte le progressif du bas vers le haut de la plage', () => {
+    const steps = flattenSteps(easySessionSteps('progressive', 9) ?? []);
+
+    // Trois tranches de course : la première n'est plus un échauffement sans
+    // cible, elle pèse 40 % de la séance.
+    expect(steps.map((step) => step.role)).toEqual(['run', 'run', 'run']);
+    expect(steps.map((step) => step.hrPercentMin)).toEqual([65, 70, 74]);
+    expect(steps.map((step) => step.hrPercentMax)).toEqual([71, 75, 79]);
+  });
+
+  it('ne pose aucune bande sur les lignes droites : trop courtes pour une FC', () => {
+    for (const variation of ['strides', 'hillStrides'] as const) {
+      for (const step of flattenSteps(easySessionSteps(variation, 8) ?? [])) {
+        expect(step.hrPercentMin, variation).toBeNull();
+        expect(step.hrPercentMax, variation).toBeNull();
+      }
     }
   });
 });

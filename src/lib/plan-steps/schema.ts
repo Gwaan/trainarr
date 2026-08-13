@@ -12,9 +12,11 @@
  * - **Une mesure par étape, jamais deux** : une étape se court soit sur une
  *   distance, soit sur une durée. Porter les deux obligerait à trancher laquelle
  *   fait foi le jour J, et à inventer une allure pour les réconcilier.
- * - **Allure *ou* zone cardiaque, jamais les deux** : deux cibles simultanées se
+ * - **Allure *ou* cible cardiaque, jamais les deux** : deux cibles simultanées se
  *   contredisent dès la première côte. Aucune des deux n'est obligatoire — un
- *   footing n'a pas de cible.
+ *   footing n'a pas de cible. La cible cardiaque s'écrit en rang de zone, que
+ *   des bornes en pourcentage de FC max peuvent préciser (« le haut de
+ *   l'endurance », cf. `hrPercentMin`).
  * - **Pas de répétition imbriquée** : un bloc répète une suite d'étapes, et un
  *   bloc ne contient pas de bloc. C'est la limite d'intervals.icu, destinataire
  *   de ces séances ; l'accepter ici évite d'avoir à l'aplatir (avec pertes) à
@@ -58,6 +60,15 @@ export const PLAN_STEP_BOUNDS = {
    * `lib/metrics/hr-zones`. Les deux tables sont documentées l'une par l'autre.
    */
   hrZone: { min: 1, max: 5 },
+  /**
+   * Bornes d'un **sous-créneau** cardiaque, en pourcentage de FC max.
+   *
+   * 30 à 100 : c'est le domaine de ce qu'un pourcentage de FC max peut vouloir
+   * dire, pas celui d'une prescription (les créneaux réellement prescrits
+   * vivent dans `lib/metrics/hr-targets`). En dessous de 30 %, on ne court pas ;
+   * au-dessus de 100 %, ce n'est plus un pourcentage d'un maximum.
+   */
+  hrPercentOfMax: { min: 30, max: 100 },
   /** 20 répétitions : au-delà, c'est un bloc mal découpé. */
   repeat: { min: 1, max: 20 },
   /** Un bloc répète une poignée d'étapes (typiquement effort + récup). */
@@ -119,6 +130,41 @@ const planStepSchema = z
       .max(PLAN_STEP_BOUNDS.hrZone.max)
       .nullable(),
     /**
+     * Le **sous-créneau** cardiaque de l'étape, en pourcentage de FC max — deux
+     * bornes ou aucune.
+     *
+     * ## Pourquoi il ne suffisait pas d'un rang
+     *
+     * `hrZone` est un ordinal : tous les blocs d'une séance facile reçoivent le
+     * rang 2, donc la **même** cible (65–79 % de FC max), et « le haut de la
+     * plage » était littéralement inexprimable. La fin appuyée d'une sortie
+     * longue portait la cible de ce qui la précède, et la première tranche d'un
+     * footing progressif n'en portait aucune.
+     *
+     * ## Facultatif, et il doit le rester
+     *
+     * Les plans déjà en base ne portent pas ces clés — une étape lue depuis la
+     * colonne `jsonb` les a donc à `undefined`, pas à `null`. Les deux valeurs
+     * se lisent par `stepHrPercentBand` (`plan-steps/hr-target`), qui ne
+     * suppose ni l'une ni l'autre : c'est la seule lecture sûre de ce champ.
+     *
+     * Une bande **exclut une allure**, exactement comme `hrZone` : c'est une
+     * cible cardiaque, et une étape n'en porte qu'une. Elle n'exige en revanche
+     * pas de `hrZone` — un déroulé qui n'a pas traversé le post-traitement des
+     * allures (régime sans table de VDOT) porte sa bande sans rang, et elle
+     * suffit à prescrire.
+     */
+    hrPercentMin: z
+      .number()
+      .min(PLAN_STEP_BOUNDS.hrPercentOfMax.min)
+      .max(PLAN_STEP_BOUNDS.hrPercentOfMax.max)
+      .nullish(),
+    hrPercentMax: z
+      .number()
+      .min(PLAN_STEP_BOUNDS.hrPercentOfMax.min)
+      .max(PLAN_STEP_BOUNDS.hrPercentOfMax.max)
+      .nullish(),
+    /**
      * Consigne courte affichée telle quelle (« footing très souple »).
      *
      * Ramenée à une seule ligne avant validation : la longueur se juge sur le
@@ -162,6 +208,29 @@ const planStepSchema = z
       ctx.addIssue({
         code: 'custom',
         message: 'allure et zone cardiaque sont exclusives — une seule cible par étape.',
+      });
+    }
+
+    const percentMin = step.hrPercentMin ?? null;
+    const percentMax = step.hrPercentMax ?? null;
+
+    if ((percentMin === null) !== (percentMax === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'un sous-créneau cardiaque porte ses deux bornes, en % de FC max.',
+      });
+    } else if (percentMin !== null && percentMax !== null && percentMin > percentMax) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'bornes de sous-créneau inversées : la borne basse d’abord.',
+      });
+    }
+
+    if (hasPace && percentMin !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'allure et sous-créneau cardiaque sont exclusifs — une seule cible par étape.',
       });
     }
   });

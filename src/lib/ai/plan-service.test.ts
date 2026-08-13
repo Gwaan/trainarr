@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 
 import type { TrainingSnapshotDto } from '@/data/coach-context';
 import { InvalidPlanError, PlanNotFoundError, type PlanDto, type PlanSessionDto } from '@/data/plans';
+import { QUALITY_ZONE_KINDS } from '@/lib/plan-skeleton';
 import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError, type AiOutputIssue } from './errors';
@@ -235,7 +236,6 @@ function qualityOutputFor(budgetKm: number) {
   const recoverM = Math.round((bodyM * 0.4) / 4);
 
   return {
-    title: 'Séance écrite par le coach',
     steps: [
       { repeat: 1, steps: [fillStep('warmup', warmupM)] },
       { repeat: 4, steps: [fillStep('run', runM), fillStep('recover', recoverM)] },
@@ -245,6 +245,28 @@ function qualityOutputFor(budgetKm: number) {
       },
     ],
   };
+}
+
+/**
+ * Ce qui distingue une séance de qualité écrite par le **coach** de la même
+ * séance écrite par l'appli.
+ *
+ * Ce n'est plus le titre : il est calculé depuis le déroulé
+ * (`plan-skeleton/quality-title`), et les deux chemins passent par le même
+ * générateur — c'est exactement ce qu'on voulait, et c'est ce qui rend le titre
+ * inutilisable comme marqueur.
+ *
+ * Les **notes**, elles, séparent les deux sans ambiguïté : le modèle n'a pas le
+ * droit d'en écrire (`quality-fill` les efface, sans quoi une note « en tempo »
+ * déplacerait le créneau d'allure d'un bloc), là où le déroulé déterministe en
+ * pose une sur chacune de ses étapes. Restreint aux séances de **qualité** : un
+ * footing peut recevoir un déroulé synthétisé sans note à la publication.
+ */
+function coachWritten(session: WrittenSession): boolean {
+  const kinds: string[] = Object.values(QUALITY_ZONE_KINDS);
+  if (!kinds.includes(session.kind)) return false;
+
+  return (session.steps ?? []).every((block) => block.steps.every((step) => step.note === null));
 }
 
 /** Le résumé que le coach simulé rend, reconnaissable dans les assertions. */
@@ -887,10 +909,9 @@ describe('generatePlan', () => {
 
       await expect(generatePlan(REQUEST)).resolves.toBe(DRAFT);
 
-      // Les séances de qualité ne portent plus le titre du modèle : elles ont été
-      // réécrites par le déroulé déterministe.
-      const titles = writtenSessions().map((session) => session.title);
-      expect(titles).not.toContain('Séance écrite par le coach');
+      // Plus aucun créneau ne vient du modèle : ils ont tous été réécrits par
+      // le déroulé déterministe.
+      expect(writtenSessions().some(coachWritten)).toBe(false);
       expect(loggedText()).toContain('réécriture de tous les créneaux');
       expect(loggedText()).toContain(VIOLATION);
     });
@@ -1466,10 +1487,10 @@ describe('updatePlanFromInstruction — coach incohérent ou en panne', () => {
 
     await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
 
-    // Le calendrier est écrit, complet, et aucun titre ne vient du modèle.
+    // Le calendrier est écrit, complet, et aucun créneau ne vient du modèle.
     const sessions = updatedSessions();
     expect(sessions.length).toBeGreaterThan(0);
-    expect(sessions.map((session) => session.title)).not.toContain('Séance écrite par le coach');
+    expect(sessions.some(coachWritten)).toBe(false);
     // Réglages inchangés (l'instruction n'a pas pu être lue) et résumé de repli.
     const settings = updatedSettings();
     expect(Object.keys(settings)).toEqual(['summary']);
@@ -1503,9 +1524,7 @@ describe('updatePlanFromInstruction — coach incohérent ou en panne', () => {
 
     expect(updatedSettings().summary).toContain('Périodisation :');
     // Les créneaux, eux, viennent bien du coach.
-    expect(updatedSessions().map((session) => session.title)).toContain(
-      'Séance écrite par le coach',
-    );
+    expect(updatedSessions().some(coachWritten)).toBe(true);
   });
 });
 
@@ -1561,9 +1580,7 @@ describe('updatePlanFromInstruction — refus et dégradation', () => {
 
     await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
 
-    expect(updatedSessions().map((session) => session.title)).not.toContain(
-      'Séance écrite par le coach',
-    );
+    expect(updatedSessions().some(coachWritten)).toBe(false);
     expect(loggedText()).toContain('réécriture de tous les créneaux');
   });
 
