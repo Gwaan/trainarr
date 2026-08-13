@@ -60,23 +60,28 @@ import 'server-only';
  *    qu'à llama.cpp : ailleurs, un paramètre inconnu vaut un HTTP 400.
  * 2. Le lecteur SSE **compte** `reasoning_content` dans la progression (c'est du
  *    temps de génération réel, la barre doit avancer) sans jamais l'accumuler
- *    dans le contenu rendu.
+ *    dans le contenu rendu, ni le diffuser à `onDelta`.
  * 3. Un bloc `<think>…</think>` restant est dépouillé avant le `JSON.parse` de
  *    {@link chatCompletionJson} — filet de dernier ressort, qui ne s'active que
- *    sur un contenu ne commençant pas par `{` ou `[`.
+ *    sur un contenu ne commençant pas par `{` ou `[`. En streaming, le même bloc
+ *    est retenu **avant** d'atteindre `onDelta` (cf. {@link createDeltaGate}) :
+ *    un fragment déjà écrit à l'écran ne se reprend pas.
  *
  * ## Streaming — uniquement quand quelqu'un écoute
  *
- * Un `onProgress` fourni bascule l'appel en `stream: true` et fait lire la
- * réponse en SSE (`data: {…}` par ligne, contenu dans `choices[0].delta.content`,
- * terminaison `data: [DONE]`) : le callback reçoit le nombre de caractères
- * accumulés à chaque chunk. La **chaîne finale est identique** à celle du mode
- * non-streaming — c'est le même contenu, reçu autrement, et la validation Zod
- * qui suit ne voit aucune différence.
+ * Un `onProgress` **ou** un `onDelta` fourni bascule l'appel en `stream: true` et
+ * fait lire la réponse en SSE (`data: {…}` par ligne, contenu dans
+ * `choices[0].delta.content`, terminaison `data: [DONE]`). Deux besoins servis par
+ * le même flux : `onProgress` reçoit le nombre de caractères accumulés — de quoi
+ * faire avancer une barre — et `onDelta` le fragment lui-même, seule matière dont
+ * un chat puisse écrire la réponse au fur et à mesure. La **chaîne finale est
+ * identique** à celle du mode non-streaming — c'est le même contenu, reçu
+ * autrement, et la validation Zod qui suit ne voit aucune différence.
  *
  * Sans callback, rien ne change : une seule réponse JSON, comme avant. Le
  * streaming ne se paie que là où il sert à quelque chose (la génération de plan,
- * qui dure des minutes et doit afficher une barre qui avance).
+ * qui dure des minutes et doit afficher une barre qui avance ; le chat, qui doit
+ * écrire pendant que le modèle parle).
  *
  * ## Trois garde-fous
  *
@@ -256,6 +261,18 @@ export type ChatCompletionOptions = {
   /** Délai de garde de l'appel. Défaut : {@link AI_REQUEST_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
+   * Abandon demandé par l'appelant — typiquement le signal d'une requête HTTP
+   * dont le client est parti. Composé avec le délai de garde : le premier des
+   * deux qui tombe interrompt l'appel, qui se solde alors par un
+   * {@link AiUnavailableError} `unreachable`.
+   *
+   * C'est la seule prise sur une génération qui n'a encore rien diffusé : tant
+   * que la retenue de tête n'a rien laissé passer (cf.
+   * {@link THINK_HOLDBACK_CHARS}), `onDelta` n'est appelé nulle part, et le GPU
+   * écrirait jusqu'au bout pour une page fermée depuis longtemps.
+   */
+  signal?: AbortSignal;
+  /**
    * Appelé à chaque chunk reçu, avec le **nombre total** de caractères
    * accumulés depuis le début de la génération.
    *
@@ -264,6 +281,16 @@ export type ChatCompletionOptions = {
    * être bon marché — il est appelé des centaines de fois sur un plan.
    */
   onProgress?: (receivedChars: number) => void;
+  /**
+   * Appelé à chaque fragment de **contenu** reçu, avec ce fragment seul — jamais
+   * le cumul. Comme `onProgress`, sa seule présence bascule l'appel en
+   * streaming ; les deux ensemble fonctionnent, chacun avec sa quantité.
+   *
+   * Ne reçoit **jamais** de raisonnement : ni `reasoning_content`, ni l'intérieur
+   * d'un bloc `<think>` (cf. {@link createDeltaGate}). Du brouillon inscrit dans
+   * un chat ne se retire pas après coup — le fragment est parti.
+   */
+  onDelta?: (delta: string) => void;
 };
 
 /**
@@ -406,6 +433,86 @@ function parseStreamLine(line: string, status: number): StreamEvent {
 }
 
 /**
+ * Caractères retenus en tête de flux, le temps de lever le doute sur un bloc de
+ * raisonnement — deux phrases.
+ *
+ * Le doute vient de la balise **ouvrante manquante** : llama.cpp la pré-remplit
+ * côté template, si bien qu'un flux de raisonnement commence par du texte nu et
+ * ne se déclare qu'à sa fermeture. Rien ne distingue ce début-là de celui d'une
+ * vraie réponse, et il faut donc choisir de quel côté se tromper : retenir
+ * jusqu'à la fermeture, c'est ne plus rien afficher du tout en régime nominal,
+ * où aucune fermeture ne vient jamais ; diffuser aussitôt, c'est laisser du
+ * brouillon s'inscrire dans le chat sans pouvoir l'en retirer.
+ *
+ * Ce chiffre **borne la latence**, il ne prétend pas borner la fuite : un
+ * raisonnement plus long que la fenêtre sort quand même (une fois la tête
+ * libérée, le flux passe en clair). C'est assumé — la vraie protection est en
+ * amont (`enable_thinking: false`, `reasoning_content`), celle-ci ne rattrape que
+ * les blocs courts et, à coup sûr, ceux qui s'annoncent par leur ouvrante.
+ */
+export const THINK_HOLDBACK_CHARS = 200;
+
+/**
+ * Le filtre qui décide ce qui part vers `onDelta`, et quand.
+ *
+ * Le pendant streamé de {@link stripThinkBlock}, avec une contrainte que celui-ci
+ * n'a pas : un fragment diffusé est déjà à l'écran. Le filtre retient donc la
+ * tête du flux plutôt que de nettoyer après coup.
+ *
+ * Trois façons de lever le doute, toutes définitives — ensuite le flux passe en
+ * clair, plus rien n'est retenu :
+ *
+ * - une balise **fermante** : tout ce qui la précède était du raisonnement et ne
+ *   sortira pas, la suite est la réponse ;
+ * - une balise **ouvrante** en tête : le doute est levé dans l'autre sens, on
+ *   sait qu'on lit du brouillon — la retenue ne coûte alors rien et court sans
+ *   limite jusqu'à la fermeture ; un bloc jamais refermé (génération coupée en
+ *   plein raisonnement) n'a rien produit d'affichable ;
+ * - {@link THINK_HOLDBACK_CHARS} caractères sans balise : c'était une réponse.
+ */
+function createDeltaGate(onDelta: (delta: string) => void): {
+  push: (fragment: string) => void;
+  flush: () => void;
+} {
+  /** Retenu tant que le doute dure, vidé dès qu'il est levé. */
+  let held = '';
+  let released = false;
+
+  const release = (text: string): void => {
+    released = true;
+    held = '';
+    if (text !== '') onDelta(text);
+  };
+
+  return {
+    push: (fragment) => {
+      if (released) {
+        onDelta(fragment);
+        return;
+      }
+      held += fragment;
+
+      const closing = held.indexOf(THINK_CLOSE);
+      if (closing !== -1) {
+        release(held.slice(closing + THINK_CLOSE.length));
+        return;
+      }
+      // Une ouvrante encore incomplète (`<thi`, à cheval sur deux fragments)
+      // échoue à ce test et reste dans la fenêtre : c'est précisément son office.
+      if (held.trimStart().startsWith(THINK_OPEN)) return;
+      if (held.length > THINK_HOLDBACK_CHARS) release(held);
+    },
+    flush: () => {
+      if (released) return;
+      // Flux terminé sans avoir levé le doute : ce qui reste est une réponse trop
+      // courte pour avoir franchi la fenêtre — sauf s'il s'annonçait comme du
+      // raisonnement, auquel cas il n'y a rien à diffuser.
+      release(held.trimStart().startsWith(THINK_OPEN) ? '' : held);
+    },
+  };
+}
+
+/**
  * Accumule le contenu d'une réponse streamée, en signalant l'avancement.
  *
  * Le délai de silence est **couru contre la lecture** plutôt que confié au seul
@@ -423,10 +530,11 @@ function parseStreamLine(line: string, status: number): StreamEvent {
  */
 async function readStreamedContent(
   response: Response,
-  onProgress: (receivedChars: number) => void,
+  listeners: Pick<ChatCompletionOptions, 'onProgress' | 'onDelta'>,
   timeouts: { firstChunkMs: number; idleMs: number },
   abort: () => void,
 ): Promise<string> {
+  const { onProgress, onDelta } = listeners;
   const body = response.body;
   if (body === null) {
     throw new AiResponseError('Flux du coach IA vide (aucun corps de réponse).', response.status);
@@ -473,6 +581,8 @@ async function readStreamedContent(
    */
   let reasoningChars = 0;
 
+  const gate = onDelta === undefined ? undefined : createDeltaGate(onDelta);
+
   /** Accumule un fragment et signale l'avancement. Rend `true` sur `[DONE]`. */
   const consume = (line: string): boolean => {
     const event = parseStreamLine(line, response.status);
@@ -481,7 +591,10 @@ async function readStreamedContent(
     if (event.content === '' && event.reasoningChars === 0) return false;
     content += event.content;
     reasoningChars += event.reasoningChars;
-    onProgress(content.length + reasoningChars);
+    // Le raisonnement compte dans l'avancement mais ne se diffuse pas : seul le
+    // `content` passe la porte, et encore, si le doute est levé.
+    if (event.content !== '') gate?.push(event.content);
+    onProgress?.(content.length + reasoningChars);
     return false;
   };
 
@@ -526,6 +639,9 @@ async function readStreamedContent(
     void reader.cancel().catch(() => {});
   }
 
+  // La fin du flux lève le dernier doute : ce qui restait en retenue part
+  // maintenant, ou jamais.
+  gate?.flush();
   return content;
 }
 
@@ -564,8 +680,8 @@ async function postChatCompletion(
   options: ChatCompletionOptions & { responseFormat?: Record<string, unknown> },
 ): Promise<string> {
   const url = aiEndpointUrl(requireBaseUrl(), '/v1/chat/completions');
-  const { onProgress } = options;
-  const streaming = onProgress !== undefined;
+  const { onProgress, onDelta } = options;
+  const streaming = onProgress !== undefined || onDelta !== undefined;
 
   const body = {
     model: env.AI_MODEL ?? DEFAULT_MODEL,
@@ -608,13 +724,21 @@ async function postChatCompletion(
   const startedAt = Date.now();
   const headersTimer = streaming ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
 
+  // L'abandon de l'appelant se compose avec la garde du régime en cours plutôt
+  // que de s'y substituer : `AbortSignal.any` rend un signal qui tombe au
+  // premier des deux, et un signal **déjà** avorté à l'entrée fait échouer le
+  // `fetch` sans qu'aucune requête ne parte — le cas du client reparti pendant
+  // qu'il attendait son tour.
+  const guard = streaming ? controller.signal : AbortSignal.timeout(timeoutMs);
+  const signal = options.signal === undefined ? guard : AbortSignal.any([guard, options.signal]);
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...aiAuthHeaders() },
       body: JSON.stringify(body),
-      signal: streaming ? controller.signal : AbortSignal.timeout(timeoutMs),
+      signal,
       // Une génération n'est jamais une réponse à mettre en cache.
       cache: 'no-store',
     });
@@ -645,7 +769,7 @@ async function postChatCompletion(
   const content = streaming
     ? await readStreamedContent(
         response,
-        onProgress,
+        { onProgress, onDelta },
         {
           // Ce qu'il reste du délai global une fois les en-têtes obtenus : le
           // pré-remplissage n'a pas droit à un second budget de cinq minutes.
@@ -768,9 +892,17 @@ export async function chatCompletionJson<T>(options: ChatCompletionJsonOptions<T
     // JSON coupé au milieu ne se rattrape pas (cf. {@link AI_JSON_MAX_TOKENS}).
     maxTokens: options.maxTokens ?? AI_JSON_MAX_TOKENS,
     timeoutMs: options.timeoutMs,
+    // Transmis pour la même raison que `onDelta` plus bas : une option acceptée
+    // par la signature et perdue en route coûte plus cher qu'elle ne rapporte.
+    signal: options.signal,
     // Le streaming ne change ni la contrainte de grammaire ni la validation qui
     // suit : c'est le même JSON, reçu au fil de l'eau.
     onProgress: options.onProgress,
+    // Transmis comme le reste, faute d'une bonne raison de faire autrement : les
+    // fragments d'un JSON contraint n'intéressent personne, mais une option
+    // acceptée puis silencieusement ignorée coûterait une heure à qui la croirait
+    // branchée. Elle fait donc ici ce qu'elle dit ailleurs.
+    onDelta: options.onDelta,
     responseFormat: {
       type: 'json_schema',
       json_schema: {

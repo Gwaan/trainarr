@@ -1,35 +1,60 @@
 import type { Metadata } from "next";
-import { Sparkles } from "lucide-react";
+import { Suspense } from "react";
+import { connection } from "next/server";
 
-import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
-import { Panel } from "@/components/panel";
-import { Button } from "@/components/ui/button";
+import { listCoachMessages } from "@/data/coach-chat";
+import { getAiAvailability } from "@/lib/ai/availability";
+
+import { CoachConversation } from "./_components/coach-conversation";
+import { CoachSkeleton } from "./_components/coach-skeleton";
 
 export const metadata: Metadata = {
   title: "Coach",
 };
 
-export default function CoachPage() {
+/**
+ * Contenu de la page.
+ *
+ * `connection()` est indispensable : `cacheComponents: true` prérendrait sinon
+ * la page pendant `next build` (image Docker), où ni la base ni l'API IA
+ * n'existent. Cf. `.claude/rules/nextjs.md`.
+ *
+ * Les deux lectures sont indépendantes — le fil vient de la base, la
+ * disponibilité du coach d'un ping réseau mémorisé — donc elles partent
+ * ensemble.
+ *
+ * Le fil est réduit à ce que l'écran affiche avant de franchir la frontière
+ * client : ni `createdAt` (aucun horodatage n'est rendu), ni rien d'autre que le
+ * texte, son rôle et une clé de liste.
+ */
+async function CoachContent() {
+  await connection();
+  const [messages, availability] = await Promise.all([
+    listCoachMessages(),
+    getAiAvailability(),
+  ]);
+
   return (
-    <div className="flex flex-col gap-5 sm:gap-6">
+    <>
       <PageHeader
         title="Coach"
         subtitle="Un regard sur tes données d'entraînement, disponible à toute heure."
       />
+      <CoachConversation
+        messages={messages.map(({ id, role, content }) => ({ id, role, content }))}
+        unavailableReason={availability.available ? null : availability.reason}
+      />
+    </>
+  );
+}
 
-      <Panel title="Conversation" padded={false}>
-        <EmptyState
-          icon={Sparkles}
-          title="Le coach attend tes premières données"
-          description="Dès que tes séances seront synchronisées, le coach pourra commenter ta charge, ta forme et te suggérer des ajustements."
-          action={
-            <Button variant="secondary" disabled>
-              Démarrer une conversation
-            </Button>
-          }
-        />
-      </Panel>
+export default function CoachPage() {
+  return (
+    <div className="flex flex-col gap-5 sm:gap-6">
+      <Suspense fallback={<CoachSkeleton />}>
+        <CoachContent />
+      </Suspense>
     </div>
   );
 }

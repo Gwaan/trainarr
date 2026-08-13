@@ -10,6 +10,7 @@ import {
   AI_JSON_MAX_TOKENS,
   AI_REQUEST_TIMEOUT_MS,
   AI_STREAM_IDLE_TIMEOUT_MS,
+  THINK_HOLDBACK_CHARS,
   aiEndpointUrl,
   chatCompletion,
   chatCompletionJson,
@@ -289,6 +290,22 @@ describe('chatCompletion', () => {
     await chatCompletion({ messages: MESSAGES, timeoutMs: 1_000 });
 
     expect(calls[0].init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("compose le signal de l'appelant avec le délai de garde, hors streaming aussi", async () => {
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      if (init?.signal?.aborted === true) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      return completion('ok');
+    });
+
+    await expect(
+      chatCompletion({ messages: MESSAGES, signal: AbortSignal.abort() }),
+    ).rejects.toBeInstanceOf(AiUnavailableError);
+    await expect(
+      chatCompletion({ messages: MESSAGES, signal: new AbortController().signal }),
+    ).resolves.toBe('ok');
   });
 
   it('traduit une panne réseau en coach injoignable', async () => {
@@ -629,6 +646,223 @@ describe('chatCompletion — streaming', () => {
     expect((error as AiResponseError).message).toContain('réponse vide');
   });
 
+  it('bascule en streaming sur le seul onDelta', async () => {
+    const { calls } = stubFetch(sseResponse(NOMINAL));
+    const fragments: string[] = [];
+
+    const answer = await chatCompletion({
+      messages: MESSAGES,
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    expect(bodyOf(calls[0]).stream).toBe(true);
+    expect(answer).toBe('Bonne semaine : 42 km.');
+    // Une réponse plus courte que la retenue de tête tient en un seul fragment,
+    // livré à la fermeture du flux — le recollage reste la valeur de retour.
+    expect(fragments.join('')).toBe(answer);
+  });
+
+  it('diffuse les fragments un à un une fois la tête du flux libérée', async () => {
+    // Passé la retenue (cf. THINK_HOLDBACK_CHARS), plus rien n'est mis de côté :
+    // chaque chunk part tel quel, dans l'ordre, et leur somme est la réponse.
+    const head = 'a'.repeat(THINK_HOLDBACK_CHARS + 1);
+    stubFetch(
+      sseResponse([deltaEvent(head), deltaEvent(' puis '), deltaEvent('la fin.'), 'data: [DONE]\n\n']),
+    );
+    const fragments: string[] = [];
+
+    const answer = await chatCompletion({
+      messages: MESSAGES,
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    expect(fragments).toEqual([head, ' puis ', 'la fin.']);
+    expect(fragments.join('')).toBe(answer);
+  });
+
+  it('sert le compteur et les fragments ensemble, chacun avec sa quantité', async () => {
+    const head = 'a'.repeat(THINK_HOLDBACK_CHARS + 1);
+    stubFetch(sseResponse([deltaEvent(head), deltaEvent('bc'), 'data: [DONE]\n\n']));
+    const received: number[] = [];
+    const fragments: string[] = [];
+
+    await chatCompletion({
+      messages: MESSAGES,
+      onProgress: (chars) => received.push(chars),
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    // Le cumul d'un côté, le fragment de l'autre : deux besoins, un seul flux.
+    expect(received).toEqual([head.length, head.length + 2]);
+    expect(fragments).toEqual([head, 'bc']);
+  });
+
+  it('compte le raisonnement dans la progression sans jamais le diffuser', async () => {
+    const reasoning = 'Voyons voir, elle court trois fois par semaine…';
+    stubFetch(
+      sseResponse([reasoningEvent(reasoning), deltaEvent('Bonne semaine.'), 'data: [DONE]\n\n']),
+    );
+    const received: number[] = [];
+    const fragments: string[] = [];
+
+    await chatCompletion({
+      messages: MESSAGES,
+      onProgress: (chars) => received.push(chars),
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    expect(fragments.join('')).toBe('Bonne semaine.');
+    expect(received).toEqual([reasoning.length, reasoning.length + 'Bonne semaine.'.length]);
+  });
+
+  it('retient un bloc <think> diffusé, que le contenu rendu garde pourtant', async () => {
+    stubFetch(
+      sseResponse([
+        deltaEvent('<think>Elle court '),
+        deltaEvent('trois fois par semaine.</think>'),
+        deltaEvent('Bonne semaine.'),
+        'data: [DONE]\n\n',
+      ]),
+    );
+    const fragments: string[] = [];
+
+    const answer = await chatCompletion({
+      messages: MESSAGES,
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    expect(fragments.join('')).toBe('Bonne semaine.');
+    // La valeur de retour ne dépouille rien (le rattrapage de `stripThinkBlock`
+    // est réservé à la génération structurée) : seule la diffusion est filtrée,
+    // parce qu'elle seule est irréversible.
+    expect(answer).toContain('<think>');
+  });
+
+  it("retient un raisonnement dont seule la fermeture arrive — llama.cpp pré-remplit l'ouvrante", async () => {
+    stubFetch(
+      sseResponse([
+        deltaEvent('Elle court trois fois par semaine.'),
+        deltaEvent('</think>Bonne semaine.'),
+        'data: [DONE]\n\n',
+      ]),
+    );
+    const fragments: string[] = [];
+
+    await chatCompletion({ messages: MESSAGES, onDelta: (delta) => fragments.push(delta) });
+
+    expect(fragments).toEqual(['Bonne semaine.']);
+  });
+
+  it("ne diffuse rien d'un bloc jamais refermé — génération coupée en plein brouillon", async () => {
+    stubFetch(sseResponse([deltaEvent('<think>Voyons, elle court'), 'data: [DONE]\n\n']));
+    const onDelta = vi.fn();
+
+    await expect(chatCompletion({ messages: MESSAGES, onDelta })).resolves.toContain('<think>');
+
+    expect(onDelta).not.toHaveBeenCalled();
+  });
+
+  it('libère la tête au-delà de la retenue, quitte à laisser filer un long brouillon', async () => {
+    // La limite assumée du filtre : la retenue borne la latence, pas la fuite. Un
+    // raisonnement plus long que la fenêtre sort — ce cas-là se traite en amont
+    // (`enable_thinking: false`, `reasoning_content`), pas ici.
+    const reasoning = 'Voyons voir. '.repeat(40);
+    expect(reasoning.length).toBeGreaterThan(THINK_HOLDBACK_CHARS);
+    stubFetch(
+      sseResponse([
+        deltaEvent(reasoning),
+        deltaEvent('</think>Bonne semaine.'),
+        'data: [DONE]\n\n',
+      ]),
+    );
+    const fragments: string[] = [];
+
+    const answer = await chatCompletion({
+      messages: MESSAGES,
+      onDelta: (delta) => fragments.push(delta),
+    });
+
+    expect(fragments.join('')).toBe(answer);
+  });
+
+  /**
+   * Un `fetch` qui honore son signal comme le vrai : rejet immédiat s'il est
+   * déjà avorté, corps de réponse en erreur s'il tombe en cours de flux. Le stub
+   * ordinaire ne le fait pas, et un signal composé s'éprouve précisément là.
+   */
+  function abortableFetch(): { signals: (AbortSignal | null | undefined)[]; push: (part: string) => void } {
+    const encoder = new TextEncoder();
+    const signals: (AbortSignal | null | undefined)[] = [];
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      signals.push(signal);
+      if (signal?.aborted === true) throw new DOMException('The operation was aborted.', 'AbortError');
+
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          stream = controller;
+          signal?.addEventListener(
+            'abort',
+            () => controller.error(new DOMException('The operation was aborted.', 'AbortError')),
+            { once: true },
+          );
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    });
+
+    return { signals, push: (part) => stream.enqueue(encoder.encode(part)) };
+  }
+
+  it("abandonne la génération quand le signal de l'appelant tombe", async () => {
+    // Le seul moyen de rendre le GPU avant le premier fragment : sous la retenue
+    // de tête, `onDelta` n'est appelé qu'à la fermeture du flux, et l'appelant
+    // n'a jusque-là aucune prise sur le flux.
+    const { signals, push } = abortableFetch();
+    const aborter = new AbortController();
+    const onDelta = vi.fn();
+
+    const pending = chatCompletion({ messages: MESSAGES, signal: aborter.signal, onDelta }).catch(
+      (caught: unknown) => caught,
+    );
+
+    push(deltaEvent('Bonne '));
+    aborter.abort();
+
+    expect(await pending).toBeInstanceOf(AiUnavailableError);
+    expect(signals[0]?.aborted).toBe(true);
+    // La retenue de tête n'a rien laissé passer : rien n'a été affiché, et c'est
+    // pourtant coupé.
+    expect(onDelta).not.toHaveBeenCalled();
+  });
+
+  it("ne part même pas quand le signal de l'appelant est déjà avorté", async () => {
+    const { signals } = abortableFetch();
+
+    const error = await chatCompletion({
+      messages: MESSAGES,
+      signal: AbortSignal.abort(),
+      onDelta: () => {},
+    }).catch((caught: unknown) => caught);
+
+    // Le client était déjà parti (l'attente du verrou de charge, typiquement) :
+    // le signal composé naît avorté, et aucun octet ne quitte la machine.
+    expect(signals[0]?.aborted).toBe(true);
+    expect(error).toBeInstanceOf(AiUnavailableError);
+  });
+
+  it("n'entrave en rien une génération dont le signal reste vivant", async () => {
+    const { calls } = stubFetch(sseResponse(NOMINAL));
+    const aborter = new AbortController();
+
+    await expect(
+      chatCompletion({ messages: MESSAGES, signal: aborter.signal, onDelta: () => {} }),
+    ).resolves.toBe('Bonne semaine : 42 km.');
+    expect(calls[0].init?.signal?.aborted).toBe(false);
+  });
+
   it('ne streame pas sans callback — le mode par défaut est inchangé', async () => {
     const { calls } = stubFetch(completion('ok'));
 
@@ -780,6 +1014,27 @@ describe('chatCompletionJson', () => {
       }),
     ).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
     expect(received).toEqual([15, json.length]);
+  });
+
+  it("transmet onDelta, qui fait ici ce qu'il dit ailleurs", async () => {
+    // Les fragments d'un JSON contraint n'intéressent personne, mais une option
+    // acceptée puis ignorée en silence est un piège de plus à comprendre.
+    const json = '{"distanceKm": 12.5, "intensity": "seuil"}';
+    stubFetch(
+      sseResponse([deltaEvent(json.slice(0, 15)), deltaEvent(json.slice(15)), 'data: [DONE]\n\n']),
+    );
+    const fragments: string[] = [];
+
+    await expect(
+      chatCompletionJson({
+        messages: MESSAGES,
+        schemaName: 'seance',
+        jsonSchema,
+        schema: sessionSchema,
+        onDelta: (delta) => fragments.push(delta),
+      }),
+    ).resolves.toEqual({ distanceKm: 12.5, intensity: 'seuil' });
+    expect(fragments.join('')).toBe(json);
   });
 
   it("dépouille un bloc de raisonnement qui précéderait le JSON", async () => {

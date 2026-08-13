@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { connection } from "next/server";
 
+import { AiSuspendedPanel, type SuspendedAiFeature } from "@/components/ai-suspended-panel";
 import { PageHeader } from "@/components/page-header";
 import { getAthleteProfile } from "@/data/athlete";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
-import { AiSuspendedPanel } from "./_components/ai-suspended-panel";
 import { PlanCreatePanel } from "./_components/plan-create-panel";
 import { PlanProposal } from "./_components/plan-proposal";
 import { PlanSkeleton } from "./_components/plan-skeleton";
@@ -30,6 +30,12 @@ const SUBTITLES = {
   review: "Le coach te propose un plan. Lis-le en entier, puis adopte-le ou refuse-le.",
   view: "Ton programme semaine par semaine, ajusté à ta charge réelle.",
 } as const;
+
+/** Ce que cette page perd quand le coach ne répond pas. */
+const PLAN_CREATION: SuspendedAiFeature = {
+  subject: "La création d'un plan",
+  inline: "la création de plan",
+};
 
 /**
  * Contenu de la page.
@@ -113,7 +119,11 @@ async function PlanContent() {
             maxStartDate={lastStart}
           />
         ) : (
-          <AiSuspendedPanel reason={availability.reason} />
+          <AiSuspendedPanel
+            reason={availability.reason}
+            panelTitle="Programme en cours"
+            feature={PLAN_CREATION}
+          />
         )}
       </>
     );

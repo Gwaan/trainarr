@@ -523,6 +523,59 @@ export const activityFeedbacks = pgTable('activity_feedbacks', {
   updatedAt: updatedAt(),
 });
 
+/**
+ * Qui a écrit un message du fil du coach.
+ *
+ * Les deux seuls rôles que la conversation connaît, et ceux qu'attend une API
+ * de complétion : `user` pour l'athlète, `assistant` pour le coach. Les
+ * instructions système ne sont **pas** persistées — elles sont reconstruites à
+ * chaque appel à partir des données d'entraînement du moment, et les figer en
+ * base ferait répondre le coach sur une forme périmée.
+ */
+export const COACH_MESSAGE_ROLES = ['user', 'assistant'] as const;
+
+export type CoachMessageRole = (typeof COACH_MESSAGE_ROLES)[number];
+
+/**
+ * Le fil de discussion avec le coach.
+ *
+ * **Un seul fil, pas de colonne de conversation** : l'application est
+ * mono-utilisateur et le coach y est un interlocuteur continu, qui se souvient
+ * d'une session à l'autre. Introduire un identifiant de fil coûterait une
+ * gestion (créer, choisir, renommer, archiver) que rien dans l'appli ne
+ * réclame, et une lecture « le fil courant » qu'il faudrait de toute façon
+ * définir. La conséquence est assumée : repartir de zéro, c'est vider la table
+ * pour l'athlète — d'où `clearCoachConversation` dans le DAL, seule façon de
+ * remettre le compteur à zéro.
+ *
+ * Rien d'autre que le rôle, le texte et l'instant : le modèle qui a rédigé la
+ * réponse n'est pas conservé (contrairement à `activity_feedbacks`, dont un
+ * texte isolé reste attribuable des mois plus tard) — dans un fil, c'est
+ * l'échange qui fait sens, pas la provenance de chaque tour.
+ */
+export const coachMessages = pgTable(
+  'coach_messages',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    role: text('role', { enum: COACH_MESSAGE_ROLES }).notNull(),
+    /** Texte brut du tour de parole, rendu tel quel (markdown côté assistant). */
+    content: text('content').notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    /**
+     * Chemin d'accès de la seule lecture qui existe : « les N derniers messages
+     * de l'athlète, dans l'ordre du temps ». Le btree se parcourt dans les deux
+     * sens, ce même index sert donc la lecture décroissante (`LIMIT N`) comme
+     * l'affichage croissant.
+     */
+    index('coach_messages_athlete_created_at_idx').on(table.athleteId, table.createdAt),
+  ],
+);
+
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
@@ -541,3 +594,6 @@ export type NewPlannedSession = InferInsertModel<typeof plannedSessions>;
 
 export type ActivityFeedback = InferSelectModel<typeof activityFeedbacks>;
 export type NewActivityFeedback = InferInsertModel<typeof activityFeedbacks>;
+
+export type CoachMessage = InferSelectModel<typeof coachMessages>;
+export type NewCoachMessage = InferInsertModel<typeof coachMessages>;
