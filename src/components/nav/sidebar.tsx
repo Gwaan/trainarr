@@ -3,10 +3,15 @@ import { AthleteLink } from "./athlete-link";
 import { Logo } from "./logo";
 import { SidebarNav } from "./sidebar-nav";
 
-/** Sidebar desktop fixe. Server Component : seule la liste de liens est cliente. */
+/**
+ * Sidebar desktop fixe. Server Component : seule la liste de liens est cliente.
+ *
+ * `view-transition-name` : nommée pour être *exclue* de l'animation d'onglet, pas
+ * pour y participer — voir le bloc « Coquille de navigation » de `globals.css`.
+ */
 export function Sidebar({ athlete }: { athlete: AthleteProfile }) {
   return (
-    <aside className="fixed inset-y-0 left-0 z-30 hidden w-[212px] flex-col border-r border-border bg-surface lg:flex">
+    <aside className="fixed inset-y-0 left-0 z-30 hidden w-[212px] flex-col border-r border-border bg-surface [view-transition-name:app-sidebar] lg:flex">
       {/* Sur iPad en PWA installée, la barre d'état est translucide et le header
           mobile qui lui réserve sa marge est masqué à partir de `lg` : sans ce
           padding, la marque passerait dessous. Hauteur recalculée plutôt que

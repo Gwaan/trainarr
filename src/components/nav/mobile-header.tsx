@@ -17,10 +17,13 @@ import { Logo } from "./logo";
  * y serait donc invisible *et* intapable. `max()` plutôt qu'une addition pour
  * que l'écart de 16 px reste le plancher, et que rien ne bouge sur un écran
  * sans encoche, où `env()` vaut 0.
+ *
+ * `view-transition-name` : nommé pour être *exclu* de l'animation d'onglet, pas
+ * pour y participer — voir le bloc « Coquille de navigation » de `globals.css`.
  */
 export function MobileHeader({ athlete }: { athlete: AthleteProfile }) {
   return (
-    <header className="sticky top-0 z-30 flex min-h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between border-b border-border bg-bg/85 pt-[env(safe-area-inset-top)] pr-[max(1rem,env(safe-area-inset-right))] pl-[max(1rem,env(safe-area-inset-left))] backdrop-blur-md lg:hidden">
+    <header className="sticky top-0 z-30 flex min-h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between border-b border-border bg-bg/85 pt-[env(safe-area-inset-top)] pr-[max(1rem,env(safe-area-inset-right))] pl-[max(1rem,env(safe-area-inset-left))] backdrop-blur-md [view-transition-name:app-header] lg:hidden">
       <Logo />
       <AthleteAvatarLink athlete={athlete} />
     </header>

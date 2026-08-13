@@ -166,6 +166,43 @@
   pointer-events: none;
 }
 
+/* =========================================================================
+   Coquille de navigation — capturée pour ne PAS être animée.
+
+   C'est le prix du `view-transition-name` posé sur le contenu : pendant une
+   transition, tout élément nommé est peint dans le pseudo-arbre
+   `::view-transition`, au-dessus de tout ce qui n'y participe pas — le
+   `z-index` de la page n'a plus cours. La bottom-nav et le header, restés hors
+   du calque, se faisaient donc recouvrir par le contenu entrant (squelette de
+   chargement en tête) le temps du fondu.
+
+   On ne peut pas faire passer le contenu sous un élément non capturé : la seule
+   issue est de nommer aussi la coquille, puis de lui retirer toute animation et
+   de la replacer au-dessus du groupe du contenu.
+   ========================================================================= */
+::view-transition-group(app-sidebar),
+::view-transition-group(app-header),
+::view-transition-group(app-bottom-nav) {
+  animation: none;
+  z-index: 100;
+}
+
+/* Les deux coquilles occupent la même géométrie ; seule la marque de l'onglet
+   actif les distingue. Superposer les snapshots ne produirait qu'un
+   scintillement : on ne garde que le nouveau, et l'onglet actif bascule donc
+   d'un coup — ce qui est bien ce qu'on veut d'un état de sélection. */
+::view-transition-old(app-sidebar),
+::view-transition-old(app-header),
+::view-transition-old(app-bottom-nav) {
+  display: none;
+}
+
+::view-transition-new(app-sidebar),
+::view-transition-new(app-header),
+::view-transition-new(app-bottom-nav) {
+  animation: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,

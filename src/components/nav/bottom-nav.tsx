@@ -16,6 +16,9 @@ import { isActivePath, NAV_LINKS } from "./nav-links";
  * événement tactile — l'onglet ne serait donc pas seulement rogné, mais
  * intapable. Le fond, lui, s'étend bien jusqu'aux bords : c'est du padding, pas
  * une réduction de la boîte, et les cinq colonnes restent égales à l'intérieur.
+ *
+ * `view-transition-name` : nommée pour être *exclue* de l'animation d'onglet, pas
+ * pour y participer — voir le bloc « Coquille de navigation » de `globals.css`.
  */
 export function BottomNav() {
   const pathname = usePathname();
@@ -23,7 +26,7 @@ export function BottomNav() {
   return (
     <nav
       aria-label="Navigation principale"
-      className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/95 pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] backdrop-blur-md lg:hidden"
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/95 pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] backdrop-blur-md [view-transition-name:app-bottom-nav] lg:hidden"
     >
       {/* `grid-cols-*` calé sur le nombre d'onglets : cinq colonnes égales
           plutôt qu'un défilement horizontal, que personne ne devine. */}
