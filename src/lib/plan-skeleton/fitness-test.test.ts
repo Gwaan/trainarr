@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { isIntensitySession, PLAN_OUTPUT_BOUNDS, weeklyVolumeTargets } from '@/lib/ai/plan-schema';
+import type { PlanLevel } from '@/data/db/schema';
 import type { SessionBudget } from '@/lib/ai/format';
 import { REFERENCE_UPDATE_MIN_GAP_DAYS } from '@/lib/metrics/fitness-test';
 import { flattenSteps } from '@/lib/plan-steps/schema';
@@ -16,7 +17,7 @@ import {
   FITNESS_TEST_SESSION_KM,
   pickFitnessTestDay,
 } from './fitness-test';
-import { PLAN_INTENTS, type PlanIntent } from './intent';
+import { intentRunsFitnessTests, PLAN_INTENTS, type PlanIntent } from './intent';
 import { planPhases, type PlanPhase } from './phases';
 import { sessionEffortKm } from './quality-load';
 import { qualitySessionTemplate } from './quality-template';
@@ -61,14 +62,16 @@ describe('firstEvaluableTestWeek', () => {
 });
 
 describe('fitnessTestWeekNumbers', () => {
-  it('pose le premier test à la fin de la phase de base, puis tous les cinq semaines', () => {
+  it('pose le premier test à la fin de la phase de base, puis toutes les quatre semaines', () => {
     // 16 semaines de `faster` : 25 % de base, soit quatre semaines (S01–S04),
     // toutes sous la première semaine évaluable. Le test glisse donc à S05, la
     // première que la cadence de Daniels autorise pour un départ le lundi.
     const phases = phasesOf('faster', 16);
     expect(phases.filter((phase) => phase === 'base')).toHaveLength(4);
 
-    expect(fitnessTestWeekNumbers('faster', phases, 1)).toEqual([5, 10, 15]);
+    // Quatre semaines d'écart, comme la règle de mise à jour du chrono
+    // (`REFERENCE_UPDATE_MIN_GAP_DAYS`) : S05, S09, S13.
+    expect(fitnessTestWeekNumbers('faster', phases, 1)).toEqual([5, 9, 13]);
   });
 
   it('n’en programme aucun sous les intentions qui n’en veulent pas', () => {
@@ -109,9 +112,10 @@ describe('fitnessTestWeekNumbers', () => {
             expect(phases[week - 1], `${where}, S${week}`).not.toBe('partial');
           }
 
-          // 4. Jamais deux tests à moins de la cadence d'intervalle — cinq
-          //    semaines, soit 29 jours au pire écart de placement, donc jamais
-          //    moins que la cadence de Daniels.
+          // 4. Jamais deux tests à moins de la cadence d'intervalle — quatre
+          //    semaines, soit 28 jours au jour de placement près. C'est le
+          //    squelette qui referme cet écart-là en jours (bloc suivant) ;
+          //    ici on ne lit que la périodisation.
           for (let index = 1; index < tests.length; index += 1) {
             expect(tests[index] - tests[index - 1], where).toBeGreaterThanOrEqual(
               FITNESS_TEST_CADENCE_WEEKS,
@@ -142,11 +146,11 @@ describe('fitnessTestWeekNumbers', () => {
     // Même plan, départ le jeudi : la semaine 5 ne laisse plus que 25 jours
     // depuis le départ dans le pire placement, la cadence en exige 28.
     const phases = phasesOf('faster', 16, 4);
-    expect(fitnessTestWeekNumbers('faster', phases, 4)).toEqual([6, 11]);
+    expect(fitnessTestWeekNumbers('faster', phases, 4)).toEqual([6, 10, 14]);
   });
 
   it('saute ce que la périodisation refuse au lieu d’avancer d’un cran', () => {
-    // Une périodisation fabriquée : la semaine que la cadence viserait (S10)
+    // Une périodisation fabriquée : la semaine que la cadence viserait (S09)
     // est un affûtage. Le test suivant se pose donc plus loin, jamais plus tôt.
     const phases: PlanPhase[] = [
       'base',
@@ -157,14 +161,14 @@ describe('fitnessTestWeekNumbers', () => {
       'build',
       'build',
       'build',
-      'build',
       'taper',
       'build',
       'build',
       'build',
+      'build',
     ];
-    expect(fitnessTestWeekNumbers('faster', phases, 1)).toEqual([5, 11]);
-    expect(phases[9]).toBe('taper');
+    expect(fitnessTestWeekNumbers('faster', phases, 1)).toEqual([5, 10]);
+    expect(phases[8]).toBe('taper');
   });
 });
 
@@ -177,17 +181,44 @@ describe('fitnessTestWeekNumbers', () => {
  * Ce test-ci prend les deux bouts ensemble : ce que `buildPlanSkeleton` **pose**
  * réellement (semaine et jour compris), et ce que `fitnessTestVerdict`
  * **exigera** de l'écart en jours.
+ *
+ * ## Ce que le passage à quatre semaines lui ajoute
+ *
+ * Tant que la cadence valait cinq semaines, l'écart entre deux tests était tenu
+ * par construction : 29 jours au pire glissement de jour, contre 28 exigés. Le
+ * seul bord qui pouvait mordre était le **premier** test, compté depuis le
+ * départ du plan.
+ *
+ * À quatre semaines, l'écart tombe **pile** sur 28 : un test posé un jeudi et le
+ * suivant un mardi feraient 26 jours, et le second partirait en `too-soon`. Ce
+ * bloc balaie donc tout ce dont le jour retenu dépend — jour de sortie longue,
+ * nombre de séances, niveau, phase de la semaine — et vérifie l'écart **entre
+ * tests consécutifs**, en jours, pas seulement le premier.
+ *
+ * Le balayage sonde 44 100 plans. Mesuré sur le code de ce commit : aucun
+ * glissement de jour vers l'amont (le jour retenu est constant ou plus tardif),
+ * écart minimal observé **exactement 28 jours** — aucune marge. C'est
+ * précisément pourquoi ce test existe : la moindre évolution de
+ * `pickFitnessTestDay` ou de `placeSessionDays` qui avancerait un jour d'un cran
+ * casserait la fonctionnalité en silence, et casse ce test à la place.
  */
 describe('un test posé est un test évaluable', () => {
-  /** Les jours écoulés entre le départ du plan et chaque test que le squelette pose. */
+  /**
+   * Les jours écoulés entre le départ du plan et chaque test que le squelette
+   * pose. Tout ce dont le **jour** retenu dépend est un paramètre : c'est là que
+   * l'écart de quatre semaines se joue.
+   */
   function testDays(params: {
     intent: PlanIntent;
     weeks: number;
     firstWeekFromDay: number;
     sessionsPerWeek: number;
     longRunDay: number;
+    level?: PlanLevel;
+    goalDistanceKm?: number | null;
   }): number[] {
     const { intent, weeks, firstWeekFromDay, sessionsPerWeek, longRunDay } = params;
+    const level = params.level ?? 'intermediate';
     const race = intent === 'race' ? ({ isMarathon: false } as const) : null;
 
     const skeleton = buildPlanSkeleton({
@@ -196,10 +227,10 @@ describe('un test posé est un test évaluable', () => {
       firstWeekFromDay,
       sessionsPerWeek,
       longRunDay,
-      level: 'intermediate',
+      level,
       race,
       raceDay: race === null ? null : longRunDay,
-      goalDistanceKm: null,
+      goalDistanceKm: params.goalDistanceKm ?? null,
       targets: weeklyVolumeTargets({
         weeks,
         firstWeekFromDay,
@@ -207,7 +238,7 @@ describe('un test posé est un test évaluable', () => {
         weeklyTimeMinutes: 400,
         easyPaceSecPerKm: 420,
         race,
-        level: 'intermediate',
+        level,
       }),
     });
 
@@ -224,40 +255,59 @@ describe('un test posé est un test évaluable', () => {
     return days;
   }
 
-  it('laisse la cadence de Daniels s’écouler avant le premier test, quel que soit le jour de départ', () => {
-    for (const intent of PLAN_INTENTS) {
+  it('laisse la cadence de Daniels s’écouler avant chaque test, en jours et sur tout le domaine', () => {
+    // Les intentions qui n'en programment aucun n'ont rien à prouver ici, et
+    // leur balayage triplerait le coût pour zéro test posé.
+    const intents = PLAN_INTENTS.filter(intentRunsFitnessTests);
+    expect(intents.length).toBeGreaterThan(0);
+
+    let placed = 0;
+    for (const intent of intents) {
       for (let weeks = 1; weeks <= 30; weeks += 1) {
         for (let firstWeekFromDay = 1; firstWeekFromDay <= 7; firstWeekFromDay += 1) {
           for (const sessionsPerWeek of [3, 4, 5, 6, 7]) {
-            for (const longRunDay of [1, 3, 6, 7]) {
-              const where =
-                `${intent}, ${weeks} semaines, départ jour ${firstWeekFromDay}, ` +
-                `${sessionsPerWeek} séances, sortie longue j${longRunDay}`;
-              const days = testDays({
-                intent,
-                weeks,
-                firstWeekFromDay,
-                sessionsPerWeek,
-                longRunDay,
-              });
+            for (let longRunDay = 1; longRunDay <= 7; longRunDay += 1) {
+              // Le niveau change le nombre de créneaux de qualité, donc les
+              // jours durs de la semaine, donc le jour que le test peut prendre.
+              for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+                const where =
+                  `${intent}, ${weeks} semaines, départ jour ${firstWeekFromDay}, ` +
+                  `${sessionsPerWeek} séances, sortie longue j${longRunDay}, ${level}`;
+                const days = testDays({
+                  intent,
+                  weeks,
+                  firstWeekFromDay,
+                  sessionsPerWeek,
+                  longRunDay,
+                  level,
+                });
+                placed += days.length;
 
-              for (const elapsed of days) {
-                expect(elapsed, where).toBeGreaterThanOrEqual(REFERENCE_UPDATE_MIN_GAP_DAYS);
-              }
-              // Et entre deux tests, le même écart : c'est la cadence de cinq
-              // semaines qui le tient, mais le jour de placement peut bouger
-              // d'une semaine à l'autre.
-              for (let index = 1; index < days.length; index += 1) {
-                expect(days[index] - days[index - 1], where).toBeGreaterThanOrEqual(
-                  REFERENCE_UPDATE_MIN_GAP_DAYS,
-                );
+                // Le premier test se compte depuis le **départ du plan**, où le
+                // chrono de référence a été déclaré.
+                for (const elapsed of days) {
+                  expect(elapsed, where).toBeGreaterThanOrEqual(REFERENCE_UPDATE_MIN_GAP_DAYS);
+                }
+                // Et entre deux tests consécutifs, le même écart — **en jours**,
+                // semaine et jour de placement pris ensemble. C'est ce que la
+                // cadence de quatre semaines ne tient plus seule.
+                for (let index = 1; index < days.length; index += 1) {
+                  expect(days[index] - days[index - 1], where).toBeGreaterThanOrEqual(
+                    REFERENCE_UPDATE_MIN_GAP_DAYS,
+                  );
+                }
               }
             }
           }
         }
       }
     }
-  });
+
+    // Un balayage qui ne poserait aucun test passerait sans rien prouver.
+    expect(placed).toBeGreaterThan(10_000);
+    // 44 100 squelettes complets : au-delà des 5 s par défaut dès que la suite
+    // tourne en parallèle, comme le balayage de `skeleton.test.ts`.
+  }, 120_000);
 
   it('garde un test sur un plan de huit semaines', () => {
     // Le plan le plus court qui en porte encore un, dans les deux cas de départ.
@@ -276,6 +326,96 @@ describe('un test posé est un test évaluable', () => {
       sessionsPerWeek: 4,
       longRunDay: 7,
     })).toHaveLength(1);
+  });
+
+  /*
+   * L'écart en jours doit être une propriété de **`buildPlanSkeleton`**, pas une
+   * coïncidence de la périodisation.
+   *
+   * Le balayage ci-dessus ne peut pas le prouver : sur le code de ce commit, le
+   * jour retenu ne recule jamais, donc quatre semaines valent toujours 28 jours
+   * pile et le garde-fou ne se déclenche pas une seule fois. Il resterait vert si
+   * on retirait le garde-fou — vérifié.
+   *
+   * Ce test-ci le déclenche pour de bon, en désignant les semaines de test
+   * directement (`testWeeks`, le chemin qu'emprunte une reconstruction). Des
+   * semaines trop rapprochées sont un cas que `fitnessTestWeekNumbers` ne produit
+   * pas, et c'est justement le point : le squelette ne doit **jamais** écrire un
+   * test que `fitnessTestVerdict` rejettera, quelle que soit la liste qu'on lui
+   * donne.
+   */
+  it('n’écrit jamais deux tests à moins de la cadence, quelles que soient les semaines désignées', () => {
+    const weeks = 20;
+    let refused = 0;
+    let written = 0;
+
+    for (let spacing = 1; spacing <= 5; spacing += 1) {
+      for (const sessionsPerWeek of [3, 4, 5, 6]) {
+        for (const longRunDay of [3, 6, 7]) {
+          const testWeeks: number[] = [];
+          for (let week = 6; week < weeks; week += spacing) testWeeks.push(week);
+
+          const skeleton = buildPlanSkeleton({
+            intent: 'faster',
+            weeks,
+            firstWeekFromDay: 1,
+            sessionsPerWeek,
+            longRunDay,
+            level: 'intermediate',
+            race: null,
+            raceDay: null,
+            goalDistanceKm: null,
+            testWeeks,
+            targets: weeklyVolumeTargets({
+              weeks,
+              firstWeekFromDay: 1,
+              recentWeeklyKm: 40,
+              weeklyTimeMinutes: 400,
+              easyPaceSecPerKm: 420,
+              race: null,
+              level: 'intermediate',
+            }),
+          });
+
+          const placed: number[] = [];
+          for (const week of skeleton) {
+            const test = week.sessions.find((session) => session.kind === FITNESS_TEST_KIND);
+            if (test === undefined) continue;
+            placed.push((week.weekNumber - 1) * 7 + test.day - 1);
+          }
+
+          const where = `espacement ${spacing}, ${sessionsPerWeek} séances, sortie longue j${longRunDay}`;
+          for (let index = 1; index < placed.length; index += 1) {
+            expect(placed[index] - placed[index - 1], where).toBeGreaterThanOrEqual(
+              REFERENCE_UPDATE_MIN_GAP_DAYS,
+            );
+          }
+          written += placed.length;
+          refused += testWeeks.length - placed.length;
+        }
+      }
+    }
+
+    // Le garde-fou a bien mordu : sans lui, toutes les semaines désignées
+    // porteraient un test, y compris celles espacées d'une seule semaine.
+    expect(refused).toBeGreaterThan(0);
+    expect(written).toBeGreaterThan(0);
+  });
+
+  it('pose bien les tests à 28 jours, et pas un de plus, sur seize semaines', () => {
+    // Le plan de référence du chantier : trois mesures au lieu de trois, mais
+    // quatre semaines plus tôt chacune — S05, S09, S13 au lieu de S05, S10, S15.
+    // L'écart réel est de 28 jours pile, ce que seule la stabilité du jour
+    // retenu (jeudi à chaque fois) rend possible.
+    expect(
+      testDays({
+        intent: 'faster',
+        weeks: 16,
+        firstWeekFromDay: 1,
+        sessionsPerWeek: 4,
+        longRunDay: 7,
+      }),
+    ).toEqual([32, 60, 88]);
   });
 });
 
@@ -443,6 +583,25 @@ describe('pickFitnessTestDay', () => {
 
   it('ne rend rien quand la semaine ne pose aucune qualité', () => {
     expect(pickFitnessTestDay([], 7)).toBeNull();
+  });
+
+  /*
+   * Le plancher de cadence : à quatre semaines d'écart, 28 jours ne tiennent que
+   * si le jour ne recule pas. Un jour plus frais ne rachète jamais une mesure que
+   * `fitnessTestVerdict` jettera en `too-soon`.
+   */
+  it('écarte les jours que la cadence rejetterait, même les plus frais', () => {
+    // Sortie longue le samedi, créneaux mardi et jeudi : sans plancher, le jeudi
+    // l'emporte (cinq jours de fraîcheur contre trois).
+    expect(pickFitnessTestDay([2, 4], 6)).toBe(4);
+    // Le test précédent est tombé un vendredi quatre semaines plus tôt : il faut
+    // au moins le vendredi, et aucun créneau ne l'atteint.
+    expect(pickFitnessTestDay([2, 4], 6, 5)).toBeNull();
+    // Un plancher au mardi laisse les deux candidats, et l'arbitrage de
+    // fraîcheur reprend la main.
+    expect(pickFitnessTestDay([2, 4], 6, 2)).toBe(4);
+    // Un plancher au jeudi élimine le mardi.
+    expect(pickFitnessTestDay([2, 5], 7, 4)).toBe(5);
   });
 });
 

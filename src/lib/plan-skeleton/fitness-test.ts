@@ -168,18 +168,37 @@ export const FITNESS_TEST_SESSION_KM =
 /**
  * La cadence nominale entre deux tests, en semaines.
  *
- * Cinq : le milieu de la fourchette de Daniels (4 à 6 semaines). Comme la
- * recherche du test suivant part de ce pas **et n'avance qu'en avant**, deux
- * tests ne peuvent jamais être séparés de moins de cinq semaines. En jours —
- * l'unité où la cadence se vérifie réellement —, cela fait 35 jours à jour de
- * placement égal, et **29 au pire écart** (le premier test un dimanche, le
- * suivant un lundi) : toujours au-dessus des
- * {@link REFERENCE_UPDATE_MIN_GAP_DAYS}. Le plancher entre deux tests est donc
- * tenu par construction, sans garde supplémentaire ; celui du **premier** test,
- * qui se compte depuis le départ du plan, est l'affaire de
- * {@link firstEvaluableTestWeek}.
+ * **Quatre**, et c'est exactement la règle que le verdict applique
+ * ({@link REFERENCE_UPDATE_MIN_GAP_DAYS}, 28 jours) : le bas de la fourchette de
+ * Daniels (4 à 6 semaines). Ces deux chiffres disaient la même chose et ne
+ * s'accordaient pas — la règle à quatre semaines, le placement à cinq. Le plan
+ * prescrivait donc une mesure de moins que ce qu'il s'autorisait à lire.
+ *
+ * Le bas de la fourchette plutôt que son milieu parce qu'un test n'est **pas une
+ * séance perdue**, même quand il ne montre rien : un 5 km à fond est un stimulus
+ * d'entraînement à part entière, et souvent le plus dur de la semaine. Le seul
+ * coût réel d'un test qui rend « pas mieux » est la fatigue d'un effort maximal
+ * — et l'information « je stagne » a de la valeur.
+ *
+ * ## Le piège que quatre semaines rouvre, et où il se referme
+ *
+ * À cinq semaines, l'écart en jours était tenu **par construction** : 35 jours à
+ * jour de placement égal, 29 au pire glissement (un test le dimanche, le suivant
+ * le lundi), donc toujours au-dessus des 28 exigés. À quatre, l'écart tombe
+ * **pile** sur 28 : il ne survit qu'à jour de placement égal ou plus tardif. Or
+ * le jour se choisit plus tard ({@link pickFitnessTestDay}), à partir des jours
+ * durs de la semaine — qui dépendent de la phase, donc peuvent bouger d'un test
+ * au suivant. Un glissement d'un seul jour vers l'amont ramènerait l'écart à 27
+ * et **le test suivant partirait en `too-soon`**, mesure prescrite et jetée.
+ *
+ * Ce n'est donc plus la cadence en semaines qui tient le plancher : c'est
+ * `buildPlanSkeleton`, qui refuse d'écrire un test à moins de
+ * {@link REFERENCE_UPDATE_MIN_GAP_DAYS} du précédent **réellement placé**, jour
+ * compris, et le décale ou y renonce (cf. le paramètre `minDay` de
+ * {@link pickFitnessTestDay}). Le plancher du **premier** test, qui se compte
+ * depuis le départ du plan, reste l'affaire de {@link firstEvaluableTestWeek}.
  */
-export const FITNESS_TEST_CADENCE_WEEKS = 5;
+export const FITNESS_TEST_CADENCE_WEEKS = 4;
 
 /**
  * La première semaine du plan capable de porter un test **évaluable**, 1-based.
@@ -282,6 +301,13 @@ function isEligible(phases: readonly PlanPhase[], index: number, minWeek: number
  * périodisation refuse ({@link TEST_ELIGIBLE_PHASES}). La recherche n'avance
  * jamais en arrière : l'écart entre deux tests est donc au moins la cadence,
  * jamais moins.
+ *
+ * Ce que cette fonction rend est une **périodisation**, pas un calendrier :
+ * quatre semaines d'écart valent 28 jours au jour de placement près, et c'est
+ * `buildPlanSkeleton` qui referme cet écart-là en jours, une fois le jour connu
+ * ({@link FITNESS_TEST_CADENCE_WEEKS}). Une semaine désignée ici peut donc
+ * repartir sans test, comme elle le fait déjà quand ses budgets ne financent pas
+ * la séance ({@link fitnessTestBudgets}).
  *
  * ## Fonction du **plan**, jamais de la fenêtre
  *
@@ -542,18 +568,33 @@ function daysSince(day: number, other: number): number {
  * du test : les jours qui le suivent dans sa propre semaine ne portent plus que
  * des footings et, au plus, la sortie longue.
  *
+ * ## Le plancher de cadence, quand il y en a un
+ *
+ * `minDay` est le premier jour de la semaine qui laisse
+ * {@link REFERENCE_UPDATE_MIN_GAP_DAYS} depuis le test précédent (cf.
+ * {@link FITNESS_TEST_CADENCE_WEEKS}). Les jours qui lui sont antérieurs sont
+ * **écartés d'emblée**, avant tout arbitrage de fraîcheur : un test que la
+ * cadence rejettera n'est pas un test, et un jour frais ne rachète pas une
+ * mesure jetée. Quand aucun créneau ne le satisfait, la fonction rend `null` et
+ * la semaine repart avec sa qualité ordinaire — le plan perd une mesure, jamais
+ * une séance.
+ *
  * @param qualityDays les jours ISO des créneaux de qualité de la semaine.
  * @param longRunDay le jour ISO de la sortie longue — `null` quand la semaine
  * n'en place pas.
+ * @param minDay le premier jour ISO acceptable, `null` quand la semaine n'a
+ * aucun test avant elle à qui rendre des comptes.
  */
 export function pickFitnessTestDay(
   qualityDays: readonly number[],
   longRunDay: number | null,
+  minDay: number | null = null,
 ): number | null {
   let best: number | null = null;
   let bestFreshness = -1;
 
   for (const day of qualityDays) {
+    if (minDay !== null && day < minDay) continue;
     let freshness = longRunDay === null ? Number.POSITIVE_INFINITY : daysSince(day, longRunDay);
     for (const other of qualityDays) {
       // Les créneaux d'avant le candidat sont devenus des footings ; ceux

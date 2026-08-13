@@ -65,6 +65,7 @@ import {
   type WeeklyVolumeTarget,
 } from '@/lib/ai/plan-schema';
 import type { PlanLevel } from '@/data/db/schema';
+import { REFERENCE_UPDATE_MIN_GAP_DAYS } from '@/lib/metrics/fitness-test';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import { weeklyQualityShares, type CompositionAnchor } from './composition';
@@ -825,6 +826,14 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
   // Le **pic** de sortie longue déjà écrit : c'est lui qui borne les suivantes,
   // et non le budget brut ni la semaine précédente (cf. `long-run-cap.ts`).
   let peakLongRunKm: number | null = null;
+  // Le dernier test **réellement écrit**, semaine du plan et jour compris :
+  // c'est lui, et non la cadence en semaines, qui tient le plancher de Daniels
+  // depuis que la cadence vaut quatre semaines (cf.
+  // `FITNESS_TEST_CADENCE_WEEKS`). Une fenêtre reconstruite ne connaît pas les
+  // tests qui la précèdent : son premier test repart donc sans plancher, ce qui
+  // est exact — il a été écrit par la création, à la même semaine et au même
+  // jour, et c'est *son* successeur qui devra rendre des comptes.
+  let lastTest: { planWeekNumber: number; day: number } | null = null;
 
   const skeleton: SkeletonWeek[] = [];
 
@@ -911,9 +920,28 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
     // footings, et la somme ne bouge pas. Il cède devant les invariants comme le
     // plafond de sortie longue : une semaine qui ne peut pas le financer garde
     // simplement sa qualité ordinaire.
-    const testDay =
+    //
+    // **Le plancher de Daniels se compte en jours, jamais en semaines.** La
+    // cadence en pose quatre, soit 28 jours *au jour de placement près* — et ce
+    // jour bouge d'une phase à l'autre. Le premier jour acceptable de cette
+    // semaine-ci se déduit donc du test précédent : `Δsemaines × 7 + (jour −
+    // jour précédent) ≥ 28`. Aucun créneau ne le satisfait ? La semaine repart
+    // avec sa qualité ordinaire — un test qui partirait en `too-soon` coûterait
+    // une séance dure pour une mesure jetée.
+    //
+    // Annotés plutôt qu'inférés, comme le plafond de sortie longue plus haut :
+    // le plancher dépend du dernier test écrit, qui dépend du jour retenu, qui
+    // dépend du plancher — une boucle que l'inférence ne sait pas dérouler, et
+    // qui n'existe pas à l'exécution.
+    const minTestDay: number | null =
+      lastTest === null
+        ? null
+        : REFERENCE_UPDATE_MIN_GAP_DAYS -
+          (planWeekNumber - lastTest.planWeekNumber) * DAYS_PER_WEEK +
+          lastTest.day;
+    const testDay: number | null =
       testWeeks.has(planWeekNumber) && days.qualityDays.length > 0
-        ? pickFitnessTestDay(days.qualityDays, days.longRunDay)
+        ? pickFitnessTestDay(days.qualityDays, days.longRunDay, minTestDay)
         : null;
     const testedBudgets = testDay === null ? null : fitnessTestBudgets(budgets);
     let test: { day: number; km: number } | null = null;
@@ -922,7 +950,10 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       // Le test consomme le **premier** créneau de qualité — celui dont
       // `fitnessTestBudgets` vient de relever le budget, et le seul qui reste.
       const testBudget = testedBudgets.find((budget) => budget.role === 'quality');
-      if (testBudget !== undefined) test = { day: testDay, km: testBudget.km };
+      if (testBudget !== undefined) {
+        test = { day: testDay, km: testBudget.km };
+        lastTest = { planWeekNumber, day: testDay };
+      }
     }
 
     const longBudget = budgets.find((budget) => budget.role === 'long');
@@ -1002,6 +1033,9 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
       easyBudgets.map((budget) => budget.km),
       variation.index,
       ceilingKm,
+      // Le donneur *est* le footing enrichi : le rééquilibrage ne doit pas le
+      // faire tomber sous le seuil qui lui permet de porter son déroulé.
+      variation.variation,
     );
 
     // Sortie longue non plaçable : son budget rejoint les footings plutôt que

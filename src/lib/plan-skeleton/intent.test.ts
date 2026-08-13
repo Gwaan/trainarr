@@ -169,13 +169,19 @@ describe('le plan type de chaque intention', () => {
       'S06 build    | Sortie longue, fin de parcours appuyée 16,0 | Seuil 6,0 + VMA 6,0 | Footing progressif 12,1',
       'S07 build    | Sortie longue en endurance 16,2 | Seuil 6,5 + VMA 6,5 | Footing avec lignes droites 11,5',
       'S08 build    | Sortie longue en endurance 13,8 | Seuil 5,5 + VMA 5,5 | Footing progressif 9,7',
-      'S09 build    | Sortie longue, fin de parcours appuyée 14,8 | Seuil 6,0 + VMA 6,0 | Footing avec lignes droites 10,4',
-      'S10 build    | Sortie longue en endurance 16,0 | — | Footing en endurance 9,1 · Footing progressif 7,5 · Test chronométré : 5 km à fond 7,5',
+      // Les suivants tous les quatre semaines — S05, S09, S13 —, soit
+      // exactement 28 jours d'écart réel puisque le jour retenu ne bouge pas
+      // (jeudi à chaque fois). C'est le plancher de la règle, pas un de moins :
+      // `buildPlanSkeleton` refuserait d'écrire un test qui serait à 27 jours du
+      // précédent.
+      'S09 build    | Sortie longue, fin de parcours appuyée 14,8 | — | Footing avec lignes droites 6,7 · Footing en endurance 8,2 · Test chronométré : 5 km à fond 7,5',
+      'S10 build    | Sortie longue en endurance 16,0 | Seuil 6,5 + VMA 6,5 | Footing progressif 11,1',
       'S11 build    | Sortie longue en endurance 16,2 | Seuil 7,0 + VMA 7,0 | Footing avec lignes droites 10,5',
       'S12 specific | Sortie longue, fin de parcours appuyée 13,8 | VMA 6,0 + Seuil 6,0 | Footing progressif 8,7',
-      'S13 specific | Sortie longue en endurance 14,5 | VMA 6,5 + Seuil 6,5 | Footing avec lignes droites 9,7',
+      'S13 specific | Sortie longue en endurance 14,5 | — | Footing avec lignes droites 6,8 · Footing en endurance 8,4 · Test chronométré : 5 km à fond 7,5',
       'S14 specific | Sortie longue en endurance 15,5 | VMA 7,5 + Seuil 7,5 | Footing progressif 9,6',
-      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | — | Footing avec lignes droites 8,0 · Footing en endurance 9,7 · Test chronométré : 5 km à fond 7,5',
+      // Pas de quatrième test : S17 est hors du plan.
+      'S15 specific | Sortie longue, fin de parcours appuyée 15,5 | VMA 7,5 + Seuil 7,5 | Footing avec lignes droites 10,2',
       'S16 specific | Sortie longue en endurance 13,0 | VMA 6,5 + Seuil 6,5 | Footing progressif 8,5',
     ]);
   });
@@ -197,14 +203,16 @@ describe('le plan type de chaque intention', () => {
       'S07 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
       'S08 build    | Sortie longue en endurance 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
       'S09 build    | Sortie longue, fin de parcours appuyée 14,0 | VMA 5,0 | Footing avec lignes droites 8,2 · Footing en endurance 10,0',
-      'S10 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing en endurance 10,6 · Footing progressif 8,5',
-      'S11 build    | Sortie longue en endurance 15,5 | — | Footing avec lignes droites 8,0 · Test chronométré : 5 km à fond 7,5 · Footing en endurance 9,7',
+      'S10 build    | Sortie longue en endurance 15,5 | — | Footing en endurance 9,5 · Test chronométré : 5 km à fond 7,5 · Footing progressif 7,6',
+      'S11 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
       'S12 build    | Sortie longue, fin de parcours appuyée 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
       'S13 build    | Sortie longue en endurance 14,0 | VMA 5,0 | Footing avec lignes droites 8,2 · Footing en endurance 10,0',
-      'S14 build    | Sortie longue en endurance 15,5 | VMA 5,5 | Footing en endurance 10,6 · Footing progressif 8,5',
+      // Trois tests là où la cadence de cinq semaines n'en posait que deux : sur
+      // un plan de seize semaines, la mesure de S14 est celle que le placement
+      // laissait passer.
+      'S14 build    | Sortie longue en endurance 15,5 | — | Footing en endurance 9,5 · Test chronométré : 5 km à fond 7,5 · Footing progressif 7,6',
       'S15 build    | Sortie longue, fin de parcours appuyée 15,5 | VMA 5,5 | Footing avec lignes droites 8,9 · Footing en endurance 10,8',
-      // Pas de troisième test en S16 : un test sur la dernière semaine d'un
-      // plan n'a plus une seule semaine à recalibrer.
+      // Pas de quatrième test : S18 est hors du plan.
       'S16 build    | Sortie longue en endurance 13,0 | VMA 5,0 | Footing en endurance 9,1 · Footing progressif 7,4',
     ]);
   });

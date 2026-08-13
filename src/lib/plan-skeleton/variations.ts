@@ -465,22 +465,36 @@ function tenthKm(value: number): number {
  * **La somme ne bouge pas** : ce qui est retiré à l'un est donné à l'autre, au
  * dixième près, sans quoi la semaine sortirait de sa cible.
  *
- * Trois bornes, et chacune protège une règle de validation :
+ * Quatre bornes, et chacune protège une règle ou l'intention même de la
+ * différenciation :
  *
  * - le receveur ne dépasse pas `ceilingKm` — la sortie longue reste la séance la
  *   plus longue de sa semaine ;
  * - le donneur ne descend pas sous la plus petite distance du contrat de sortie
  *   (`PLAN_OUTPUT_BOUNDS.distanceKm.min`) ;
+ * - **le donneur ne descend pas sous {@link EASY_VARIATION_MIN_KM} quand il
+ *   porte un déroulé** : sous ce seuil `easySessionSteps` n'écrit plus rien, et
+ *   le rééquilibrage détruirait exactement la différence qu'il cherche à créer —
+ *   deux footings nus séparés d'un kilomètre au lieu d'un footing à lignes
+ *   droites et d'un footing long. Mesuré sur le plan de l'utilisatrice après le
+ *   dépeuplement des semaines de test : deux budgets de 5,2 km devenaient 5,7 et
+ *   **4,7**, et la semaine du test était la seule du plan sans aucune variation.
+ *   Ce plancher-là ne joue que s'il y a quelque chose à protéger : un donneur
+ *   déjà sous le seuil ne porte aucun déroulé, et la différenciation par les
+ *   distances reste alors sa seule variété ;
  * - un écart nul ne différencie rien : les budgets ressortent alors tels quels,
  *   ce qui est le cas des toutes petites semaines.
  *
  * @param shortIndex le rang du footing qui cède.
  * @param ceilingKm la distance à ne pas dépasser — celle de la sortie longue.
+ * @param variation la variation que porte le donneur, dont dépend le plancher
+ * qui lui est appliqué.
  */
 export function spreadEasyDistances(
   kms: readonly number[],
   shortIndex: number,
   ceilingKm: number,
+  variation: EasyVariation = 'plain',
 ): number[] {
   if (kms.length < 2) return [...kms];
 
@@ -489,9 +503,18 @@ export function spreadEasyDistances(
   // dernier, ou le premier quand c'est le dernier qui cède.
   const taker = giver === kms.length - 1 ? 0 : kms.length - 1;
 
+  // Le plancher de déroulé ne protège que ce qui existe : un donneur déjà trop
+  // court pour porter quoi que ce soit n'a rien à perdre, et le lui appliquer
+  // reviendrait à renoncer à la différenciation au nom d'un déroulé qui n'aurait
+  // pas été écrit de toute façon.
+  const keepsSteps = variation !== 'plain' && kms[giver] >= EASY_VARIATION_MIN_KM;
+  const giverFloorKm = keepsSteps
+    ? Math.max(PLAN_OUTPUT_BOUNDS.distanceKm.min, EASY_VARIATION_MIN_KM)
+    : PLAN_OUTPUT_BOUNDS.distanceKm.min;
+
   const wanted = tenthKm(kms[giver] * EASY_SPREAD_SHARE);
   const room = tenthKm(ceilingKm - kms[taker]);
-  const floor = tenthKm(kms[giver] - PLAN_OUTPUT_BOUNDS.distanceKm.min);
+  const floor = tenthKm(kms[giver] - giverFloorKm);
   const delta = Math.min(wanted, room, floor);
   if (delta <= 0) return [...kms];
 
