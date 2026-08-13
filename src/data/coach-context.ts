@@ -4,10 +4,13 @@ import { and, asc, desc, eq, gte, lt, lte } from 'drizzle-orm';
 
 import { civilDaysBetween, isoWeekStart, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import { computeLoadSeries, computeTrimp } from '@/lib/metrics';
+import type { PlanIntent } from '@/lib/plan-skeleton/intent';
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
 import { todayCivilDate } from './athlete';
 import { db } from './db/client';
 import { activities, athlete, type Activity, type Athlete, type AthleteSex } from './db/schema';
+import { getActivePlanWithSessions, planEndExclusive, type PlanSessionDto } from './plans';
 import { buildDailyTrimp, buildFitness, buildVo2max, isRunning } from './training-metrics';
 
 /**
@@ -91,8 +94,107 @@ export type ComparableActivityDto = {
   trimp: number | null;
 };
 
+/**
+ * Une séance du plan telle que le **chat** du coach la lit.
+ *
+ * Volontairement plus pauvre que `PlanSessionDto` : ni `id`, ni allure cible, ni
+ * échauffement/récupération séparés. Ce qu'il faut pour répondre à « c'est quoi
+ * ma prochaine séance ? », et rien de plus — chaque champ superflu se paie en
+ * tokens et donne au modèle une matière de plus à recombiner de travers.
+ */
+export type UpcomingSessionDto = {
+  /** Jour civil `YYYY-MM-DD`. */
+  date: string;
+  /** Le type de la séance, ex. « VMA courte · piste ». */
+  kind: string;
+  /** L'intitulé, ex. « 6 × 800 m ». */
+  title: string;
+  /**
+   * Le déroulé **structuré**, tel que la séance le porte — `null` quand elle
+   * n'en a pas.
+   *
+   * Brut et non rendu : le DAL rend des données, la mise en forme des prompts
+   * appartient à `lib/ai/format`. Le rendre ici obligerait `src/data/` à
+   * importer `src/lib/ai/`, ce qui inverserait le sens des couches. Le type est
+   * celui des séances planifiées, porté par un module pur (`lib/plan-steps`) —
+   * il ne fait entrer aucun identifiant interne au passage.
+   */
+  steps: PlanSessionSteps | null;
+  volumeM: number | null;
+  durationS: number | null;
+  /** La séance a-t-elle déjà été courue ? */
+  done: boolean;
+};
+
+/** L'objectif du plan : ce que l'athlète est venue y chercher, et sa note. */
+export type PlanGoalDto = {
+  intent: PlanIntent;
+  /** Note libre de l'athlète, `null` quand elle n'en a pas écrit. */
+  note: string | null;
+};
+
+/**
+ * Le plan de l'athlète, réduit à ce que le chat en dit.
+ *
+ * Union discriminée et non `PlanContextDto | null` : l'absence de plan est un
+ * **fait à énoncer** (« tu n'as pas de plan en cours »), pas une donnée manquante
+ * à taire. C'est la même règle que partout ici — ce qui n'est pas là est dit tel
+ * quel, et le modèle n'a donc rien à combler.
+ */
+export type PlanContextDto =
+  | { hasPlan: false }
+  | {
+      hasPlan: true;
+      /**
+       * Le jour de la lecture, celui contre lequel la fenêtre a été découpée.
+       *
+       * Il voyage avec les séances parce qu'il est ce qui les situe : sans lui,
+       * une séance non faite du passé récent ne se distingue pas d'une séance à
+       * venir, et le formateur ne pourrait pas les rendre différemment.
+       */
+      today: string;
+      goal: PlanGoalDto;
+      /** Jour J, pour un objectif « course » uniquement. */
+      raceDate: string | null;
+      /** Dernier jour **couvert** par le plan, inclus. */
+      endsOn: string;
+      /** Les séances de la fenêtre, de la plus ancienne à la plus lointaine. */
+      upcoming: UpcomingSessionDto[];
+    };
+
 /** Quatre semaines : de quoi voir une progression de volume sans noyer le prompt. */
 export const SNAPSHOT_WEEKS = 4;
+
+/**
+ * Fenêtre des séances envoyées au chat : 10 jours, aujourd'hui compris.
+ *
+ * Dix, parce que c'est le plus petit nombre qui répond aux deux questions
+ * posées : quel que soit le jour où l'athlète demande, la fenêtre couvre la fin
+ * de sa semaine **et** le début de la suivante, donc « ma semaine » ne s'arrête
+ * jamais au dimanche soir, et au moins un week-end complet y figure — soit au
+ * moins une sortie longue à venir. Sept jours laisseraient un lundi sans rien
+ * savoir du week-end suivant ; quatorze doubleraient le bloc (une quinzaine à
+ * cinq séances, c'est dix lignes de déroulés) pour répondre à une question que
+ * personne ne pose au chat.
+ */
+export const COACH_UPCOMING_DAYS = 10;
+
+/**
+ * Jours de passé récent joints à la fenêtre : 3.
+ *
+ * Ce que le coach ne voit pas, il ne peut pas le relever. Une fenêtre ouverte à
+ * aujourd'hui laissait la séance d'**hier** hors du contexte : sautée ou courue,
+ * le modèle n'en savait rien, alors que `done` existe précisément pour faire la
+ * différence entre le fait et l'à-venir.
+ *
+ * Trois, parce que c'est le plus petit nombre qui couvre les deux cas qui se
+ * présentent : « ma séance d'hier », et un week-end entier passé à la trappe —
+ * un lundi, `today − 3` remonte au vendredi, samedi et dimanche compris. Sept
+ * jours rouvriraient une semaine complète de déroulés dans un bloc qui pèse déjà
+ * trois fois l'état d'entraînement, pour un passé que la page « Plan » montre
+ * mieux que le chat ; c'est le même budget de 32 k de contexte qui est en jeu.
+ */
+export const COACH_RECENT_DAYS = 3;
 
 /** Fenêtre de l'allure de référence : les 5 dernières courses. */
 export const RECENT_PACE_ACTIVITIES = 5;
@@ -256,6 +358,50 @@ export function toComparableActivityDto(row: Activity, profile: Athlete): Compar
   };
 }
 
+/**
+ * Séance planifiée réduite à ce que le chat en lit, déroulé compris tel quel.
+ *
+ * `done` est le seul champ dérivé : `completedActivityId` est un identifiant
+ * interne, il ne franchit pas la frontière — mais le fait qu'une séance ait été
+ * courue, lui, est exactement ce qui empêche le coach d'annoncer comme « à
+ * venir » ce que l'athlète vient de faire.
+ */
+export function toUpcomingSessionDto(session: PlanSessionDto): UpcomingSessionDto {
+  return {
+    date: session.scheduledOn,
+    kind: session.kind,
+    title: session.title,
+    steps: session.steps,
+    volumeM: session.volumeM,
+    durationS: session.durationS,
+    done: session.completedActivityId !== null,
+  };
+}
+
+/**
+ * Les séances de la fenêtre `[today − {@link COACH_RECENT_DAYS}, today + days)`,
+ * dans l'ordre du calendrier.
+ *
+ * Fenêtre fermée des deux côtés, comme {@link longestRunKm} : rien au-delà de
+ * l'horizon, donc rien qui laisse croire au modèle qu'il connaît la suite du
+ * plan, et seulement quelques jours de passé — assez pour que le coach voie une
+ * séance sautée, pas assez pour que le bloc devienne un journal.
+ */
+export function buildUpcomingSessions(
+  sessions: readonly PlanSessionDto[],
+  today: string,
+  days = COACH_UPCOMING_DAYS,
+): UpcomingSessionDto[] {
+  const from = shiftCivilDate(today, -COACH_RECENT_DAYS);
+  const endExclusive = shiftCivilDate(today, days);
+
+  return sessions
+    // Les dates civiles `YYYY-MM-DD` s'ordonnent lexicographiquement.
+    .filter((session) => session.scheduledOn >= from && session.scheduledOn < endExclusive)
+    .sort((a, b) => a.scheduledOn.localeCompare(b.scheduledOn))
+    .map(toUpcomingSessionDto);
+}
+
 /** Snapshot d'un athlète qui n'existe pas encore : tout est absent, rien n'est inventé. */
 function emptySnapshot(today: string): TrainingSnapshotDto {
   return {
@@ -306,6 +452,47 @@ export async function getTrainingSnapshot(): Promise<TrainingSnapshotDto> {
     weeks: buildRecentWeeks(rows, today),
     longestSessionKm30d: longestRunKm(rows, today),
     recentAvgPaceSecPerKm: recentRunPace(rows),
+  };
+}
+
+/**
+ * Le plan actif réduit aux quelques jours qui entourent aujourd'hui — le
+ * contexte que le **chat** du coach n'avait pas, et qu'un petit modèle comblait
+ * donc en inventant des séances.
+ *
+ * Lecture **distincte** de {@link getTrainingSnapshot}, et c'est délibéré : le
+ * snapshot alimente aussi la génération de plan, la révision, le feedback et les
+ * tests chronométrés. Y verser les séances rendrait le prompt de génération
+ * circulaire — le plan décrivant le plan qu'on lui demande d'écrire — et
+ * modifierait quatre prompts éprouvés pour le seul besoin du chat.
+ *
+ * `{ hasPlan: false }` quand il n'y a pas de plan actif (ou pas encore
+ * d'athlète) : c'est une réponse, pas un trou.
+ */
+export async function getPlanContext(): Promise<PlanContextDto> {
+  const active = await getActivePlanWithSessions();
+  if (active === null) return { hasPlan: false };
+
+  const { plan, sessions } = active;
+  // Une seule lecture de l'horloge : la fenêtre et le jour annoncé au formateur
+  // doivent parler du même jour, faute de quoi une séance passée pourrait se
+  // rendre comme à venir à cheval sur minuit.
+  const today = todayCivilDate();
+
+  return {
+    hasPlan: true,
+    today,
+    goal: {
+      intent: plan.intent,
+      // La note est facultative depuis le sélecteur d'intention : une chaîne
+      // vide n'est pas un objectif, elle ne doit pas se rendre en « Objectif : ».
+      note: plan.goalText.trim() === '' ? null : plan.goalText,
+    },
+    raceDate: plan.raceDate,
+    // `planEndExclusive` rend le premier jour **non** couvert ; le prompt parle
+    // d'une échéance, donc du dernier jour couvert.
+    endsOn: shiftCivilDate(planEndExclusive(plan.startsOn, plan.weeks), -1),
+    upcoming: buildUpcomingSessions(sessions, today),
   };
 }
 

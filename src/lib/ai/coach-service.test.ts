@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CoachMessageDto } from '@/data/coach-chat';
-import type { TrainingSnapshotDto } from '@/data/coach-context';
+import type { PlanContextDto, TrainingSnapshotDto } from '@/data/coach-context';
 
 import {
   COACH_CONTEXT_TURNS,
@@ -18,13 +18,17 @@ const { chatCompletion } = vi.hoisted(() => ({ chatCompletion: vi.fn() }));
 const { dal } = vi.hoisted(() => ({
   dal: {
     getTrainingSnapshot: vi.fn(),
+    getPlanContext: vi.fn(),
     listCoachMessages: vi.fn(),
     appendCoachExchange: vi.fn(),
   },
 }));
 
 vi.mock('./client', () => ({ chatCompletion }));
-vi.mock('@/data/coach-context', () => ({ getTrainingSnapshot: dal.getTrainingSnapshot }));
+vi.mock('@/data/coach-context', () => ({
+  getTrainingSnapshot: dal.getTrainingSnapshot,
+  getPlanContext: dal.getPlanContext,
+}));
 vi.mock('@/data/coach-chat', () => ({
   listCoachMessages: dal.listCoachMessages,
   appendCoachExchange: dal.appendCoachExchange,
@@ -40,6 +44,60 @@ const SNAPSHOT: TrainingSnapshotDto = {
   recentAvgPaceSecPerKm: 324,
 };
 
+const PLAN_CONTEXT: PlanContextDto = {
+  hasPlan: true,
+  today: '2026-08-11',
+  goal: { intent: 'race', note: 'Semi de Lyon en 1 h 45' },
+  raceDate: '2026-09-27',
+  endsOn: '2026-09-27',
+  upcoming: [
+    {
+      date: '2026-08-09',
+      kind: 'Sortie longue',
+      title: 'Sortie longue 14 km',
+      steps: null,
+      volumeM: 14_000,
+      durationS: null,
+      done: false,
+    },
+    {
+      date: '2026-08-11',
+      kind: 'Endurance fondamentale',
+      title: 'Footing 8 km',
+      steps: null,
+      volumeM: 8_000,
+      durationS: null,
+      done: true,
+    },
+    {
+      date: '2026-08-13',
+      kind: 'VMA courte · piste',
+      title: '6 × 800 m',
+      // Déroulé **brut** : le DAL ne rend plus de texte, c'est `format.ts` qui
+      // met en forme.
+      steps: [
+        {
+          repeat: 6,
+          steps: [
+            {
+              role: 'run',
+              distanceM: 800,
+              durationS: null,
+              paceMinSecPerKm: 220,
+              paceMaxSecPerKm: 220,
+              hrZone: null,
+              note: null,
+            },
+          ],
+        },
+      ],
+      volumeM: 11_000,
+      durationS: null,
+      done: false,
+    },
+  ],
+};
+
 function message(id: number, role: 'user' | 'assistant', content: string): CoachMessageDto {
   return { id, role, content, createdAt: '2026-08-11T09:00:00.000Z' };
 }
@@ -52,6 +110,7 @@ beforeEach(() => {
   order = [];
 
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
+  dal.getPlanContext.mockResolvedValue(PLAN_CONTEXT);
   dal.listCoachMessages.mockResolvedValue([
     message(1, 'user', 'Je suis fatiguée, je cours ?'),
     message(2, 'assistant', 'Repose-toi.'),
@@ -342,6 +401,87 @@ describe('answerCoachQuestion — messages envoyés au modèle', () => {
     expect(system).toContain("tu n'inventes ni n'approximes jamais une donnée physiologique");
     expect(system).toContain('tu ne modifies rien');
     expect(system).toContain("champ d'ajustement de la page « Plan »");
+  });
+
+  /*
+   * Le bug réparé ici : « le coach hallucine quand je lui demande mon prochain
+   * entraînement ». Ce n'était pas un défaut de prompt mais un trou de contexte —
+   * aucune donnée de plan ne partait au modèle. Les deux moitiés du correctif
+   * sont éprouvées ci-dessous : le bloc part bien, et l'interdiction qui va avec
+   * est posée.
+   */
+  it('porte le plan et ses prochaines séances dans le message système, daté du même jour', async () => {
+    await answerCoachQuestion({ question: 'Je cours quoi jeudi ?', onDelta: () => {} });
+
+    const system = sentMessages()[0].content;
+    expect(system).toContain("Plan d'entraînement au 2026-08-11 :");
+    expect(system).toContain('Plan actif — objectif : préparer une course.');
+    expect(system).toContain('Course le dimanche 27 septembre 2026.');
+    expect(system).toContain('dimanche 9 août 2026 — passée, non courue');
+    expect(system).toContain('mardi 11 août 2026 — déjà courue');
+    expect(system).toContain(
+      'jeudi 13 août 2026 — à venir · VMA courte · piste : 6 × 800 m · 11,0 km · 6 × (800 m @ 3:40/km)',
+    );
+    // Bloc distinct de l'état d'entraînement, qui reste en tête et intact.
+    expect(system.indexOf("État d'entraînement au 2026-08-11 :")).toBeLessThan(
+      system.indexOf("Plan d'entraînement au 2026-08-11 :"),
+    );
+  });
+
+  it("dit l'absence de plan plutôt que de laisser le contexte muet", async () => {
+    dal.getPlanContext.mockResolvedValue({ hasPlan: false });
+
+    await answerCoachQuestion({ question: 'Je cours quoi demain ?', onDelta: () => {} });
+
+    const system = sentMessages()[0].content;
+    expect(system).toContain("Plan d'entraînement au 2026-08-11 :\nAucun plan actif.");
+  });
+
+  it('interdit d’inventer une séance, plan actif ou non', async () => {
+    await answerCoachQuestion({ question: 'Et la semaine prochaine ?', onDelta: () => {} });
+
+    const system = sentMessages()[0].content;
+    expect(system).toContain("tu n'inventes aucune séance");
+    expect(system).toContain('sont les seules que tu connaisses');
+    expect(system).toContain("aucun plan n'est actif, tu le dis aussi");
+  });
+
+  /**
+   * Le troisième état des séances, apparu avec l'ouverture de la fenêtre sur le
+   * passé récent : « passée, non courue » se lit trop volontiers comme « il reste
+   * à la faire ». L'interdiction lève l'ambiguïté là où elle naît.
+   */
+  it("dit au modèle qu'une séance passée non courue n'est pas la séance du jour", async () => {
+    await answerCoachQuestion({ question: 'Je cours quoi aujourd’hui ?', onDelta: () => {} });
+
+    const system = sentMessages()[0].content;
+    expect(system).toContain('« passée, non courue » a son jour derrière elle');
+    expect(system).toContain("n'est pas au programme d'aujourd'hui");
+  });
+
+  /**
+   * Les trois lectures partent ensemble : le snapshot n'aboutit qu'une fois la
+   * lecture du plan commencée. Enchaînées, ce test ne se terminerait jamais.
+   */
+  it('lit le plan en parallèle du reste', async () => {
+    let planStarted: () => void = () => {};
+    const planHasStarted = new Promise<void>((resolve) => {
+      planStarted = resolve;
+    });
+
+    dal.getTrainingSnapshot.mockImplementation(async () => {
+      await planHasStarted;
+      return SNAPSHOT;
+    });
+    dal.getPlanContext.mockImplementation(async () => {
+      planStarted();
+      return PLAN_CONTEXT;
+    });
+
+    await answerCoachQuestion({ question: 'Je cours quoi jeudi ?', onDelta: () => {} });
+
+    expect(dal.getPlanContext).toHaveBeenCalledTimes(1);
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
   });
 
   /*

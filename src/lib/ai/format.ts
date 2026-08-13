@@ -18,8 +18,13 @@
  * `h mm`.
  */
 
-import type { TrainingSnapshotDto } from '@/data/coach-context';
+import type {
+  PlanContextDto,
+  TrainingSnapshotDto,
+  UpcomingSessionDto,
+} from '@/data/coach-context';
 import type { PaceZone } from '@/lib/metrics/vdot';
+import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps, PlanStep, PlanStepBlock, PlanStepRole } from '@/lib/plan-steps/schema';
 
 /** Jours ISO en toutes lettres : `day` vaut 1 pour lundi … 7 pour dimanche. */
@@ -287,6 +292,124 @@ export function formatTrainingSnapshot(
         ? 'Allure de référence : inconnue (aucune course récente).'
         : `Allure moyenne des dernières sorties : ${formatPace(snapshot.recentAvgPaceSecPerKm)}.`,
     );
+  }
+
+  return lines.join('\n');
+}
+
+/*
+ * Contexte de plan — bloc **distinct** de l'état d'entraînement.
+ *
+ * Séparé de {@link formatTrainingSnapshot} à dessein : ce dernier alimente aussi
+ * la génération de plan, la révision, le feedback et les tests chronométrés. Y
+ * verser les séances rendrait le prompt de génération circulaire (le plan
+ * décrivant le plan) et ferait bouger quatre prompts éprouvés. Un seul appelant
+ * consomme ce qui suit : le chat.
+ */
+
+/** Ce que l'athlète prépare, en toutes lettres — un `intent` brut ne se lit pas. */
+const PLAN_INTENT_LABELS: Record<PlanIntent, string> = {
+  race: 'préparer une course',
+  faster: 'courir plus vite',
+  weight_loss: 'perdre du poids',
+  return: 'reprendre la course',
+};
+
+/**
+ * Le volume d'une séance : sa distance, à défaut sa durée, et rien quand elle ne
+ * porte ni l'une ni l'autre — un « 0 km » serait une donnée inventée.
+ */
+function formatSessionVolume(session: UpcomingSessionDto): string {
+  if (session.volumeM !== null) return ` · ${formatDistanceKm(session.volumeM)}`;
+  if (session.durationS !== null) return ` · ${formatDuration(session.durationS)}`;
+  return '';
+}
+
+/**
+ * L'état d'une séance : ce qu'elle est **de fait**, en trois mots et sans
+ * jugement.
+ *
+ * Trois états et non deux, depuis que la fenêtre remonte de quelques jours dans
+ * le passé (cf. `COACH_RECENT_DAYS`) : une séance dont le jour est passé et que
+ * rien n'a réalisée n'est ni « déjà courue » ni « à venir », et la confondre avec
+ * l'une ou l'autre ferait dire au coach une chose fausse — soit qu'elle a été
+ * faite, soit qu'il reste à la faire.
+ *
+ * La formulation reste strictement descriptive : « passée, non courue » énonce
+ * un fait, là où « manquée » ou « sautée » y ajouterait un reproche. Ce que
+ * cette séance-là veut dire, c'est au coach de le dire, pas au formateur.
+ */
+function formatSessionState(session: UpcomingSessionDto, today: string): string {
+  if (session.done) return 'déjà courue';
+  // Les dates civiles `YYYY-MM-DD` s'ordonnent lexicographiquement.
+  return session.date < today ? 'passée, non courue' : 'à venir';
+}
+
+/**
+ * Une séance sur une ligne : jour, état, type, intitulé, volume, déroulé.
+ *
+ * La date est écrite en toutes lettres, **jour de la semaine compris** : un petit
+ * modèle raisonne mal sur `2026-08-13` (il ne sait pas que c'est un jeudi) alors
+ * que la question posée est presque toujours « je cours quoi jeudi ? ».
+ *
+ * L'état vient en deuxième position, avant tout le reste : une séance déjà courue
+ * qu'on annoncerait comme prochaine est exactement l'erreur que ce bloc existe
+ * pour empêcher.
+ */
+function formatUpcomingSession(session: UpcomingSessionDto, today: string): string {
+  const state = formatSessionState(session, today);
+  // Le déroulé arrive brut du DAL : c'est ici, et non dans `src/data/`, que la
+  // mise en forme des prompts se fait.
+  const steps = session.steps === null ? '' : ` · ${formatPlanSteps(session.steps)}`;
+  return `- ${formatCivilDate(session.date)} — ${state} · ${session.kind} : ${session.title}${formatSessionVolume(session)}${steps}`;
+}
+
+/**
+ * Le plan actif et les séances qui entourent aujourd'hui, tels que le **chat**
+ * les lit.
+ *
+ * Sans plan, la fonction le **dit** au lieu de rendre une chaîne vide : c'est
+ * précisément ce qui permet au coach de répondre « tu n'as pas de plan en
+ * cours » plutôt que de broder. Un bloc vide, lui, ne serait qu'un trou de plus —
+ * et le trou est la cause du bug qu'on répare.
+ *
+ * Comptez ~50 tokens d'en-tête, ~25 par séance sans déroulé et ~60 avec, soit
+ * ~340 tokens sur une fenêtre à six séances dont trois de qualité (1 024
+ * caractères mesurés, ~3 caractères par token en français — le même ratio que
+ * les ~120 tokens de {@link formatTrainingSnapshot}). Les trois jours de passé
+ * récent y ajoutent au plus une séance ou deux. Sans plan : ~15 tokens. Un ordre
+ * de grandeur à retenir : le bloc pèse trois fois l'état d'entraînement, et
+ * c'est le prix du seul contexte qui répond à « c'est quoi ma prochaine
+ * séance ? ».
+ */
+export function formatPlanContext(context: PlanContextDto): string {
+  if (!context.hasPlan) {
+    return ['Aucun plan actif.', "Aucune séance n'est planifiée."].join('\n');
+  }
+
+  const lines: string[] = [`Plan actif — objectif : ${PLAN_INTENT_LABELS[context.goal.intent]}.`];
+
+  if (context.goal.note !== null) {
+    lines.push(`Note de l'athlète sur son objectif : « ${context.goal.note} ».`);
+  }
+  if (context.raceDate !== null) {
+    lines.push(`Course le ${formatCivilDate(context.raceDate)}.`);
+  }
+  lines.push(`Dernier jour du plan : ${formatCivilDate(context.endsOn)}.`);
+
+  if (context.upcoming.length === 0) {
+    // Un plan actif dont la fenêtre est vide (fin de plan, semaine de coupure)
+    // est un fait à énoncer : sans cette ligne, le bloc s'arrêterait sur
+    // l'échéance et laisserait le modèle deviner ce qu'il y a entre les deux.
+    lines.push("Aucune séance planifiée ces jours-ci.");
+    return lines.join('\n');
+  }
+
+  lines.push(
+    'Séances des derniers et des prochains jours — cette liste est complète, tu ne connais aucune autre séance :',
+  );
+  for (const session of context.upcoming) {
+    lines.push(formatUpcomingSession(session, context.today));
   }
 
   return lines.join('\n');

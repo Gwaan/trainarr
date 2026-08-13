@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { TrainingSnapshotDto } from '@/data/coach-context';
-import type { PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
+import type { PlanContextDto, TrainingSnapshotDto } from '@/data/coach-context';
+import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import {
   formatCivilDate,
@@ -12,6 +12,7 @@ import {
   formatNumber,
   formatPace,
   formatPaceRange,
+  formatPlanContext,
   formatPlanSteps,
   formatSignedPercent,
   formatTrainingSnapshot,
@@ -231,6 +232,245 @@ describe('formatTrainingSnapshot', () => {
     expect(formatTrainingSnapshot(SNAPSHOT, {})).toContain(
       'Allure moyenne des dernières sorties : 5:24/km.',
     );
+  });
+
+  /**
+   * Le bloc partagé, figé au caractère près.
+   *
+   * Quatre services le lisent — génération de plan, révision, feedback, test
+   * chronométré — et leurs prompts sont éprouvés en production. Le contexte de
+   * plan du chat est donc un bloc **séparé** ({@link formatPlanContext}) : le
+   * verser ici rendrait le prompt de génération circulaire (le plan décrivant le
+   * plan) et ferait bouger les quatre autres d'un coup. Ce test est la barrière.
+   */
+  it('reste inchangé : quatre prompts éprouvés en dépendent', () => {
+    expect(formatTrainingSnapshot(SNAPSHOT)).toBe(
+      [
+        'Profil : 36 ans · femme · FC max 188 bpm · FC repos 48 bpm · 62,0 kg.',
+        'Charge : CTL 52 · ATL 61 · TSB -9.',
+        'VO2max estimée : 48,6.',
+        'Volume de course des dernières semaines :',
+        '- semaine du 2026-07-20 : 42,1 km · 3 h 45 · 4 séances',
+        '- semaine du 2026-07-27 : 0,0 km · 0 s · 0 séance',
+        'Allure moyenne des dernières sorties : 5:24/km.',
+      ].join('\n'),
+    );
+    // Aucune séance ne s'y est glissée : c'est l'autre moitié de l'invariant.
+    expect(formatTrainingSnapshot(SNAPSHOT)).not.toContain('Séances');
+  });
+});
+
+/** Le déroulé d'une VMA courte, **brut** — c'est ce que le DAL rend désormais. */
+const INTERVAL_STEPS: PlanSessionSteps = [
+  {
+    repeat: 1,
+    steps: [
+      {
+        role: 'warmup',
+        distanceM: null,
+        durationS: 900,
+        paceMinSecPerKm: null,
+        paceMaxSecPerKm: null,
+        hrZone: 2,
+        note: null,
+      },
+    ],
+  },
+  {
+    repeat: 6,
+    steps: [
+      {
+        role: 'run',
+        distanceM: 800,
+        durationS: null,
+        paceMinSecPerKm: 220,
+        paceMaxSecPerKm: 220,
+        hrZone: null,
+        note: null,
+      },
+      {
+        role: 'recover',
+        distanceM: null,
+        durationS: 90,
+        paceMinSecPerKm: null,
+        paceMaxSecPerKm: null,
+        hrZone: null,
+        note: null,
+      },
+    ],
+  },
+  {
+    repeat: 1,
+    steps: [
+      {
+        role: 'cooldown',
+        distanceM: null,
+        durationS: 600,
+        paceMinSecPerKm: null,
+        paceMaxSecPerKm: null,
+        hrZone: null,
+        note: null,
+      },
+    ],
+  },
+];
+
+const PLAN_CONTEXT: PlanContextDto = {
+  hasPlan: true,
+  today: '2026-08-11',
+  goal: { intent: 'race', note: 'Semi de Lyon en 1 h 45' },
+  raceDate: '2026-09-27',
+  endsOn: '2026-09-27',
+  upcoming: [
+    {
+      date: '2026-08-09',
+      kind: 'Sortie longue',
+      title: 'Sortie longue 14 km',
+      steps: null,
+      volumeM: 14_000,
+      durationS: null,
+      done: false,
+    },
+    {
+      date: '2026-08-11',
+      kind: 'Endurance fondamentale',
+      title: 'Footing 8 km',
+      steps: null,
+      volumeM: 8_000,
+      durationS: null,
+      done: true,
+    },
+    {
+      date: '2026-08-13',
+      kind: 'VMA courte · piste',
+      title: '6 × 800 m',
+      steps: INTERVAL_STEPS,
+      volumeM: 11_000,
+      durationS: null,
+      done: false,
+    },
+    {
+      date: '2026-08-16',
+      kind: 'Sortie longue',
+      title: 'Sortie longue 18 km',
+      steps: null,
+      volumeM: null,
+      durationS: 6_300,
+      done: false,
+    },
+  ],
+};
+
+describe('formatPlanContext', () => {
+  /**
+   * Sans plan, le bloc **dit** qu'il n'y en a pas. Une chaîne vide serait un trou
+   * de plus dans le contexte — exactement la cause du bug qu'on répare : un petit
+   * modèle comble un trou, il ne s'y arrête pas.
+   */
+  it("dit qu'aucun plan n'est actif au lieu de ne rien rendre", () => {
+    const text = formatPlanContext({ hasPlan: false });
+
+    expect(text).not.toBe('');
+    expect(text).toContain('Aucun plan actif.');
+    expect(text).toContain("Aucune séance n'est planifiée.");
+  });
+
+  it('porte objectif, note, jour J et échéance', () => {
+    const text = formatPlanContext(PLAN_CONTEXT);
+
+    expect(text).toContain('Plan actif — objectif : préparer une course.');
+    expect(text).toContain("Note de l'athlète sur son objectif : « Semi de Lyon en 1 h 45 ».");
+    expect(text).toContain('Course le dimanche 27 septembre 2026.');
+    expect(text).toContain('Dernier jour du plan : dimanche 27 septembre 2026.');
+  });
+
+  it('nomme le jour de la semaine en plus de la date : le modèle raisonne mal sur une date nue', () => {
+    const text = formatPlanContext(PLAN_CONTEXT);
+
+    expect(text).toContain('mardi 11 août 2026');
+    expect(text).toContain('jeudi 13 août 2026');
+    expect(text).toContain('dimanche 16 août 2026');
+    // Et jamais la date nue seule, qu'un modèle ne sait pas situer dans la semaine.
+    expect(text).not.toContain('2026-08-13');
+  });
+
+  /**
+   * Trois états, et pas deux : une séance dont le jour est passé et que rien n'a
+   * réalisée n'est ni faite ni à faire. La confondre avec l'un ou l'autre ferait
+   * dire au coach une chose fausse.
+   */
+  it('distingue le fait, le passé non couru et ce qui vient', () => {
+    const text = formatPlanContext(PLAN_CONTEXT);
+
+    expect(text).toContain('dimanche 9 août 2026 — passée, non courue');
+    expect(text).toContain('mardi 11 août 2026 — déjà courue');
+    expect(text).toContain('jeudi 13 août 2026 — à venir');
+  });
+
+  it('énonce le fait sans le juger : ni « manquée », ni « sautée », ni « ratée »', () => {
+    const text = formatPlanContext(PLAN_CONTEXT);
+
+    expect(text).not.toContain('manquée');
+    expect(text).not.toContain('sautée');
+    expect(text).not.toContain('ratée');
+  });
+
+  it("situe l'état par rapport au jour porté par le contexte, pas à l'horloge", () => {
+    // Le même dimanche, lu depuis le samedi qui le précède : il est à venir.
+    const text = formatPlanContext({ ...PLAN_CONTEXT, today: '2026-08-08' });
+
+    expect(text).toContain('dimanche 9 août 2026 — à venir');
+    expect(text).not.toContain('passée, non courue');
+  });
+
+  it('rend le déroulé brut du DAL, et le volume ou la durée à défaut', () => {
+    const text = formatPlanContext(PLAN_CONTEXT);
+
+    // La mise en forme du déroulé se fait ici : le DTO porte les blocs bruts.
+    expect(text).toContain(
+      'VMA courte · piste : 6 × 800 m · 11,0 km · échauffement 900 s @ Z2 + 6 × (800 m @ 3:40/km + récup 90 s) + retour au calme 600 s',
+    );
+    // Sans volume déclaré, c'est la durée qui situe la séance — jamais « 0 km ».
+    expect(text).toContain('Sortie longue : Sortie longue 18 km · 1 h 45');
+    expect(text).not.toContain('0,0 km');
+  });
+
+  it('annonce que la liste est close : au-delà, le coach ne sait rien', () => {
+    expect(formatPlanContext(PLAN_CONTEXT)).toContain(
+      'cette liste est complète, tu ne connais aucune autre séance',
+    );
+  });
+
+  it('dit la fenêtre vide d’un plan actif sans séance à venir', () => {
+    const text = formatPlanContext({ ...PLAN_CONTEXT, upcoming: [] });
+
+    expect(text).toContain('Plan actif — objectif : préparer une course.');
+    expect(text).toContain('Aucune séance planifiée ces jours-ci.');
+  });
+
+  it('nomme les quatre intentions en toutes lettres, jamais leur code', () => {
+    const labels = (['race', 'faster', 'weight_loss', 'return'] as const).map((intent) =>
+      formatPlanContext({ ...PLAN_CONTEXT, goal: { intent, note: null } }).split('\n')[0],
+    );
+
+    expect(labels).toEqual([
+      'Plan actif — objectif : préparer une course.',
+      'Plan actif — objectif : courir plus vite.',
+      'Plan actif — objectif : perdre du poids.',
+      'Plan actif — objectif : reprendre la course.',
+    ]);
+  });
+
+  it('tait la note et le jour J quand ils sont absents', () => {
+    const text = formatPlanContext({
+      ...PLAN_CONTEXT,
+      goal: { intent: 'faster', note: null },
+      raceDate: null,
+    });
+
+    expect(text).not.toContain("Note de l'athlète");
+    expect(text).not.toContain('Course le');
+    expect(text).not.toContain('null');
   });
 });
 

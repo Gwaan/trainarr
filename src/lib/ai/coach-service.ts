@@ -14,8 +14,9 @@ import 'server-only';
  *
  * ## Ce qui part au modèle
  *
- * Un message système — le rôle, les interdictions, la mise en forme, et
- * l'{@link getTrainingSnapshot état d'entraînement} du jour — puis les
+ * Un message système — le rôle, les interdictions, la mise en forme,
+ * l'{@link getTrainingSnapshot état d'entraînement} du jour et le
+ * {@link getPlanContext plan} avec ses prochaines séances — puis les
  * {@link COACH_CONTEXT_TURNS} derniers tours du fil, et enfin la question du
  * jour, qui n'est pas encore en base à cet instant (cf. ci-dessous) et s'ajoute
  * donc à la main. Le fil complet, lui, reste en base : c'est l'historique que
@@ -55,11 +56,16 @@ import 'server-only';
 
 import { COACH_QUESTION_LIMITS } from './coach-question';
 import { appendCoachExchange, listCoachMessages, type CoachMessageDto } from '@/data/coach-chat';
-import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
+import {
+  getPlanContext,
+  getTrainingSnapshot,
+  type PlanContextDto,
+  type TrainingSnapshotDto,
+} from '@/data/coach-context';
 
 import { chatCompletion, type ChatMessage } from './client';
 import { AiResponseError } from './errors';
-import { formatTrainingSnapshot } from './format';
+import { formatPlanContext, formatTrainingSnapshot } from './format';
 
 /*
  * Les bornes d'une question vivent dans le contrat de l'endpoint
@@ -153,6 +159,11 @@ const COACH_SYSTEM_PROMPT = [
   '',
   'INTERDICTIONS — elles priment sur tout le reste :',
   "- tu n'inventes ni n'approximes jamais une donnée physiologique. Les chiffres de l'état d'entraînement ci-dessous sont les seuls dont tu disposes. Pas de FC max déduite de l'âge, pas de VO2max estimée à partir d'une allure, pas de charge reconstituée, pas d'ordre de grandeur « en général ». Si la donnée manque, dis-le en une phrase et dis ce qu'il faudrait pour l'obtenir.",
+  // La dernière phrase existe pour le troisième état des séances, apparu quand
+  // la fenêtre du bloc « Plan » s'est ouverte sur quelques jours de passé : sans
+  // elle, un modèle lit « non courue » comme « il reste à la faire » et la
+  // propose comme séance du jour, alors que son jour est derrière elle.
+  "- tu n'inventes aucune séance. Les séances du bloc « Plan d'entraînement » ci-dessous sont les seules que tu connaisses : tu n'en ajoutes pas, tu n'en déduis pas la suite du plan, et tu ne devines pas ce qui vient après la dernière listée. Si ce bloc dit qu'aucun plan n'est actif, tu le dis aussi, et tu ne décris aucune séance comme si elle était prévue. Chaque séance listée porte son état : « déjà courue » a été faite, « à venir » reste à faire, et « passée, non courue » a son jour derrière elle sans avoir été faite — celle-là n'est pas au programme d'aujourd'hui, ne la présente jamais comme la séance à faire.",
   "- tu ne modifies rien. Tu n'as aucun accès en écriture : tu ne peux ni créer, ni ajuster, ni déplacer, ni supprimer une séance ou un réglage. N'annonce jamais que tu as fait, changé, enregistré ou programmé quoi que ce soit.",
   "- si l'athlète veut modifier son plan, dis-lui de le demander dans le champ d'ajustement de la page « Plan » : c'est le seul endroit d'où le plan se modifie. Tu peux lui proposer la formulation à y écrire.",
   "- aucun diagnostic médical : devant une douleur, un malaise ou un symptôme, tu renvoies à un professionnel de santé et tu t'abstiens de conclure.",
@@ -191,13 +202,17 @@ const COACH_SYSTEM_PROMPT = [
  */
 export function buildCoachMessages(input: {
   snapshot: TrainingSnapshotDto;
+  planContext: PlanContextDto;
   history: readonly CoachMessageDto[];
   question: string;
 }): ChatMessage[] {
   const context = `État d'entraînement au ${input.snapshot.today} :\n${formatTrainingSnapshot(input.snapshot)}`;
+  // Bloc distinct, et daté du même jour que l'état d'entraînement : les deux
+  // décrivent le même instant, et le modèle doit pouvoir le dire.
+  const plan = `Plan d'entraînement au ${input.snapshot.today} :\n${formatPlanContext(input.planContext)}`;
 
   return [
-    { role: 'system', content: `${COACH_SYSTEM_PROMPT}\n\n${context}` },
+    { role: 'system', content: `${COACH_SYSTEM_PROMPT}\n\n${context}\n\n${plan}` },
     ...input.history.map((message): ChatMessage => ({
       role: message.role,
       content: message.content,
@@ -236,8 +251,9 @@ export async function answerCoachQuestion(input: {
 
   // Tout est lu avant que quoi que ce soit ne soit écrit : le fil relu ici est
   // celui d'avant la question, à laquelle `buildCoachMessages` fait sa place.
-  const [snapshot, history] = await Promise.all([
+  const [snapshot, planContext, history] = await Promise.all([
     getTrainingSnapshot(),
+    getPlanContext(),
     listCoachMessages(COACH_CONTEXT_TURNS),
   ]);
 
@@ -245,7 +261,7 @@ export async function answerCoachQuestion(input: {
   let streamed = '';
 
   await chatCompletion({
-    messages: buildCoachMessages({ snapshot, history, question }),
+    messages: buildCoachMessages({ snapshot, planContext, history, question }),
     temperature: COACH_TEMPERATURE,
     maxTokens: COACH_MAX_TOKENS,
     signal: input.signal,

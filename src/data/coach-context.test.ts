@@ -2,10 +2,18 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { shiftCivilDate } from '@/lib/dates/civil';
+
+import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+
 import {
+  COACH_RECENT_DAYS,
+  COACH_UPCOMING_DAYS,
   ageYearsOn,
   buildRecentWeeks,
+  buildUpcomingSessions,
   getComparableActivities,
+  getPlanContext,
   getTrainingSnapshot,
   longestRunKm,
   recentRunPace,
@@ -13,9 +21,21 @@ import {
   toSnapshotProfile,
 } from './coach-context';
 import type { Activity, Athlete } from './db/schema';
+import type { PlanDto, PlanSessionDto } from './plans';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
+
+const { plansDal } = vi.hoisted(() => ({
+  plansDal: { getActivePlanWithSessions: vi.fn() },
+}));
+
+vi.mock('./plans', async () => {
+  // Seule la lecture qui touche la base est remplacée : `planEndExclusive`, dont
+  // dépend l'échéance annoncée au coach, reste le vrai code.
+  const actual = await vi.importActual<typeof import('./plans')>('./plans');
+  return { ...actual, getActivePlanWithSessions: plansDal.getActivePlanWithSessions };
+});
 
 /**
  * Aucune base de données : les lectures servent les lignes déclarées par table.
@@ -108,6 +128,48 @@ function run(overrides: Partial<Activity> & { startedAt: Date }): Activity {
   };
 }
 
+/** Un plan de course type — 8 semaines à partir du lundi 3 août 2026. */
+const PLAN_ROW: PlanDto = {
+  id: 3,
+  status: 'active',
+  goalType: 'race',
+  intent: 'race',
+  returnInjuryHistory: false,
+  level: 'intermediate',
+  goalText: 'Semi de Lyon en 1 h 45',
+  raceDate: '2026-09-27',
+  startsOn: '2026-08-03',
+  weeks: 8,
+  sessionsPerWeek: 4,
+  weeklyTimeMinutes: 300,
+  longRunDay: 7,
+  referenceDistance: '10k',
+  referenceTimeS: 2_700,
+  referenceUpdatedOn: null,
+  lastTestNote: null,
+  summary: null,
+  reviewedAt: null,
+  createdAt: '2026-08-01T00:00:00.000Z',
+};
+
+/** Une séance planifiée type — chaque test n'en modifie que ce qu'il éprouve. */
+function planSession(overrides: Partial<PlanSessionDto> & { scheduledOn: string }): PlanSessionDto {
+  return {
+    id: 1,
+    kind: 'Endurance fondamentale',
+    title: 'Footing 8 km',
+    warmup: null,
+    recovery: null,
+    cooldown: null,
+    targetPaceSecPerKm: null,
+    volumeM: 8_000,
+    durationS: null,
+    steps: null,
+    completedActivityId: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   // Un mardi : la semaine ISO en cours commence le lundi 10 août 2026.
@@ -115,6 +177,7 @@ beforeEach(() => {
   dbState.rows = {};
   dbState.queue = {};
   dbState.selects = [];
+  plansDal.getActivePlanWithSessions.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -395,5 +458,179 @@ describe('getComparableActivities', () => {
   it('ne lit rien quand la limite demandée est nulle', async () => {
     expect(await getComparableActivities(7, 0)).toEqual([]);
     expect(dbState.selects).toHaveLength(0);
+  });
+});
+
+/*
+ * La fenêtre des séances envoyées au chat. C'est le trou de contexte que ce bloc
+ * répare : sans lui, le coach n'avait aucun moyen de connaître la prochaine
+ * séance, et un petit modèle comblait en inventant.
+ */
+describe('buildUpcomingSessions', () => {
+  it("garde le passé récent, écarte le passé lointain et l'au-delà de l'horizon", () => {
+    const sessions = buildUpcomingSessions(
+      [
+        // `today − 4` : hors fenêtre, le chat n'est pas un journal.
+        planSession({ scheduledOn: '2026-08-07', title: 'Trop vieux' }),
+        // `today − 3` : le samedi d'un week-end sauté, vu depuis le mardi.
+        planSession({ scheduledOn: '2026-08-08', title: 'Samedi dernier' }),
+        planSession({ scheduledOn: '2026-08-11', title: "Aujourd'hui" }),
+        // Dernier jour de la fenêtre : `today + 9`, aujourd'hui étant compté.
+        planSession({ scheduledOn: '2026-08-20', title: 'Dernier jour' }),
+        planSession({ scheduledOn: '2026-08-21', title: 'Hors fenêtre' }),
+      ],
+      '2026-08-11',
+    );
+
+    expect(sessions.map((session) => session.title)).toEqual([
+      'Samedi dernier',
+      "Aujourd'hui",
+      'Dernier jour',
+    ]);
+  });
+
+  it('couvre bien dix jours à venir et trois de passé, aujourd’hui compris', () => {
+    const days = Array.from({ length: 20 }, (_unused, index) =>
+      planSession({ scheduledOn: shiftCivilDate('2026-08-11', index - 5) }),
+    );
+
+    expect(buildUpcomingSessions(days, '2026-08-11')).toHaveLength(
+      COACH_RECENT_DAYS + COACH_UPCOMING_DAYS,
+    );
+  });
+
+  it('rend les séances dans l’ordre du calendrier', () => {
+    const sessions = buildUpcomingSessions(
+      [
+        planSession({ scheduledOn: '2026-08-15', title: 'Samedi' }),
+        planSession({ scheduledOn: '2026-08-13', title: 'Jeudi' }),
+      ],
+      '2026-08-11',
+    );
+
+    expect(sessions.map((session) => session.date)).toEqual(['2026-08-13', '2026-08-15']);
+  });
+
+  it('dit ce qui est déjà couru, et ne porte aucun identifiant interne', () => {
+    const sessions = buildUpcomingSessions(
+      [
+        planSession({ scheduledOn: '2026-08-11', completedActivityId: 42 }),
+        planSession({ scheduledOn: '2026-08-13' }),
+      ],
+      '2026-08-11',
+    );
+
+    expect(sessions[0].done).toBe(true);
+    expect(sessions[1].done).toBe(false);
+    // DTO minimal : ni `id`, ni `completedActivityId` ne franchissent la frontière.
+    expect(Object.keys(sessions[0])).toEqual([
+      'date',
+      'kind',
+      'title',
+      'steps',
+      'volumeM',
+      'durationS',
+      'done',
+    ]);
+  });
+
+  /**
+   * Le déroulé passe **brut**, et c'est la frontière des couches : le DAL rend
+   * des données, la mise en forme des prompts appartient à `lib/ai/format`. Le
+   * rendre ici forcerait `src/data/` à importer `src/lib/ai/`.
+   */
+  it('porte le déroulé brut, `null` quand la séance n’en porte pas', () => {
+    const steps: PlanSessionSteps = [
+      {
+        repeat: 6,
+        steps: [
+          {
+            role: 'run',
+            distanceM: 400,
+            durationS: null,
+            paceMinSecPerKm: 220,
+            paceMaxSecPerKm: 220,
+            hrZone: null,
+            note: null,
+          },
+        ],
+      },
+    ];
+
+    const sessions = buildUpcomingSessions(
+      [planSession({ scheduledOn: '2026-08-13', steps }), planSession({ scheduledOn: '2026-08-15' })],
+      '2026-08-11',
+    );
+
+    expect(sessions[0].steps).toEqual(steps);
+    expect(typeof sessions[0].steps).not.toBe('string');
+    expect(sessions[1].steps).toBeNull();
+  });
+});
+
+describe('getPlanContext', () => {
+  it("dit qu'il n'y a pas de plan plutôt que de rendre un contexte vide", async () => {
+    expect(await getPlanContext()).toEqual({ hasPlan: false });
+  });
+
+  it("assemble l'objectif, l'échéance et les séances de la fenêtre", async () => {
+    plansDal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN_ROW,
+      sessions: [
+        planSession({ scheduledOn: '2026-08-04', title: 'Trop vieux' }),
+        // Dans la fenêtre depuis qu'elle remonte de trois jours : le coach peut
+        // enfin voir qu'elle n'a pas été courue.
+        planSession({ scheduledOn: '2026-08-09', title: 'Dimanche dernier' }),
+        planSession({ scheduledOn: '2026-08-11', completedActivityId: 42 }),
+        planSession({ scheduledOn: '2026-08-16', title: 'Sortie longue', volumeM: 16_000 }),
+        planSession({ scheduledOn: '2026-09-05', title: 'Trop loin' }),
+      ],
+    });
+
+    const context = await getPlanContext();
+
+    expect(context).toEqual({
+      hasPlan: true,
+      // Le jour de la lecture voyage avec les séances : c'est lui qui situe une
+      // séance passée non courue par rapport à une séance à venir.
+      today: '2026-08-11',
+      goal: { intent: 'race', note: 'Semi de Lyon en 1 h 45' },
+      raceDate: '2026-09-27',
+      // 8 semaines à partir du lundi 3 août : dernier jour couvert, le dimanche
+      // 27 septembre. `planEndExclusive` rend le 28, non couvert.
+      endsOn: '2026-09-27',
+      upcoming: [
+        expect.objectContaining({ date: '2026-08-09', title: 'Dimanche dernier', done: false }),
+        expect.objectContaining({ date: '2026-08-11', done: true }),
+        expect.objectContaining({ date: '2026-08-16', title: 'Sortie longue', done: false }),
+      ],
+    });
+  });
+
+  it('rend une fenêtre vide sur un plan actif sans séance à venir', async () => {
+    plansDal.getActivePlanWithSessions.mockResolvedValue({
+      plan: PLAN_ROW,
+      sessions: [planSession({ scheduledOn: '2026-08-04' })],
+    });
+
+    const context = await getPlanContext();
+
+    expect(context).toEqual(expect.objectContaining({ hasPlan: true, upcoming: [] }));
+  });
+
+  it('laisse la note à `null` quand l’athlète n’en a pas écrit', async () => {
+    plansDal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN_ROW, goalType: 'free', intent: 'faster', goalText: '   ', raceDate: null },
+      sessions: [],
+    });
+
+    const context = await getPlanContext();
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        goal: { intent: 'faster', note: null },
+        raceDate: null,
+      }),
+    );
   });
 });
