@@ -442,7 +442,18 @@ function ConstraintsFields({ values, onChange, errors, fieldId, bounds }: PlanSt
   );
 }
 
-/** La dernière étape ne saisit rien : elle relit ce qui va partir au coach. */
+/**
+ * La dernière étape ne saisit rien : elle relit ce qui va partir au coach.
+ *
+ * Une des valeurs relues est du **texte libre** — la note de l'athlète. Ligne et
+ * valeur étant des éléments de flex, leur `min-width: auto` les empêche de
+ * rétrécir sous leur contenu minimal : une note écrite sans espace (une adresse
+ * collée, un mot à rallonge) élargissait la ligne bien au-delà de la modale.
+ * Le corps de la modale étant en `overflow-y-auto`, l'autre axe passe à `auto`
+ * avec lui — la relecture se mettait donc à défiler latéralement sous le doigt,
+ * en-tête et barre d'actions restant immobiles. `min-w-0` rend la valeur
+ * rétrécissable, `break-words` coupe le mot qui ne tient pas.
+ */
 function SummaryFields({ values }: { values: PlanFormValues }) {
   return (
     <div className="rounded-card border border-border bg-surface-2">
@@ -456,8 +467,8 @@ function SummaryFields({ values }: { values: PlanFormValues }) {
             <dd
               className={
                 entry.numeric
-                  ? "num text-[0.85rem] text-fg"
-                  : "text-[0.85rem] text-fg"
+                  ? "num min-w-0 break-words text-[0.85rem] text-fg"
+                  : "min-w-0 break-words text-[0.85rem] text-fg"
               }
             >
               {entry.value}
