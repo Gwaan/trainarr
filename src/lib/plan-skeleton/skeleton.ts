@@ -234,6 +234,23 @@ export type QualitySlot = {
    * écrite devra déclarer, sans quoi le volume de la semaine ne tombe plus juste.
    */
   budgetKm: number;
+  /**
+   * La **cible hebdomadaire de la semaine où tombe ce créneau**, en km — ce qui
+   * plafonne le volume d'effort de la séance ({@link qualityEffortCapKm}).
+   *
+   * Elle voyage avec le créneau pour la même raison que le niveau : c'est là
+   * qu'elle sert, et des deux côtés. Le plafond de Daniels s'exprime en part du
+   * volume **hebdomadaire** — 10 % au seuil, 8 % en VMA, 5 % en répétitions —, or
+   * ni la validation d'une séance remplie (`quality-fill.ts`) ni le déroulé
+   * déterministe ({@link qualitySessionTemplate}) ne voient la semaine : ils ne
+   * voient qu'un créneau. Sans ce champ, la seule dimension de la séance dont
+   * l'excès mène au surentraînement resterait la seule que rien ne borne.
+   *
+   * C'est bien la cible de la semaine, pas le budget du créneau : un plafond
+   * calculé sur la séance elle-même ne dirait rien de la charge que l'athlète
+   * absorbe cette semaine-là.
+   */
+  weeklyTargetKm: number;
 };
 
 /** Une semaine du squelette : ce qui est écrit, et ce qui reste à écrire. */
@@ -1050,6 +1067,10 @@ export function buildPlanSkeleton(params: PlanSkeletonParams): SkeletonWeek[] {
         zone,
         kind: QUALITY_ZONE_KINDS[zone],
         budgetKm: qualityBudgets[slotIndex].km,
+        // La cible de la semaine, pas la somme réellement écrite : c'est elle
+        // que la décomposition a répartie, et c'est sur elle que les plafonds de
+        // volume d'effort se calculent.
+        weeklyTargetKm: target.targetKm,
       };
     });
 

@@ -7,8 +7,10 @@ import type { PlanLevel } from '@/data/db/schema';
 import {
   applyImposedPaces,
   validatePlanBusinessRules,
+  weeklyVolumeTargets,
   PLAN_OUTPUT_BOUNDS,
   type PlanExpectations,
+  type PlanRaceGoal,
   type PlanSessionOutput,
   type PlanWeekOutput,
 } from '@/lib/ai/plan-schema';
@@ -20,9 +22,12 @@ import {
   type PlanSessionSteps,
 } from '@/lib/plan-steps/schema';
 
+import { PlanSkeletonInfeasibleError } from './feasibility';
+import { PLAN_INTENTS, type PlanIntent } from './intent';
 import type { PlanPhase } from './phases';
 import { QUALITY_ZONE_KINDS, type QualityZone } from './quality';
 import { qualitySessionTemplate } from './quality-template';
+import { buildPlanSkeleton, type SkeletonWeek } from './skeleton';
 
 /*
  * Ce que ce fichier doit prouver, et pourquoi chaque preuve existe.
@@ -95,11 +100,41 @@ const BUDGET_STEP_KM = 0.1;
  */
 const TOLERANCE_M = 100;
 
+/**
+ * La plus grosse part du volume hebdomadaire qu'un créneau puisse prendre.
+ *
+ * Ce n'est pas la part nominale (14 à 19 %, cf. `composition.ts`) : c'est le
+ * maximum **mesuré** sur des squelettes réels — 22,7 %, sur un créneau de 1,5 km
+ * dans une semaine de 6,6 km, où le plancher de 0,5 km par séance (`halfKm`)
+ * découple le budget de la semaine qui le finance.
+ *
+ * Le balayage l'utilise pour apparier chaque budget à la semaine la plus maigre
+ * qui puisse le porter, donc au **plafond de volume d'effort le plus serré**
+ * (`quality-load.ts`) que ce budget puisse rencontrer. C'est le coin où le
+ * plafond mord le plus fort ; les appariements réels, eux, sont balayés tels
+ * quels plus bas, depuis `buildPlanSkeleton`.
+ */
+const MAX_QUALITY_SHARE = 0.227;
+
+/**
+ * La part **nominale** d'un créneau : celle que la décomposition pose par
+ * défaut (`SESSION_BUDGET_SHARES.quality`, 16 %), au milieu de la rampe de
+ * composition (14 à 19 %).
+ *
+ * Elle apparie les déroulés **figés** ci-dessous à la semaine qui les porterait
+ * réellement. Un créneau n'existe pas sans sa semaine, et le plafond de volume
+ * d'effort se calcule sur elle : illustrer une VMA de 6 km sans dire de quelle
+ * semaine elle vient reviendrait à illustrer une séance impossible.
+ */
+const NOMINAL_QUALITY_SHARE = 0.16;
+
 type SweptCase = {
   zone: QualityZone;
   phase: PlanPhase;
   level: PlanLevel;
   budgetKm: number;
+  /** La cible hebdomadaire de la semaine qui porte ce créneau — ce qui plafonne l'effort. */
+  weeklyTargetKm: number;
   label: string;
 };
 
@@ -122,7 +157,14 @@ const SWEEP: SweptCase[] = ZONES.flatMap((zone) =>
           // flottant produirait des budgets comme 4,300000000000001, qui ne sont
           // pas ceux que `weeklySessionBudgets` écrit.
           const budgetKm = (Math.round(MIN_BUDGET_KM * 10) + index) / 10;
-          return { zone, phase, level, budgetKm, label: `${zone} ${phase} ${level} ${budgetKm} km` };
+          return {
+            zone,
+            phase,
+            level,
+            budgetKm,
+            weeklyTargetKm: budgetKm / MAX_QUALITY_SHARE,
+            label: `${zone} ${phase} ${level} ${budgetKm} km`,
+          };
         },
       ),
     ),
@@ -546,7 +588,13 @@ describe('qualitySessionTemplate — le format des séances', () => {
 
   it('fait croître la part de l’enveloppe à mesure que le budget baisse', () => {
     const shareAt = (budgetKm: number): number => {
-      const steps = qualitySessionTemplate({ zone: 'interval', budgetKm, phase: 'build', level: 'intermediate' });
+      const steps = qualitySessionTemplate({
+        zone: 'interval',
+        budgetKm,
+        phase: 'build',
+        level: 'intermediate',
+        weeklyTargetKm: budgetKm / NOMINAL_QUALITY_SHARE,
+      });
       const flat = flattenSteps(steps);
       return (
         ((flat[0].distanceM ?? 0) + (flat[flat.length - 1].distanceM ?? 0)) /
@@ -579,6 +627,7 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       budgetKm: 6,
       phase: 'build',
       level: 'intermediate',
+      weeklyTargetKm: 6 / NOMINAL_QUALITY_SHARE,
     })).toEqual([
       {
         repeat: 1,
@@ -648,6 +697,7 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       budgetKm: 8,
       phase: 'build',
       level: 'intermediate',
+      weeklyTargetKm: 8 / NOMINAL_QUALITY_SHARE,
     });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
@@ -666,6 +716,7 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       budgetKm: 4,
       phase: 'build',
       level: 'intermediate',
+      weeklyTargetKm: 4 / NOMINAL_QUALITY_SHARE,
     });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
@@ -681,6 +732,7 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       budgetKm: 12,
       phase: 'build',
       level: 'intermediate',
+      weeklyTargetKm: 12 / NOMINAL_QUALITY_SHARE,
     });
 
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
@@ -699,7 +751,15 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
    */
   it('la phase resserre ou relâche la récupération, à budget égal', () => {
     const formatFor = (phase: PlanPhase): [number, (number | null)[]] => {
-      const block = body(qualitySessionTemplate({ zone: 'interval', budgetKm: 9, phase, level: 'intermediate' }));
+      const block = body(
+        qualitySessionTemplate({
+          zone: 'interval',
+          budgetKm: 9,
+          phase,
+          level: 'intermediate',
+          weeklyTargetKm: 9 / NOMINAL_QUALITY_SHARE,
+        }),
+      );
       return [block.repeat, block.steps.map((step) => step.distanceM)];
     };
 
@@ -733,7 +793,15 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       zone: QualityZone = 'threshold',
       phase: PlanPhase = 'build',
     ): [number, (number | null)[]] => {
-      const block = body(qualitySessionTemplate({ zone, budgetKm: 9, phase, level }));
+      const block = body(
+        qualitySessionTemplate({
+          zone,
+          budgetKm: 9,
+          phase,
+          level,
+          weeklyTargetKm: 9 / NOMINAL_QUALITY_SHARE,
+        }),
+      );
       return [block.repeat, block.steps.map((step) => step.distanceM)];
     };
 
@@ -781,16 +849,259 @@ describe('qualitySessionTemplate — les séances qu’on obtient', () => {
       budgetKm: MIN_BUDGET_KM,
       phase: 'base',
       level: 'intermediate',
+      weeklyTargetKm: MIN_BUDGET_KM / MAX_QUALITY_SHARE,
     });
 
-    // 200 m d'échauffement, 200 m vite, 100 m pour rentrer : ce n'est plus une
+    // 250 m d'échauffement, 110 m vite, 140 m pour rentrer : ce n'est plus une
     // séance, c'est ce qu'un budget de 500 m permet d'écrire. Le module l'écrit
     // quand même plutôt que d'échouer — c'est le refus d'infaisabilité du
     // squelette qui décide qu'un tel plan ne doit pas exister, pas celui-ci.
+    //
+    // Les 110 m sont le **plafond de volume d'effort** lui-même : une semaine de
+    // 2,2 km n'autorise que 5 % de répétitions, et le module rend le plafond
+    // plutôt qu'une répétition de 200 m qui le dépasserait. C'est le seul coin du
+    // domaine où le plafond descend sous la longueur minimale de la zone, et le
+    // reliquat part à l'enveloppe comme tous les autres.
     expect(steps.map((block) => [block.repeat, block.steps.map((step) => step.distanceM)])).toEqual([
-      [1, [200]],
-      [1, [200]],
-      [1, [100]],
+      [1, [250]],
+      [1, [110]],
+      [1, [140]],
     ]);
+  });
+});
+
+/*
+ * Le balayage sur squelettes réels : les appariements (budget, semaine) que
+ * `buildPlanSkeleton` produit vraiment, par opposition au pire cas construit
+ * de {@link SWEEP}.
+ *
+ * Volontairement resserré — ce n'est pas le test de propriété du squelette
+ * (`skeleton.test.ts`), qui balaie 42 336 combinaisons. Ici, une seule chose est
+ * jugée, et elle ne dépend que de trois entrées : la zone, le budget du créneau
+ * et la cible de sa semaine. Les axes gardés sont ceux qui déplacent ces
+ * trois-là — le volume de l'athlète surtout, puisque c'est lui qui décide du
+ * plafond.
+ */
+
+/** Objectif et course vont ensemble : c'est la distance visée qui décide de l'affûtage. */
+const SKELETON_GOALS: { label: string; goalDistanceKm: number | null; race: PlanRaceGoal | null }[] =
+  [
+    { label: 'libre', goalDistanceKm: null, race: null },
+    { label: '5 km daté', goalDistanceKm: 5, race: { isMarathon: false } },
+    { label: '10 km daté', goalDistanceKm: 10, race: { isMarathon: false } },
+    { label: 'semi daté', goalDistanceKm: 21.0975, race: { isMarathon: false } },
+    { label: 'marathon daté', goalDistanceKm: 42.195, race: { isMarathon: true } },
+  ];
+
+/**
+ * Les volumes récents balayés, en km par semaine.
+ *
+ * L'axe qui compte : le plafond **est** une part de ce chiffre. Les trois
+ * premiers sont le domaine où le plancher de 0,5 km par séance mord, c'est-à-dire
+ * exactement là où les 2 444 dépassements mesurés se trouvaient.
+ */
+const SKELETON_WEEKLY_KM = [3, 6, 10, 14, 27, 42, 70];
+
+const SKELETON_WEEKS = [4, 8, 16, 24];
+const SKELETON_SESSIONS = [2, 3, 4, 5, 6, 7];
+
+/** Le squelette d'une combinaison — `null` quand le volume ne la finance pas. */
+function skeletonOrNull(params: {
+  intent: PlanIntent;
+  goal: (typeof SKELETON_GOALS)[number];
+  recentWeeklyKm: number;
+  level: PlanLevel;
+  weeks: number;
+  sessionsPerWeek: number;
+}): SkeletonWeek[] | null {
+  const { intent, goal, recentWeeklyKm, level, weeks, sessionsPerWeek } = params;
+
+  try {
+    return buildPlanSkeleton({
+      intent,
+      weeks,
+      firstWeekFromDay: 1,
+      sessionsPerWeek,
+      longRunDay: 7,
+      level,
+      race: goal.race,
+      raceDay: goal.race === null ? null : 7,
+      goalDistanceKm: intent === 'race' ? goal.goalDistanceKm : null,
+      targets: weeklyVolumeTargets({
+        weeks,
+        firstWeekFromDay: 1,
+        recentWeeklyKm,
+        weeklyTimeMinutes: null,
+        easyPaceSecPerKm: null,
+        race: goal.race,
+        level,
+      }),
+    });
+  } catch (error) {
+    // Le seul refus attendu : une cible que le nombre de séances ne finance pas.
+    if (error instanceof PlanSkeletonInfeasibleError) return null;
+    throw error;
+  }
+}
+
+describe('qualitySessionTemplate — le plafond de volume d’effort', () => {
+  /*
+   * ## Ce que ces tests protègent
+   *
+   * Le déroulé écrit ici est le **repli** d'une validation qui refuse une séance
+   * dépassant le plafond de Daniels (`quality-fill.ts`, `quality-load.ts`). S'il
+   * le dépassait lui-même, le repli ne replierait rien : on remplacerait une
+   * séance refusée par une autre séance refusée, et l'athlète recevrait quand
+   * même la surcharge.
+   *
+   * Ce n'était pas hypothétique. Mesuré **avant** que le plafond n'entre dans ce
+   * module, sur 49 671 créneaux plafonnés issus de squelettes réels : le déroulé
+   * déterministe en dépassait **2 444 (4,9 %)**, jusqu'à 1,48 fois le plafond.
+   * Tous dans le coin des petits volumes hebdomadaires, où le plancher de 0,5 km
+   * par séance (`halfKm`) découple le budget du créneau de la semaine qui le
+   * finance.
+   */
+
+  /**
+   * Les plafonds, **réécrits ici en toutes lettres**.
+   *
+   * Comme les formats de zone plus haut : un test qui relit les constantes du
+   * code sous test ne prouve rien. `marathon` n'y figure pas — la zone n'a pas de
+   * plafond publié en part du volume hebdomadaire, et ce module n'en invente pas.
+   */
+  const EXPECTED_CAPS = {
+    repetition: { share: 0.05, maxKm: 8 },
+    interval: { share: 0.08, maxKm: 10 },
+    threshold: { share: 0.1, maxKm: Number.POSITIVE_INFINITY },
+    marathon: null,
+  } as const satisfies Record<QualityZone, { share: number; maxKm: number } | null>;
+
+  /** Le plafond en mètres, arrondi comme le module l'arrondit. */
+  function capM(zone: QualityZone, weeklyTargetKm: number): number | null {
+    const cap = EXPECTED_CAPS[zone];
+    return cap === null ? null : Math.round(Math.min(weeklyTargetKm * cap.share, cap.maxKm) * 1_000);
+  }
+
+  /** Le volume d'effort d'un déroulé, en mètres : les `run`, répétitions comprises. */
+  function effortM(steps: PlanSessionSteps): number {
+    return flattenSteps(steps)
+      .filter((step) => step.role === 'run')
+      .reduce((total, step) => total + (step.distanceM ?? 0), 0);
+  }
+
+  it('ne dépasse jamais le plafond, sur tout le domaine', () => {
+    const failures: string[] = [];
+
+    for (const swept of SWEEP) {
+      const cap = capM(swept.zone, swept.weeklyTargetKm);
+      if (cap === null) continue;
+
+      const effort = effortM(qualitySessionTemplate(swept));
+      if (effort > cap) failures.push(`${swept.label} : ${effort} m > ${cap} m`);
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  /*
+   * Le balayage ci-dessus apparie chaque budget à la semaine la plus maigre qui
+   * puisse le porter ({@link MAX_QUALITY_SHARE}) : c'est le pire cas, pas le cas
+   * réel. Celui-ci prend les appariements que `buildPlanSkeleton` produit
+   * vraiment — chaque créneau avec la semaine qui l'a budgété.
+   */
+  it('ne dépasse jamais le plafond sur des squelettes réels non plus', () => {
+    const failures: string[] = [];
+    let slots = 0;
+
+    for (const intent of PLAN_INTENTS) {
+      for (const goal of SKELETON_GOALS) {
+        if ((intent === 'race') !== (goal.race !== null)) continue;
+        for (const recentWeeklyKm of SKELETON_WEEKLY_KM) {
+          for (const level of LEVELS) {
+            for (const weeks of SKELETON_WEEKS) {
+              for (const sessionsPerWeek of SKELETON_SESSIONS) {
+                const skeleton = skeletonOrNull({
+                  intent,
+                  goal,
+                  recentWeeklyKm,
+                  level,
+                  weeks,
+                  sessionsPerWeek,
+                });
+                if (skeleton === null) continue;
+
+                for (const week of skeleton) {
+                  for (const slot of week.qualitySlots) {
+                    slots += 1;
+                    const cap = capM(slot.zone, slot.weeklyTargetKm);
+                    if (cap === null) continue;
+
+                    const effort = effortM(qualitySessionTemplate(slot));
+                    if (effort > cap) {
+                      failures.push(
+                        `${intent}/${goal.label}/${recentWeeklyKm} km/${level}/${weeks} sem/${sessionsPerWeek} séances ` +
+                          `— s${week.weekNumber} ${slot.zone} (budget ${slot.budgetKm} km, semaine ${slot.weeklyTargetKm} km) : ` +
+                          `${effort} m > ${cap} m`,
+                      );
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+    // Le balayage ne prouverait rien s'il ne voyait aucun créneau.
+    expect(slots).toBeGreaterThan(10_000);
+  });
+
+  /*
+   * Le plafond doit **mordre** quelque part, sinon les deux tests ci-dessus sont
+   * vrais pour la mauvaise raison. Voici le cas exact, minimal et reproductible :
+   * un seuil de 5,5 km dans une semaine de 29 km pour une confirmée en
+   * spécificité. Sans plafond, le module écrit un bloc continu de 3 000 m — le
+   * plus long que la zone autorise —, soit 100 m de plus que les 2 900 m permis.
+   * Avec, il écarte ce format et prend le voisin : deux blocs de 1 300 m.
+   */
+  it('écarte le format qui dépasse et prend le voisin', () => {
+    const slot = {
+      zone: 'threshold',
+      budgetKm: 5.5,
+      phase: 'specific',
+      level: 'advanced',
+    } as const;
+
+    // 32 km de semaine : le plafond vaut 3,2 km, le format naturel passe.
+    expect(body(qualitySessionTemplate({ ...slot, weeklyTargetKm: 32 }))).toMatchObject({
+      repeat: 1,
+      steps: [{ distanceM: 3_000 }],
+    });
+
+    // 29 km : le plafond tombe à 2,9 km, et le bloc de 3 000 m ne tient plus.
+    const capped = qualitySessionTemplate({ ...slot, weeklyTargetKm: 29 });
+    expect(body(capped)).toMatchObject({
+      repeat: 2,
+      steps: [{ distanceM: 1_300 }, { distanceM: 150 }],
+    });
+    // Le reliquat va à l'enveloppe, et la somme retombe sur le budget au mètre.
+    expect(totalDistanceM(capped)).toBe(5_500);
+  });
+
+  /*
+   * La zone `marathon` n'a pas de plafond publié en part du volume hebdomadaire,
+   * et on n'en invente pas : son déroulé ne doit dépendre en rien de la semaine
+   * qui le porte.
+   */
+  it('n’invente pas de plafond pour la zone spécifique allure course', () => {
+    for (const budgetKm of [4, 8, 12]) {
+      const params = { zone: 'marathon', budgetKm, phase: 'specific', level: 'advanced' } as const;
+      expect(
+        qualitySessionTemplate({ ...params, weeklyTargetKm: budgetKm / MAX_QUALITY_SHARE }),
+        `${budgetKm} km`,
+      ).toEqual(qualitySessionTemplate({ ...params, weeklyTargetKm: 200 }));
+    }
   });
 });

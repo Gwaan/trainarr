@@ -48,6 +48,12 @@ export { PLAN_INTENTS, type PlanIntent } from './intent';
 export { planPhases, type PlanPhase, type PlanPhasesParams } from './phases';
 export { goalFamily, qualityZones, QUALITY_ZONE_KINDS, type QualityZone } from './quality';
 export {
+  qualityEffortCapKm,
+  QUALITY_EFFORT_CAPS,
+  sessionEffortKm,
+  sessionEffortM,
+} from './quality-load';
+export {
   buildPlanSkeleton,
   type PlanSkeletonParams,
   type QualitySlot,

@@ -783,9 +783,23 @@ const STEP_NOTE_ZONES = [
   ['threshold', /seuil|tempo/],
 ] as const satisfies readonly (readonly [PaceZoneKey, RegExp])[];
 
-/** Le créneau qu'une note d'étape réclame, `null` si elle n'en nomme aucun. */
-function stepNotePaceZone(note: string | null): PaceZoneKey | null {
-  if (note === null) return null;
+/**
+ * Le créneau qu'une note d'étape réclame, `null` si elle n'en nomme aucun.
+ *
+ * Exportée pour le **volume d'effort** d'une séance de qualité
+ * (`plan-skeleton/quality-load.ts`) : compter les kilomètres courus à l'allure
+ * d'une zone exige de savoir quelles étapes une note en a sorties, et une
+ * seconde lecture des notes finirait par diverger de celle qui pose réellement
+ * les allures — c'est-à-dire celle-ci.
+ *
+ * Le paramètre admet `undefined` en plus de `null`, et ce n'est pas de la
+ * défensive : une étape lue depuis la colonne `jsonb` peut ne pas porter la clé
+ * du tout (même raison que pour `hrPercentMin`, cf. `plan-steps/schema.ts`), et
+ * le type `PlanStep` ne le dit pas. Sans cette tolérance, la fonction lève sur
+ * un plan ancien — mesuré, et corrigé ici plutôt qu'à chacun de ses appelants.
+ */
+export function stepNotePaceZone(note: string | null | undefined): PaceZoneKey | null {
+  if (note === null || note === undefined) return null;
   const normalized = normalizeText(note);
   return STEP_NOTE_ZONES.find(([, pattern]) => pattern.test(normalized))?.[0] ?? null;
 }

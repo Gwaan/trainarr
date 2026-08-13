@@ -49,6 +49,17 @@ const { chatCompletionJson } = vi.hoisted(() => ({
 }));
 vi.mock('./client', () => ({ chatCompletionJson }));
 
+/**
+ * La part du volume hebdomadaire qu'un créneau prend, telle que la décomposition
+ * la pose par défaut (`SESSION_BUDGET_SHARES.quality`).
+ *
+ * Elle sert ici à apparier un budget de créneau à une semaine **plausible** : le
+ * plafond de volume d'effort se calcule sur la semaine, et un créneau de 8 km
+ * greffé sur une semaine de 12 km n'existe pas — le tester reviendrait à juger
+ * le plafond sur une configuration que le squelette ne produit jamais.
+ */
+const QUALITY_SHARE = 0.16;
+
 const SLOT: QualitySlot = {
   day: 3,
   phase: 'build',
@@ -56,6 +67,10 @@ const SLOT: QualitySlot = {
   zone: 'threshold',
   kind: 'Seuil',
   budgetKm: 8,
+  // 8 km de créneau, c'est une semaine de 50 km — et un plafond de seuil à 5 km
+  // (10 %). Le déroulé de référence en porte 4,5 : sous le plafond, mais pas
+  // loin, ce qui est exactement ce qu'un créneau bien dimensionné doit être.
+  weeklyTargetKm: 8 / QUALITY_SHARE,
 };
 
 /** Les trois niveaux du contrat : le prompt doit en dire quelque chose de différent. */
@@ -287,7 +302,22 @@ describe('fillQualitySlot — sortie conforme', () => {
   });
 
   it("impose le jour et le kind du créneau, quoi que le modèle en dise", async () => {
-    respondsWith({ ...VALID_OUTPUT, day: 1, kind: 'Footing', distanceKm: 42 });
+    // Un déroulé de VMA, pas le seuil de référence : la séance est jugée dans la
+    // zone du créneau, et 3 × 1,5 km n'est pas une séance de VMA — son volume
+    // d'effort dépasserait ce qu'une semaine de 50 km autorise à cette intensité.
+    respondsWith({
+      steps: [
+        { steps: [{ role: 'warmup', distanceM: 1500 }] },
+        {
+          repeat: 5,
+          steps: [{ role: 'run', distanceM: 700 }, { role: 'recover', distanceM: 400 }],
+        },
+        { steps: [{ role: 'cooldown', distanceM: 1000 }] },
+      ],
+      day: 1,
+      kind: 'Footing',
+      distanceKm: 42,
+    });
 
     const session = await fillQualitySlot({ ...SLOT, day: 6, kind: 'VMA', zone: 'interval' });
 
@@ -402,9 +432,33 @@ describe('fillQualitySlot — repli déterministe', () => {
     chatCompletionJson.mockRejectedValue(new AiUnavailableError('unconfigured'));
 
     const slots: QualitySlot[] = [
-      { day: 2, phase: 'base', level: 'beginner', zone: 'repetition', kind: 'Répétitions', budgetKm: 5 },
-      { day: 4, phase: 'build', level: 'intermediate', zone: 'interval', kind: 'VMA', budgetKm: 7.5 },
-      { day: 5, phase: 'specific', level: 'advanced', zone: 'threshold', kind: 'Seuil', budgetKm: 10 },
+      {
+        day: 2,
+        phase: 'base',
+        level: 'beginner',
+        zone: 'repetition',
+        kind: 'Répétitions',
+        budgetKm: 5,
+        weeklyTargetKm: 5 / QUALITY_SHARE,
+      },
+      {
+        day: 4,
+        phase: 'build',
+        level: 'intermediate',
+        zone: 'interval',
+        kind: 'VMA',
+        budgetKm: 7.5,
+        weeklyTargetKm: 7.5 / QUALITY_SHARE,
+      },
+      {
+        day: 5,
+        phase: 'specific',
+        level: 'advanced',
+        zone: 'threshold',
+        kind: 'Seuil',
+        budgetKm: 10,
+        weeklyTargetKm: 10 / QUALITY_SHARE,
+      },
       {
         day: 6,
         phase: 'specific',
@@ -412,6 +466,7 @@ describe('fillQualitySlot — repli déterministe', () => {
         zone: 'marathon',
         kind: 'Spécifique allure course',
         budgetKm: 12,
+        weeklyTargetKm: 12 / QUALITY_SHARE,
       },
     ];
 
@@ -598,6 +653,7 @@ describe("fillQualitySlot — l'enveloppe, quel que soit le kind", () => {
     zone: 'marathon',
     kind: 'Spécifique allure course',
     budgetKm: 8,
+    weeklyTargetKm: 8 / QUALITY_SHARE,
   };
 
   const BARE_RUN_OUTPUT = {
@@ -623,6 +679,140 @@ describe("fillQualitySlot — l'enveloppe, quel que soit le kind", () => {
     const roles = new Set((session.steps ?? []).flatMap((block) => block.steps.map((s) => s.role)));
     expect(roles.has('warmup')).toBe(true);
     expect(roles.has('cooldown')).toBe(true);
+  });
+});
+
+describe('fillQualitySlot — le plafond de volume d’effort', () => {
+  /*
+   * Le trou que ces tests ferment : jusqu'ici, **rien** ne bornait ce qu'une
+   * séance fait courir à l'allure dure. La structure était vérifiée, le budget
+   * total aussi, les allures aussi — mais une séance de seuil de 8 km pouvait en
+   * porter 6 d'effort, soit 12 % d'une semaine de 50 km quand la référence en
+   * plafonne 10. C'est la seule dimension de la séance dont l'excès mène au
+   * surentraînement, et c'était la seule que personne ne regardait.
+   *
+   * Le créneau de référence ({@link SLOT}) est un seuil de 8 km sur une semaine
+   * de 50 : le plafond vaut 5,0 km.
+   */
+
+  /** 1 km + 4 × (1,5 km + 100 m) + 600 m = 8 km pile, dont **6 km au seuil**. */
+  const OVER_CAP_OUTPUT = {
+    steps: [
+      { steps: [{ role: 'warmup', distanceM: 1000 }] },
+      { repeat: 4, steps: [{ role: 'run', distanceM: 1500 }, { role: 'recover', distanceM: 100 }] },
+      { steps: [{ role: 'cooldown', distanceM: 600 }] },
+    ],
+  };
+
+  it('refuse une séance au-dessus du plafond, budget pourtant tenu', async () => {
+    respondsWith(OVER_CAP_OUTPUT, OVER_CAP_OUTPUT);
+
+    const session = await fillQualitySlot(SLOT);
+
+    // 1 000 + 4 × (1 500 + 100) + 600 = 8 000 m : le budget est tenu au mètre
+    // près, et la structure est irréprochable. Sans le plafond, cette séance
+    // passait — c'est exactement le trou que la règle ferme.
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
+    expect(writtenByApp(session)).toBe(true);
+  });
+
+  it('dit au modèle combien il a écrit, combien il pouvait, et quoi réduire', async () => {
+    respondsWith(OVER_CAP_OUTPUT, VALID_OUTPUT);
+
+    const session = await fillQualitySlot(SLOT);
+
+    const reprise = messagesOfCall(2).at(-1)?.content ?? '';
+    expect(reprise).toContain("6,0 km à l'allure seuil");
+    expect(reprise).toContain('le maximum est 5,0 km pour cette semaine');
+    expect(reprise).toContain('réduis le nombre ou la longueur des efforts');
+    // Et la séance corrigée est gardée : 3 × 1,5 km, soit 4,5 km au seuil.
+    expect(writtenByApp(session)).toBe(false);
+  });
+
+  it('accepte une séance pile au plafond', async () => {
+    // 1,5 km + 4 × (1,25 km + 100 m) + 1,1 km = 8 km, dont 5,0 km au seuil.
+    respondsWith({
+      steps: [
+        { steps: [{ role: 'warmup', distanceM: 1500 }] },
+        {
+          repeat: 4,
+          steps: [{ role: 'run', distanceM: 1250 }, { role: 'recover', distanceM: 100 }],
+        },
+        { steps: [{ role: 'cooldown', distanceM: 1100 }] },
+      ],
+    });
+
+    const session = await fillQualitySlot(SLOT);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(writtenByApp(session)).toBe(false);
+  });
+
+  /*
+   * L'enveloppe et les récupérations ne sont pas de l'effort : une séance qui
+   * les gonfle reste sous le plafond, même si elle est longue. C'est ce qui
+   * distingue « volume d'effort » de « volume ».
+   */
+  it('ne compte ni l’échauffement, ni les récupérations, ni le retour au calme', async () => {
+    // 3 km + 3 × (1 km + 500 m) + 500 m = 8 km, dont **3 km** au seuil : le
+    // total est le même que celui de la séance refusée ci-dessus.
+    respondsWith({
+      steps: [
+        { steps: [{ role: 'warmup', distanceM: 3000 }] },
+        {
+          repeat: 3,
+          steps: [{ role: 'run', distanceM: 1000 }, { role: 'recover', distanceM: 500 }],
+        },
+        { steps: [{ role: 'cooldown', distanceM: 500 }] },
+      ],
+    });
+
+    const session = await fillQualitySlot(SLOT);
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(writtenByApp(session)).toBe(false);
+  });
+
+  /*
+   * La zone `marathon` n'a pas de plafond publié en part du volume hebdomadaire
+   * (cf. `plan-skeleton/quality-load.ts`), et on n'en invente pas : la même
+   * séance, en spécifique allure course, passe.
+   */
+  it('ne plafonne pas la zone spécifique allure course', async () => {
+    respondsWith(OVER_CAP_OUTPUT);
+
+    const session = await fillQualitySlot({
+      ...SLOT,
+      zone: 'marathon',
+      kind: 'Spécifique allure course',
+    });
+
+    expect(chatCompletionJson).toHaveBeenCalledTimes(1);
+    expect(writtenByApp(session)).toBe(false);
+  });
+
+  /*
+   * Le plafond ne peut pas rendre un créneau infaisable, et c'est structurel :
+   * la dernière issue de `fillQualitySlot` est le déroulé déterministe, qui
+   * n'est pas soumis à cette validation — il respecte le plafond de son côté
+   * (balayage dans `quality-template.test.ts`). Une semaine si maigre que rien
+   * ne tiendrait sous le plafond rend donc une séance quand même.
+   */
+  it('rend toujours une séance, même sur un plafond que rien ne peut tenir', async () => {
+    chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
+
+    const session = await fillQualitySlot({
+      ...SLOT,
+      zone: 'repetition',
+      kind: 'Répétitions',
+      budgetKm: 3,
+      // Un plafond de 150 m : plus petit que la moindre répétition de la zone.
+      weeklyTargetKm: 3,
+    });
+
+    expect(session.distanceKm).toBe(3);
+    expect(sessionStepViolations(session, 'Séance de qualité')).toEqual([]);
+    expect(totalKm(session.steps ?? [])).toBeCloseTo(3, 3);
   });
 });
 
@@ -658,13 +848,16 @@ describe("fillQualitySlot — absorption de l'écart au budget", () => {
 
   it("se replie quand l'écart ne tient pas dans le retour au calme", async () => {
     // 8,35 km : l'écart est dans ce que l'appli retoucherait, mais le reporter
-    // annulerait le retour au calme (250 − 350 = −100 m).
+    // annulerait le retour au calme (250 − 350 = −100 m). L'échauffement porte
+    // les kilomètres en trop plutôt que les efforts : 4,5 km au seuil restent
+    // sous le plafond de la semaine, et c'est bien l'absorption qu'on éprouve
+    // ici, pas le plafond.
     respondsWith({
       steps: [
-        { steps: [{ role: 'warmup', distanceM: 1500 }] },
+        { steps: [{ role: 'warmup', distanceM: 3000 }] },
         {
           repeat: 3,
-          steps: [{ role: 'run', distanceM: 2000 }, { role: 'recover', distanceM: 200 }],
+          steps: [{ role: 'run', distanceM: 1500 }, { role: 'recover', distanceM: 200 }],
         },
         { steps: [{ role: 'cooldown', distanceM: 250 }] },
       ],
@@ -769,7 +962,13 @@ describe('fillQualitySlot — balayage : la couverture vaut toujours le budget',
           return parsed.data;
         });
 
-        const slot: QualitySlot = { ...SLOT, budgetKm };
+        // La semaine suit le budget : c'est le seul appariement que le squelette
+        // produise, et le plafond de volume d'effort se calcule dessus.
+        const slot: QualitySlot = {
+          ...SLOT,
+          budgetKm,
+          weeklyTargetKm: budgetKm / QUALITY_SHARE,
+        };
         const session = await fillQualitySlot(slot);
         const covered = totalKm(session.steps ?? []);
         if (writtenByApp(session)) issues.fallback += 1;

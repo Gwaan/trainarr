@@ -37,6 +37,13 @@
  * couvre ~11 km à l'allure seuil, et fait sortir de sa cible **2 973 semaines
  * sur 3 024 (98,3 %)** du balayage de propriété. En distance : zéro.
  *
+ * **3. Le volume d'effort reste sous le plafond de sa zone.** Le déroulé est le
+ * repli d'une validation qui refuse une séance dépassant le plafond de Daniels
+ * (`quality-load.ts`) : un repli qui le dépasserait ne replierait rien. Le
+ * plafond agit à deux endroits, et à deux endroits seulement — il **écarte** les
+ * formats qui le dépassent ({@link chooseFormat}), et il borne l'effort continu.
+ * Le reliquat va à l'enveloppe, comme tous les autres reliquats de ce module.
+ *
  * ## Ce que ce module n'écrit surtout pas
  *
  * **Aucune allure, aucune zone cardiaque.** `applyImposedPaces` les pose en
@@ -58,6 +65,7 @@ import { PLAN_STEP_BOUNDS, type PlanSessionSteps, type PlanStep } from '@/lib/pl
 
 import type { PlanPhase } from './phases';
 import type { QualityZone } from './quality';
+import { qualityEffortCapKm } from './quality-load';
 
 /*
  * ------------------------------------------------------------------------
@@ -541,6 +549,7 @@ function chooseFormat(
   phase: PlanPhase,
   level: PlanLevel,
   workTargetM: number,
+  effortCapM: number | null,
 ): SessionFormat | null {
   const shape = ZONE_SHAPES[zone];
   // Le contrat des étapes borne aussi les répétitions : au-delà, c'est un bloc
@@ -577,6 +586,13 @@ function chooseFormat(
 
     const usedM = reps * (effortM + recoverM);
     if (usedM > workTargetM) continue;
+    // Le plafond de volume d'effort **écarte** le format, il ne le rogne pas :
+    // rogner l'effort sous la longueur minimale de la zone changerait la nature
+    // de la séance (un « seuil » de 3 × 700 m n'est plus un seuil), là où le
+    // format voisin — une répétition de plus, donc plus courte — reste celui que
+    // la zone décrit. Quand aucun ne tient, c'est l'effort continu qui prend la
+    // suite, plafonné lui aussi.
+    if (effortCapM !== null && reps * effortM > effortCapM) continue;
 
     const score = workTargetM - usedM + REPS_PREFERENCE_PENALTY_M * Math.abs(reps - preferredReps);
     if (score < bestScore) {
@@ -611,14 +627,26 @@ function chooseFormat(
  * @param level le niveau de l'athlète, second et dernier modulateur du format
  * ({@link LEVEL_RECOVERY_FACTOR}). Sans lui, le repli écrirait à une débutante
  * la séance d'une confirmée — c'est le défaut mesuré que ce paramètre répare.
+ * @param weeklyTargetKm la cible hebdomadaire de la semaine où tombe le créneau,
+ * qui plafonne le **volume d'effort** de la séance ({@link qualityEffortCapKm}).
+ *
+ * Paramètre **obligatoire**, et c'est délibéré : ce déroulé est le repli d'une
+ * validation qui, elle, refuse une séance au-dessus du plafond. Un défaut ici
+ * produirait un repli que la validation rejetterait — un repli qui ne replie
+ * rien. Mesuré avant qu'il n'existe : sur 49 671 créneaux plafonnés issus de
+ * squelettes réels, le déroulé déterministe en dépassait **2 444 (4,9 %)**,
+ * jusqu'à 1,48 fois le plafond, tous dans le coin des petits volumes
+ * hebdomadaires — où le plancher de 0,5 km par séance (`halfKm`) découple le
+ * budget du créneau de la semaine qui le finance.
  */
 export function qualitySessionTemplate(params: {
   zone: QualityZone;
   budgetKm: number;
   phase: PlanPhase;
   level: PlanLevel;
+  weeklyTargetKm: number;
 }): PlanSessionSteps {
-  const { zone, budgetKm, phase, level } = params;
+  const { zone, budgetKm, phase, level, weeklyTargetKm } = params;
 
   // Tout se calcule en mètres entiers : c'est la seule façon de faire retomber
   // une somme sur un total sans traîner d'erreur de flottant.
@@ -626,9 +654,21 @@ export function qualitySessionTemplate(params: {
   const targets = envelopeTargets(totalM, level);
   const workTargetM = totalM - targets.warmupM - targets.cooldownM;
 
-  const format = chooseFormat(zone, phase, level, workTargetM);
+  const capKm = qualityEffortCapKm(zone, weeklyTargetKm);
+  const effortCapM = capKm === null ? null : Math.round(capKm * 1_000);
+
+  const format = chooseFormat(zone, phase, level, workTargetM, effortCapM);
   const notes = ZONE_NOTES[zone];
-  const usedM = format === null ? workTargetM : format.reps * (format.effortM + format.recoverM);
+  // L'effort continu est plafonné comme les autres. Le plancher d'une étape
+  // reste le dernier mot : c'est ce qui garde le déroulé valide par
+  // construction, y compris sur un plafond que le contrat ne saurait pas
+  // exprimer (moins de 10 m, soit une semaine sous 200 m — que nulle
+  // configuration finançable ne produit).
+  const continuousM =
+    effortCapM === null
+      ? workTargetM
+      : Math.max(PLAN_STEP_BOUNDS.distanceM.min, Math.min(workTargetM, effortCapM));
+  const usedM = format === null ? continuousM : format.reps * (format.effortM + format.recoverM);
 
   // Le corps de séance tombe sur des nombres ronds, l'enveloppe absorbe l'écart
   // — et le retour au calme prend le reliquat exact, ce qui fait la somme juste.
@@ -638,7 +678,7 @@ export function qualitySessionTemplate(params: {
 
   const body =
     format === null
-      ? { repeat: 1, steps: [distanceStep('run', workTargetM, notes.continuous)] }
+      ? { repeat: 1, steps: [distanceStep('run', continuousM, notes.continuous)] }
       : {
           repeat: format.reps,
           steps: [

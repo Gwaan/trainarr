@@ -76,6 +76,7 @@ import { z } from 'zod';
 
 import type { PlanLevel } from '@/data/db/schema';
 import type { PlanPhase, QualitySlot, QualityZone } from '@/lib/plan-skeleton';
+import { qualityEffortCapKm, sessionEffortM } from '@/lib/plan-skeleton/quality-load';
 import { qualitySessionTemplate } from '@/lib/plan-skeleton/quality-template';
 import { LAST_RESORT_TITLE, qualitySessionTitle } from '@/lib/plan-skeleton/quality-title';
 import {
@@ -592,6 +593,21 @@ function qualitySessionFor(slot: QualitySlot, output: QualitySessionOutput): Pla
 const QUALITY_VIOLATION_LABEL = 'Séance de qualité';
 
 /**
+ * Comment nommer l'allure d'une zone **dans une phrase** — « à l'allure seuil ».
+ *
+ * Distinct de {@link QUALITY_ZONE_KINDS}, qui nomme la *séance* et s'écrit avec
+ * une capitale (« Seuil », « Spécifique allure course ») : recopier ces libellés
+ * ici donnerait « à l'allure Spécifique allure course ». Le message de reprise
+ * est lu par le modèle, et une phrase bancale est une consigne qu'il suit mal.
+ */
+const EFFORT_ZONE_LABELS: Record<QualityZone, string> = {
+  threshold: 'seuil',
+  interval: 'VMA',
+  repetition: 'des répétitions',
+  marathon: 'objectif',
+};
+
+/**
  * Ce qui cloche dans une séance remplie — la liste vide valant « bonne ».
  *
  * Trois familles :
@@ -622,6 +638,16 @@ const QUALITY_VIOLATION_LABEL = 'Séance de qualité';
  * de qualité en est un par construction**, c'est le squelette qui l'a écrit.
  * `sessionStepViolations` reste la source pour les séances qu'elle reconnaît (on
  * ne dédouble pas ses messages), et cette fonction couvre les autres.
+ *
+ * ## Le quatrième juge : le volume d'effort
+ *
+ * Les trois familles ci-dessus bornent la *forme* et le *total* d'une séance.
+ * Aucune ne bornait ce qu'elle fait **courir à l'allure dure** — la seule
+ * dimension dont l'excès mène au surentraînement. Rien n'empêchait donc une
+ * séance de seuil budgétée 6 km d'en porter 5 d'effort, soit 17 % d'une semaine
+ * de 30 km quand la référence en plafonne 10. Les plafonds et leur niveau de
+ * preuve vivent dans `plan-skeleton/quality-load.ts` ; ici, ils sont une
+ * contrainte dure comme les autres : reprise du modèle, puis repli déterministe.
  */
 function qualitySessionViolations(session: PlanSessionOutput, slot: QualitySlot): string[] {
   const violations = sessionStepViolations(session, QUALITY_VIOLATION_LABEL);
@@ -648,6 +674,20 @@ function qualitySessionViolations(session: PlanSessionOutput, slot: QualitySlot)
     violations.push(
       `${where} : le déroulé totalise ${formatNumber(totalKm, 1)} km au lieu de ${formatNumber(slot.budgetKm, 1)} km — ajuste la longueur ou le nombre des efforts pour retomber sur ce total, échauffement et retour au calme compris.`,
     );
+  }
+
+  const capKm = qualityEffortCapKm(slot.zone, slot.weeklyTargetKm);
+  if (capKm !== null) {
+    const effortM = sessionEffortM(slot.zone, session.steps ?? []);
+    // Comparé en **mètres entiers**, comme tout le reste du projet : le plafond
+    // est un produit de flottants (0,1 × 29 vaut 2,9000000000000004) et l'arrondir
+    // au mètre supprime ce bruit-là sans rien accorder — au plus un demi-mètre.
+    const capM = Math.round(capKm * 1_000);
+    if (effortM > capM) {
+      violations.push(
+        `${where} : ta séance contient ${formatNumber(effortM / 1_000, 1)} km à l'allure ${EFFORT_ZONE_LABELS[slot.zone]}, le maximum est ${formatNumber(capM / 1_000, 1)} km pour cette semaine — réduis le nombre ou la longueur des efforts. L'échauffement, les récupérations et le retour au calme ne comptent pas dans ce total.`,
+      );
+    }
   }
 
   return violations;
@@ -879,6 +919,7 @@ function templateSteps(slot: QualitySlot): PlanSessionSteps | null {
         budgetKm: slot.budgetKm,
         phase: slot.phase,
         level: slot.level,
+        weeklyTargetKm: slot.weeklyTargetKm,
       }),
     );
     if (parsed.success) return parsed.data;
