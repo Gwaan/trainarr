@@ -3,13 +3,15 @@ import { Suspense } from "react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
-import { getAthleteProfile } from "@/data/athlete";
+import { getAthleteProfile, getIntervalsSettings } from "@/data/athlete";
 import { getAccountSummary } from "@/lib/auth/session";
 
 import { AccountPanel } from "./_components/account-panel";
+import { IntervalsPanel } from "./_components/intervals-panel";
 import { ProfileForm } from "./_components/profile-form";
 import { ProfileSkeleton } from "./_components/profile-skeleton";
 import { toProfileFormValues } from "./_lib/form-values";
+import { toIntervalsFormDefaults } from "./_lib/intervals-values";
 
 export const metadata: Metadata = {
   title: "Profil",
@@ -42,10 +44,13 @@ const HEADINGS = {
  */
 async function ProfileContent() {
   await connection();
-  // Deux lectures indépendantes : le profil athlète (nos tables, via le DAL) et
-  // le compte connecté (la session, via better-auth).
-  const [profile, account] = await Promise.all([
+  // Trois lectures indépendantes : le profil athlète et ses identifiants
+  // intervals.icu (nos tables, via le DAL) et le compte connecté (la session,
+  // via better-auth). Les identifiants ne portent que l'état de la clé API,
+  // jamais sa valeur.
+  const [profile, intervals, account] = await Promise.all([
     getAthleteProfile(),
+    getIntervalsSettings(),
     getAccountSummary(),
   ]);
 
@@ -58,6 +63,12 @@ async function ProfileContent() {
       {/* Le formulaire ne reçoit que des chaînes prêtes à afficher : la
           conversion des mesures reste côté serveur, testée à part. */}
       <ProfileForm mode={mode} values={toProfileFormValues(profile)} />
+      {/* En édition seulement : à la création, ces deux champs voyagent avec le
+          profil dans la même soumission — l'athlète n'existe pas encore, il n'y
+          a rien à modifier séparément. */}
+      {mode === "edit" ? (
+        <IntervalsPanel defaults={toIntervalsFormDefaults(intervals)} />
+      ) : null}
       {/* Après le profil, et à part : l'identité de connexion n'a rien à voir
           avec les données physiologiques, et son CTA ne doit pas concurrencer
           l'enregistrement. Le composant ne reçoit que le nom — jamais l'e-mail,

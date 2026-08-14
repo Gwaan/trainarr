@@ -97,6 +97,16 @@ export function ProfileSkeleton() {
           <FieldSkeleton inputClassName="w-32" />
         </PanelSkeleton>
 
+        {/* « Import automatique » : cadrage, identifiant d'athlète, clé API.
+            À la création il précède le bouton (il fait partie du formulaire) ;
+            en édition il le suit, avec son propre bouton — une seule géométrie
+            pour les deux, le squelette ignore encore lequel s'affichera. */}
+        <PanelSkeleton titleWidth="w-32">
+          <Skeleton className="h-3 w-full max-w-xl" />
+          <FieldSkeleton inputClassName="w-full sm:max-w-sm" />
+          <FieldSkeleton inputClassName="w-full sm:max-w-sm" />
+        </PanelSkeleton>
+
         <Skeleton className="h-12 w-full sm:w-44" />
 
         {/* « Ton compte » : trois blocs — nom, mot de passe, déconnexion. */}

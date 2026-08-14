@@ -19,11 +19,13 @@ import {
   ATHLETE_PROFILE_LIMITS,
   AthleteAlreadyExistsError,
   AthleteNotFoundError,
+  AthleteOwnerRequiredError,
   createAthlete,
   getCurrentAthleteId,
   hasAthlete,
   InvalidAthleteProfileError,
   isCivilDate,
+  saveIntervalsSettings,
   todayCivilDate,
   updateAthleteProfile,
   type AthleteProfileInput,
@@ -31,9 +33,20 @@ import {
 import { ATHLETE_SEXES } from '@/data/db/schema';
 import { recoverPendingImports, type RecoveryReport } from '@/lib/fit/recover';
 
+import { parseIntervalsFields } from './intervals-input';
+import type { IntervalsField } from './intervals-state';
+
+/**
+ * Les champs que ce formulaire peut signaler.
+ *
+ * Les deux champs intervals.icu s'y ajoutent parce que le formulaire de
+ * **création** les porte : à ce moment-là, et à ce moment-là seulement, ils
+ * accompagnent le profil dans la même soumission (l'athlète n'existe pas encore,
+ * un second formulaire n'aurait rien à modifier).
+ */
 export type ProfileFormState = {
   status: 'idle' | 'success' | 'error';
-  fieldErrors?: Partial<Record<keyof AthleteProfileInput, string>>;
+  fieldErrors?: Partial<Record<keyof AthleteProfileInput | IntervalsField, string>>;
   message?: string;
 };
 
@@ -190,14 +203,21 @@ export async function saveProfileAction(
     weightKg: textField(formData, 'weightKg'),
     birthDate: textField(formData, 'birthDate'),
   });
+  // Les deux champs intervals.icu sont validés **avant** toute écriture, même
+  // s'ils ne serviront qu'à la création : une borne dépassée ne doit pas laisser
+  // derrière elle un profil créé sans ses identifiants.
+  const intervals = parseIntervalsFields(formData);
 
-  if (!parsed.success) {
-    const flat = z.flattenError(parsed.error);
+  if (!parsed.success || !intervals.ok) {
     const fieldErrors: NonNullable<ProfileFormState['fieldErrors']> = {};
-    for (const field of PROFILE_FIELDS) {
-      const message = flat.fieldErrors[field]?.[0];
-      if (message !== undefined) fieldErrors[field] = message;
+    if (!parsed.success) {
+      const flat = z.flattenError(parsed.error);
+      for (const field of PROFILE_FIELDS) {
+        const message = flat.fieldErrors[field]?.[0];
+        if (message !== undefined) fieldErrors[field] = message;
+      }
     }
+    if (!intervals.ok) Object.assign(fieldErrors, intervals.fieldErrors);
     return { status: 'error', fieldErrors, message: 'Corrige les champs signalés.' };
   }
 
@@ -218,11 +238,35 @@ export async function saveProfileAction(
     return failure(error);
   }
 
+  // À la création seulement. En édition, ce formulaire ne porte pas les champs
+  // intervals.icu (ils ont leur propre panneau) : les enregistrer d'ici
+  // effacerait la clé à chaque enregistrement du profil.
+  let intervalsSaved = true;
+  if (created) {
+    try {
+      await saveIntervalsSettings(intervals.value);
+    } catch (error) {
+      // Le profil, lui, est bien créé : le refaire échouerait, et ressaisir la
+      // clé se fait désormais depuis le panneau dédié. On le dit — plutôt qu'un
+      // succès qui masquerait une clé jamais enregistrée — mais sans renoncer à
+      // la reprise ci-dessous, qui ne se rejouerait jamais.
+      console.error('[profile] identifiants intervals.icu non enregistrés :', error);
+      intervalsSaved = false;
+    }
+  }
+
   // Après la création seulement : rien n'attend une mise à jour de profil. Cette
   // fonction ne lève jamais — l'onboarding est déjà acquis.
   const recovery = athleteId === null ? null : await recoverPendingImports(athleteId);
 
   revalidatePath('/', 'layout');
+  if (!intervalsSaved) {
+    return {
+      status: 'error',
+      message:
+        "Profil créé, mais les identifiants intervals.icu n'ont pas été enregistrés. Reprends-les depuis la section « Import automatique ».",
+    };
+  }
   return { status: 'success', message: successMessage(created, recovery) };
 }
 
@@ -242,6 +286,15 @@ function failure(error: unknown): ProfileFormState {
   }
   if (error instanceof AthleteNotFoundError) {
     return { status: 'error', message: 'Aucun profil à modifier — recharge la page.' };
+  }
+  // Un athlète appartient à un compte : sans session, il n'y a rien à qui
+  // rattacher le profil. Le dire, plutôt qu'un « impossible pour l'instant »
+  // qu'aucune manœuvre ne débloquerait.
+  if (error instanceof AthleteOwnerRequiredError) {
+    return {
+      status: 'error',
+      message: 'Ta session a expiré : reconnecte-toi, puis enregistre ton profil.',
+    };
   }
 
   console.error('[profile] enregistrement impossible :', error);

@@ -17,6 +17,9 @@ import { cn } from "@/lib/utils";
 
 import { saveProfileAction, type ProfileFormState } from "../_lib/actions";
 import { SEX_CHOICES, type ProfileFormValues } from "../_lib/form-values";
+import { EMPTY_INTERVALS_FORM_VALUES } from "../_lib/intervals-values";
+
+import { IntervalsFields } from "./intervals-fields";
 
 /**
  * Formulaire de profil — le même à l'onboarding et à l'édition : les champs sont
@@ -38,6 +41,16 @@ const HINTS = {
   birthDate:
     "Repère d'âge pour la lecture de tes séances ; aucun calcul actuel ne s'en sert.",
 } as const;
+
+/**
+ * Cadrage du bloc intervals.icu à la création.
+ *
+ * Il dit ce qu'on perd à laisser ces champs vides — l'import automatique — et
+ * qu'on peut y revenir : sans ça, une installation neuve croirait le
+ * rapatriement acquis, ou se croirait engagée à le configurer tout de suite.
+ */
+const INTERVALS_ONBOARDING_INTRO =
+  "Trainarr rapatrie tes séances depuis intervals.icu, où HealthFit les dépose. Sans clé API, l'import automatique ne démarre pas : il reste le dépôt manuel d'un fichier FIT depuis la page « Activités ». Tu peux laisser ces champs vides et les renseigner plus tard, depuis cette même page.";
 
 /** Rien à afficher tant que le formulaire n'a pas été soumis. */
 const INITIAL_STATE: ProfileFormState = { status: "idle" };
@@ -143,6 +156,10 @@ export function ProfileForm({ mode, values }: ProfileFormProps) {
     INITIAL_STATE,
   );
   const [fields, setFields] = useState(values);
+  // Les identifiants intervals.icu ne voyagent avec le profil qu'à la création :
+  // en édition, ils ont leur propre panneau et leur propre action, et ce
+  // formulaire ne les porte pas (il les effacerait à chaque enregistrement).
+  const [intervals, setIntervals] = useState(EMPTY_INTERVALS_FORM_VALUES);
   const uid = useId();
 
   const fieldId = (name: keyof ProfileFormValues) => `${uid}-${name}`;
@@ -402,6 +419,21 @@ export function ProfileForm({ mode, values }: ProfileFormProps) {
           </Field>
         </div>
       </Panel>
+
+      {/* À la création seulement : c'est le seul moment où ces champs peuvent
+          accompagner le profil, puisque l'athlète n'existe pas encore et qu'un
+          second formulaire n'aurait rien à modifier. */}
+      {mode === "onboarding" ? (
+        <Panel title="Import automatique">
+          <IntervalsFields
+            apiKeyState="absent"
+            values={intervals}
+            onChange={setIntervals}
+            errors={errors}
+            intro={INTERVALS_ONBOARDING_INTRO}
+          />
+        </Panel>
+      ) : null}
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <Button

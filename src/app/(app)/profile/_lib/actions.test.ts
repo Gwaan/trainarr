@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { InvalidAthleteProfileError } from '@/data/athlete';
+import { AthleteOwnerRequiredError, InvalidAthleteProfileError } from '@/data/athlete';
 
 import { saveProfileAction, type ProfileFormState } from './actions';
+import { CLEAR_API_KEY_VALUE } from './intervals-state';
 
 vi.mock('server-only', () => ({}));
 
@@ -18,6 +19,7 @@ const { mocks } = vi.hoisted(() => ({
     getCurrentAthleteId: vi.fn(),
     createAthlete: vi.fn(),
     updateAthleteProfile: vi.fn(),
+    saveIntervalsSettings: vi.fn(),
     recoverPendingImports: vi.fn(),
     revalidatePath: vi.fn(),
   },
@@ -35,6 +37,7 @@ vi.mock('@/data/athlete', async (importOriginal) => ({
   getCurrentAthleteId: mocks.getCurrentAthleteId,
   createAthlete: mocks.createAthlete,
   updateAthleteProfile: mocks.updateAthleteProfile,
+  saveIntervalsSettings: mocks.saveIntervalsSettings,
 }));
 
 const IDLE: ProfileFormState = { status: 'idle' };
@@ -62,6 +65,7 @@ beforeEach(() => {
   mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.createAthlete.mockResolvedValue(undefined);
   mocks.updateAthleteProfile.mockResolvedValue(undefined);
+  mocks.saveIntervalsSettings.mockResolvedValue(undefined);
   mocks.recoverPendingImports.mockResolvedValue({ requeued: 0, backfillReopened: true });
 });
 
@@ -225,7 +229,86 @@ describe('saveProfileAction — édition', () => {
   });
 });
 
+describe('saveProfileAction — identifiants intervals.icu', () => {
+  const KEY = 'k'.repeat(40);
+
+  it('enregistre les identifiants saisis à la création', async () => {
+    const state = await saveProfileAction(
+      IDLE,
+      form({ intervalsAthleteId: '  i671024 ', apiKey: `  ${KEY} ` }),
+    );
+
+    expect(mocks.saveIntervalsSettings).toHaveBeenCalledWith({
+      intervalsAthleteId: 'i671024',
+      apiKey: KEY,
+    });
+    expect(state.status).toBe('success');
+    // La clé ne revient jamais vers le client, même en écho d'un succès.
+    expect(JSON.stringify(state)).not.toContain(KEY);
+  });
+
+  it('accepte une création sans identifiants — ils restent facultatifs', async () => {
+    const state = await saveProfileAction(IDLE, form());
+
+    expect(mocks.saveIntervalsSettings).toHaveBeenCalledWith({ intervalsAthleteId: '' });
+    expect(state.status).toBe('success');
+  });
+
+  it("n'y touche pas en édition, où ces champs ont leur propre formulaire", async () => {
+    mocks.hasAthlete.mockResolvedValue(true);
+
+    await saveProfileAction(IDLE, form({ intervalsAthleteId: 'i9', apiKey: KEY }));
+
+    expect(mocks.saveIntervalsSettings).not.toHaveBeenCalled();
+  });
+
+  it('refuse un champ intervals.icu hors bornes sans créer le profil', async () => {
+    const state = await saveProfileAction(IDLE, form({ apiKey: 'k'.repeat(257) }));
+
+    expect(state.status).toBe('error');
+    expect(state.fieldErrors?.apiKey).toEqual(expect.any(String));
+    expect(mocks.createAthlete).not.toHaveBeenCalled();
+    expect(mocks.saveIntervalsSettings).not.toHaveBeenCalled();
+  });
+
+  it('rapporte ensemble les champs physiologiques et intervals.icu fautifs', async () => {
+    const state = await saveProfileAction(
+      IDLE,
+      form({ displayName: '', apiKey: KEY, clearApiKey: CLEAR_API_KEY_VALUE }),
+    );
+
+    expect(Object.keys(state.fieldErrors ?? {}).sort()).toEqual(['apiKey', 'displayName']);
+  });
+
+  it("dit que le profil est créé quand seuls les identifiants n'ont pas pu l'être", async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.saveIntervalsSettings.mockRejectedValue(new Error('secret absent'));
+
+    const state = await saveProfileAction(IDLE, form({ apiKey: KEY }));
+
+    expect(state.status).toBe('error');
+    expect(state.message).toContain('Profil créé');
+    // Le profil existe : la page doit repasser en mode édition, où la section
+    // dédiée permet de reprendre la clé.
+    expect(mocks.revalidatePath).toHaveBeenCalledWith('/', 'layout');
+    // La reprise des imports a bien eu lieu : elle ne se rejouerait jamais, la
+    // création n'ayant lieu qu'une fois.
+    expect(mocks.recoverPendingImports).toHaveBeenCalledWith(7);
+    expect(JSON.stringify(state)).not.toContain(KEY);
+    expect(logged).toHaveBeenCalled();
+  });
+});
+
 describe('saveProfileAction — erreurs du DAL', () => {
+  it("dit qu'une session est nécessaire plutôt qu'un échec générique", async () => {
+    mocks.createAthlete.mockRejectedValue(new AthleteOwnerRequiredError());
+
+    const state = await saveProfileAction(IDLE, form());
+
+    expect(state.status).toBe('error');
+    expect(state.message).toContain('reconnecte-toi');
+  });
+
   it('reporte une erreur de bornes du DAL sur son champ', async () => {
     mocks.createAthlete.mockRejectedValue(
       new InvalidAthleteProfileError('weightKg', 'Poids hors bornes.'),
