@@ -103,6 +103,32 @@ export const athlete = pgTable('athlete', {
    * illisible, à ressaisir » — jamais comme une panne.
    */
   intervalsApiKeyEncrypted: text('intervals_api_key_encrypted'),
+  /**
+   * Lieu **réglé** des prévisions météo : le libellé choisi (« Bordeaux ») et
+   * ses coordonnées géocodées.
+   *
+   * **Les trois colonnes vont ensemble ou pas du tout** : `NULL` partout, c'est
+   * le mode automatique — le lieu se déduit alors du plus central des départs
+   * récents (`habitualStart`), qui reste le défaut pour un compte qui n'a rien
+   * réglé. Un libellé sans coordonnées ne serait interrogeable nulle part, et
+   * des coordonnées sans libellé ne se diraient pas à l'écran ; le DAL ne rend
+   * donc le réglage que lorsque les trois sont là.
+   *
+   * Un réglage **par compte**, comme les identifiants intervals.icu au-dessus :
+   * l'installation peut porter plusieurs athlètes, qui ne courent pas au même
+   * endroit.
+   *
+   * Coordonnées **arrondies** à deux décimales (≈ 1 km, cf.
+   * `COORDINATE_DECIMALS`), comme partout ailleurs dans le système. Un lieu
+   * public n'a rien de secret, mais une exception à la règle d'arrondi finirait
+   * par en faire une autre.
+   *
+   * Le libellé, lui, **franchit la frontière client** : c'est la réponse à « la
+   * prévision, c'est quelle ville ? ». Les coordonnées, non.
+   */
+  forecastLocationLabel: text('forecast_location_label'),
+  forecastLatitudeDeg: real('forecast_latitude_deg'),
+  forecastLongitudeDeg: real('forecast_longitude_deg'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

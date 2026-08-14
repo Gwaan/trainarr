@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { SettingsSectionsData } from "../_lib/settings-values";
 
 import { AccountPanel } from "./account-panel";
+import { ForecastLocationPanel } from "./forecast-location-panel";
 import { IntervalsPanel } from "./intervals-panel";
 import { InvitationsPanel } from "./invitations-panel";
 import { ProfileForm } from "./profile-form";
@@ -30,10 +31,15 @@ import { ProfileForm } from "./profile-form";
  * n'est refermé ni escamoté sur un succès.
  */
 
+/**
+ * Le troisième onglet s'appelait « Import » quand il ne portait qu'intervals.icu.
+ * Il porte désormais aussi le lieu des prévisions météo, qui n'importe rien :
+ * son intitulé dit les deux plutôt que d'en cacher un.
+ */
 const TABS = [
   { id: "profile", label: "Profil" },
   { id: "account", label: "Compte" },
-  { id: "imports", label: "Import" },
+  { id: "imports", label: "Import & météo" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -89,8 +95,13 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
         </div>
       </TabsContent>
 
+      {/* L'import d'abord : c'est lui qui alimente l'application. Le lieu des
+          prévisions ensuite — un réglage qu'on pose une fois. */}
       <TabsContent value="imports" active={current === "imports"}>
-        <IntervalsPanel defaults={data.intervals} />
+        <div className="flex flex-col gap-4 sm:gap-5">
+          <IntervalsPanel defaults={data.intervals} />
+          <ForecastLocationPanel label={data.forecastLocationLabel} />
+        </div>
       </TabsContent>
     </Tabs>
   );

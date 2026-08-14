@@ -30,7 +30,7 @@ const HEADINGS = {
   edit: {
     title: "Tes réglages",
     subtitle:
-      "Ton profil physiologique, ton compte et l'import automatique de tes séances.",
+      "Ton profil physiologique, ton compte, l'import automatique de tes séances et le lieu de tes prévisions météo.",
   },
 } as const;
 

@@ -98,7 +98,7 @@ const EMPTY_SUMMARY: Omit<DashboardSummary, 'today'> = {
   loadWeeks: [],
   todaySession: null,
   // Sans athlète, il n'y a ni séance ni lieu : la prévision n'a rien à dire.
-  forecast: { status: null, fetchedAt: null, days: [] },
+  forecast: { status: null, fetchedAt: null, location: { source: 'derived' }, days: [] },
   recentActivities: [],
 };
 

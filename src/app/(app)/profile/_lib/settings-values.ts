@@ -5,9 +5,10 @@
  * composants clients (`settings-tabs.tsx`) de s'y référer sans importer le
  * module `server-only` qui les produit.
  *
- * Trois champs, pas un de plus. En particulier, la clé API intervals.icu n'a
- * aucune représentation ici : `IntervalsFormDefaults` n'en porte que l'**état**
- * (cf. `intervals-values.ts`), jamais la valeur, même masquée.
+ * Rien de plus que ce que les sections affichent. En particulier, la clé API
+ * intervals.icu n'a aucune représentation ici : `IntervalsFormDefaults` n'en
+ * porte que l'**état** (cf. `intervals-values.ts`), jamais la valeur, même
+ * masquée. Et le lieu des prévisions n'y est qu'un nom, jamais un point.
  */
 
 import type { ProfileFormValues } from './form-values';
@@ -18,6 +19,11 @@ import type { InvitationsSettings } from './invitation-values';
 export type SettingsSectionsData = {
   profile: ProfileFormValues;
   intervals: IntervalsFormDefaults;
+  /**
+   * Le **nom** du lieu fixé pour les prévisions, `null` en mode automatique.
+   * Jamais ses coordonnées : le navigateur n'en a aucun usage.
+   */
+  forecastLocationLabel: string | null;
   /** Le nom du compte connecté, `null` si personne ne l'est. Jamais l'e-mail ni l'identifiant. */
   account: { name: string } | null;
   /**

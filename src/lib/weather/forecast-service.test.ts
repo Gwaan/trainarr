@@ -8,7 +8,10 @@ vi.mock('server-only', () => ({}));
 const { dalState, clientState } = vi.hoisted(() => ({
   dalState: {
     run: null as unknown,
+    configured: null as unknown,
     starts: [] as Array<{ latitudeDeg: number; longitudeDeg: number }>,
+    /** Nombre de lectures des départs récents — un lieu réglé doit s'en passer. */
+    startsRead: 0,
     saved: [] as Array<{ athleteId: number; readingDay: string; outcome: unknown }>,
   },
   clientState: {
@@ -20,7 +23,11 @@ const { dalState, clientState } = vi.hoisted(() => ({
 
 vi.mock('@/data/weather-forecast', () => ({
   getForecastRun: () => Promise.resolve(dalState.run),
-  listRecentStartCoordinates: () => Promise.resolve(dalState.starts),
+  getForecastLocation: () => Promise.resolve(dalState.configured),
+  listRecentStartCoordinates: () => {
+    dalState.startsRead += 1;
+    return Promise.resolve(dalState.starts);
+  },
   saveForecastReading: (athleteId: number, readingDay: string, outcome: unknown) => {
     dalState.saved.push({ athleteId, readingDay, outcome });
     return Promise.resolve();
@@ -57,7 +64,9 @@ const DAY = {
 
 beforeEach(() => {
   dalState.run = null;
+  dalState.configured = null;
   dalState.starts = [HOME];
+  dalState.startsRead = 0;
   dalState.saved = [];
   clientState.days = [DAY];
   clientState.error = null;
@@ -185,6 +194,41 @@ describe('runDailyForecast', () => {
     const report = await runDailyForecast(ATHLETE, { now: MORNING });
     expect(report?.status).toBe('failed');
     expect(dalState.saved).toHaveLength(1);
+  });
+
+  it('interroge le lieu réglé plutôt que le point de départ habituel', async () => {
+    dalState.configured = {
+      label: 'Bordeaux',
+      coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 },
+    };
+
+    const report = await runDailyForecast(ATHLETE, { now: MORNING });
+
+    expect(report?.status).toBe('forecast');
+    expect(clientState.calls[0]).toMatchObject({
+      coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 },
+    });
+    expect(dalState.saved[0].outcome).toMatchObject({
+      coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 },
+    });
+  });
+
+  it('ne lit même pas les départs récents quand un lieu est réglé', async () => {
+    dalState.configured = {
+      label: 'Bordeaux',
+      coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 },
+    };
+
+    await runDailyForecast(ATHLETE, { now: MORNING });
+
+    expect(dalState.startsRead).toBe(0);
+  });
+
+  it('garde le lieu déduit tant que rien n’est réglé', async () => {
+    await runDailyForecast(ATHLETE, { now: MORNING });
+
+    expect(dalState.startsRead).toBe(1);
+    expect(clientState.calls[0]).toMatchObject({ coordinates: HOME });
   });
 
   it('transmet l’annulation et le `fetch` injecté au client', async () => {

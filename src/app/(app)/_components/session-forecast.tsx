@@ -30,11 +30,17 @@ import {
  * probabilité la plus forte de la journée : « 3,6 mm » ne veut pas dire qu'il
  * pleuvra pendant la sortie, et l'écran ne le laisse pas croire.
  *
- * ## L'instant du relevé est affiché
+ * ## L'instant du relevé est affiché, et le lieu quand il a un nom
  *
  * Une prévision est périssable. Sans la date de son relevé, impossible de savoir
  * si l'on lit celle de ce matin ou celle d'avant-hier — et le service, lui,
  * conserve la précédente quand le relevé du jour a échoué.
+ *
+ * Le **lieu** se dit dès qu'il en a un, c'est-à-dire dès qu'il a été fixé dans
+ * les réglages : « Prévisions : Bordeaux » répond à la question qu'un athlète se
+ * pose devant une température qui ne ressemble pas à sa fenêtre. Un lieu déduit
+ * des derniers départs, lui, n'a pas de nom — on connaît un point, pas une
+ * ville — et l'écran n'en invente pas.
  *
  * ## Une absence se dit
  *
@@ -68,6 +74,19 @@ export function SessionForecast({
 
   const day = resolved.day;
   const condition = describeWeatherCode(day.weatherCode);
+
+  /*
+   * Le pied du bloc : le lieu (quand il a un nom) et l'instant du relevé, sur
+   * une seule ligne. Deux lignes de gris pâle pour deux informations de même
+   * poids donneraient un pavé de mentions légales sous une prévision de trois
+   * valeurs.
+   *
+   * Le nom du lieu n'est **pas** en mono : la mono est la signature des données
+   * chiffrées, une ville n'en est pas une.
+   */
+  const place =
+    forecast.location.source === "configured" ? `Prévisions : ${forecast.location.label}` : null;
+  const reading = forecast.fetchedAt === null ? null : formatForecastReading(forecast.fetchedAt);
 
   const measures = [
     day.apparentTemperatureMaxC === null
@@ -110,9 +129,11 @@ export function SessionForecast({
         </dl>
       )}
 
-      {forecast.fetchedAt === null ? null : (
-        <p className="num mt-1.5 text-[0.66rem] text-fg-faint/80">
-          {formatForecastReading(forecast.fetchedAt)}
+      {place === null && reading === null ? null : (
+        <p className="mt-1.5 text-[0.66rem] text-fg-faint/80">
+          {place}
+          {place !== null && reading !== null ? " · " : null}
+          {reading === null ? null : <span className="num">{reading}</span>}
         </p>
       )}
     </div>

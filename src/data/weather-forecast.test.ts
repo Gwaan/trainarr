@@ -3,10 +3,16 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  clearForecastLocation,
+  getForecastLocation,
+  getForecastLocationLabel,
   getForecastRun,
   getWeatherForecast,
+  InvalidForecastLocationError,
   listRecentStartCoordinates,
+  saveForecastLocation,
   saveForecastReading,
+  validateForecastLocation,
 } from './weather-forecast';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
@@ -37,6 +43,7 @@ const { dbState, athleteState } = vi.hoisted(() => ({
       conflictSet: Record<string, unknown> | null;
     }>,
     deletes: [] as Array<{ table: string; where: SQL | null }>,
+    updates: [] as Array<{ table: string; values: Record<string, unknown>; where: SQL | null }>,
     transactions: 0,
   },
   athleteState: { currentId: null as number | null, today: '2026-08-14' },
@@ -45,6 +52,15 @@ const { dbState, athleteState } = vi.hoisted(() => ({
 vi.mock('./athlete', () => ({
   getCurrentAthleteId: () => Promise.resolve(athleteState.currentId),
   todayCivilDate: () => athleteState.today,
+  // Recopiée du vrai module : le DAL des prévisions la lève quand le compte n'a
+  // pas d'athlète, et un test doit pouvoir la reconnaître sans charger le
+  // chiffrement et better-auth avec elle.
+  AthleteNotFoundError: class AthleteNotFoundError extends Error {
+    constructor() {
+      super("Aucun athlète enregistré : le profil doit d'abord être créé.");
+      this.name = 'AthleteNotFoundError';
+    }
+  },
 }));
 
 vi.mock('./db/client', async () => {
@@ -110,6 +126,14 @@ vi.mock('./db/client', async () => {
         return Promise.resolve(undefined);
       },
     }),
+    update: (table: Table) => ({
+      set: (values: Record<string, unknown>) => ({
+        where: (clause: SQL) => {
+          dbState.updates.push({ table: getTableName(table), values, where: clause });
+          return Promise.resolve(undefined);
+        },
+      }),
+    }),
   };
 
   return {
@@ -157,6 +181,7 @@ beforeEach(() => {
   dbState.queries = [];
   dbState.inserts = [];
   dbState.deletes = [];
+  dbState.updates = [];
   dbState.transactions = 0;
   athleteState.currentId = null;
   athleteState.today = '2026-08-14';
@@ -196,6 +221,160 @@ describe('listRecentStartCoordinates', () => {
   it('ne lit rien quand on ne lui demande rien', async () => {
     expect(await listRecentStartCoordinates(7, 0)).toEqual([]);
     expect(dbState.queries).toHaveLength(0);
+  });
+});
+
+/**
+ * Le lieu réglé — la seule partie du DAL qui écrit sur `athlete`.
+ *
+ * Trois propriétés s'y jouent :
+ *
+ * 1. **les trois colonnes vont ensemble** : un libellé sans coordonnées n'est
+ *    pas un demi-réglage, c'est une ligne qu'on ne sait pas lire ;
+ * 2. **rien ne s'écrit hors de l'athlète de la session** ;
+ * 3. **changer de lieu périme le relevé en cours** — sinon la prévision d'une
+ *    autre ville s'afficherait sous le nom de la nouvelle.
+ */
+describe('validateForecastLocation', () => {
+  it('arrondit les coordonnées comme partout ailleurs', () => {
+    expect(
+      validateForecastLocation({ label: 'Bordeaux', latitudeDeg: 44.84124, longitudeDeg: -0.58046 }),
+    ).toEqual({ label: 'Bordeaux', coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 } });
+  });
+
+  it('détoure le libellé et refuse un nom vide', () => {
+    expect(
+      validateForecastLocation({ label: '  Bordeaux ', latitudeDeg: 44.84, longitudeDeg: -0.58 })
+        .label,
+    ).toBe('Bordeaux');
+
+    expect(() =>
+      validateForecastLocation({ label: '   ', latitudeDeg: 44.84, longitudeDeg: -0.58 }),
+    ).toThrow(InvalidForecastLocationError);
+  });
+
+  it('refuse un point qu’Open-Meteo ne saurait pas interroger', () => {
+    expect(() =>
+      validateForecastLocation({ label: 'Nulle part', latitudeDeg: 0, longitudeDeg: 0 }),
+    ).toThrow(InvalidForecastLocationError);
+
+    expect(() =>
+      validateForecastLocation({ label: 'Ailleurs', latitudeDeg: 148.85, longitudeDeg: 2.35 }),
+    ).toThrow(InvalidForecastLocationError);
+  });
+});
+
+describe('getForecastLocation', () => {
+  it('rend le lieu réglé de l’athlète demandé', async () => {
+    dbState.rows.athlete = [{ label: 'Bordeaux', latitudeDeg: 44.84, longitudeDeg: -0.58 }];
+
+    expect(await getForecastLocation(7)).toEqual({
+      label: 'Bordeaux',
+      coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 },
+    });
+
+    const { params } = render(queryOn('athlete').where);
+    expect(params).toEqual([7]);
+  });
+
+  it('rend `null` dès qu’une des trois colonnes manque', async () => {
+    dbState.rows.athlete = [{ label: 'Bordeaux', latitudeDeg: null, longitudeDeg: -0.58 }];
+    expect(await getForecastLocation(7)).toBeNull();
+
+    dbState.rows.athlete = [{ label: null, latitudeDeg: 44.84, longitudeDeg: -0.58 }];
+    expect(await getForecastLocation(7)).toBeNull();
+  });
+
+  it('rend `null` quand aucun lieu n’est réglé', async () => {
+    expect(await getForecastLocation(7)).toBeNull();
+  });
+});
+
+describe('getForecastLocationLabel', () => {
+  it('ne lit rien sans athlète connecté', async () => {
+    expect(await getForecastLocationLabel()).toBeNull();
+    expect(dbState.queries).toHaveLength(0);
+  });
+
+  it('ne rend que le nom — jamais les coordonnées', async () => {
+    athleteState.currentId = 7;
+    dbState.rows.athlete = [{ label: 'Bordeaux', latitudeDeg: 44.84, longitudeDeg: -0.58 }];
+
+    expect(await getForecastLocationLabel()).toBe('Bordeaux');
+  });
+});
+
+describe('saveForecastLocation', () => {
+  const BORDEAUX = { label: 'Bordeaux', latitudeDeg: 44.84124, longitudeDeg: -0.58046 };
+
+  it('écrit sous l’athlète de la session, coordonnées arrondies', async () => {
+    athleteState.currentId = 7;
+
+    await saveForecastLocation(BORDEAUX);
+
+    const update = dbState.updates.find((entry) => entry.table === 'athlete');
+    expect(update?.values).toMatchObject({
+      forecastLocationLabel: 'Bordeaux',
+      forecastLatitudeDeg: 44.84,
+      forecastLongitudeDeg: -0.58,
+    });
+    expect(render(update?.where ?? null).params).toEqual([7]);
+  });
+
+  it('périme le relevé en cours — son état et ses jours, d’un seul tenant', async () => {
+    athleteState.currentId = 7;
+
+    await saveForecastLocation(BORDEAUX);
+
+    expect(dbState.transactions).toBe(1);
+    expect(dbState.deletes.map((entry) => entry.table)).toEqual([
+      'weather_forecast_runs',
+      'weather_forecasts',
+    ]);
+    for (const entry of dbState.deletes) {
+      expect(render(entry.where).params).toEqual([7]);
+    }
+  });
+
+  it('refuse un lieu inexploitable sans rien écrire', async () => {
+    athleteState.currentId = 7;
+
+    await expect(
+      saveForecastLocation({ label: 'Nulle part', latitudeDeg: 0, longitudeDeg: 0 }),
+    ).rejects.toBeInstanceOf(InvalidForecastLocationError);
+
+    expect(dbState.updates).toHaveLength(0);
+    expect(dbState.deletes).toHaveLength(0);
+  });
+
+  it('refuse d’écrire quand le compte n’a pas d’athlète', async () => {
+    await expect(saveForecastLocation(BORDEAUX)).rejects.toThrow(/Aucun athlète/);
+    expect(dbState.updates).toHaveLength(0);
+  });
+});
+
+describe('clearForecastLocation', () => {
+  it('remet les trois colonnes à null et périme le relevé', async () => {
+    athleteState.currentId = 7;
+
+    await clearForecastLocation();
+
+    const update = dbState.updates.find((entry) => entry.table === 'athlete');
+    expect(update?.values).toMatchObject({
+      forecastLocationLabel: null,
+      forecastLatitudeDeg: null,
+      forecastLongitudeDeg: null,
+    });
+    expect(render(update?.where ?? null).params).toEqual([7]);
+    expect(dbState.deletes.map((entry) => entry.table)).toEqual([
+      'weather_forecast_runs',
+      'weather_forecasts',
+    ]);
+  });
+
+  it('refuse d’écrire quand le compte n’a pas d’athlète', async () => {
+    await expect(clearForecastLocation()).rejects.toThrow(/Aucun athlète/);
+    expect(dbState.updates).toHaveLength(0);
   });
 });
 
@@ -316,7 +495,12 @@ describe('saveForecastReading', () => {
 
 describe('getWeatherForecast', () => {
   it('ne rend rien sans athlète connecté', async () => {
-    expect(await getWeatherForecast()).toEqual({ status: null, fetchedAt: null, days: [] });
+    expect(await getWeatherForecast()).toEqual({
+      status: null,
+      fetchedAt: null,
+      location: { source: 'derived' },
+      days: [],
+    });
     expect(dbState.queries).toHaveLength(0);
   });
 
@@ -339,8 +523,25 @@ describe('getWeatherForecast', () => {
     expect(await getWeatherForecast()).toEqual({
       status: 'no-location',
       fetchedAt: NOW,
+      location: { source: 'derived' },
       days: [],
     });
+  });
+
+  it('porte le nom du lieu réglé, jamais ses coordonnées', async () => {
+    athleteState.currentId = 7;
+    dbState.rows.athlete = [{ label: 'Bordeaux', latitudeDeg: 44.84, longitudeDeg: -0.58 }];
+
+    const dto = await getWeatherForecast();
+
+    expect(dto.location).toEqual({ source: 'configured', label: 'Bordeaux' });
+    expect(JSON.stringify(dto)).not.toContain('44.84');
+  });
+
+  it('annonce un lieu déduit sans lui inventer de nom', async () => {
+    athleteState.currentId = 7;
+
+    expect((await getWeatherForecast()).location).toEqual({ source: 'derived' });
   });
 
   it('date la prévision de son relevé, pas de la dernière tentative', async () => {

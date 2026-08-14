@@ -8,13 +8,14 @@ import 'server-only';
  * réglages montrent et *ce qui* franchit la frontière client : deux appelants,
  * une lecture, un DTO.
  *
- * Trois lectures indépendantes, en parallèle : le profil athlète et ses
- * identifiants intervals.icu (nos tables, via le DAL) et le compte connecté (la
- * session, via better-auth).
+ * Des lectures indépendantes, en parallèle : le profil athlète, ses identifiants
+ * intervals.icu et son lieu de prévisions (nos tables, via le DAL), le compte
+ * connecté (la session, via better-auth) et ses invitations.
  */
 
 import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
 import { canInvite, listPendingInvitations } from '@/data/invitations';
+import { getForecastLocationLabel } from '@/data/weather-forecast';
 import { getAccountSummary } from '@/lib/auth/session';
 
 import { toProfileFormValues } from './form-values';
@@ -45,9 +46,10 @@ async function loadInvitations(): Promise<InvitationsSettings> {
 }
 
 export async function loadSettingsData(): Promise<SettingsData> {
-  const [profile, intervals, account, invitations] = await Promise.all([
+  const [profile, intervals, forecastLocationLabel, account, invitations] = await Promise.all([
     getAthleteProfile(),
     getIntervalsSettings(),
+    getForecastLocationLabel(),
     getAccountSummary(),
     loadInvitations(),
   ]);
@@ -55,6 +57,9 @@ export async function loadSettingsData(): Promise<SettingsData> {
   return {
     mode: profile === null ? 'onboarding' : 'edit',
     invitations,
+    // Le nom du lieu fixé, ou `null` : le mode automatique se dit à l'écran,
+    // il ne se devine pas d'un champ vide.
+    forecastLocationLabel,
     // Des chaînes prêtes à afficher : la conversion des mesures reste ici, et
     // les identifiants intervals.icu se réduisent à l'état de la clé.
     profile: toProfileFormValues(profile),

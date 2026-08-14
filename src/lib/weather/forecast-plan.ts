@@ -223,6 +223,65 @@ export function habitualStart(starts: readonly Coordinates[]): Coordinates | nul
   return best;
 }
 
+/**
+ * Le lieu **réglé** d'un compte : un libellé choisi par l'athlète et les
+ * coordonnées que le géocodage lui a données.
+ *
+ * Les deux voyagent ensemble : les coordonnées sont ce qui part à Open-Meteo, le
+ * libellé est ce que l'écran a le droit de dire (« Prévisions : Bordeaux »).
+ */
+export type ConfiguredForecastLocation = {
+  label: string;
+  /** Coordonnées **déjà arrondies** (cf. `toRequestCoordinates`). */
+  coordinates: Coordinates;
+};
+
+/**
+ * D'où vient le lieu des prévisions — la seule chose que l'écran ait besoin de
+ * savoir pour ne plus laisser l'athlète deviner « c'est quelle ville ? ».
+ *
+ * - `configured` : l'athlète l'a réglé, et il porte donc un nom ;
+ * - `derived` : déduit des départs récents. Il n'a pas de nom — on connaît un
+ *   point, pas une ville, et inventer un libellé pour deux coordonnées serait
+ *   exactement le genre d'approximation que ce projet s'interdit.
+ */
+export type ForecastLocation =
+  | { source: 'configured'; label: string; coordinates: Coordinates }
+  | { source: 'derived'; coordinates: Coordinates };
+
+/**
+ * Le lieu à interroger pour un compte : **le réglé, sinon le déduit, sinon
+ * rien**.
+ *
+ * L'ordre n'est pas négociable et c'est tout l'objet de cette fonction : un lieu
+ * réglé **supplante** le médoïde des départs, y compris quand l'athlète part
+ * habituellement d'ailleurs. C'est le sens d'un réglage — sans quoi il faudrait
+ * expliquer pourquoi la ville saisie n'est pas celle affichée.
+ *
+ * Le mode automatique (aucun réglage) reste le défaut, et le rendu est le même
+ * qu'avant : `habitualStart` sur les départs récents, `null` quand il n'y en a
+ * aucun (l'appelant en fait un `no-location`, réessayable dans la matinée).
+ *
+ * @param recentStarts départs récents, déjà arrondis, du plus récent au plus
+ *   ancien. Ignorés quand un lieu est réglé — l'appelant peut donc s'épargner
+ *   la lecture.
+ */
+export function resolveForecastLocation(input: {
+  configured: ConfiguredForecastLocation | null;
+  recentStarts: readonly Coordinates[];
+}): ForecastLocation | null {
+  if (input.configured !== null) {
+    return {
+      source: 'configured',
+      label: input.configured.label,
+      coordinates: input.configured.coordinates,
+    };
+  }
+
+  const derived = habitualStart(input.recentStarts);
+  return derived === null ? null : { source: 'derived', coordinates: derived };
+}
+
 /*
  * La portée.
  */

@@ -10,6 +10,7 @@ import {
   habitualStart,
   isForecastReadingDue,
   resolveDayForecast,
+  resolveForecastLocation,
   type DailyForecast,
   type ForecastRunState,
 } from './forecast-plan';
@@ -192,6 +193,40 @@ describe('habitualStart', () => {
       { latitudeDeg: 48.86, longitudeDeg: 2.34 },
     ];
     expect(starts).toContainEqual(habitualStart(starts));
+  });
+});
+
+/**
+ * Le lieu réglé supplante le lieu déduit.
+ *
+ * C'est le seul point de cette fonction, et il n'est pas négociable : un réglage
+ * qui céderait devant le médoïde des départs ne serait pas un réglage.
+ */
+describe('resolveForecastLocation', () => {
+  const home: Coordinates = { latitudeDeg: 48.85, longitudeDeg: 2.35 };
+  const bordeaux = { label: 'Bordeaux', coordinates: { latitudeDeg: 44.84, longitudeDeg: -0.58 } };
+
+  it('préfère le lieu réglé, même quand les départs disent autre chose', () => {
+    expect(resolveForecastLocation({ configured: bordeaux, recentStarts: [home, home, home] })).toEqual(
+      { source: 'configured', label: 'Bordeaux', coordinates: bordeaux.coordinates },
+    );
+  });
+
+  it('retombe sur le médoïde des départs quand rien n’est réglé', () => {
+    expect(resolveForecastLocation({ configured: null, recentStarts: [home] })).toEqual({
+      source: 'derived',
+      coordinates: home,
+    });
+  });
+
+  it('ne rend rien quand il n’y a ni réglage ni départ géolocalisé', () => {
+    expect(resolveForecastLocation({ configured: null, recentStarts: [] })).toBeNull();
+  });
+
+  it('tient sans départs dès qu’un lieu est réglé — l’appelant peut s’épargner la lecture', () => {
+    expect(resolveForecastLocation({ configured: bordeaux, recentStarts: [] })?.source).toBe(
+      'configured',
+    );
   });
 });
 

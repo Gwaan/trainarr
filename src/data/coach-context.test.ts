@@ -131,6 +131,9 @@ const ATHLETE_ROW: Athlete = {
   birthDate: '1990-06-15',
   intervalsAthleteId: null,
   intervalsApiKeyEncrypted: null,
+  forecastLocationLabel: null,
+  forecastLatitudeDeg: null,
+  forecastLongitudeDeg: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };

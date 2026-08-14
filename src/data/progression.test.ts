@@ -124,6 +124,9 @@ const ATHLETE: Athlete = {
   birthDate: '1992-03-14',
   intervalsAthleteId: null,
   intervalsApiKeyEncrypted: null,
+  forecastLocationLabel: null,
+  forecastLatitudeDeg: null,
+  forecastLongitudeDeg: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };

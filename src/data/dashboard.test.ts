@@ -144,6 +144,9 @@ const ATHLETE: Athlete = {
   birthDate: '1992-03-14',
   intervalsAthleteId: null,
   intervalsApiKeyEncrypted: null,
+  forecastLocationLabel: null,
+  forecastLatitudeDeg: null,
+  forecastLongitudeDeg: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -227,7 +230,7 @@ describe('getDashboardSummary — base vide', () => {
       today: '2026-08-10',
       // Sans athlète, il n'y a ni séance ni lieu : rien à prévoir, et un état
       // explicite plutôt qu'un `null` de plus.
-      forecast: { status: null, fetchedAt: null, days: [] },
+      forecast: { status: null, fetchedAt: null, location: { source: 'derived' }, days: [] },
       recentActivities: [],
     });
   });

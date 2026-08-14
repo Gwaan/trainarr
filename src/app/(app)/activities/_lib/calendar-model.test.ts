@@ -207,7 +207,12 @@ describe('libellés', () => {
 
 describe('buildCalendarMonth', () => {
   /** Aucun relevé de prévisions : le calendrier doit se construire sans. */
-  const NO_FORECAST: WeatherForecastDto = { status: null, fetchedAt: null, days: [] };
+  const NO_FORECAST: WeatherForecastDto = {
+    status: null,
+    fetchedAt: null,
+    location: { source: 'derived' },
+    days: [],
+  };
 
   const base = {
     ...AUGUST,
@@ -372,6 +377,7 @@ describe('buildCalendarMonth — météo prévue', () => {
   const withForecast: WeatherForecastDto = {
     status: 'forecast',
     fetchedAt: new Date('2026-08-13T04:00:12Z'),
+    location: { source: 'derived' },
     days: [forecastDay],
   };
 
@@ -430,7 +436,12 @@ describe('buildCalendarMonth — météo prévue', () => {
     const day = dayOf(
       {
         ...base,
-        forecast: { status: 'no-location', fetchedAt: null, days: [] },
+        forecast: {
+          status: 'no-location',
+          fetchedAt: null,
+          location: { source: 'derived' },
+          days: [],
+        },
         sessions: [session(1, '2026-08-16')],
       },
       '2026-08-16',
@@ -469,6 +480,7 @@ describe('buildCalendarMonth — météo relevée', () => {
     forecast: {
       status: 'forecast',
       fetchedAt: new Date('2026-08-13T04:00:12Z'),
+      location: { source: 'derived' },
       days: [forecastToday],
     } satisfies WeatherForecastDto,
   };

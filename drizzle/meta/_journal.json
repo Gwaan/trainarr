@@ -148,6 +148,13 @@
       "when": 1786716323072,
       "tag": "0020_weather_forecasts",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786726009059,
+      "tag": "0021_forecast_location",
+      "breakpoints": true
     }
   ]
 }

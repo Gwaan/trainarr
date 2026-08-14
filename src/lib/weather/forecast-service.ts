@@ -25,6 +25,14 @@ import 'server-only';
  * Sans cela, un déploiement matinal laisserait la journée entière avec les
  * prévisions de la veille.
  *
+ * ## Le lieu : réglé, sinon déduit
+ *
+ * Un compte peut **fixer** le lieu de ses prévisions (« Bordeaux ») dans ses
+ * réglages ; il supplante alors le point de départ habituel. Sans réglage, le
+ * lieu reste déduit du plus central des départs récents — c'est le défaut, et il
+ * n'a pas bougé. La décision elle-même est pure : `resolveForecastLocation` dans
+ * `./forecast-plan.ts`.
+ *
  * ## Ce que ce relevé ne fait jamais
  *
  * - **Lever.** Il rend ce qu'il a écrit ; c'est l'appelant qui journalise.
@@ -36,6 +44,7 @@ import 'server-only';
  */
 
 import {
+  getForecastLocation,
   getForecastRun,
   listRecentStartCoordinates,
   saveForecastReading,
@@ -46,8 +55,8 @@ import { fetchDailyForecast } from './forecast-client';
 import {
   forecastReadingMarker,
   HABITUAL_START_SAMPLE,
-  habitualStart,
   isForecastReadingDue,
+  resolveForecastLocation,
   type WeatherForecastStatus,
 } from './forecast-plan';
 
@@ -98,20 +107,33 @@ export async function runDailyForecast(
 
   const readingDay = forecastReadingMarker(now);
 
-  // Une séance à venir n'a pas de GPS : le lieu se déduit des départs récents,
-  // par une médiane qui résiste à une sortie en déplacement (cf. `habitualStart`).
-  const coordinates = habitualStart(
-    await listRecentStartCoordinates(athleteId, HABITUAL_START_SAMPLE),
-  );
+  /*
+   * Le lieu : celui que l'athlète a réglé s'il en a réglé un, sinon celui que
+   * ses départs récents désignent (une séance à venir n'a pas de GPS).
+   *
+   * Les départs ne sont **lus que dans le second cas** : un compte qui a réglé
+   * sa ville n'a aucune raison de payer une lecture dont la réponse serait
+   * écartée (cf. `resolveForecastLocation`).
+   */
+  const configured = await getForecastLocation(athleteId);
+  const location = resolveForecastLocation({
+    configured,
+    recentStarts:
+      configured === null
+        ? await listRecentStartCoordinates(athleteId, HABITUAL_START_SAMPLE)
+        : [],
+  });
 
-  if (coordinates === null) {
-    // Aucune sortie géolocalisée : il n'y a pas de lieu, donc pas de prévision.
+  if (location === null) {
+    // Aucun lieu réglé et aucune sortie géolocalisée : pas de prévision.
     // Ce n'est pas un échec, mais ça se reprend dans la matinée — le rattrapage
     // de la météo des séances passées, qui tourne dans la même boucle, écrit
     // précisément les départs dont ce lieu se déduit (cf. `isForecastReadingDue`).
     await saveForecastReading(athleteId, readingDay, { status: 'no-location' }, now);
     return { status: 'no-location', readingDay, days: 0, reason: null };
   }
+
+  const { coordinates } = location;
 
   try {
     const days = await fetchDailyForecast({
