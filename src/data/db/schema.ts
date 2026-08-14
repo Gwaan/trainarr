@@ -17,6 +17,7 @@ import {
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+import type { ActivityWeatherStatus, WeatherSource } from '@/lib/weather/plan';
 
 /**
  * Schéma Drizzle de Trainarr.
@@ -233,6 +234,100 @@ export const activityStreams = pgTable(
      * si deux imports de la même activité se croisent.
      */
     uniqueIndex('activity_streams_activity_id_type_idx').on(table.activityId, table.type),
+  ],
+);
+
+/**
+ * Statuts recopiés de `lib/weather/plan` — la base ne dépend pas du service,
+ * mais `satisfies` interdit qu'ils en divergent (même montage que
+ * {@link PLAN_INTENTS}).
+ */
+export const ACTIVITY_WEATHER_STATUSES = [
+  'observed',
+  'no-location',
+  'unsupported',
+  'failed',
+] as const satisfies readonly ActivityWeatherStatus[];
+
+/** Endpoint Open-Meteo qui a fourni la mesure. */
+export const WEATHER_SOURCES = ['forecast', 'archive'] as const satisfies readonly WeatherSource[];
+
+/**
+ * La météo d'une séance **effectuée**, relevée après coup chez Open-Meteo.
+ *
+ * **Une ligne par activité, et c'est la clé primaire** : la météo d'une sortie
+ * passée ne change plus, il n'y a donc rien à versionner. `ON DELETE CASCADE`
+ * parce que ce relevé n'a aucun sens sans sa séance.
+ *
+ * **La ligne existe aussi quand il n'y a pas de météo**, et c'est tout l'objet
+ * de `status` : sans elle, « pas encore essayé » et « essayé, sans résultat »
+ * seraient le même état — l'absence de ligne — et chaque cycle de rattrapage
+ * redemanderait éternellement la séance sur tapis qui n'a pas de GPS, ou la
+ * position que le service refuse. Les mesures sont donc toutes nullables : elles
+ * ne sont renseignées que sous `observed`.
+ *
+ * `attempts`, `last_attempt_at` et `failure_reason` ne servent qu'aux échecs
+ * **réessayables** (`failed`) : ils décident du moment de la prochaine tentative
+ * et de l'abandon (cf. `RETRY_DELAYS_MS`). Une panne réseau ne doit pas coûter
+ * une séance pour de bon, et ne doit pas non plus tourner en boucle.
+ *
+ * Pas de colonne `athlete_id` : l'appartenance est celle de l'activité, et le
+ * DAL ne lit ni n'écrit ici sans avoir joint `activities` sur l'athlète — la
+ * dupliquer ouvrirait la possibilité qu'elle diverge.
+ */
+export const activityWeather = pgTable(
+  'activity_weather',
+  {
+    activityId: integer('activity_id')
+      .primaryKey()
+      .references(() => activities.id, { onDelete: 'cascade' }),
+    status: text('status', { enum: ACTIVITY_WEATHER_STATUSES }).notNull(),
+    /** `NULL` hors `observed` : aucun endpoint n'a répondu. */
+    source: text('source', { enum: WEATHER_SOURCES }),
+    /**
+     * Coordonnées **arrondies** telles qu'elles ont été envoyées (deux
+     * décimales, ≈ 1 km — cf. `COORDINATE_DECIMALS`). Conservées comme
+     * provenance de la mesure : sans elles, impossible de dire de quel point
+     * parle un relevé qui semble faux.
+     */
+    latitudeDeg: real('latitude_deg'),
+    longitudeDeg: real('longitude_deg'),
+    /** Heure horaire retenue par Open-Meteo — celle qu'il a rendue, pas celle demandée. */
+    observedAt: timestamp('observed_at', { withTimezone: true }),
+    temperatureC: real('temperature_c'),
+    /** Ressenti : humidité, vent et rayonnement compris. */
+    apparentTemperatureC: real('apparent_temperature_c'),
+    /**
+     * Précipitations en mm, **cumulées sur l'heure précédant `observed_at`** —
+     * c'est la sémantique d'Open-Meteo pour les variables de somme, les autres
+     * étant instantanées. Donc « il est tombé tant dans l'heure autour de la
+     * séance », jamais « pendant la séance ».
+     */
+    precipitationMm: real('precipitation_mm'),
+    windSpeedKmh: real('wind_speed_kmh'),
+    /** Direction **d'où vient** le vent, en degrés (convention météo : 0 = nord). */
+    windDirectionDeg: real('wind_direction_deg'),
+    relativeHumidityPct: real('relative_humidity_pct'),
+    /** Code temps WMO 4677 (0 = ciel clair, 61 = pluie faible, 95 = orage…). */
+    weatherCode: integer('weather_code'),
+    /** Nombre de relevés tentés, échecs compris. Borné par `MAX_ATTEMPTS`. */
+    attempts: integer('attempts').notNull().default(0),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Motif du dernier échec, tel que le service l'a formulé (`nom : message`).
+     * `NULL` sous `observed`. Jamais d'URL ni de coordonnées brutes.
+     */
+    failureReason: text('failure_reason'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /**
+     * Chemin d'accès de la seule lecture de service : « les relevés en échec
+     * dont le délai de reprise est écoulé ». Le statut d'abord, il découpe la
+     * table en quatre paquets très inégaux dont un seul est scanné.
+     */
+    index('activity_weather_status_last_attempt_idx').on(table.status, table.lastAttemptAt),
   ],
 );
 
@@ -824,6 +919,9 @@ export type NewActivity = InferInsertModel<typeof activities>;
 
 export type ActivityStream = InferSelectModel<typeof activityStreams>;
 export type NewActivityStream = InferInsertModel<typeof activityStreams>;
+
+export type ActivityWeather = InferSelectModel<typeof activityWeather>;
+export type NewActivityWeather = InferInsertModel<typeof activityWeather>;
 
 export type Plan = InferSelectModel<typeof plans>;
 export type NewPlan = InferInsertModel<typeof plans>;

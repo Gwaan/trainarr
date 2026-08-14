@@ -136,6 +136,22 @@ const { activitiesDal } = vi.hoisted(() => ({
 
 vi.mock('@/data/activities', () => activitiesDal);
 
+/**
+ * La météo est un bord réseau de plus : son DAL est remplacé, mais
+ * `recordActivityWeather` tourne pour de vrai — c'est lui qui doit transmettre
+ * l'athlète du fichier. La cible rendue est sans coordonnées (une séance sur
+ * tapis), ce qui referme la chaîne avant tout appel à Open-Meteo.
+ */
+const { weatherDal } = vi.hoisted(() => ({
+  weatherDal: {
+    getWeatherLookupTarget: vi.fn(),
+    listActivitiesAwaitingWeather: vi.fn(),
+    saveActivityWeather: vi.fn(),
+  },
+}));
+
+vi.mock('@/data/activity-weather', () => weatherDal);
+
 const { chatCompletionJson } = vi.hoisted(() => ({ chatCompletionJson: vi.fn() }));
 vi.mock('@/lib/ai/client', () => ({ chatCompletionJson }));
 
@@ -280,6 +296,14 @@ beforeEach(() => {
   activitiesDal.saveActivityStreams.mockResolvedValue(undefined);
   activitiesDal.hasActivityStreams.mockResolvedValue(false);
 
+  weatherDal.getWeatherLookupTarget.mockResolvedValue({
+    activityId: ACTIVITY_ID,
+    startedAt: PARSED.startedAt,
+    elapsedTimeS: PARSED.elapsedTimeS,
+    coordinates: null,
+  });
+  weatherDal.saveActivityWeather.mockResolvedValue(true);
+
   getAiAvailability.mockResolvedValue({ available: true });
   chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
 
@@ -357,6 +381,16 @@ describe('ingestion de fond : la chaîne complète, sans session', () => {
         (update.values as Record<string, unknown>).lastTestNote !== undefined,
     );
     expect(record).toBeDefined();
+  });
+
+  it('relève la météo sous l’athlète du fichier, sans passer par une session', async () => {
+    await ingestFitBuffer(Buffer.from('fit'), ATHLETE_ID);
+    await drainFollowUp();
+
+    expect(weatherDal.getWeatherLookupTarget).toHaveBeenCalledWith(ACTIVITY_ID, ATHLETE_ID);
+    expect(weatherDal.saveActivityWeather).toHaveBeenCalledWith(ACTIVITY_ID, ATHLETE_ID, {
+      status: 'no-location',
+    });
   });
 
   it('déclenche la révision du plan et avance son marqueur', async () => {

@@ -9,6 +9,7 @@ import {
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
+import { recordActivityWeather } from '@/lib/weather/service';
 
 import { parseFitActivity } from './parse';
 
@@ -93,6 +94,33 @@ async function linkToPlannedSession(activityId: number, athleteId: number): Prom
 }
 
 /**
+ * Relève la météo de la séance qui vient d'être importée.
+ *
+ * **Jamais une condition de l'import**, exactement comme le rapprochement au
+ * plan : une séance sans météo reste une séance valide, et elle ne doit pas
+ * repartir en `failed/` parce qu'Open-Meteo n'a pas répondu. Le service
+ * journalise ses propres motifs et ne lève pas (`[weather]`) ; ce `catch` est un
+ * dernier recours.
+ *
+ * **Attendu**, contrairement au suivi du plan : c'est un unique appel HTTP de
+ * quelques dizaines de millisecondes, borné par un délai de garde, et le rendre
+ * synchrone garantit que la météo est là quand l'écran de la séance s'ouvre.
+ * Ce qui n'aboutit pas est de toute façon repris par la boucle de rattrapage.
+ *
+ * **Après les séries temporelles**, et ce n'est pas un détail d'ordre : les
+ * coordonnées viennent du flux `latlng`, qui n'existe en base qu'une fois
+ * `saveActivityStreams` passé.
+ */
+async function recordWeather(activityId: number, athleteId: number): Promise<void> {
+  try {
+    await recordActivityWeather(activityId, athleteId);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : relevé météo impossible — ${reason}`);
+  }
+}
+
+/**
  * Confie la séance au plan — **sans attendre** : d'abord le test chronométré
  * qu'elle réalise peut-être, puis la relecture du plan par le coach.
  *
@@ -171,6 +199,7 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
   }
 
   await linkToPlannedSession(activityId, athleteId);
+  await recordWeather(activityId, athleteId);
   scheduleActivePlanFollowUp(activityId, athleteId);
 
   return { status, activityId };

@@ -1,9 +1,11 @@
 import 'server-only';
 
 /**
- * Démarrage du service d'import FIT, côté runtime Node uniquement.
+ * Démarrage des services de fond, côté runtime Node uniquement : l'import FIT
+ * (surveillance du dossier, rapatriement intervals.icu) et le rattrapage de la
+ * météo des séances.
  *
- * Module à effet de bord : le simple fait de l'importer démarre le service.
+ * Module à effet de bord : le simple fait de l'importer démarre les services.
  * C'est `src/instrumentation.ts` qui le fait, une fois, et seulement quand
  * `NEXT_RUNTIME === 'nodejs'`.
  *
@@ -23,10 +25,11 @@ import 'server-only';
  */
 
 import { startFitService } from '@/lib/fit/service';
+import { startWeatherService } from '@/lib/weather/service';
 
-// Ne lève jamais et rend la main aussitôt : le serveur n'attend pas l'import
-// pour commencer à servir.
-const service = startFitService();
+// Ne lèvent jamais et rendent la main aussitôt : le serveur n'attend ni l'import
+// ni la météo pour commencer à servir.
+const services = [startFitService(), startWeatherService()];
 
 // Un Ctrl+C dans un shell interactif envoie SIGINT à toute la descendance : le
 // gestionnaire peut être appelé plusieurs fois, une seule ligne suffit.
@@ -35,8 +38,8 @@ let stopped = false;
 const shutdown = (signal: NodeJS.Signals): void => {
   if (stopped) return;
   stopped = true;
-  console.log(`[fit] ${signal} reçu — arrêt du service FIT.`);
-  void service.stop();
+  console.log(`[fit] ${signal} reçu — arrêt des services de fond.`);
+  for (const service of services) void service.stop();
 };
 
 process.on('SIGTERM', shutdown);

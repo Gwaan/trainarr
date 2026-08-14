@@ -385,6 +385,21 @@ export async function hasAthlete(): Promise<boolean> {
   return (await getCurrentAthleteId()) !== null;
 }
 
+/**
+ * Tous les athlètes, par identifiant croissant.
+ *
+ * **Réservée aux services de fond**, qui n'ont pas de session et doivent
+ * pourtant travailler pour chaque compte : le rattrapage de la météo passe
+ * ensuite athlète par athlète, chaque appel du DAL recevant le sien en
+ * paramètre. C'est la même mécanique que {@link listIntervalsAccounts} pour le
+ * rapatriement — énumérer les comptes, puis les traiter un à un — et surtout pas
+ * un raccourci « le premier athlète venu », qui reste interdit partout.
+ */
+export async function listAthleteIds(): Promise<number[]> {
+  const rows = await db.select({ id: athlete.id }).from(athlete).orderBy(athlete.id);
+  return rows.map((row) => row.id);
+}
+
 /*
  * Identifiants intervals.icu.
  *

@@ -13,6 +13,7 @@ const { mocks } = vi.hoisted(() => ({
     linkActivityToPlannedSession: vi.fn(),
     maybeReviewActivePlan: vi.fn(),
     maybeApplyFitnessTest: vi.fn(),
+    recordActivityWeather: vi.fn(),
   },
 }));
 
@@ -36,6 +37,10 @@ vi.mock('@/lib/ai/review-service', () => ({
 
 vi.mock('@/lib/ai/fitness-test-service', () => ({
   maybeApplyFitnessTest: mocks.maybeApplyFitnessTest,
+}));
+
+vi.mock('@/lib/weather/service', () => ({
+  recordActivityWeather: mocks.recordActivityWeather,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -87,6 +92,7 @@ beforeEach(() => {
   mocks.linkActivityToPlannedSession.mockResolvedValue(true);
   mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
   mocks.maybeApplyFitnessTest.mockResolvedValue(undefined);
+  mocks.recordActivityWeather.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
@@ -176,6 +182,32 @@ describe('ingestFitBuffer', () => {
     logged.mockRestore();
   });
 
+  it('relève la météo après les séries, avec l’athlète du fichier', async () => {
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordActivityWeather).toHaveBeenCalledWith(42, ATHLETE_ID);
+    // Les séries d'abord, et ce n'est pas un détail d'ordre : les coordonnées
+    // viennent du flux `latlng`, qui n'est en base qu'une fois écrites.
+    expect(mocks.saveActivityStreams.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.recordActivityWeather.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it('journalise un relevé météo en échec sans faire échouer l’import', async () => {
+    // Une séance sans météo reste une séance valide : elle ne doit pas repartir
+    // en `failed/` parce qu'Open-Meteo n'a pas répondu.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.recordActivityWeather.mockRejectedValue(new Error('Open-Meteo injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({
+      status: 'created',
+      activityId: 42,
+    });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('Open-Meteo injoignable'));
+    logged.mockRestore();
+  });
+
   it('demande une révision du plan, après le rapprochement', async () => {
     await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
@@ -220,6 +252,7 @@ describe('ingestFitBuffer', () => {
     await Promise.resolve();
 
     expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42, ATHLETE_ID);
+    expect(mocks.recordActivityWeather).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeReviewActivePlan).toHaveBeenCalledWith(ATHLETE_ID);
   });
