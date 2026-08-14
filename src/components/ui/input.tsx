@@ -14,7 +14,10 @@ function Input({ className, ...props }: React.ComponentProps<"input">) {
     <input
       data-slot="input"
       className={cn(
-        "h-11 w-full rounded-button border border-border bg-surface-2 px-3 text-[0.95rem] text-fg",
+        // 16 px minimum, pas une coquetterie : en dessous, iOS zoome la page à la
+        // prise de focus, et en PWA `standalone` rien ne permet de revenir en
+        // arrière — la page reste plus large que l'écran et glisse sous le doigt.
+        "h-11 w-full rounded-button border border-border bg-surface-2 px-3 text-base text-fg",
         "transition-colors duration-150 ease-out",
         "placeholder:text-fg-faint hover:border-fg-faint/35",
         "aria-invalid:border-negative/60",

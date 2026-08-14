@@ -226,7 +226,9 @@ export function Select({ className, children, ...props }: ComponentProps<"select
         {...props}
         className={cn(
           "h-11 w-full appearance-none rounded-button border border-border bg-surface-2 pr-9 pl-3",
-          "text-[0.95rem] text-fg transition-colors duration-150 ease-out",
+          // 16 px minimum : même raison que l'Input partagé — sous ce seuil,
+          // iOS zoome à la prise de focus, sans retour possible en PWA.
+          "text-base text-fg transition-colors duration-150 ease-out",
           "hover:border-fg-faint/35 aria-invalid:border-negative/60",
         )}
       >

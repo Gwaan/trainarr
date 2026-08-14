@@ -14,6 +14,7 @@ import {
 } from "../_lib/form-options";
 import { INTENT_CHOICES, INTENT_HONEST_NOTES } from "../_lib/plan-intent";
 import { planRecapEntries } from "../_lib/plan-recap";
+import { formatRaceTimeInput } from "../_lib/race-time-input";
 import type { PlanFormValues, PlanStep } from "../_lib/plan-steps";
 
 import { Checkbox, Field, RadioCards, Select, describedBy } from "./plan-form-fields";
@@ -252,6 +253,14 @@ function ProfileFields({ values, onChange, errors, fieldId }: PlanStepFieldsProp
  * Le temps est un champ texte à masque libre plutôt qu'un `type="time"` : le
  * sélecteur natif est pensé pour une heure de la journée, pas pour un chrono, et
  * il n'affiche pas les secondes sur tous les navigateurs.
+ *
+ * Il garde `inputMode="numeric"` — le pavé numérique est le bon clavier pour
+ * quatre chiffres — et ce sont les deux-points qui viennent à la saisie plutôt
+ * que l'inverse : le pavé d'iOS n'en propose aucun, l'athlète ne pouvait donc
+ * pas les taper. `formatRaceTimeInput` fait tout le travail (lecture des
+ * chiffres depuis la droite, suppression, collage, borne à six chiffres) ; la
+ * valeur envoyée reste `mm:ss` / `hh:mm:ss`, et la validation Zod de la Server
+ * Action reste seule autorité sur ce qui part au coach.
  */
 function RaceFields({ values, onChange, errors, fieldId }: PlanStepFieldsProps) {
   const placeholder =
@@ -310,7 +319,12 @@ function RaceFields({ values, onChange, errors, fieldId }: PlanStepFieldsProps) 
             Boolean(errors?.referenceTime) && `${fieldId("referenceTime")}-error`,
           )}
           value={values.referenceTime}
-          onChange={(event) => onChange("referenceTime", event.target.value)}
+          onChange={(event) =>
+            onChange(
+              "referenceTime",
+              formatRaceTimeInput(values.referenceTime, event.target.value),
+            )
+          }
           className="num w-32"
         />
         <p

@@ -79,7 +79,9 @@ export function PlanAdjustForm() {
         onChange={(event) => setInstruction(event.target.value)}
         className={cn(
           "w-full resize-y rounded-button border border-border bg-surface-2 px-3 py-2.5",
-          "text-[0.95rem] leading-relaxed text-fg transition-colors duration-150 ease-out",
+          // 16 px minimum : même raison que l'Input partagé — sous ce seuil,
+          // iOS zoome à la prise de focus, sans retour possible en PWA.
+          "text-base leading-relaxed text-fg transition-colors duration-150 ease-out",
           "placeholder:text-fg-faint hover:border-fg-faint/35 aria-invalid:border-negative/60",
         )}
       />
