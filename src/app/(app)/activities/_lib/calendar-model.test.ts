@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CalendarActivityDto, CalendarSessionDto } from '@/data/calendar';
+import type {
+  CalendarActivityDto,
+  CalendarDayWeatherDto,
+  CalendarSessionDto,
+} from '@/data/calendar';
 import type { WeatherForecastDto } from '@/data/weather-forecast';
 
 import {
@@ -210,6 +214,7 @@ describe('buildCalendarMonth', () => {
     plan: PLAN,
     sessions: [],
     activities: [],
+    weather: [],
     forecast: NO_FORECAST,
   } as const;
 
@@ -346,9 +351,10 @@ describe('buildCalendarMonth', () => {
 /**
  * La météo des cases du calendrier.
  *
- * Trois propriétés : la prévision ne s'affiche que là où elle habille une séance
- * **à venir**, elle dit sa raison quand elle manque, et elle ne prend jamais la
- * place de la séance (une icône, une température, le reste dans l'infobulle).
+ * Quatre propriétés : un jour couru montre ce qui a été **mesuré**, un jour à
+ * venir ce qui est **prévu**, une absence dit toujours sa raison dès qu'il y a
+ * quelque chose à habiller, et rien de tout cela ne prend la place de la séance
+ * (une icône, une température, le reste dans l'infobulle).
  */
 describe('buildCalendarMonth — météo prévue', () => {
   const forecastDay = {
@@ -374,6 +380,7 @@ describe('buildCalendarMonth — météo prévue', () => {
     plan: PLAN,
     sessions: [] as CalendarSessionDto[],
     activities: [] as CalendarActivityView[],
+    weather: [] as CalendarDayWeatherDto[],
     forecast: withForecast,
   };
 
@@ -385,13 +392,13 @@ describe('buildCalendarMonth — météo prévue', () => {
     return day;
   }
 
-  it('habille la séance à venir de son icône et de sa maximale', () => {
+  it('habille le jour à venir de son icône et de sa maximale', () => {
     const day = dayOf({ ...base, sessions: [session(1, '2026-08-16')] }, '2026-08-16');
 
     expect(day.weather).toEqual({
       icon: 'rain',
       temperature: '25°',
-      label: 'Pluie faible, 14 → 25 °C. Pluie du jour : 3,6 mm (39 %).',
+      label: 'Météo prévue : Pluie faible, 14 → 25 °C. Pluie du jour : 3,6 mm (39 %).',
     });
   });
 
@@ -400,16 +407,8 @@ describe('buildCalendarMonth — météo prévue', () => {
     expect(day.weather?.label).toContain('Pluie du jour');
   });
 
-  it('ne met pas de météo sur un jour sans séance', () => {
-    expect(dayOf(base, '2026-08-16').weather).toBeNull();
-  });
-
-  it('ne met pas de météo sur une séance déjà courue', () => {
-    const day = dayOf(
-      { ...base, sessions: [session(1, '2026-08-16', { completed: true })] },
-      '2026-08-16',
-    );
-    expect(day.weather).toBeNull();
+  it('porte la prévision même sur un jour vide — un calendrier parle du temps', () => {
+    expect(dayOf(base, '2026-08-16').weather?.icon).toBe('rain');
   });
 
   it('dit pourquoi il n’y a pas de prévision, plutôt que de laisser un blanc', () => {
@@ -419,6 +418,12 @@ describe('buildCalendarMonth — météo prévue', () => {
     expect(day.weather?.icon).toBeNull();
     expect(day.weather?.temperature).toBeNull();
     expect(day.weather?.label).toContain('16 jours');
+  });
+
+  it('se tait sur un jour vide dont il n’a rien à dire', () => {
+    // Un mois entier de tirets à quarante jours d'échéance n'apprendrait rien :
+    // l'absence ne s'écrit que là où elle prive d'une information attendue.
+    expect(dayOf(base, '2026-09-05').weather).toBeNull();
   });
 
   it('fait remonter l’état du relevé sur les jours qu’il ne couvre pas', () => {
@@ -432,5 +437,117 @@ describe('buildCalendarMonth — météo prévue', () => {
     );
 
     expect(day.weather?.label).toContain('pas de lieu connu');
+  });
+});
+
+/**
+ * La météo **relevée** — celle des jours qui ont été courus.
+ *
+ * Une mesure n'est pas une estimation : elle prime sur la prévision du même
+ * jour, elle dit l'heure à laquelle elle a été relevée, et son échec (tapis,
+ * refus d'Open-Meteo) se dit dans le vocabulaire de la météo d'activité.
+ */
+describe('buildCalendarMonth — météo relevée', () => {
+  const forecastToday = {
+    date: '2026-08-13',
+    weatherCode: 0,
+    temperatureMaxC: 30.4,
+    temperatureMinC: 18.2,
+    apparentTemperatureMaxC: 31.1,
+    apparentTemperatureMinC: 17.4,
+    precipitationSumMm: 0,
+    precipitationProbabilityMaxPct: 0,
+    windSpeedMaxKmh: 9.5,
+  };
+
+  const base = {
+    ...AUGUST,
+    plan: PLAN,
+    sessions: [] as CalendarSessionDto[],
+    activities: [] as CalendarActivityView[],
+    weather: [] as CalendarDayWeatherDto[],
+    forecast: {
+      status: 'forecast',
+      fetchedAt: new Date('2026-08-13T04:00:12Z'),
+      days: [forecastToday],
+    } satisfies WeatherForecastDto,
+  };
+
+  function observation(
+    date: string,
+    overrides: Partial<CalendarDayWeatherDto> = {},
+  ): CalendarDayWeatherDto {
+    return {
+      date,
+      status: 'observed',
+      temperatureC: 18.4,
+      weatherCode: 3,
+      observedAt: new Date('2026-08-11T16:00:00Z'),
+      ...overrides,
+    };
+  }
+
+  function dayOf(input: Parameters<typeof buildCalendarMonth>[0], date: string) {
+    const day = buildCalendarMonth(input)
+      .flatMap((week) => week.days)
+      .find((candidate) => candidate.date === date);
+    if (day === undefined) throw new Error(`Jour ${date} absent de la grille.`);
+    return day;
+  }
+
+  it('rend la mesure du jour couru, et l’heure de son relevé', () => {
+    const day = dayOf({ ...base, weather: [observation('2026-08-11')] }, '2026-08-11');
+
+    expect(day.weather).toEqual({
+      icon: 'cloudy',
+      temperature: '18°',
+      label: 'Couvert, 18 °C. Relevé de 18:00.',
+    });
+  });
+
+  it('préfère la mesure à la prévision du même jour', () => {
+    // Aujourd'hui : la séance est courue, il n'y a plus rien à estimer.
+    const day = dayOf(
+      { ...base, weather: [observation('2026-08-13', { weatherCode: 61 })] },
+      '2026-08-13',
+    );
+
+    expect(day.weather?.icon).toBe('rain');
+    expect(day.weather?.label).not.toContain('prévue');
+  });
+
+  it('laisse le bulletin du jour vivre quand le relevé n’a rien mesuré', () => {
+    // Un tapis de course ce matin ne doit pas effacer la météo de ce soir.
+    const day = dayOf(
+      { ...base, weather: [observation('2026-08-13', { status: 'no-location' })] },
+      '2026-08-13',
+    );
+
+    expect(day.weather?.label).toContain('Météo prévue');
+  });
+
+  it('dit pourquoi un jour passé n’a pas de relevé', () => {
+    const day = dayOf(
+      {
+        ...base,
+        sessions: [session(1, '2026-08-11', { completed: true })],
+        weather: [observation('2026-08-11', { status: 'no-location' })],
+      },
+      '2026-08-11',
+    );
+
+    expect(day.weather?.icon).toBeNull();
+    expect(day.weather?.label).toContain('séance en intérieur');
+  });
+
+  it('se tait sur un jour passé sans sortie ni séance', () => {
+    expect(dayOf(base, '2026-08-11').weather).toBeNull();
+  });
+
+  it('signale l’absence de relevé sur une séance passée non courue', () => {
+    const day = dayOf({ ...base, sessions: [session(1, '2026-08-11')] }, '2026-08-11');
+
+    expect(day.weather?.icon).toBeNull();
+    expect(day.weather?.label).toContain('Jour passé');
   });
 });

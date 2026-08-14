@@ -3,7 +3,7 @@
  * position. Fonctions pures, testées.
  *
  * Même parti pris que la période de « Progression » (`progression/_lib/range.ts`)
- * et que le mois du plan (`plan/_lib/calendar-params.ts`), pour les mêmes
+ * et que la vue et le mois de cet onglet (`./calendar-params.ts`), pour les mêmes
  * raisons : la page affichée n'est pas un état React mais une **URL**. Le
  * serveur relit les semaines demandées, un rechargement, un retour arrière ou un
  * lien partagé retombent sur le même écran, et la page reste un Server
@@ -12,6 +12,10 @@
  * Le paramètre vient du navigateur : il est validé comme n'importe quelle
  * entrée externe — tout ce qui n'est pas un rang de page plausible retombe sur
  * la première page plutôt que d'échouer, et jamais sur un `OFFSET` arbitraire.
+ *
+ * La **construction** des liens, elle, vit dans `./calendar-params.ts` : une URL
+ * de cet onglet porte aussi sa vue et son mois, et deux fabriques d'URL
+ * finiraient par en oublier une.
  */
 
 import { z } from "zod";
@@ -67,14 +71,6 @@ export function parsePageParam(value: unknown): number {
 /** Rang de la première semaine de la page dans l'historique (0 = la plus récente). */
 export function pageOffset(page: number): number {
   return (page - 1) * WEEKS_PER_PAGE;
-}
-
-/**
- * Lien vers une page de l'historique. La première ne porte pas de paramètre :
- * l'URL reste `/activities` tant qu'on regarde les dernières semaines.
- */
-export function activitiesHref(page: number): string {
-  return page <= DEFAULT_PAGE ? "/activities" : `/activities?${PAGE_PARAM}=${page}`;
 }
 
 // `timeZone` explicite : le container tourne en UTC, alors que les semaines sont

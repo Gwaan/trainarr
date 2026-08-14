@@ -4,7 +4,9 @@ import { and, asc, eq, gte, lte } from 'drizzle-orm';
 
 import { civilDateToMs, isCivilDate, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+import type { ActivityWeatherStatus } from '@/lib/weather/plan';
 
+import { listWeatherObservations, type ActivityWeatherObservation } from './activity-weather';
 import { getCurrentAthleteId, todayCivilDate } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type Activity, type PlannedSession } from './db/schema';
@@ -29,7 +31,7 @@ import { planEndExclusive } from './plans';
  * calendrier montre ce qui a été prévu, y compris par un plan qui n'est plus en
  * cours ; masquer ces jours-là ferait croire à des semaines vides. Seul le
  * **déplacement** est plus étroit : il exige que la séance appartienne au plan
- * actif (cf. `plan/_lib/calendar-actions.ts`).
+ * actif (cf. `activities/_lib/calendar-actions.ts`).
  *
  * **Les activités, elles, ne sont rendues que si aucune séance de la plage ne
  * les réalise** : sans cette soustraction, une sortie rapprochée s'afficherait
@@ -82,6 +84,27 @@ export type CalendarActivityDto = {
   avgPaceSecPerKm: number | null;
 };
 
+/**
+ * La météo **relevée** d'un jour de calendrier.
+ *
+ * Un jour, un relevé : c'est celui de la **première sortie du jour qui en a
+ * un** (cf. {@link calendarDayWeather}). Une journée à deux sorties n'a pas une
+ * météo unique, et la case n'a la place que d'une icône et d'une température.
+ *
+ * `status` franchit la frontière parce qu'il porte du sens : sans lui, « séance
+ * sur tapis, donc pas de position » et « le relevé a échoué » seraient le même
+ * vide, qu'on prendrait pour du beau temps.
+ */
+export type CalendarDayWeatherDto = {
+  /** Jour civil `YYYY-MM-DD`, dans le fuseau de l'athlète. */
+  date: string;
+  status: ActivityWeatherStatus;
+  temperatureC: number | null;
+  /** Code temps WMO 4677. */
+  weatherCode: number | null;
+  observedAt: Date | null;
+};
+
 export type CalendarRangeDto = {
   /** Bornes demandées, renvoyées telles quelles : l'UI n'a pas à les mémoriser. */
   from: string;
@@ -97,6 +120,12 @@ export type CalendarRangeDto = {
   } | null;
   sessions: CalendarSessionDto[];
   activities: CalendarActivityDto[];
+  /**
+   * La météo relevée des jours **où l'athlète a couru**, au plus une par jour.
+   * Les jours sans sortie n'y figurent pas : leur météo, si elle existe, est une
+   * prévision, et elle vient d'ailleurs (`./weather-forecast.ts`).
+   */
+  weather: CalendarDayWeatherDto[];
 };
 
 /**
@@ -156,7 +185,7 @@ function validateRange(from: string, to: string): void {
 
 /** Vide, mais valide : l'onboarding n'a pas eu lieu, ou rien n'est planifié. */
 function emptyRange(from: string, to: string): CalendarRangeDto {
-  return { from, to, plan: null, sessions: [], activities: [] };
+  return { from, to, plan: null, sessions: [], activities: [], weather: [] };
 }
 
 export function toCalendarSessionDto(row: PlannedSession, today: string): CalendarSessionDto {
@@ -213,6 +242,55 @@ export function calendarActivities(
 }
 
 /**
+ * La météo relevée de chaque jour de la plage, rangée par jour civil.
+ *
+ * **Une journée à plusieurs sorties n'a pas une météo unique**, et une case de
+ * calendrier n'a la place que d'une icône. Le choix, quand il y en a plusieurs :
+ * la **première sortie du jour qui porte un relevé**, à défaut la première tout
+ * court — celle-ci ne dit alors rien du temps, mais son statut dit *pourquoi*
+ * (« séance en intérieur », « relevé indisponible »), ce qui vaut mieux qu'un
+ * blanc.
+ *
+ * Pourquoi « la première qui a un relevé » plutôt que « la première » : un
+ * footing matinal sur tapis suivi d'une sortie dehors laisserait sinon la case
+ * annoncer « pas de position » un jour où le temps a bel et bien été mesuré. Le
+ * cas courant — une sortie par jour — donne évidemment la même réponse dans les
+ * deux lectures.
+ *
+ * Fonction pure, exportée pour les tests : elle porte aussi le recadrage de la
+ * marge d'interrogation sur la plage réellement demandée, comme
+ * {@link calendarActivities}.
+ */
+export function calendarDayWeather(
+  observations: readonly ActivityWeatherObservation[],
+  range: { from: string; to: string },
+): CalendarDayWeatherDto[] {
+  const byDay = new Map<string, CalendarDayWeatherDto>();
+
+  for (const observation of observations) {
+    const date = toCivilDate(observation.startedAt);
+    if (date < range.from || date > range.to) continue;
+
+    const kept = byDay.get(date);
+    // Le premier relevé du jour gagne, sauf s'il ne relève rien : une sortie
+    // réellement mesurée reprend alors la place.
+    if (kept !== undefined && (kept.status === 'observed' || observation.status !== 'observed')) {
+      continue;
+    }
+
+    byDay.set(date, {
+      date,
+      status: observation.status,
+      temperatureC: observation.temperatureC,
+      weatherCode: observation.weatherCode,
+      observedAt: observation.observedAt,
+    });
+  }
+
+  return [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+/**
  * Le calendrier de la plage `[from, to]`, bornes incluses.
  *
  * @throws {InvalidCalendarRangeError} si la plage est mal formée ou trop large.
@@ -227,7 +305,7 @@ export async function getCalendarRange(from: string, to: string): Promise<Calend
   const oldest = new Date(civilDateToMs(from) - ACTIVITY_QUERY_MARGIN_DAYS * DAY_MS);
   const newest = new Date(civilDateToMs(to) + (ACTIVITY_QUERY_MARGIN_DAYS + 1) * DAY_MS);
 
-  const [sessionRows, activityRows, planRows] = await Promise.all([
+  const [sessionRows, activityRows, planRows, observations] = await Promise.all([
     db
       .select()
       .from(plannedSessions)
@@ -257,6 +335,10 @@ export async function getCalendarRange(from: string, to: string): Promise<Calend
       .from(plans)
       .where(and(eq(plans.athleteId, athleteId), eq(plans.status, 'active')))
       .limit(1),
+    // La météo **relevée** des sorties de la plage : celle des jours passés. La
+    // prévision, elle, ne dépend d'aucune plage et se lit ailleurs — un relevé
+    // du matin couvre seize jours d'un coup (`./weather-forecast.ts`).
+    listWeatherObservations(athleteId, oldest, newest),
   ]);
 
   const plan = planRows[0];
@@ -279,5 +361,6 @@ export async function getCalendarRange(from: string, to: string): Promise<Calend
           },
     sessions: sessionRows.map((row) => toCalendarSessionDto(row, today)),
     activities: calendarActivities(activityRows, sessionRows, { from, to }),
+    weather: calendarDayWeather(observations, { from, to }),
   };
 }

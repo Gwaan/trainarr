@@ -2,11 +2,13 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ActivityWeatherObservation } from './activity-weather';
 import type { Activity, Plan, PlannedSession } from './db/schema';
 import {
   CALENDAR_RANGE_LIMITS,
   InvalidCalendarRangeError,
   calendarActivities,
+  calendarDayWeather,
   getCalendarRange,
   toCalendarActivityDto,
   toCalendarSessionDto,
@@ -58,6 +60,25 @@ vi.mock('./db/client', async () => {
 
   return { db: { select: () => ({ from: chainFor }) } };
 });
+
+/**
+ * La météo relevée est lue par le DAL qui la possède (`./activity-weather.ts`,
+ * dont les tests couvrent le cloisonnement de sa jointure) : ici, seul compte ce
+ * que le calendrier en fait — un relevé par jour, recadré sur la plage demandée.
+ */
+const { weatherState } = vi.hoisted(() => ({
+  weatherState: {
+    observations: [] as import('./activity-weather').ActivityWeatherObservation[],
+    calls: [] as Array<{ athleteId: number; oldest: Date; newest: Date }>,
+  },
+}));
+
+vi.mock('./activity-weather', () => ({
+  listWeatherObservations: (athleteId: number, oldest: Date, newest: Date) => {
+    weatherState.calls.push({ athleteId, oldest, newest });
+    return Promise.resolve(weatherState.observations);
+  },
+}));
 
 const { athleteState } = vi.hoisted(() => ({ athleteState: { id: 1 as number | null } }));
 
@@ -157,6 +178,8 @@ beforeEach(() => {
   dbState.wheres = {};
   dbState.orderBys = {};
   athleteState.id = 1;
+  weatherState.observations = [];
+  weatherState.calls = [];
 });
 
 describe('getCalendarRange — validation de la plage', () => {
@@ -216,6 +239,7 @@ describe('getCalendarRange — lecture', () => {
       plan: null,
       sessions: [],
       activities: [],
+      weather: [],
     });
   });
 
@@ -295,6 +319,123 @@ describe('getCalendarRange — lecture', () => {
     const range = await getCalendarRange('2026-08-10', '2026-08-16');
 
     expect(range.activities.map((activity) => activity.id)).toEqual([43]);
+  });
+
+  it('lit la météo des sorties sous le même athlète et la même plage', async () => {
+    weatherState.observations = [
+      {
+        startedAt: new Date('2026-08-11T16:00:00.000Z'),
+        status: 'observed',
+        temperatureC: 21.4,
+        weatherCode: 3,
+        observedAt: new Date('2026-08-11T16:00:00.000Z'),
+      },
+    ];
+
+    const range = await getCalendarRange('2026-08-10', '2026-08-16');
+
+    expect(weatherState.calls).toHaveLength(1);
+    expect(weatherState.calls[0]?.athleteId).toBe(1);
+    expect(range.weather).toEqual([
+      {
+        date: '2026-08-11',
+        status: 'observed',
+        temperatureC: 21.4,
+        weatherCode: 3,
+        observedAt: new Date('2026-08-11T16:00:00.000Z'),
+      },
+    ]);
+  });
+});
+
+/**
+ * Une journée à plusieurs sorties n'a pas une météo unique, et une case de
+ * calendrier n'a la place que d'une icône : c'est ici que le choix se fait.
+ */
+describe('calendarDayWeather', () => {
+  const RANGE = { from: '2026-08-10', to: '2026-08-16' };
+
+  function observation(
+    startedAt: string,
+    overrides: Partial<ActivityWeatherObservation> = {},
+  ): ActivityWeatherObservation {
+    return {
+      startedAt: new Date(startedAt),
+      status: 'observed',
+      temperatureC: 21.4,
+      weatherCode: 3,
+      observedAt: new Date(startedAt),
+      ...overrides,
+    };
+  }
+
+  it('range les relevés par jour civil, dans le fuseau de l’athlète', () => {
+    // 23 h 30 UTC le 11 août, soit 1 h 30 le 12 août à Paris.
+    const days = calendarDayWeather([observation('2026-08-11T23:30:00.000Z')], RANGE);
+
+    expect(days.map((day) => day.date)).toEqual(['2026-08-12']);
+  });
+
+  it('retient la première sortie du jour', () => {
+    const days = calendarDayWeather(
+      [
+        observation('2026-08-11T06:00:00.000Z', { temperatureC: 14 }),
+        observation('2026-08-11T18:00:00.000Z', { temperatureC: 27 }),
+      ],
+      RANGE,
+    );
+
+    expect(days).toHaveLength(1);
+    expect(days[0]?.temperatureC).toBe(14);
+  });
+
+  it('préfère une sortie réellement mesurée à une première sans relevé', () => {
+    // Tapis le matin, dehors le soir : la case doit dire le temps qu'il a fait,
+    // pas « séance en intérieur ».
+    const days = calendarDayWeather(
+      [
+        observation('2026-08-11T06:00:00.000Z', {
+          status: 'no-location',
+          temperatureC: null,
+          weatherCode: null,
+          observedAt: null,
+        }),
+        observation('2026-08-11T18:00:00.000Z', { temperatureC: 27 }),
+      ],
+      RANGE,
+    );
+
+    expect(days).toHaveLength(1);
+    expect(days[0]).toMatchObject({ status: 'observed', temperatureC: 27 });
+  });
+
+  it('garde le statut d’un jour dont aucune sortie n’a été relevée', () => {
+    const days = calendarDayWeather(
+      [
+        observation('2026-08-11T06:00:00.000Z', {
+          status: 'failed',
+          temperatureC: null,
+          weatherCode: null,
+          observedAt: null,
+        }),
+      ],
+      RANGE,
+    );
+
+    expect(days[0]?.status).toBe('failed');
+  });
+
+  it('recadre la marge d’interrogation sur la plage demandée', () => {
+    const days = calendarDayWeather(
+      [
+        observation('2026-08-09T06:00:00.000Z'),
+        observation('2026-08-12T06:00:00.000Z'),
+        observation('2026-08-17T06:00:00.000Z'),
+      ],
+      RANGE,
+    );
+
+    expect(days.map((day) => day.date)).toEqual(['2026-08-12']);
   });
 });
 

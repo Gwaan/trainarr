@@ -47,18 +47,22 @@ import type { CalendarDayView, CalendarDayWeather } from "../_lib/calendar-model
  */
 
 /**
- * La météo prévue du jour, dans l'en-tête de la case.
+ * La météo du jour, dans le coin libre de la case — **relevée** pour un jour
+ * couru, **prévue** pour un jour à venir. C'est le modèle qui tranche
+ * (`dayWeather`), la case ne fait que rendre ce qu'il a décidé.
  *
- * Une icône et une température, et c'est tout ce que la place permet — le détail
- * est sur la séance du jour du tableau de bord. La phrase entière reste
- * accessible : `title` pour la souris, `sr-only` pour les lecteurs d'écran.
+ * Une icône et une température, et c'est tout ce que la place permet : à 390 px,
+ * la météo est du **contexte** et ne doit jamais prendre le pas sur l'intitulé
+ * de la séance. Le détail — ressenti, vent, cumul de pluie, heure du relevé —
+ * vit sur la page de l'activité et sur la séance du jour du tableau de bord. La
+ * phrase entière reste accessible : `title` pour la souris, `sr-only` pour les
+ * lecteurs d'écran, et elle dit toujours si elle mesure ou si elle estime.
  *
- * Sans prévision, un tiret **et sa raison**, jamais un vide : une case muette se
+ * Sans donnée, un tiret **et sa raison**, jamais un vide : une case muette se
  * lirait « beau temps ». Le tiret est le même vocabulaire que la valeur absente
  * du détail d'activité (`MISSING`).
  *
- * En `fg-faint`, jamais en accent : la météo est du contexte, l'accent appartient
- * à l'effort.
+ * En `fg-faint`, jamais en accent : l'accent appartient à l'effort.
  */
 function DayWeatherBadge({ weather }: { weather: CalendarDayWeather }) {
   return (
@@ -66,7 +70,7 @@ function DayWeatherBadge({ weather }: { weather: CalendarDayWeather }) {
       title={weather.label}
       className="relative ml-auto flex shrink-0 items-center gap-0.5 text-fg-faint"
     >
-      <span className="sr-only">Météo prévue : {weather.label}</span>
+      <span className="sr-only">{weather.label}</span>
       {weather.icon === null ? null : <WeatherIcon name={weather.icon} className="size-3.5" />}
       <span aria-hidden="true" className="num text-[0.68rem]">
         {weather.temperature ?? "—"}

@@ -5,14 +5,14 @@ import { cn } from "@/lib/utils";
 
 import { formatMonthLabel } from "../_lib/calendar-model";
 import {
-  PLAN_VIEW_OPTIONS,
-  planHref,
+  activitiesHref,
   shiftMonth,
-  type PlanViewParam,
+  VIEW_OPTIONS,
+  type CalendarViewParam,
 } from "../_lib/calendar-params";
 
 /**
- * La barre de commande du plan : quelle vue, et quel mois.
+ * La barre de commande de l'onglet : quelle vue, et quel mois.
  *
  * Des liens, jamais un état client — c'est le serveur qui relit la plage, l'URL
  * qui la porte, et un retour arrière retombe sur l'écran qu'on regardait. Même
@@ -20,29 +20,27 @@ import {
  * reprend les classes : le système n'a qu'une façon de dessiner un segmenté.
  */
 
-export type PlanCalendarToolbarProps = {
-  view: PlanViewParam;
+export type CalendarToolbarProps = {
+  view: CalendarViewParam;
   /** Mois affiché, `YYYY-MM`. */
   month: string;
   /** Mois du jour — celui que l'URL n'a pas besoin de nommer. */
   currentMonth: string;
 };
 
-export function PlanCalendarToolbar({
-  view,
-  month,
-  currentMonth,
-}: PlanCalendarToolbarProps) {
+export function CalendarToolbar({ view, month, currentMonth }: CalendarToolbarProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <nav
-        aria-label="Vue du plan"
+        aria-label="Vue du calendrier"
         className="flex w-fit items-center gap-1 rounded-button border border-border p-0.5"
       >
-        {PLAN_VIEW_OPTIONS.map((option) => (
+        {VIEW_OPTIONS.map((option) => (
           <Link
             key={option.param}
-            href={planHref({ view: option.param, month }, currentMonth)}
+            // La page n'est pas transmise : un rang de page appartient à la
+            // liste qu'on quitte, pas à celle qu'on rouvre.
+            href={activitiesHref({ view: option.param, month }, currentMonth)}
             scroll={false}
             aria-current={view === option.param ? "page" : undefined}
             className={cn(
@@ -79,7 +77,7 @@ function MonthNav({ month, currentMonth }: { month: string; currentMonth: string
     <nav aria-label="Mois affiché" className="flex items-center gap-1">
       {currentMonth === month ? null : (
         <Link
-          href={planHref({ view: "calendrier", month: currentMonth }, currentMonth)}
+          href={activitiesHref({ view: "calendrier", month: currentMonth }, currentMonth)}
           scroll={false}
           className="mr-1 inline-flex h-9 items-center gap-1.5 rounded-button px-2.5 text-[0.72rem] font-medium text-fg-faint transition-colors duration-150 ease-out hover:bg-surface-2 hover:text-fg"
         >
@@ -89,7 +87,7 @@ function MonthNav({ month, currentMonth }: { month: string; currentMonth: string
       )}
 
       <Link
-        href={planHref({ view: "calendrier", month: shiftMonth(month, -1) }, currentMonth)}
+        href={activitiesHref({ view: "calendrier", month: shiftMonth(month, -1) }, currentMonth)}
         scroll={false}
         aria-label="Mois précédent"
         className={arrow}
@@ -105,7 +103,7 @@ function MonthNav({ month, currentMonth }: { month: string; currentMonth: string
       </span>
 
       <Link
-        href={planHref({ view: "calendrier", month: shiftMonth(month, 1) }, currentMonth)}
+        href={activitiesHref({ view: "calendrier", month: shiftMonth(month, 1) }, currentMonth)}
         scroll={false}
         aria-label="Mois suivant"
         className={arrow}

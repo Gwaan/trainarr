@@ -1,42 +1,52 @@
 /**
- * Ce que l'URL de `/plan` porte : la **vue** (calendrier ou liste) et le **mois**
- * affiché. Fonctions pures, testées.
+ * Ce que l'URL de l'onglet « Calendrier » porte : la **vue** (calendrier ou
+ * liste), le **mois** affiché, et la **page** de l'historique. Fonctions pures,
+ * testées.
  *
  * Même parti pris que la période de « Progression » (`progression/_lib/range.ts`)
- * et pour les mêmes raisons : ni la vue ni le mois ne sont un état React. C'est
- * le serveur qui lit la plage, l'URL qui la porte, et un retour arrière comme un
+ * et pour les mêmes raisons : rien de tout cela n'est un état React. C'est le
+ * serveur qui lit la plage, l'URL qui la porte, et un retour arrière comme un
  * rechargement retombent sur l'écran qu'on regardait. Les paramètres venant du
  * navigateur, ils sont validés comme n'importe quelle entrée externe — une
  * valeur inconnue retombe sur le défaut plutôt que d'échouer.
+ *
+ * L'URL reste `/activities` : c'est l'index de la **ressource**, dont le détail
+ * d'une sortie (`/activities/[id]`) est un enfant, et c'est l'onglet qui a
+ * changé de titre, pas la collection qu'il montre. Renommer le segment aurait
+ * coupé cette filiation — un détail sous un index qui n'existe plus — ou
+ * imposé de déplacer aussi le détail, donc de laisser des redirections derrière
+ * chaque lien déjà écrit.
  */
 
 import { z } from "zod";
 
 import { isoWeekEnd, isoWeekStart } from "@/lib/dates/civil";
 
+import { PAGE_PARAM } from "./pagination";
+
 /** Noms des paramètres d'URL, en français comme le reste de l'interface. */
-export const PLAN_VIEW_PARAM = "vue";
+export const VIEW_PARAM = "vue";
 export const MONTH_PARAM = "mois";
 
-export type PlanViewParam = "calendrier" | "liste";
+export type CalendarViewParam = "calendrier" | "liste";
 
 /**
  * Le calendrier par défaut : c'est la vue qui répond à la question qu'on se pose
  * en ouvrant l'onglet — « qu'est-ce que je cours, et quand ? » — et la seule où
- * une séance se déplace. La liste reste à une tape, pour lire un programme
- * semaine par semaine.
+ * une séance se déplace. La liste chronologique, qui déroule tout l'historique
+ * semaine par semaine, reste à une tape.
  */
-const DEFAULT_VIEW: PlanViewParam = "calendrier";
+const DEFAULT_VIEW: CalendarViewParam = "calendrier";
 
 const viewSchema = z.enum(["calendrier", "liste"]).catch(DEFAULT_VIEW);
 
-export const PLAN_VIEW_OPTIONS = [
+export const VIEW_OPTIONS = [
   { param: "calendrier", label: "Calendrier" },
   { param: "liste", label: "Liste" },
-] as const satisfies readonly { param: PlanViewParam; label: string }[];
+] as const satisfies readonly { param: CalendarViewParam; label: string }[];
 
 /** Le paramètre `searchParams` peut être absent, répété, ou n'importe quoi. */
-export function parsePlanViewParam(value: unknown): PlanViewParam {
+export function parseViewParam(value: unknown): CalendarViewParam {
   return viewSchema.parse(value);
 }
 
@@ -94,20 +104,28 @@ export function monthGridRange(month: string): { from: string; to: string } {
 }
 
 /**
- * Lien vers `/plan` dans l'état demandé.
+ * Lien vers l'onglet dans l'état demandé.
  *
- * Les défauts ne portent pas de paramètre — l'URL reste `/plan` tant qu'on
- * regarde le calendrier du mois courant. Le mois est conservé même en vue liste :
- * revenir au calendrier doit rendre le mois qu'on venait de quitter.
+ * Les défauts ne portent pas de paramètre — l'URL reste `/activities` tant qu'on
+ * regarde le calendrier du mois courant. Deux règles complètent ça :
+ *
+ * - le **mois** est conservé même en vue liste : revenir au calendrier doit
+ *   rendre le mois qu'on venait de quitter ;
+ * - la **page** n'existe que dans la liste. Un rang de page traîné jusque dans
+ *   le calendrier ne voudrait rien dire, et le premier lien de retour vers la
+ *   liste y ramènerait à une page qu'on n'a pas demandée.
  */
-export function planHref(
-  target: { view: PlanViewParam; month: string },
+export function activitiesHref(
+  target: { view: CalendarViewParam; month: string; page?: number },
   currentMonth: string,
 ): string {
   const params = new URLSearchParams();
-  if (target.view !== DEFAULT_VIEW) params.set(PLAN_VIEW_PARAM, target.view);
+  if (target.view !== DEFAULT_VIEW) params.set(VIEW_PARAM, target.view);
   if (target.month !== currentMonth) params.set(MONTH_PARAM, target.month);
+  if (target.view === "liste" && target.page !== undefined && target.page > 1) {
+    params.set(PAGE_PARAM, String(target.page));
+  }
 
   const query = params.toString();
-  return query === "" ? "/plan" : `/plan?${query}`;
+  return query === "" ? "/activities" : `/activities?${query}`;
 }

@@ -26,8 +26,8 @@ import type {
  *
  * L'état, lui, se double toujours d'un signe nommé, jamais d'une couleur seule :
  * une pastille réalisée porte sa coche, une pastille manquée son cercle
- * pointillé — la même grammaire que `plan-session-row.tsx`, qui est le
- * vocabulaire déjà établi de cette page.
+ * pointillé — la même grammaire que les lignes de séance du plan
+ * (`plan/_components/plan-session-row.tsx`), qui est le vocabulaire déjà établi.
  */
 
 /** Le signe d'état, `null` pour une séance à venir : elle n'a rien à annoncer. */

@@ -193,7 +193,13 @@ describe('moveSessionAction — verdict des règles', () => {
     expect(state).toEqual({ status: 'success', message: 'Séance déplacée.' });
     expect(mocks.rescheduleSession).toHaveBeenCalledWith(3, 7, '2026-08-19');
     expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('déplacement de séance', 7);
-    expect(mocks.revalidatePath.mock.calls.map(([path]) => path)).toEqual(['/plan', '/']);
+    // Les trois écrans qui montrent cette séance : le calendrier d'où part le
+    // geste, le déroulé du plan, et la séance du jour du tableau de bord.
+    expect(mocks.revalidatePath.mock.calls.map(([path]) => path)).toEqual([
+      '/activities',
+      '/plan',
+      '/',
+    ]);
   });
 
   it('déplace quand même, en remontant les avertissements', async () => {

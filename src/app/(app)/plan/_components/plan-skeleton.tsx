@@ -9,24 +9,20 @@ import { cn } from "@/lib/utils";
  * Trois issues possibles derrière le `Suspense` — le formulaire de création, une
  * proposition du coach, ou le plan en cours — et une seule géométrie de départ
  * possible : le fallback ne sait pas laquelle arrive, et `loading.tsx` encore
- * moins (il n'a même pas accès aux `searchParams`). C'est donc la **vue par
- * défaut du cas le plus fréquent** qui est figurée, dans son ordre exact :
- * l'en-tête, la barre de commande, le panneau « Objectif », le calendrier du
- * mois, puis le panneau « Ajuster le plan ».
+ * moins. C'est donc le **cas le plus fréquent** qui est figuré, dans son ordre
+ * exact : l'en-tête, le panneau « Objectif » et sa resynchronisation, les
+ * semaines du programme, puis le panneau « Ajuster le plan ».
  *
  * Ce fichier est rendu à l'identique par le `<Suspense>` de `page.tsx` et par
  * `loading.tsx` : les deux se succèdent pendant un même chargement, et toute
  * différence de géométrie se verrait comme un saut. Toute modification de la
- * mise en page de la vue calendrier doit être répercutée ici — **y compris**
- * l'ajout ou le retrait d'un bloc autour de la grille : un panneau oublié ne
- * décale pas un pixel, il pousse la grille de plusieurs centaines.
+ * mise en page du plan actif doit être répercutée ici — **y compris** l'ajout ou
+ * le retrait d'un bloc : un panneau oublié ne décale pas un pixel, il pousse
+ * tout ce qui suit de plusieurs centaines.
  */
 
-/** Cinq semaines : ce qu'une grille mensuelle porte le plus souvent. */
+/** Cinq semaines : de quoi remplir un écran sans promettre la longueur du plan. */
 const WEEKS = [0, 1, 2, 3, 4];
-
-/** Sept jours, du lundi au dimanche — la ligne de l'agenda, la colonne de la grille. */
-const DAYS = [0, 1, 2, 3, 4, 5, 6];
 
 /** Trois contraintes : séances par semaine, sortie longue, temps hebdomadaire. */
 const SETTINGS = [0, 1, 2];
@@ -37,15 +33,19 @@ const SETTINGS = [0, 1, 2];
  */
 function PanelSkeleton({
   titleClassName,
+  meta,
   children,
 }: {
   titleClassName: string;
+  /** Le pendant du `meta` d'un `Panel` : le repère aligné à droite du titre. */
+  meta?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="flex flex-col overflow-hidden rounded-card border border-border bg-surface">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
         <Skeleton className={cn("h-3", titleClassName)} />
+        {meta}
       </div>
       <div className="flex flex-1 flex-col p-4 sm:p-5">{children}</div>
     </div>
@@ -66,16 +66,14 @@ export function PlanSkeleton() {
         <Skeleton className="mt-2.5 h-3.5 w-96 max-w-full" />
       </div>
 
-      {/* Barre de commande : bascule de vue à gauche, navigation de mois à droite */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Skeleton className="h-9 w-[9.5rem]" />
-        <Skeleton className="h-11 w-[13rem]" />
-      </div>
-
-      {/* Objectif : échéance et fenêtre, intention, contraintes, renforcement.
-          Les blocs facultatifs de la carte (note de test, résumé du coach) ne
-          sont pas figurés — on ne sait pas s'ils existeront. */}
-      <PanelSkeleton titleClassName="w-16">
+      {/* Objectif : échéance et fenêtre, intention, contraintes, renforcement,
+          puis la resynchronisation en pied. Les blocs facultatifs de la carte
+          (note de test, résumé du coach) ne sont pas figurés — on ne sait pas
+          s'ils existeront. */}
+      <PanelSkeleton
+        titleClassName="w-16"
+        meta={<Skeleton className="h-3 w-24 shrink-0" />}
+      >
         <div className="flex flex-wrap items-center gap-2">
           <Skeleton className="h-7 w-40 max-w-full" />
           <Skeleton className="h-3 w-36 max-w-full" />
@@ -87,56 +85,38 @@ export function PlanSkeleton() {
           ))}
         </div>
         <Skeleton className="mt-4 h-[4.8rem]" />
+        <div className="mt-4 border-t border-border pt-3">
+          <Skeleton className="h-9 w-full sm:w-56" />
+        </div>
       </PanelSkeleton>
 
-      <div className="flex flex-col gap-3 sm:gap-4">
-        <div className="overflow-hidden rounded-card border border-border bg-surface">
-          {/* En-tête de colonnes — la grille seule en a une */}
-          <div className="hidden border-b border-border lg:grid lg:grid-cols-7">
-            {DAYS.map((day) => (
-              <div key={day} className="flex justify-center px-2 py-2">
-                <Skeleton className="h-3 w-7" />
+      {/* Programme : l'intitulé de section, puis les semaines repliées. Aucune
+          n'est figurée dépliée : c'est le plan qui décide laquelle s'ouvre (la
+          semaine en cours et la suivante), et le deviner ferait sauter l'écran
+          plus sûrement qu'un repli uniforme. */}
+      <section className="flex flex-col gap-3">
+        <Skeleton className="ml-0.5 h-3 w-24" />
+        {WEEKS.map((week) => (
+          <div
+            key={week}
+            className="overflow-hidden rounded-card border border-border bg-surface"
+          >
+            <div className="flex items-start justify-between gap-3 px-4 py-3 sm:px-5">
+              <div className="flex min-w-0 flex-col gap-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+                <Skeleton className="h-3.5 w-40 max-w-full" />
               </div>
-            ))}
-          </div>
-
-          {WEEKS.map((week) => (
-            <div key={week} className="border-b border-border">
-              <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 lg:px-4">
-                <Skeleton className="h-3 w-36 max-w-full" />
-                <Skeleton className="h-3 w-14 shrink-0" />
-              </div>
-
-              <div className="lg:grid lg:grid-cols-7">
-                {DAYS.map((day) => (
-                  <div
-                    key={day}
-                    className="flex min-h-11 items-start gap-2.5 border-t border-border px-3 py-2 first:border-t-0 lg:min-h-28 lg:flex-col lg:gap-1 lg:border-t-0 lg:border-r lg:px-1.5 lg:py-1.5 lg:last:border-r-0"
-                  >
-                    <Skeleton className="h-3.5 w-[3.4rem] shrink-0" />
-                    {/* Un jour sur deux porte une séance : une grille pleine
-                        annoncerait un plan plus dense qu'il ne l'est. */}
-                    {day % 2 === 0 ? (
-                      <Skeleton className="h-[3.1rem] min-w-0 flex-1 self-stretch" />
-                    ) : (
-                      <span className="min-w-0 flex-1" />
-                    )}
-                  </div>
-                ))}
-              </div>
+              <Skeleton className="mt-0.5 size-4 shrink-0" />
             </div>
-          ))}
-
-          {/* Grille de lecture des pastilles */}
-          <div className="flex flex-wrap gap-x-4 gap-y-2 px-3 py-2.5 lg:px-4">
-            {[0, 1, 2].map((item) => (
-              <Skeleton key={item} className="h-3 w-24" />
-            ))}
           </div>
-        </div>
-      </div>
+        ))}
+      </section>
 
-      {/* Ajuster le plan : intitulé du champ, zone de saisie, bouton et sa note */}
+      {/* Ajuster le plan : intitulé du champ, zone de saisie, bouton et sa note,
+          puis l'archivage sous son filet. */}
       <PanelSkeleton titleClassName="w-28">
         <div className="flex flex-col gap-3">
           <Skeleton className="h-3.5 w-44 max-w-full" />
@@ -145,6 +125,9 @@ export function PlanSkeleton() {
             <Skeleton className="h-11 w-full sm:w-52" />
             <Skeleton className="h-8 w-full sm:h-3 sm:w-64" />
           </div>
+        </div>
+        <div className="mt-5 border-t border-border pt-4">
+          <Skeleton className="h-9 w-full sm:w-44" />
         </div>
       </PanelSkeleton>
 

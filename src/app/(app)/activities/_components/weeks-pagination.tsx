@@ -1,16 +1,20 @@
 import Link from "next/link";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-import { activitiesHref } from "../_lib/pagination";
+import { activitiesHref } from "../_lib/calendar-params";
 
 /**
  * Navigation entre les pages de semaines.
  *
  * Des liens, jamais un état client : c'est le serveur qui relit les semaines,
  * l'URL qui porte la page, et un retour arrière retombe sur ce qu'on regardait.
- * Même grammaire — et mêmes classes — que la navigation de mois du plan
- * (`plan/_components/plan-calendar-toolbar.tsx`) : le système n'a qu'une façon
- * de dessiner une paire de chevrons.
+ * Même grammaire — et mêmes classes — que la navigation de mois du calendrier
+ * (`./calendar-toolbar.tsx`) : le système n'a qu'une façon de dessiner une paire
+ * de chevrons.
+ *
+ * Le **mois** voyage avec la page, alors qu'il ne se voit pas ici : c'est celui
+ * du calendrier qu'on vient de quitter, et il doit être encore là quand on y
+ * revient, trois pages plus loin.
  *
  * Les deux chevrons font 44 px de côté : ce sont des cibles tactiles. Une
  * extrémité de l'historique ne rend pas un lien désactivé mais **rien** — un
@@ -24,6 +28,10 @@ export type WeeksPaginationProps = {
   hasOlder: boolean;
   /** Repère de position : la plage de dates affichée. */
   span: string;
+  /** Mois que porte l'URL, `YYYY-MM` — celui du calendrier qu'on a quitté. */
+  month: string;
+  /** Mois du jour — celui que l'URL n'a pas besoin de nommer. */
+  currentMonth: string;
 };
 
 const ARROW =
@@ -32,8 +40,16 @@ const ARROW =
 /** Emplacement d'un chevron absent : la ligne garde sa géométrie aux extrémités. */
 const ARROW_PLACEHOLDER = "size-11";
 
-export function WeeksPagination({ page, hasOlder, span }: WeeksPaginationProps) {
+export function WeeksPagination({
+  page,
+  hasOlder,
+  span,
+  month,
+  currentMonth,
+}: WeeksPaginationProps) {
   const hasNewer = page > 1;
+  const pageHref = (target: number) =>
+    activitiesHref({ view: "liste", month, page: target }, currentMonth);
 
   return (
     <nav
@@ -42,7 +58,7 @@ export function WeeksPagination({ page, hasOlder, span }: WeeksPaginationProps) 
     >
       {hasNewer ? (
         <Link
-          href={activitiesHref(page - 1)}
+          href={pageHref(page - 1)}
           scroll={false}
           aria-label="Semaines plus récentes"
           className={ARROW}
@@ -62,7 +78,7 @@ export function WeeksPagination({ page, hasOlder, span }: WeeksPaginationProps) 
 
       {hasOlder ? (
         <Link
-          href={activitiesHref(page + 1)}
+          href={pageHref(page + 1)}
           scroll={false}
           aria-label="Semaines plus anciennes"
           className={ARROW}

@@ -4,11 +4,11 @@
  * Server Action du calendrier : déplacer une séance planifiée d'un jour à
  * l'autre.
  *
- * Mince par construction, sur le modèle exact d'`actions.ts` : valider (Zod) →
- * vérifier l'appartenance → laisser juger le module de règles → déléguer
- * l'écriture au DAL → republier et revalider. Aucune règle d'entraînement ici :
- * elles vivent toutes dans `lib/plan-calendar/move-rules.ts`, qui est pur et
- * testé.
+ * Mince par construction, sur le modèle exact des actions du plan
+ * (`plan/_lib/actions.ts`) : valider (Zod) → vérifier l'appartenance → laisser
+ * juger le module de règles → déléguer l'écriture au DAL → republier et
+ * revalider. Aucune règle d'entraînement ici : elles vivent toutes dans
+ * `lib/plan-calendar/move-rules.ts`, qui est pur et testé.
  *
  * Rappel de sécurité : une Server Action exportée est un endpoint public,
  * appelable par POST direct sans passer par l'écran. L'identifiant de séance et
@@ -21,6 +21,9 @@ import { revalidatePath } from 'next/cache';
 import { after } from 'next/server';
 import { z } from 'zod';
 
+// Les bornes du plan restent calculées par le plan lui-même : le calendrier les
+// affiche, il ne les redéfinit pas.
+import { planEndsOn } from '@/app/(app)/plan/_lib/plan-weeks';
 import { getCurrentAthleteId, todayCivilDate } from '@/data/athlete';
 import {
   InvalidPlanError,
@@ -35,8 +38,6 @@ import { getSession } from '@/data/session';
 import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import { judgeSessionMove, type MoveSession } from '@/lib/plan-calendar/move-rules';
-
-import { planEndsOn } from './plan-weeks';
 
 /**
  * État rendu au formulaire. Sérialisé vers le client : un statut, un message, et
@@ -65,8 +66,8 @@ function textField(formData: FormData, name: string): string {
 /**
  * Identifiant de séance, tel que l'écran le renvoie.
  *
- * Même motif que le `planIdSchema` d'`actions.ts`, et pour la même raison : un
- * entier positif écrit en base 10, jamais coercé — `z.coerce.number()`
+ * Même motif que le `planIdSchema` de `plan/_lib/actions.ts`, et pour la même
+ * raison : un entier positif écrit en base 10, jamais coercé — `z.coerce.number()`
  * accepterait `' '`, `'1e3'` ou `'0x1f'`. La vraie garde reste plus bas (la
  * séance doit appartenir au plan actif de l'athlète) ; ceci n'écarte que ce qui
  * n'est même pas un id.
@@ -110,10 +111,10 @@ function toMoveSession(session: PlanSessionDto): MoveSession {
 /**
  * Revalide sans jamais faire échouer l'action appelante.
  *
- * Même raison qu'en face (`actions.ts`) : `revalidatePath` re-rend la route côté
- * serveur et peut lever — survenant **après** une écriture commitée, l'exception
- * remonterait jusqu'à la frontière d'erreur, écran cassé pour un déplacement qui,
- * lui, a réussi.
+ * Même raison que dans les actions du plan (`plan/_lib/actions.ts`) :
+ * `revalidatePath` re-rend la route côté serveur et peut lever — survenant
+ * **après** une écriture commitée, l'exception remonterait jusqu'à la frontière
+ * d'erreur, écran cassé pour un déplacement qui, lui, a réussi.
  */
 function revalidateSafely(paths: readonly string[], context: string): void {
   for (const path of paths) {
@@ -209,9 +210,13 @@ export async function moveSessionAction(
   // rien à ce qu'elle va voir.
   after(() => syncPlanToIntervalsSafely('déplacement de séance', athleteId));
 
-  // Le tableau de bord affiche la séance du jour : elle vient peut-être de
-  // changer, dans un sens comme dans l'autre.
-  revalidateSafely(['/plan', '/'], 'déplacement de séance');
+  /*
+   * Trois écrans montrent cette séance : le calendrier d'où le geste est parti,
+   * le déroulé semaine par semaine du plan — qui l'a peut-être changée de
+   * semaine —, et le tableau de bord, dont la séance du jour vient peut-être
+   * d'apparaître ou de disparaître.
+   */
+  revalidateSafely(['/activities', '/plan', '/'], 'déplacement de séance');
 
   const warnings = verdict.warnings.map((warning) => warning.message);
   return {

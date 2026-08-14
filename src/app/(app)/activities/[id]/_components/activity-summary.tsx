@@ -41,7 +41,7 @@ export function ActivityHeader({ activity }: { activity: ActivitySummaryData }) 
         className="inline-flex items-center gap-0.5 rounded-button text-[0.75rem] text-fg-faint transition-colors duration-150 ease-out hover:text-accent"
       >
         <ChevronLeft aria-hidden="true" className="size-3.5" />
-        Activités
+        Calendrier
       </Link>
 
       <h1 className="mt-2 text-[1.6rem] leading-tight font-extrabold tracking-[-0.035em] text-fg sm:text-[1.9rem]">

@@ -14,13 +14,29 @@
  * déplacement optimiste.
  */
 
+/*
+ * Les libellés de séance et le total d'un déroulé restent chez le **plan** :
+ * c'est lui qui écrit ces séances, et deux définitions du volume d'une séance
+ * finiraient par diverger. Le calendrier, lui, ne fait que les afficher.
+ */
+import {
+  formatCivilDay,
+  formatDayNumber,
+  formatWeekdayShort,
+  ISO_DAY_LABELS,
+} from "@/app/(app)/plan/_lib/format-plan";
+import { planSessionTotals } from "@/app/(app)/plan/_lib/session-detail";
 import { APP_TIME_ZONE } from "@/config/time";
-import type { CalendarActivityDto, CalendarSessionDto } from "@/data/calendar";
+import type {
+  CalendarActivityDto,
+  CalendarDayWeatherDto,
+  CalendarSessionDto,
+} from "@/data/calendar";
 import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { sessionPaceZone } from "@/lib/ai/plan-schema";
 import { civilDateToMs, shiftCivilDate } from "@/lib/dates/civil";
 import { SESSION_KINDS } from "@/lib/plan-skeleton";
-import { resolveDayForecast } from "@/lib/weather/forecast-plan";
+import { resolveDayForecast, type DailyForecast } from "@/lib/weather/forecast-plan";
 import { describeWeatherCode, type WeatherIconName } from "@/lib/weather/wmo";
 
 import {
@@ -30,20 +46,15 @@ import {
   formatFullDate,
 } from "../../_lib/format";
 import {
+  ACTIVITY_WEATHER_ABSENCE,
   FORECAST_ABSENCE,
+  formatObservationHour,
   formatPercent,
   formatPrecipitation,
+  formatTemperature,
   formatTemperatureCompact,
   formatTemperatureRange,
 } from "../../_lib/format-weather";
-
-import {
-  formatCivilDay,
-  formatDayNumber,
-  formatWeekdayShort,
-  ISO_DAY_LABELS,
-} from "./format-plan";
-import { planSessionTotals } from "./session-detail";
 
 /**
  * Bornes du plan actif, telles que le calendrier les reçoit du DAL.
@@ -112,19 +123,21 @@ export type CalendarActivityView = {
 /**
  * La météo d'une case de calendrier.
  *
- * **Une icône et une température**, pas davantage : la place est comptée, et
- * une case de 50 px de large sur téléphone doit d'abord montrer la séance. Le
- * détail (ressenti, vent, cumul de pluie, date du relevé) vit sur la séance du
- * jour du tableau de bord, où il a la place d'être écrit proprement.
+ * **Une icône et une température**, pas davantage : la place est comptée, et une
+ * case de 50 px de large sur téléphone doit d'abord montrer la séance. Le détail
+ * (ressenti, vent, cumul de pluie, heure du relevé) vit sur la page de
+ * l'activité et sur la séance du jour du tableau de bord, où il a la place
+ * d'être écrit proprement.
  *
  * `label` porte la phrase entière — celle que lit un lecteur d'écran et celle
- * qu'affiche l'infobulle. C'est **toujours** une phrase : quand il n'y a pas de
- * prévision, elle dit pourquoi. Un blanc se lirait « beau temps ».
+ * qu'affiche l'infobulle. C'est **toujours** une phrase, et elle dit d'où elle
+ * vient : une mesure et une estimation ne se lisent pas pareil. Quand il n'y a
+ * ni l'une ni l'autre, elle dit pourquoi — un blanc se lirait « beau temps ».
  */
 export type CalendarDayWeather = {
-  /** `null` quand il n'y a pas de prévision : rien à dessiner, mais tout à dire. */
+  /** `null` quand il n'y a rien à afficher : rien à dessiner, mais tout à dire. */
   icon: WeatherIconName | null;
-  /** `25°` — la maximale du jour, ou `null` sans prévision. */
+  /** `25°` — la mesure du jour passé, la maximale prévue sinon. */
   temperature: string | null;
   label: string;
 };
@@ -146,11 +159,13 @@ export type CalendarDayView = {
   sessions: CalendarSessionView[];
   activities: CalendarActivityView[];
   /**
-   * Météo prévue, `null` quand la question ne se pose pas — c'est-à-dire quand
-   * aucune séance **à venir** ne tombe ce jour-là. Le calendrier reste un
-   * calendrier d'entraînement : une prévision sans séance à habiller serait du
-   * bruit, et une prévision sur une séance déjà courue serait un contresens
-   * (c'est alors la météo relevée de l'activité qui fait foi).
+   * La météo du jour : **relevée** quand il a été couru, **prévue** quand il est
+   * à venir (cf. {@link dayWeather}).
+   *
+   * `null` quand il n'y a ni l'une ni l'autre **et** que le jour est vide : un
+   * mois entier de tirets à quarante jours d'échéance ne dirait rien de plus
+   * qu'une case nue. Dès qu'un jour porte une séance ou une sortie, l'absence,
+   * elle, s'écrit et se justifie.
    */
   weather: CalendarDayWeather | null;
 };
@@ -282,39 +297,48 @@ export function formatMoveDetail(title: string, toDate: string): string {
   return `« ${title} » est passée au ${formatDayLabel(toDate)}.`;
 }
 
-/**
- * La météo d'une journée du calendrier.
- *
- * Rien n'est rendu tant qu'aucune séance à venir n'occupe le jour : c'est ce qui
- * garde la grille lisible, un mois entier de bulletins l'ayant transformée en
- * autre chose.
- */
-export function dayWeather(input: {
-  date: string;
-  today: string;
-  sessions: readonly CalendarSessionView[];
-  forecast: WeatherForecastDto;
-}): CalendarDayWeather | null {
-  if (!input.sessions.some((session) => session.state === "upcoming")) return null;
+/** Une absence : pas d'icône, pas de valeur, mais une phrase qui la justifie. */
+function weatherAbsence(label: string): CalendarDayWeather {
+  return { icon: null, temperature: null, label };
+}
 
-  const resolved = resolveDayForecast({
-    status: input.forecast.status,
-    days: input.forecast.days,
-    date: input.date,
-    today: input.today,
-  });
+/** Ce qu'a donné le relevé d'une sortie du jour. */
+function observedWeather(observation: CalendarDayWeatherDto): CalendarDayWeather {
+  const condition = describeWeatherCode(observation.weatherCode);
+  const measured =
+    observation.temperatureC === null
+      ? condition.label
+      : `${condition.label}, ${formatTemperature(observation.temperatureC)}`;
+  /*
+   * L'heure du relevé plutôt que le jour : le jour, c'est la case elle-même. Et
+   * c'est elle qui dit que la phrase est une **mesure** — la prévision, en face,
+   * s'annonce « Météo prévue ». Le repli n'arrive pas en pratique (un relevé
+   * `observed` porte toujours son heure, cf. `ActivityWeatherDto`) mais il ne
+   * doit pas laisser une observation passer pour un bulletin.
+   */
+  const reading =
+    observation.observedAt === null
+      ? "Météo relevée"
+      : formatObservationHour(observation.observedAt);
 
-  if (resolved.day === null) {
-    return { icon: null, temperature: null, label: FORECAST_ABSENCE[resolved.availability] };
-  }
+  return {
+    icon: condition.icon,
+    temperature:
+      observation.temperatureC === null
+        ? null
+        : formatTemperatureCompact(observation.temperatureC),
+    label: `${measured}. ${reading}.`,
+  };
+}
 
-  const { day } = resolved;
+/** Ce qu'annonce la prévision d'un jour à venir. */
+function forecastWeather(day: DailyForecast): CalendarDayWeather {
   const condition = describeWeatherCode(day.weatherCode);
 
   const sentences = [
     day.temperatureMinC === null || day.temperatureMaxC === null
-      ? condition.label
-      : `${condition.label}, ${formatTemperatureRange(day.temperatureMinC, day.temperatureMaxC)}`,
+      ? `Météo prévue : ${condition.label}`
+      : `Météo prévue : ${condition.label}, ${formatTemperatureRange(day.temperatureMinC, day.temperatureMaxC)}`,
   ];
 
   // « du jour », toujours : c'est un cumul de journée, pas la pluie qui tombera
@@ -338,6 +362,82 @@ export function dayWeather(input: {
   };
 }
 
+/**
+ * La météo d'une journée du calendrier — **une mesure, une estimation, ou une
+ * raison de n'avoir ni l'une ni l'autre**.
+ *
+ * L'ordre est celui de la certitude, et il vaut pour tous les jours :
+ *
+ * 1. **le relevé de la sortie du jour**, s'il a mesuré quelque chose. C'est une
+ *    observation : elle bat n'importe quelle estimation du même jour, y compris
+ *    celle d'aujourd'hui — le temps qu'il a fait pendant la séance n'est plus
+ *    une question ouverte ;
+ * 2. **la prévision**, pour aujourd'hui et les jours suivants, dans la limite
+ *    des seize jours d'Open-Meteo. Un tapis de course ce matin ne doit pas
+ *    effacer le bulletin de la séance de ce soir : c'est pourquoi un relevé sans
+ *    mesure ne court-circuite pas cette étape sur un jour non passé ;
+ * 3. **l'absence, et son motif**, dans le vocabulaire qui existe déjà —
+ *    `ACTIVITY_WEATHER_ABSENCE` pour un relevé qui n'a rien pu mesurer,
+ *    `FORECAST_ABSENCE` pour le reste (au-delà de l'horizon, relevé du matin en
+ *    panne, jour passé sans sortie).
+ *
+ * Une seule exception au « toujours une phrase » : un jour **vide** dont on n'a
+ * rien à dire ne rend rien du tout ({@link CalendarDayView.weather}). C'est ce
+ * qui garde la grille lisible — quarante cases barrées d'un tiret ne
+ * l'informeraient de rien.
+ */
+export function dayWeather(input: DayWeatherInput): CalendarDayWeather | null {
+  const { observation } = input;
+
+  if (observation !== null) {
+    if (observation.status === "observed") return observedWeather(observation);
+
+    // Un relevé qui n'a rien pu mesurer ne dit rien du jour **à venir** : un
+    // tapis de course ce matin n'efface pas le bulletin de ce soir.
+    if (!isPast(input)) return upcomingWeather(input);
+
+    return input.hasContent
+      ? weatherAbsence(ACTIVITY_WEATHER_ABSENCE[observation.status])
+      : null;
+  }
+
+  if (!isPast(input)) return upcomingWeather(input);
+
+  return input.hasContent ? weatherAbsence(FORECAST_ABSENCE.past) : null;
+}
+
+type DayWeatherInput = {
+  date: string;
+  today: string;
+  /** Le jour porte-t-il une séance ou une sortie ? */
+  hasContent: boolean;
+  /** Le relevé retenu pour ce jour, `null` si l'athlète n'y a pas couru. */
+  observation: CalendarDayWeatherDto | null;
+  forecast: WeatherForecastDto;
+};
+
+/**
+ * Comparaison lexicographique : sur des dates civiles `YYYY-MM-DD` bien formées,
+ * elle coïncide avec l'ordre chronologique. Aujourd'hui n'est **pas** passé —
+ * la journée n'est pas finie, et le bulletin la couvre encore.
+ */
+function isPast(input: { date: string; today: string }): boolean {
+  return input.date < input.today;
+}
+
+/** Le bulletin du jour, ou la raison de ne pas en avoir. */
+function upcomingWeather(input: DayWeatherInput): CalendarDayWeather | null {
+  const resolved = resolveDayForecast({
+    status: input.forecast.status,
+    days: input.forecast.days,
+    date: input.date,
+    today: input.today,
+  });
+
+  if (resolved.day !== null) return forecastWeather(resolved.day);
+  return input.hasContent ? weatherAbsence(FORECAST_ABSENCE[resolved.availability]) : null;
+}
+
 export type BuildCalendarMonthInput = {
   /** Premier jour de la grille — un lundi (cf. `monthGridRange`). */
   from: string;
@@ -355,6 +455,11 @@ export type BuildCalendarMonthInput = {
    * pas, et rien de superflu ne doit franchir la frontière client.
    */
   activities: readonly CalendarActivityView[];
+  /**
+   * La météo **relevée** des jours courus, au plus une par jour (le DAL a déjà
+   * tranché entre deux sorties d'une même journée).
+   */
+  weather: readonly CalendarDayWeatherDto[];
   /**
    * Le relevé de prévisions du matin, tel que le DAL le rend — au plus seize
    * jours, aucune coordonnée.
@@ -394,6 +499,9 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
     else bucket.push(view);
   }
 
+  const weatherByDay = new Map<string, CalendarDayWeatherDto>();
+  for (const observation of input.weather) weatherByDay.set(observation.date, observation);
+
   const weeks: CalendarWeekView[] = [];
 
   for (let weekStart = from; weekStart <= to; weekStart = shiftCivilDate(weekStart, 7)) {
@@ -404,6 +512,7 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
     for (let offset = 0; offset < 7; offset += 1) {
       const date = shiftCivilDate(weekStart, offset);
       const sessions = sessionsByDay.get(date) ?? [];
+      const activities = activitiesByDay.get(date) ?? [];
 
       const dayVolumeM = volumeByDay.get(date);
       if (dayVolumeM !== undefined) volumeM = (volumeM ?? 0) + dayVolumeM;
@@ -420,8 +529,14 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
         // Ordre stable : deux séances d'un même jour ne doivent pas permuter
         // d'un rendu à l'autre.
         sessions: [...sessions].sort((left, right) => left.id - right.id),
-        activities: activitiesByDay.get(date) ?? [],
-        weather: dayWeather({ date, today, sessions, forecast: input.forecast }),
+        activities,
+        weather: dayWeather({
+          date,
+          today,
+          hasContent: sessions.length > 0 || activities.length > 0,
+          observation: weatherByDay.get(date) ?? null,
+          forecast: input.forecast,
+        }),
       });
     }
 

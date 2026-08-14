@@ -27,7 +27,7 @@ import { Undo2 } from "lucide-react";
 
 import { Banner } from "@/components/banner";
 import { Button } from "@/components/ui/button";
-import type { CalendarSessionDto } from "@/data/calendar";
+import type { CalendarDayWeatherDto, CalendarSessionDto } from "@/data/calendar";
 import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { judgeSessionMove, type MoveSession } from "@/lib/plan-calendar/move-rules";
 import { cn } from "@/lib/utils";
@@ -95,7 +95,7 @@ import { CalendarSessionDraggable } from "./calendar-session-draggable";
  *    sans risque : un dépôt raté se défait d'un bouton.
  */
 
-export type PlanCalendarProps = {
+export type TrainingCalendarProps = {
   /** Mois mis en avant, `YYYY-MM`. */
   month: string;
   /** Premier et dernier jour de la grille (semaines ISO entières). */
@@ -109,6 +109,11 @@ export type PlanCalendarProps = {
    * l'allure moyenne, dont cet écran ne fait rien.
    */
   activities: CalendarActivityView[];
+  /**
+   * La météo **relevée** des jours courus de la plage — au plus une par jour,
+   * le DAL ayant déjà tranché entre deux sorties d'une même journée.
+   */
+  weather: CalendarDayWeatherDto[];
   /**
    * Le relevé de prévisions du matin — seize jours au plus, et **aucune
    * coordonnée** : le DAL les exclut de son DTO, elles n'ont rien à faire dans
@@ -238,15 +243,16 @@ function usePrefersReducedMotion(): boolean {
   );
 }
 
-export function PlanCalendar({
+export function TrainingCalendar({
   month,
   range,
   today,
   plan,
   sessions,
   activities,
+  weather,
   forecast,
-}: PlanCalendarProps) {
+}: TrainingCalendarProps) {
   const [visibleSessions, applyMove] = useOptimistic(
     sessions,
     (current: readonly CalendarSessionDto[], move: { id: number; date: string }) =>
@@ -301,9 +307,10 @@ export function PlanCalendar({
         plan,
         sessions: visibleSessions,
         activities,
+        weather,
         forecast,
       }),
-    [range.from, range.to, month, today, plan, visibleSessions, activities, forecast],
+    [range.from, range.to, month, today, plan, visibleSessions, activities, weather, forecast],
   );
 
   const sessionViews = useMemo(() => {

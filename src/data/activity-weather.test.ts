@@ -6,6 +6,7 @@ import {
   getActivityWeather,
   getWeatherLookupTarget,
   listActivitiesAwaitingWeather,
+  listWeatherObservations,
   saveActivityWeather,
 } from './activity-weather';
 
@@ -189,6 +190,42 @@ describe('getActivityWeather', () => {
       'weatherCode',
       'windDirectionDeg',
       'windSpeedKmh',
+    ]);
+  });
+});
+
+describe('listWeatherObservations', () => {
+  it('confronte les sorties à l’athlète reçu, et borne la plage sur les instants', async () => {
+    const oldest = new Date('2026-07-26T00:00:00Z');
+    const newest = new Date('2026-09-08T00:00:00Z');
+
+    await listWeatherObservations(7, oldest, newest);
+
+    const query = dbState.queries[0];
+    expect(query?.table).toBe('activity_weather');
+    // L'appartenance vit dans la jointure : `activity_weather` n'a pas de
+    // colonne `athlete_id`, c'est son activité qui porte le propriétaire.
+    expect(render(query?.join).params).toEqual([7]);
+    // Drizzle sérialise les bornes `timestamptz` avant de les passer au pilote.
+    expect(render(query?.where).params).toEqual([oldest.toISOString(), newest.toISOString()]);
+  });
+
+  it('rend les relevés tels quels — l’instant de départ, pas un jour civil', async () => {
+    const startedAt = new Date('2026-08-11T16:00:00Z');
+    dbState.rows.activity_weather = [
+      {
+        startedAt,
+        status: 'observed',
+        temperatureC: 21.4,
+        weatherCode: 3,
+        observedAt: startedAt,
+      },
+    ];
+
+    await expect(
+      listWeatherObservations(7, new Date('2026-08-01T00:00:00Z'), new Date('2026-08-31T00:00:00Z')),
+    ).resolves.toEqual([
+      { startedAt, status: 'observed', temperatureC: 21.4, weatherCode: 3, observedAt: startedAt },
     ]);
   });
 });

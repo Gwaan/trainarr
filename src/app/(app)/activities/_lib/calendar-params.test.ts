@@ -1,25 +1,25 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  activitiesHref,
   civilMonth,
   monthGridRange,
   parseMonthParam,
-  parsePlanViewParam,
-  planHref,
+  parseViewParam,
   shiftMonth,
 } from './calendar-params';
 
-describe('parsePlanViewParam', () => {
+describe('parseViewParam', () => {
   it('reconnaît les deux vues', () => {
-    expect(parsePlanViewParam('calendrier')).toBe('calendrier');
-    expect(parsePlanViewParam('liste')).toBe('liste');
+    expect(parseViewParam('calendrier')).toBe('calendrier');
+    expect(parseViewParam('liste')).toBe('liste');
   });
 
   it('retombe sur le calendrier pour tout le reste', () => {
-    expect(parsePlanViewParam(undefined)).toBe('calendrier');
-    expect(parsePlanViewParam('grille')).toBe('calendrier');
-    expect(parsePlanViewParam(['liste', 'calendrier'])).toBe('calendrier');
-    expect(parsePlanViewParam(42)).toBe('calendrier');
+    expect(parseViewParam(undefined)).toBe('calendrier');
+    expect(parseViewParam('grille')).toBe('calendrier');
+    expect(parseViewParam(['liste', 'calendrier'])).toBe('calendrier');
+    expect(parseViewParam(42)).toBe('calendrier');
   });
 });
 
@@ -92,24 +92,45 @@ describe('monthGridRange', () => {
   });
 });
 
-describe('planHref', () => {
+describe('activitiesHref', () => {
   const current = '2026-08';
 
   it('ne porte aucun paramètre sur la vue et le mois par défaut', () => {
-    expect(planHref({ view: 'calendrier', month: current }, current)).toBe('/plan');
+    expect(activitiesHref({ view: 'calendrier', month: current }, current)).toBe('/activities');
   });
 
   it('nomme la vue liste', () => {
-    expect(planHref({ view: 'liste', month: current }, current)).toBe('/plan?vue=liste');
+    expect(activitiesHref({ view: 'liste', month: current }, current)).toBe(
+      '/activities?vue=liste',
+    );
   });
 
   it('nomme un autre mois', () => {
-    expect(planHref({ view: 'calendrier', month: '2026-09' }, current)).toBe('/plan?mois=2026-09');
+    expect(activitiesHref({ view: 'calendrier', month: '2026-09' }, current)).toBe(
+      '/activities?mois=2026-09',
+    );
   });
 
   it('conserve le mois quand on bascule vers la liste', () => {
-    expect(planHref({ view: 'liste', month: '2026-09' }, current)).toBe(
-      '/plan?vue=liste&mois=2026-09',
+    expect(activitiesHref({ view: 'liste', month: '2026-09' }, current)).toBe(
+      '/activities?vue=liste&mois=2026-09',
+    );
+  });
+
+  it('nomme la page au-delà de la première', () => {
+    expect(activitiesHref({ view: 'liste', month: current, page: 4 }, current)).toBe(
+      '/activities?vue=liste&page=4',
+    );
+    expect(activitiesHref({ view: 'liste', month: current, page: 1 }, current)).toBe(
+      '/activities?vue=liste',
+    );
+  });
+
+  it("ne traîne pas un rang de page jusque dans le calendrier", () => {
+    // Une page appartient à la liste qu'on quitte : la reporter sur la grille
+    // ramènerait ensuite à une page que personne n'a demandée.
+    expect(activitiesHref({ view: 'calendrier', month: current, page: 4 }, current)).toBe(
+      '/activities',
     );
   });
 });

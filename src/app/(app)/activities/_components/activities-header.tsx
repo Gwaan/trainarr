@@ -20,8 +20,9 @@ import {
 } from "../_lib/fit-upload-summary";
 
 /**
- * En-tête de la page « Activités », porteur de l'import de fichiers FIT — le
- * seul canal d'entrée des données.
+ * En-tête de l'onglet « Calendrier », porteur de l'import de fichiers FIT — le
+ * seul canal d'entrée manuel des données. Il coiffe les deux vues : la grille du
+ * mois comme l'historique paginé.
  *
  * L'en-tête est un composant client parce que le bouton d'import, la zone de
  * dépôt, le récapitulatif et l'état d'accueil partagent le même état et le même

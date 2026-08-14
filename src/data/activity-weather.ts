@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, desc, eq, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
 
 import {
   RETRY_DELAYS_MS,
@@ -106,6 +106,65 @@ export async function getActivityWeather(activityId: number): Promise<ActivityWe
     .limit(1);
 
   return rows[0] ?? null;
+}
+
+/**
+ * Une sortie de la plage et sa météo relevée — ce que le **calendrier** lit.
+ *
+ * L'instant de départ est rendu tel quel : c'est le calendrier qui range les
+ * sorties par jour civil, dans le fuseau de l'athlète, exactement comme il le
+ * fait déjà des activités elles-mêmes (`./calendar.ts`). Une conversion en base
+ * dupliquerait ce découpage à un endroit de plus.
+ *
+ * DTO minimal, comme {@link ActivityWeatherDto} : de quoi dessiner une icône,
+ * écrire une température et dater le relevé. Ni coordonnées, ni mécanique de
+ * service — et pas non plus l'identifiant de l'activité, dont une case de
+ * calendrier ne fait rien (la pastille de la sortie porte déjà son lien).
+ */
+export type ActivityWeatherObservation = {
+  startedAt: Date;
+  status: ActivityWeatherStatus;
+  temperatureC: number | null;
+  /** Code temps WMO 4677. */
+  weatherCode: number | null;
+  /** Heure horaire retenue par Open-Meteo. `null` hors `observed`. */
+  observedAt: Date | null;
+};
+
+/**
+ * Les relevés des sorties **de cet athlète** parties entre `oldest` et `newest`,
+ * du plus ancien au plus récent.
+ *
+ * Bornes en **instants**, pas en jours civils : c'est l'appelant qui découpe en
+ * jours, et lui seul connaît la marge à prendre autour de sa plage (cf.
+ * `ACTIVITY_QUERY_MARGIN_DAYS` dans `./calendar.ts`). Les statuts d'échec sont
+ * rendus au même titre que les succès : « séance en intérieur » est une réponse,
+ * et l'écran doit pouvoir la distinguer d'un jour sans sortie.
+ *
+ * L'athlète est un **paramètre** : cette lecture sert le calendrier, dont le DAL
+ * a déjà résolu la session, et la jointure sur `activities` porte seule
+ * l'appartenance (la table météo n'a pas de colonne `athlete_id`).
+ */
+export async function listWeatherObservations(
+  athleteId: number,
+  oldest: Date,
+  newest: Date,
+): Promise<ActivityWeatherObservation[]> {
+  return db
+    .select({
+      startedAt: activities.startedAt,
+      status: activityWeather.status,
+      temperatureC: activityWeather.temperatureC,
+      weatherCode: activityWeather.weatherCode,
+      observedAt: activityWeather.observedAt,
+    })
+    .from(activityWeather)
+    .innerJoin(
+      activities,
+      and(eq(activities.id, activityWeather.activityId), eq(activities.athleteId, athleteId)),
+    )
+    .where(and(gte(activities.startedAt, oldest), lte(activities.startedAt, newest)))
+    .orderBy(asc(activities.startedAt));
 }
 
 /*

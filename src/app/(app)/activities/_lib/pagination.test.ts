@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  activitiesHref,
   formatWeekSpan,
   MAX_PAGE,
   pageOffset,
@@ -56,16 +55,6 @@ describe("pageOffset", () => {
     // Le plafond de l'URL et celui du DAL doivent rester d'accord : sinon une
     // page atteignable par un lien serait ramenée ailleurs par la requête.
     expect(pageOffset(MAX_PAGE)).toBeLessThanOrEqual(1_600);
-  });
-});
-
-describe("activitiesHref", () => {
-  it("laisse l'URL nue sur la première page", () => {
-    expect(activitiesHref(1)).toBe("/activities");
-  });
-
-  it("porte le rang au-delà", () => {
-    expect(activitiesHref(4)).toBe("/activities?page=4");
   });
 });
 
