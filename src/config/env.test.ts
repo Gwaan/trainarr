@@ -19,6 +19,8 @@ describe('parseEnv — cas nominal', () => {
     expect(env.AI_API_KEY).toBeUndefined();
     expect(env.WEBDAV_USERNAME).toBeUndefined();
     expect(env.WEBDAV_PASSWORD).toBeUndefined();
+    // Sans secret, l'authentification est inopérante — mais l'appli démarre.
+    expect(env.BETTER_AUTH_SECRET).toBeUndefined();
     // Sans identifiant d'athlète ni clé, le poller intervals.icu reste inactif.
     expect(env.INTERVALS_ATHLETE_ID).toBeUndefined();
     expect(env.INTERVALS_API_KEY).toBeUndefined();
@@ -43,6 +45,16 @@ describe('parseEnv — cas nominal', () => {
     }
   });
 
+  it('ne juge pas la longueur du secret better-auth', () => {
+    // Même parti pris que pour INTERVALS_ATHLETE_ID : un secret trop court doit
+    // désactiver la seule authentification (c'est `planAuthActivation` qui le
+    // refuse, avec son diagnostic), jamais empêcher l'application de démarrer.
+    expect(
+      parseEnv({ DATABASE_URL: VALID_DATABASE_URL, BETTER_AUTH_SECRET: 'trop-court' })
+        .BETTER_AUTH_SECRET,
+    ).toBe('trop-court');
+  });
+
   it('accepte une configuration complète', () => {
     const env = parseEnv({
       DATABASE_URL: VALID_DATABASE_URL,
@@ -54,6 +66,7 @@ describe('parseEnv — cas nominal', () => {
       FIT_INBOX_DIR: '/tmp/fit',
       WEBDAV_USERNAME: 'gwen',
       WEBDAV_PASSWORD: 'mot-de-passe-de-test',
+      BETTER_AUTH_SECRET: 'un-secret-de-test-suffisamment-long-pour-passer',
     });
 
     expect(env.AI_PROVIDER).toBe('anthropic');
@@ -61,6 +74,7 @@ describe('parseEnv — cas nominal', () => {
     expect(env.APP_BASE_URL).toBe('https://exemple.test');
     expect(env.FIT_INBOX_DIR).toBe('/tmp/fit');
     expect(env.WEBDAV_USERNAME).toBe('gwen');
+    expect(env.BETTER_AUTH_SECRET).toBe('un-secret-de-test-suffisamment-long-pour-passer');
   });
 
   it('traite une variable définie mais vide comme absente', () => {

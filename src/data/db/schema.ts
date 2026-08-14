@@ -576,6 +576,155 @@ export const coachMessages = pgTable(
   ],
 );
 
+/* =========================================================================
+ * Authentification (better-auth)
+ *
+ * Les quatre tables que better-auth attend, dérivées de `getAuthTables()`
+ * (@better-auth/core/db) — sa source de vérité, celle que sa CLI utilise elle
+ * aussi pour générer un schéma. Une colonne manquante ou d'un autre type ne se
+ * verrait pas à la compilation : elle casserait à la première connexion.
+ *
+ * **Préfixe `auth_` sur les quatre noms de tables.** Deux raisons : `user` est
+ * un mot réservé SQL (toute requête écrite à la main devrait le mettre entre
+ * guillemets), et `session` comme `account` sont des noms trop génériques à
+ * côté d'`athlete` — le préfixe dit d'un coup d'œil qui possède ces tables.
+ * better-auth n'en sait rien et n'a pas à le savoir : ses noms de modèles
+ * restent `user`/`session`/`account`/`verification`, la correspondance vers ces
+ * tables-ci se fait dans `auth-adapter.ts`.
+ *
+ * En revanche les **clés TypeScript des colonnes gardent le nom de champ exact
+ * de better-auth** (`emailVerified`, `expiresAt`, `userId`…) : l'adaptateur
+ * Drizzle indexe la table par ce nom-là (`table[fieldName]`). Seul le nom de
+ * colonne en base est libre, d'où le snake_case habituel du fichier.
+ * ========================================================================= */
+
+/**
+ * Un compte capable de se connecter.
+ *
+ * `emailVerified` est conservée bien qu'aucun e-mail ne parte d'ici (appli
+ * auto-hébergée, pas de serveur SMTP) : better-auth l'écrit à chaque création
+ * de compte, elle ne peut pas être omise.
+ */
+export const authUsers = pgTable(
+  'auth_users',
+  {
+    /** Identifiant opaque généré par better-auth (chaîne aléatoire), pas un serial. */
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    email: text('email').notNull().unique(),
+    emailVerified: boolean('email_verified').notNull().default(false),
+    /** URL d'avatar — inutilisée ici, mais écrite par better-auth. */
+    image: text('image'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    /**
+     * Marque le compte créé par la porte d'amorçage — celle qui n'est ouverte
+     * que tant qu'aucun compte n'existe (cf. `src/lib/auth/`).
+     *
+     * Elle n'existe que pour l'index partiel ci-dessous : c'est lui qui ferme
+     * la course entre deux inscriptions simultanées sur une base vide. Un
+     * simple « compter les comptes puis insérer » ne la voit pas venir — en
+     * `READ COMMITTED`, les deux requêtes comptent zéro. Ici, les deux
+     * insertions portent `true`, et la base n'en accepte qu'une (`23505`).
+     *
+     * Nullable et jamais lue par l'application : les comptes créés plus tard
+     * (invitations, étape 4) la laissent vide.
+     */
+    isFirstAccount: boolean('is_first_account'),
+  },
+  (table) => [
+    /**
+     * Index partiel : seules les lignes à `true` y entrent, et elles y portent
+     * toutes la même clé. Le second compte d'amorçage est donc rejeté par la
+     * base, pas par une lecture préalable. Rien n'est consommé au passage — une
+     * inscription qui échoue ne laisse aucune trace et la porte reste ouverte.
+     */
+    uniqueIndex('auth_users_first_account_unique')
+      .on(table.isFirstAccount)
+      .where(sql`${table.isFirstAccount}`),
+  ],
+);
+
+/**
+ * Une session ouverte. `token` est le secret présenté par le cookie : il est
+ * unique, et c'est par lui que se fait la lecture à chaque requête.
+ */
+export const authSessions = pgTable(
+  'auth_sessions',
+  {
+    id: text('id').primaryKey(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    token: text('token').notNull().unique(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    /** Traçabilité d'une session ouverte, renseignée par better-auth. */
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    userId: text('user_id')
+      .notNull()
+      .references(() => authUsers.id, { onDelete: 'cascade' }),
+  },
+  (table) => [
+    /** Révoquer les sessions d'un compte, et les lister : deux lectures par `user_id`. */
+    index('auth_sessions_user_id_idx').on(table.userId),
+  ],
+);
+
+/**
+ * Le moyen de connexion rattaché à un compte.
+ *
+ * Une seule ligne par compte ici, avec `provider_id = 'credential'` : c'est là
+ * que vit le **hachage** du mot de passe (`password`), jamais dans `auth_users`.
+ * Les colonnes de jetons OAuth restent vides — aucun fournisseur externe n'est
+ * configuré (appli auto-hébergée) — mais better-auth les écrit le cas échéant.
+ */
+export const authAccounts = pgTable(
+  'auth_accounts',
+  {
+    id: text('id').primaryKey(),
+    accountId: text('account_id').notNull(),
+    providerId: text('provider_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => authUsers.id, { onDelete: 'cascade' }),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    idToken: text('id_token'),
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
+    scope: text('scope'),
+    /** Hachage scrypt du mot de passe — jamais le mot de passe lui-même. */
+    password: text('password'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /** Lecture systématique à la connexion : « les moyens d'accès de ce compte ». */
+    index('auth_accounts_user_id_idx').on(table.userId),
+  ],
+);
+
+/**
+ * Jetons à usage unique et à durée de vie courte (vérification d'e-mail,
+ * réinitialisation de mot de passe). Table vide en pratique tant qu'aucun envoi
+ * d'e-mail n'est configuré, mais better-auth l'exige dans son schéma.
+ */
+export const authVerifications = pgTable(
+  'auth_verifications',
+  {
+    id: text('id').primaryKey(),
+    identifier: text('identifier').notNull(),
+    value: text('value').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /** Un jeton se retrouve par son `identifier`, jamais par son id. */
+    index('auth_verifications_identifier_idx').on(table.identifier),
+  ],
+);
+
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
@@ -597,3 +746,6 @@ export type NewActivityFeedback = InferInsertModel<typeof activityFeedbacks>;
 
 export type CoachMessage = InferSelectModel<typeof coachMessages>;
 export type NewCoachMessage = InferInsertModel<typeof coachMessages>;
+
+export type AuthUser = InferSelectModel<typeof authUsers>;
+export type NewAuthUser = InferInsertModel<typeof authUsers>;

@@ -50,6 +50,19 @@ const envSchema = z.object({
   INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(60),
   INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
 
+  // Secret de signature des sessions et des jetons (better-auth, cf. src/lib/auth/).
+  //
+  // **Facultative**, comme INTERVALS_API_KEY : absente, l'authentification est
+  // inopérante (l'écran de connexion le dit, la route /api/auth répond 503) mais
+  // l'application démarre et sert ses pages. Un secret manquant ne doit pas
+  // couper une installation entière — le déploiement est automatique au push.
+  //
+  // Sa LONGUEUR n'est volontairement pas validée ici, pour la même raison que
+  // le format d'INTERVALS_ATHLETE_ID : un secret trop court doit désactiver la
+  // seule authentification, jamais empêcher le démarrage. Le seuil et son
+  // diagnostic vivent dans `resolveAuthConfig` (src/lib/auth/config.ts).
+  BETTER_AUTH_SECRET: z.string().min(1).optional(),
+
   // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).
   // Optionnels, mais tant que les deux ne sont pas renseignés le dépôt répond
   // 503 : il n'existe pas d'état « ouvert sans authentification ».
