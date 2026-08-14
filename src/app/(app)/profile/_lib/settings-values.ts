@@ -12,6 +12,7 @@
  */
 
 import type { MaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
+import type { RestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 
 import type { ProfileFormValues } from './form-values';
 import type { IntervalsFormDefaults } from './intervals-values';
@@ -27,6 +28,13 @@ export type SettingsSectionsData = {
    * du DAL, un seul composant (`(app)/_components/max-hr-suggestion-card.tsx`).
    */
   maxHrSuggestion: MaxHrSuggestionView | null;
+  /**
+   * La médiane de FC de repos des quatorze derniers jours, quand elle s'écarte
+   * de celle du profil et n'a pas été écartée. `null` le reste du temps.
+   * Indépendante de la précédente : les deux encarts peuvent se montrer
+   * ensemble, sous le même champ « Fréquence cardiaque ».
+   */
+  restingHrSuggestion: RestingHrSuggestionView | null;
   intervals: IntervalsFormDefaults;
   /**
    * Le **nom** du lieu fixé pour les prévisions, `null` en mode automatique.

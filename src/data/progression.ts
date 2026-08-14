@@ -17,6 +17,7 @@ import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, type Activity } from './db/schema';
+import { listWellnessDays, type WellnessDayDto } from './wellness';
 import {
   VO2MAX_WINDOW_DAYS,
   buildDailyTrimp,
@@ -132,7 +133,30 @@ export type ProgressionDto = {
    * couvre les deux.
    */
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /**
+   * Les tendances de bien-être, sur une fenêtre **fixe** de
+   * {@link WELLNESS_TREND_DAYS} jours.
+   *
+   * Indépendante du filtre de période, comme l'instantané en tête de page, et
+   * pour la même raison : ces mesures se lisent sur quelques semaines — au-delà,
+   * une HRV d'il y a six mois ne dit plus rien de la forme d'aujourd'hui, et une
+   * courbe d'un an écraserait la seule variation qui compte. La fenêtre est
+   * annoncée à l'écran, elle ne se devine pas.
+   *
+   * Les journées sont rendues telles quelles, trous compris : c'est le panneau
+   * qui décide quoi faire d'une nuit sans mesure, et il le dit.
+   */
+  wellness: { from: string; to: string; days: WellnessDayDto[] };
 };
+
+/**
+ * Fenêtre des tendances de bien-être : trente jours, aujourd'hui compris.
+ *
+ * Un mois, parce que c'est l'horizon sur lequel une HRV ou une FC de repos se
+ * lisent : assez pour qu'une tendance se dessine au-delà du bruit d'une nuit,
+ * assez court pour qu'un changement récent se voie encore.
+ */
+export const WELLNESS_TREND_DAYS = 30;
 
 /**
  * Étendue de chaque période, en jours révolus avant aujourd'hui. Des jours et
@@ -378,6 +402,8 @@ function emptyProgression(range: ProgressionRange, today: string): ProgressionDt
     // Sans athlète, il n'y a pas de cause à expliquer : c'est l'onboarding qui parle.
     fitnessUnavailable: null,
     vo2maxUnavailable: null,
+    // Sans athlète, aucun relevé bien-être n'a jamais été rapatrié.
+    wellness: { from: today, to: today, days: [] },
   };
 }
 
@@ -411,11 +437,16 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
   const today = toCivilDate(new Date());
   if (!profile) return emptyProgression(range, today);
 
-  const rows = await db
-    .select()
-    .from(activities)
-    .where(eq(activities.athleteId, profile.id))
-    .orderBy(desc(activities.startedAt));
+  const wellnessFrom = shiftCivilDate(today, -(WELLNESS_TREND_DAYS - 1));
+
+  const [rows, wellnessRows] = await Promise.all([
+    db
+      .select()
+      .from(activities)
+      .where(eq(activities.athleteId, profile.id))
+      .orderBy(desc(activities.startedAt)),
+    listWellnessDays(profile.id, wellnessFrom, today),
+  ]);
 
   const daily = buildDailyTrimp(rows, profile, today);
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
@@ -456,5 +487,6 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
     vo2maxUnavailable: currentVo2max
       ? null
       : buildVo2maxUnavailable(rows, profile, today),
+    wellness: { from: wellnessFrom, to: today, days: wellnessRows },
   };
 }

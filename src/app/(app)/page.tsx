@@ -12,10 +12,13 @@ import { MaxHrSuggestionCard } from "./_components/max-hr-suggestion-card";
 import { OnboardingCard } from "./_components/onboarding-card";
 import { PlanRevisionCard } from "./_components/plan-revision-card";
 import { RecentActivitiesPanel } from "./_components/recent-activities-panel";
+import { RestingHrSuggestionCard } from "./_components/resting-hr-suggestion-card";
 import { TodaySessionPanel } from "./_components/today-session-panel";
 import { TrainingLoadPanel } from "./_components/training-load-panel";
 import { capitalize, formatFullDate } from "./_lib/format";
 import { toMaxHrSuggestionView } from "./_lib/max-hr-suggestion";
+import { toRestingHrSuggestionView } from "./_lib/resting-hr-suggestion";
+import { toWellnessTileView } from "./_lib/wellness-view";
 
 /**
  * Contenu du tableau de bord.
@@ -38,6 +41,7 @@ async function DashboardContent() {
   // Aucun nom d'athlète = aucun profil en base : l'installation est neuve.
   const hasProfile = summary.athleteName !== null;
   const maxHrSuggestion = toMaxHrSuggestionView(summary.maxHrSuggestion);
+  const restingHrSuggestion = toRestingHrSuggestionView(summary.restingHrSuggestion);
 
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
@@ -61,6 +65,19 @@ async function DashboardContent() {
         <MaxHrSuggestionCard suggestion={maxHrSuggestion} emphasis="accent" />
       )}
 
+      {/* Les deux propositions cardiaques peuvent coexister, et elles s'empilent
+          alors dans cet ordre. **Un seul CTA accent par écran** : c'est la FC max
+          qui le garde quand les deux sont là, parce qu'elle est la plus lourde de
+          conséquences (elle redéfinit à elle seule les zones, la VO₂max et le
+          TRIMP de tout l'historique, là où la FC de repos ne déplace que le
+          plancher de la réserve). Seule, la FC de repos le prend. */}
+      {restingHrSuggestion === null ? null : (
+        <RestingHrSuggestionCard
+          suggestion={restingHrSuggestion}
+          emphasis={maxHrSuggestion === null ? "accent" : "secondary"}
+        />
+      )}
+
       {/* La réévaluation de plan que le coach propose, à la même place et pour
           la même raison : c'est un état qui appelle une décision, et le tableau
           de bord est le seul écran qu'on ouvre sans rien chercher. Elle ne
@@ -75,6 +92,10 @@ async function DashboardContent() {
         fitnessUnavailable={summary.fitnessUnavailable}
         vo2max={summary.vo2max}
         vo2maxUnavailable={summary.vo2maxUnavailable}
+        // Sans profil, aucun relevé n'a pu être rapatrié : la tuile n'aurait
+        // qu'un état vide à montrer, et l'invitation à créer son profil est
+        // déjà en tête de page.
+        wellness={hasProfile ? toWellnessTileView(summary.wellness) : null}
         hasProfile={hasProfile}
       />
 

@@ -15,8 +15,9 @@ import 'server-only';
  * ## Ce qui part au modèle
  *
  * Un message système — le rôle, les interdictions, la mise en forme,
- * l'{@link getTrainingSnapshot état d'entraînement} du jour et le
- * {@link getPlanContext plan} avec ses prochaines séances — puis les
+ * l'{@link getTrainingSnapshot état d'entraînement} du jour, le
+ * {@link getPlanContext plan} avec ses prochaines séances et le
+ * {@link getWellnessContext bien-être} des sept derniers jours — puis les
  * {@link COACH_CONTEXT_TURNS} derniers tours du fil, et enfin la question du
  * jour, qui n'est pas encore en base à cet instant (cf. ci-dessous) et s'ajoute
  * donc à la main. Le fil complet, lui, reste en base : c'est l'historique que
@@ -60,13 +61,15 @@ import { appendCoachExchange, listCoachMessages, type CoachMessageDto } from '@/
 import {
   getPlanContext,
   getTrainingSnapshot,
+  getWellnessContext,
   type PlanContextDto,
   type TrainingSnapshotDto,
+  type WellnessContextDto,
 } from '@/data/coach-context';
 
 import { chatCompletion, type ChatMessage } from './client';
 import { AiResponseError } from './errors';
-import { formatPlanContext, formatTrainingSnapshot } from './format';
+import { formatPlanContext, formatTrainingSnapshot, formatWellnessContext } from './format';
 
 /*
  * Les bornes d'une question vivent dans le contrat de l'endpoint
@@ -165,6 +168,11 @@ const COACH_SYSTEM_PROMPT = [
   // elle, un modèle lit « non courue » comme « il reste à la faire » et la
   // propose comme séance du jour, alors que son jour est derrière elle.
   "- tu n'inventes aucune séance. Les séances du bloc « Plan d'entraînement » ci-dessous sont les seules que tu connaisses : tu n'en ajoutes pas, tu n'en déduis pas la suite du plan, et tu ne devines pas ce qui vient après la dernière listée. Si ce bloc dit qu'aucun plan n'est actif, tu le dis aussi, et tu ne décris aucune séance comme si elle était prévue. Chaque séance listée porte son état : « déjà courue » a été faite, « à venir » reste à faire, et « passée, non courue » a son jour derrière elle sans avoir été faite — celle-là n'est pas au programme d'aujourd'hui, ne la présente jamais comme la séance à faire.",
+  // Le pendant exact de la ligne « aucune séance » ci-dessus, pour le bloc
+  // « Bien-être récent » : ces mesures viennent de la montre, l'appli n'en
+  // produit aucune — un modèle qui ne le lit pas estime volontiers une HRV « en
+  // général » à partir d'un âge, ou déduit un sommeil d'une heure de séance.
+  "- tu n'inventes aucune mesure de bien-être. Les valeurs du bloc « Bien-être récent » ci-dessous sont les seules que tu connaisses : pas de HRV déduite, pas de sommeil supposé, pas de FC de repos moyenne « pour son âge ». Ce que ce bloc ne dit pas, tu ne le sais pas, et tu le dis plutôt que de l'estimer.",
   "- tu ne modifies rien. Tu n'as aucun accès en écriture : tu ne peux ni créer, ni ajuster, ni déplacer, ni supprimer une séance ou un réglage. N'annonce jamais que tu as fait, changé, enregistré ou programmé quoi que ce soit.",
   "- si l'athlète veut modifier son plan, dis-lui de le demander dans le champ d'ajustement de la page « Plan » : c'est le seul endroit d'où le plan se modifie. Tu peux lui proposer la formulation à y écrire.",
   "- aucun diagnostic médical : devant une douleur, un malaise ou un symptôme, tu renvoies à un professionnel de santé et tu t'abstiens de conclure.",
@@ -204,6 +212,7 @@ const COACH_SYSTEM_PROMPT = [
 export function buildCoachMessages(input: {
   snapshot: TrainingSnapshotDto;
   planContext: PlanContextDto;
+  wellness: WellnessContextDto;
   history: readonly CoachMessageDto[];
   question: string;
 }): ChatMessage[] {
@@ -211,9 +220,12 @@ export function buildCoachMessages(input: {
   // Bloc distinct, et daté du même jour que l'état d'entraînement : les deux
   // décrivent le même instant, et le modèle doit pouvoir le dire.
   const plan = `Plan d'entraînement au ${input.snapshot.today} :\n${formatPlanContext(input.planContext)}`;
+  // Troisième bloc, même montage : mesuré par la montre, jamais calculé ici, et
+  // hors de l'état d'entraînement que quatre autres prompts partagent.
+  const wellness = `Bien-être récent au ${input.snapshot.today} :\n${formatWellnessContext(input.wellness)}`;
 
   return [
-    { role: 'system', content: `${COACH_SYSTEM_PROMPT}\n\n${context}\n\n${plan}` },
+    { role: 'system', content: `${COACH_SYSTEM_PROMPT}\n\n${context}\n\n${plan}\n\n${wellness}` },
     ...input.history.map((message): ChatMessage => ({
       role: message.role,
       content: message.content,
@@ -256,9 +268,10 @@ export async function answerCoachQuestion(input: {
   // onboarding non fait — rend un snapshot vide, comme avant.
   const athleteId = await getCurrentAthleteId();
 
-  const [snapshot, planContext, history] = await Promise.all([
+  const [snapshot, planContext, wellness, history] = await Promise.all([
     getTrainingSnapshot(athleteId),
     getPlanContext(),
+    getWellnessContext(),
     listCoachMessages(COACH_CONTEXT_TURNS),
   ]);
 
@@ -266,7 +279,7 @@ export async function answerCoachQuestion(input: {
   let streamed = '';
 
   await chatCompletion({
-    messages: buildCoachMessages({ snapshot, planContext, history, question }),
+    messages: buildCoachMessages({ snapshot, planContext, wellness, history, question }),
     temperature: COACH_TEMPERATURE,
     maxTokens: COACH_MAX_TOKENS,
     signal: input.signal,

@@ -22,6 +22,8 @@ import type {
   PlanContextDto,
   TrainingSnapshotDto,
   UpcomingSessionDto,
+  WellnessContextDayDto,
+  WellnessContextDto,
 } from '@/data/coach-context';
 import type { PaceZone } from '@/lib/metrics/vdot';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
@@ -410,6 +412,91 @@ export function formatPlanContext(context: PlanContextDto): string {
   );
   for (const session of context.upcoming) {
     lines.push(formatUpcomingSession(session, context.today));
+  }
+
+  return lines.join('\n');
+}
+
+/*
+ * Bien-être récent — bloc **distinct** lui aussi, et pour la même raison que le
+ * plan : il n'entre que dans le prompt du chat, jamais dans l'état
+ * d'entraînement partagé par la génération, la revue, le feedback et les tests.
+ */
+
+/** Les mesures d'un relevé, dans l'ordre où elles se lisent, avec leur unité. */
+const WELLNESS_MEASURES: readonly {
+  label: string;
+  read: (day: WellnessContextDayDto) => string | null;
+}[] = [
+  {
+    label: 'FC de repos',
+    read: (day) => (day.restingHrBpm === null ? null : `${day.restingHrBpm} bpm`),
+  },
+  {
+    // « rMSSD » explicite : c'est la seule façon d'empêcher un modèle de comparer
+    // cette valeur à un score de HRV d'une autre échelle.
+    label: 'HRV (rMSSD)',
+    read: (day) => (day.hrvRmssdMs === null ? null : `${formatNumber(day.hrvRmssdMs, 0)} ms`),
+  },
+  {
+    label: 'sommeil',
+    read: (day) => (day.sleepTimeS === null ? null : formatDuration(day.sleepTimeS)),
+  },
+  {
+    label: 'score de sommeil',
+    read: (day) => (day.sleepScore === null ? null : `${formatNumber(day.sleepScore, 0)}/100`),
+  },
+  { label: 'poids', read: (day) => (day.weightKg === null ? null : `${formatNumber(day.weightKg, 1)} kg`) },
+];
+
+/** Une journée sur une ligne : sa date, puis ses seules mesures existantes. */
+function formatWellnessDay(day: WellnessContextDayDto): string {
+  const measures = WELLNESS_MEASURES.map((measure) => {
+    const value = measure.read(day);
+    return value === null ? null : `${measure.label} ${value}`;
+  }).filter((measure): measure is string => measure !== null);
+
+  return `- ${formatCivilDate(day.date)} — ${measures.join(' · ')}`;
+}
+
+/**
+ * Le bien-être des derniers jours, tel que le **chat** le lit.
+ *
+ * Trois précautions, et chacune répare une faute qu'un petit modèle commet
+ * spontanément devant ces chiffres :
+ *
+ * 1. **La provenance est écrite** : ces mesures viennent de la montre, pas d'un
+ *    calcul de Trainarr. Sans ça, le modèle les traite comme les indicateurs
+ *    qu'il voit ailleurs dans le prompt et se met à en « déduire » une charge.
+ * 2. **Les mesures jamais renseignées sont nommées**, une fois, en fin de bloc :
+ *    une HRV absente de toutes les lignes se lit sinon comme un oubli de
+ *    formatage, et un modèle qui veut bien faire en invente une valeur.
+ * 3. **La fenêtre est bornée à l'écrit** : ce qui n'est pas listé n'existe pas
+ *    pour lui.
+ *
+ * Comptez ~35 tokens d'en-tête et ~30 par journée — soit ~250 tokens sur une
+ * semaine complète, l'ordre de grandeur de l'état d'entraînement. Sans mesure :
+ * ~20 tokens.
+ */
+export function formatWellnessContext(context: WellnessContextDto): string {
+  if (context.days.length === 0) {
+    return [
+      'Aucune mesure de bien-être sur les 7 derniers jours.',
+      "Tu ne sais donc rien de son sommeil, de sa HRV ni de sa FC de repos récente : ne les commente pas.",
+    ].join('\n');
+  }
+
+  const lines = [
+    'Relevés de sa montre (Trainarr ne les calcule pas, il les rapatrie) — cette liste est complète, tu ne connais aucune autre mesure :',
+    ...context.days.map(formatWellnessDay),
+  ];
+
+  const missing = WELLNESS_MEASURES.filter((measure) =>
+    context.days.every((day) => measure.read(day) === null),
+  ).map((measure) => measure.label);
+
+  if (missing.length > 0) {
+    lines.push(`Jamais mesuré sur cette période : ${missing.join(', ')}.`);
   }
 
   return lines.join('\n');

@@ -11,7 +11,17 @@ import { db } from './db/client';
 import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
 import { selectMaxHrSuggestion, type MaxHrSuggestionDto } from './max-hr-suggestion';
 import { getPendingPlanRevision, type PlanRevisionDto } from './plan-revisions';
+import {
+  selectRestingHrSuggestion,
+  type RestingHrSuggestionDto,
+} from './resting-hr-suggestion';
 import { getWeatherForecast, type WeatherForecastDto } from './weather-forecast';
+import {
+  emptyWellnessSummary,
+  selectWellnessSummary,
+  WELLNESS_LATEST_WINDOW_DAYS,
+  type WellnessSummaryDto,
+} from './wellness';
 import {
   buildDailyTrimp,
   buildFitness,
@@ -107,12 +117,32 @@ export type DashboardSummary = {
    * contenu proposé, lui, ne se juge pas depuis un tableau de bord.
    */
   planRevision: PlanRevisionDto | null;
+  /**
+   * Les dernières mesures de bien-être connues — HRV, FC de repos, sommeil (cf.
+   * `./wellness.ts`).
+   *
+   * Elles viennent de la montre, pas de l'application : le tableau de bord les
+   * met sous les yeux parce que ce sont elles qui expliquent une séance qui ne
+   * passe pas, et parce qu'elles sont invisibles partout ailleurs. Chaque champ
+   * est indépendamment `null` — l'écran **dit** l'absence, il ne la laisse pas en
+   * blanc.
+   */
+  wellness: WellnessSummaryDto;
+  /**
+   * Une FC de repos médiane qui s'écarte de celle du profil, `null` s'il n'y a
+   * rien à proposer (cf. `./resting-hr-suggestion.ts`).
+   *
+   * Ici pour la même raison que la proposition de FC max : c'est le seul écran
+   * qu'on ouvre sans rien chercher. Elle peut coexister avec elle — les deux
+   * cartes s'empilent, et une seule des deux porte le CTA accent (cf. la page).
+   */
+  restingHrSuggestion: RestingHrSuggestionDto | null;
 };
 
 const RECENT_ACTIVITIES_COUNT = 3;
 const LOAD_WEEKS_COUNT = 6;
 
-const EMPTY_SUMMARY: Omit<DashboardSummary, 'today'> = {
+const EMPTY_SUMMARY: Omit<DashboardSummary, 'today' | 'wellness'> = {
   athleteName: null,
   fitness: null,
   // Sans athlète, il n'y a pas de cause à expliquer : c'est l'onboarding qui parle.
@@ -128,6 +158,8 @@ const EMPTY_SUMMARY: Omit<DashboardSummary, 'today'> = {
   maxHrSuggestion: null,
   // Ni plan, donc aucune réévaluation en attente.
   planRevision: null,
+  // Sans athlète, aucun relevé bien-être n'a jamais été rapatrié.
+  restingHrSuggestion: null,
 };
 
 /**
@@ -174,9 +206,17 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
   const today = toCivilDate(new Date());
 
   const profile = await getCurrentAthlete();
-  if (!profile) return { ...EMPTY_SUMMARY, today };
+  if (!profile) return { ...EMPTY_SUMMARY, today, wellness: emptyWellnessSummary(today) };
 
-  const [activityRows, sessionRows, forecast, maxHrSuggestion, planRevision] = await Promise.all([
+  const [
+    activityRows,
+    sessionRows,
+    forecast,
+    maxHrSuggestion,
+    planRevision,
+    wellness,
+    restingHrSuggestion,
+  ] = await Promise.all([
     // Historique complet : la CTL est une moyenne mobile sur 42 jours, et une
     // ligne d'activité est légère (les séries temporelles vivent à part).
     db
@@ -213,6 +253,15 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     // Même lecture que la page du plan, en version courte : l'athlète est passé,
     // jamais redéduit.
     getPendingPlanRevision(profile.id),
+    // Le même « aujourd'hui » que le reste de la page : deux lectures de
+    // l'horloge à cheval sur minuit dateraient la tuile d'hier.
+    selectWellnessSummary(
+      profile.id,
+      today,
+      shiftCivilDate(today, -(WELLNESS_LATEST_WINDOW_DAYS - 1)),
+    ),
+    // Le profil est déjà lu, comme pour la FC max : la proposition le reçoit.
+    selectRestingHrSuggestion(profile, today),
   ]);
 
   const daily = buildDailyTrimp(activityRows, profile, today);
@@ -237,5 +286,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     recentActivities: activityRows.slice(0, RECENT_ACTIVITIES_COUNT).map(toActivitySummaryDto),
     maxHrSuggestion,
     planRevision,
+    wellness,
+    restingHrSuggestion,
   };
 }

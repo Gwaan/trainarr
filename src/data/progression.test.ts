@@ -128,6 +128,8 @@ const ATHLETE: Athlete = {
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
+  restingHrSuggestionDismissedBpm: null,
+  wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -198,6 +200,8 @@ describe('getProgression — base vide', () => {
       volume: [],
       fitnessUnavailable: null,
       vo2maxUnavailable: null,
+      // Sans athlète, aucun relevé bien-être : la fenêtre se réduit au jour même.
+      wellness: { from: '2026-08-10', to: '2026-08-10', days: [] },
     });
   });
 

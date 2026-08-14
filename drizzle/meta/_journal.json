@@ -169,6 +169,13 @@
       "when": 1786729522962,
       "tag": "0023_plan_revisions",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786731733797,
+      "tag": "0024_wellness_days",
+      "breakpoints": true
     }
   ]
 }

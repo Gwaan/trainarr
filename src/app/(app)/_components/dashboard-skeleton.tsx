@@ -36,6 +36,21 @@ export function DashboardSkeleton() {
           <Skeleton className="mt-3 h-[1.9rem] w-16 sm:h-[2.3rem]" />
           <Skeleton className="mt-2.5 h-3 w-40 max-w-full" />
         </div>
+
+        {/* Tuile bien-être : pleine largeur, trois mesures côte à côte. Même
+            géométrie que `WellnessTile` — titre, puis libellé + valeur par
+            colonne. */}
+        <div className="col-span-2 rounded-card border border-border bg-surface p-4 sm:p-5 md:col-span-3">
+          <Skeleton className="h-3 w-24" />
+          <div className="mt-3 grid grid-cols-3 gap-3 sm:gap-4">
+            {[0, 1, 2].map((measure) => (
+              <div key={measure}>
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="mt-2 h-[1.45rem] w-14 sm:h-[1.6rem]" />
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">

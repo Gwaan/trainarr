@@ -16,7 +16,9 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 import { MaxHrSuggestionCard } from "../../_components/max-hr-suggestion-card";
+import { RestingHrSuggestionCard } from "../../_components/resting-hr-suggestion-card";
 import type { MaxHrSuggestionView } from "../../_lib/max-hr-suggestion";
+import type { RestingHrSuggestionView } from "../../_lib/resting-hr-suggestion";
 
 import { saveProfileAction, type ProfileFormState } from "../_lib/actions";
 import { SEX_CHOICES, type ProfileFormValues } from "../_lib/form-values";
@@ -167,12 +169,20 @@ export type ProfileFormProps = {
    * proposer à l'onboarding, où aucune séance n'est encore rattachée.
    */
   maxHrSuggestion?: MaxHrSuggestionView | null;
+  /**
+   * Une FC de repos médiane qui s'écarte de celle du profil, mesurée par la
+   * montre. `null` s'il n'y a rien à proposer — et rien à l'onboarding, où aucun
+   * relevé n'a encore été rapatrié. Indépendante de la précédente : les deux
+   * encarts peuvent s'afficher ensemble.
+   */
+  restingHrSuggestion?: RestingHrSuggestionView | null;
 };
 
 export function ProfileForm({
   mode,
   values,
   maxHrSuggestion = null,
+  restingHrSuggestion = null,
 }: ProfileFormProps) {
   const [state, formAction, isPending] = useActionState(
     saveProfileAction,
@@ -361,6 +371,18 @@ export function ProfileForm({
                 // Le champ est contrôlé : sans ça, il garderait l'ancienne
                 // valeur à l'écran alors que la base porte la nouvelle.
                 onAccepted={(bpm) => setField("maxHrBpm", String(bpm))}
+                className="mt-3"
+              />
+            )}
+
+            {/* Sous la précédente quand les deux sont là : elles proposent deux
+                champs différents de la même paire, et aucune des deux ne porte
+                l'accent ici — « Enregistrer » l'a déjà. */}
+            {restingHrSuggestion === null ? null : (
+              <RestingHrSuggestionCard
+                suggestion={restingHrSuggestion}
+                emphasis="secondary"
+                onAccepted={(bpm) => setField("restingHrBpm", String(bpm))}
                 className="mt-3"
               />
             )}

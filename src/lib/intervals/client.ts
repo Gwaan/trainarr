@@ -226,7 +226,7 @@ function isAbortLike(error: unknown): boolean {
 }
 
 /** Ce qui change d'un appel à l'autre, au-delà de l'URL. */
-type RequestOptions = {
+export type RequestOptions = {
   /** Défaut : `GET`. */
   method?: 'GET' | 'POST' | 'PUT';
   /** Corps de la requête, sérialisé en JSON. Absent = pas de corps. */
@@ -243,8 +243,12 @@ type RequestOptions = {
  * Le signal de l'appelant, quand il y en a un, est **combiné** au délai de garde
  * de {@link REQUEST_TIMEOUT_MS} : aucun appel ne peut rester suspendu, et un
  * arrêt demandé coupe sans attendre l'échéance.
+ *
+ * Exportée pour `./wellness-client.ts` — même API, même authentification, mêmes
+ * garde-fous. Une seconde implémentation de l'en-tête `Authorization` et du
+ * délai de garde aurait divergé de celle-ci au premier correctif.
  */
-async function authorizedRequest(
+export async function authorizedRequest(
   url: string,
   apiKey: string,
   fetchImpl: FetchLike,
@@ -293,8 +297,12 @@ async function authorizedRequest(
  * Les champs inconnus sont écartés par le schéma. En revanche une réponse dont
  * la **forme** est inattendue lève : mieux vaut un appel en échec, visible dans
  * les journaux, qu'une liste silencieusement amputée.
+ *
+ * Exportée pour `./wellness-client.ts`, dont le schéma n'a jamais été confronté
+ * à l'API réelle : c'est précisément là que le message d'erreur nommant les
+ * champs en défaut a le plus de valeur.
  */
-async function parseJsonBody<T>(
+export async function parseJsonBody<T>(
   response: Response,
   context: string,
   schema: z.ZodType<T>,

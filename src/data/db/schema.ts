@@ -156,6 +156,36 @@ export const athlete = pgTable('athlete', {
    * bruit » reste vrai après avoir accepté 192.
    */
   maxHrSuggestionDismissedBpm: integer('max_hr_suggestion_dismissed_bpm'),
+  /**
+   * **Dernière** valeur de FC de repos écartée par l'athlète, en bpm. `NULL`
+   * tant qu'aucune ne l'a été.
+   *
+   * Une valeur, pas un seuil — et c'est toute la différence avec
+   * `max_hr_suggestion_dismissed_bpm` juste au-dessus. La proposition de FC max
+   * ne va que vers le haut : mémoriser « tout ce qui est au-dessus de 215 est du
+   * bruit » a un sens. La FC de repos, elle, **bouge dans les deux sens** — elle
+   * baisse quand la forme monte, elle remonte sinon : un seuil directionnel
+   * enterrerait la moitié des propositions légitimes. On mémorise donc la valeur
+   * refusée, et rien ne se repropose tant que la médiane ne s'en écarte pas d'au
+   * moins `RESTING_HR_REPROPOSE_DELTA_BPM` battements (cf.
+   * `src/lib/metrics/resting-hr.ts`).
+   */
+  restingHrSuggestionDismissedBpm: integer('resting_hr_suggestion_dismissed_bpm'),
+  /**
+   * Marqueur du dernier relevé bien-être **réussi** : la date civile du dernier
+   * passage de l'heure de relevé révolu (cf. `wellnessReadingMarker`).
+   *
+   * Même esprit que `weather_forecast_runs.reading_day`, en une seule colonne :
+   * le relevé bien-être n'a ni statut à afficher, ni compteur de tentatives à
+   * borner — ce que l'écran montre, ce sont les jours de `wellness_days`, et une
+   * journée manquée se rattrape toute seule (chaque relevé redemande les
+   * `WELLNESS_WINDOW_DAYS` derniers jours). Une table d'état n'aurait rien
+   * porté de plus.
+   *
+   * Écrit **seulement** quand le relevé a abouti : un échec réseau se reprend au
+   * cycle suivant plutôt que d'attendre le lendemain.
+   */
+  wellnessReadingDay: date('wellness_reading_day'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -521,6 +551,75 @@ export const weatherForecasts = pgTable(
      * dates »), qui parcourt donc un intervalle contigu de l'index.
      */
     primaryKey({ columns: [table.athleteId, table.forecastDate] }),
+  ],
+);
+
+/**
+ * Le relevé bien-être d'une journée — **une ligne par athlète et par jour**.
+ *
+ * Ces mesures ne sont **pas produites par Trainarr** : elles sont prises par la
+ * montre (HRV nocturne, FC de repos, sommeil) ou par la balance, synchronisées
+ * vers intervals.icu par HealthFit, et rapatriées telles quelles par le relevé
+ * quotidien (`src/lib/intervals/wellness-service.ts`). L'application les stocke,
+ * les montre et les donne à lire au coach ; elle n'en dérive aucun calcul physio.
+ *
+ * **Rien de ce qu'intervals.icu calcule n'entre ici** : ni `ctl`, ni `atl`, ni
+ * `rampRate`. Trainarr calcule les siens depuis ses propres activités, et deux
+ * charges concurrentes sous le même nom seraient la pire donnée possible — celle
+ * dont personne ne sait laquelle croire.
+ *
+ * **Une mesure absente est `NULL`, jamais `0`.** Une nuit sans ceinture n'est pas
+ * une HRV nulle, et une journée sans pesée n'est pas un poids de zéro. C'est la
+ * règle du projet, et c'est aussi ce qui fait que les lignes se **complètent**
+ * après coup : la montre synchronise en retard, un jour déjà écrit peut recevoir
+ * son sommeil plusieurs heures plus tard (cf. `saveWellnessDays`, qui ne remplace
+ * jamais une valeur connue par un trou).
+ *
+ * Pas de `created_at` : la date de la ligne *est* le jour qu'elle décrit.
+ * `updated_at` dit quand le relevé l'a touchée pour la dernière fois.
+ */
+export const wellnessDays = pgTable(
+  'wellness_days',
+  {
+    /**
+     * `ON DELETE CASCADE` : un relevé bien-être n'a aucun sens sans son athlète,
+     * et c'est une donnée rapatriée — elle se reconstruit d'un appel.
+     */
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id, { onDelete: 'cascade' }),
+    /** Jour civil décrit, dans le fuseau de l'athlète (tel qu'intervals.icu le date). */
+    day: date('day').notNull(),
+    /** FC de repos de la journée, en bpm. */
+    restingHrBpm: integer('resting_hr_bpm'),
+    /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+    hrvRmssdMs: real('hrv_rmssd_ms'),
+    /** Temps de sommeil, en secondes. */
+    sleepTimeS: integer('sleep_time_s'),
+    /** Score de sommeil de la montre, sur 100. Ce n'est pas un calcul de Trainarr. */
+    sleepScore: real('sleep_score'),
+    /** FC moyenne pendant le sommeil, en bpm. */
+    avgSleepingHrBpm: real('avg_sleeping_hr_bpm'),
+    /**
+     * Poids du jour, en kg — celui de la balance, **pas** celui du profil.
+     *
+     * Décision, et non oubli : `athlete.weight_kg` reste saisi à la main. Une
+     * balance qui réécrirait le profil sans accord est exactement ce qu'on
+     * refuse pour les fréquences cardiaques, dont l'application propose la mise
+     * à jour au lieu de l'appliquer.
+     */
+    weightKg: real('weight_kg'),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /**
+     * Un athlète, un jour, une ligne. La clé est aussi le chemin d'accès de
+     * toutes les lectures (« le bien-être de cet athlète entre deux dates »),
+     * qui parcourent donc un intervalle contigu de l'index — et c'est elle qui
+     * porte l'idempotence du relevé, dont chaque passage réécrit les quatorze
+     * derniers jours.
+     */
+    primaryKey({ columns: [table.athleteId, table.day] }),
   ],
 );
 
@@ -1234,6 +1333,9 @@ export type NewWeatherForecastRun = InferInsertModel<typeof weatherForecastRuns>
 
 export type WeatherForecast = InferSelectModel<typeof weatherForecasts>;
 export type NewWeatherForecast = InferInsertModel<typeof weatherForecasts>;
+
+export type WellnessDay = InferSelectModel<typeof wellnessDays>;
+export type NewWellnessDay = InferInsertModel<typeof wellnessDays>;
 
 export type Plan = InferSelectModel<typeof plans>;
 export type NewPlan = InferInsertModel<typeof plans>;

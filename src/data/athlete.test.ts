@@ -131,6 +131,8 @@ const rawAthlete: Athlete = {
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
+  restingHrSuggestionDismissedBpm: null,
+  wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };

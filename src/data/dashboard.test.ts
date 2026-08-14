@@ -150,6 +150,8 @@ const ATHLETE: Athlete = {
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
+  restingHrSuggestionDismissedBpm: null,
+  wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -240,6 +242,10 @@ describe('getDashboardSummary — base vide', () => {
       maxHrSuggestion: null,
       // Ni plan, donc aucune réévaluation en attente.
       planRevision: null,
+      // Aucun relevé bien-être n'a pu être rapatrié : les trois mesures sont
+      // absentes, et la tuile le dira plutôt que de rester blanche.
+      wellness: { today: '2026-08-10', restingHr: null, hrv: null, sleep: null },
+      restingHrSuggestion: null,
     });
   });
 

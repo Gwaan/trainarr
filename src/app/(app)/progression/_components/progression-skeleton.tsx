@@ -89,6 +89,23 @@ export function ProgressionSkeleton() {
         <BarsFrame />
       </PanelFrame>
 
+      {/* Bien-être : quatre mesures en deux colonnes, chacune libellé + valeur,
+          courbe, puis compte de mesures. Même géométrie que `WellnessPanel`. */}
+      <PanelFrame>
+        <div className="grid gap-5 p-4 sm:grid-cols-2 sm:gap-6 sm:p-5">
+          {[0, 1, 2, 3].map((measure) => (
+            <div key={measure}>
+              <div className="flex items-baseline justify-between gap-2">
+                <Skeleton className="h-3 w-24" />
+                <Skeleton className="h-4 w-14" />
+              </div>
+              <Skeleton className="mt-3 h-14 w-full sm:h-16" />
+              <Skeleton className="mt-2.5 h-3 w-32 max-w-full" />
+            </div>
+          ))}
+        </div>
+      </PanelFrame>
+
       <span className="sr-only">Chargement de la progression…</span>
     </div>
   );

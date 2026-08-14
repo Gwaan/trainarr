@@ -103,6 +103,7 @@ import {
   type PollPlan,
   type PollWindow,
 } from '@/lib/intervals/poll-plan';
+import { runDailyWellness, wellnessStartupLine } from '@/lib/intervals/wellness-service';
 
 /**
  * Délai avant de relancer une boucle tombée sur une erreur qu'aucun de ses
@@ -820,6 +821,15 @@ type PollLoopState = {
   cycleNumbers: Map<number, number>;
   /** Comptes sautés déjà signalés (`<athlète>|<motif>`) — une ligne, pas une par cycle. */
   loggedSkips: Set<string>;
+  /**
+   * Échecs du relevé bien-être déjà signalés (`<athlète>|<jour>`).
+   *
+   * Le relevé ne pose son marqueur qu'en cas de succès : un échec est donc redû
+   * au cycle suivant, toutes les minutes jusqu'au bout de la journée. Une ligne
+   * par compte et par journée suffit à le dire — les suivantes ne diraient rien
+   * de plus et noieraient les journaux du rapatriement.
+   */
+  loggedWellnessFailures: Set<string>;
   /** « Aucun compte configuré » a déjà été dit ; il se redira si ça change. */
   announcedNoAccounts: boolean;
 };
@@ -835,6 +845,7 @@ function initialPollLoopState(): PollLoopState {
     memories: new Map(),
     cycleNumbers: new Map(),
     loggedSkips: new Set(),
+    loggedWellnessFailures: new Set(),
     announcedNoAccounts: false,
   };
 }
@@ -846,6 +857,55 @@ function initialPollMemory(): PollMemory {
     loggedWithoutFile: new Set(),
     unfinished: false,
   };
+}
+
+/**
+ * Le relevé bien-être d'un compte, journalisé.
+ *
+ * Rien n'est écrit dans le journal quand il n'y avait rien à faire : le
+ * rendez-vous est quotidien, mais la question est posée à chaque cycle. Un échec
+ * ne se dit qu'**une fois par journée** — le relevé ne pose son marqueur qu'en
+ * cas de succès, il serait donc redemandé (et raté) à chaque minute.
+ *
+ * Ses erreurs sont attrapées ici : un bien-être qui ne se relève pas ne doit pas
+ * coûter le rapatriement des séances du même cycle, qui n'a rien à voir avec lui.
+ * Rend le délai que l'API aurait demandé (429), pour que la boucle le respecte.
+ */
+async function readWellness(
+  account: PollableAccount,
+  controls: StopControls,
+  state: PollLoopState,
+): Promise<number | null> {
+  try {
+    const report = await runDailyWellness(
+      account.athleteId,
+      { intervalsAthleteId: account.intervalsAthleteId, apiKey: account.apiKey },
+      { signal: controls.signal },
+    );
+    if (report === null) return null;
+
+    const label = athleteDirName(account.athleteId);
+    if (report.status === 'saved') {
+      pollLog(`${label} : bien-être du ${report.readingDay} — ${report.days} jour(s) relevé(s).`);
+      return null;
+    }
+
+    if (shouldLogOnce(state.loggedWellnessFailures, `${account.athleteId}|${report.readingDay}`)) {
+      pollLogError(
+        `${label} : bien-être du ${report.readingDay} — ${report.reason ?? 'échec sans motif'}`,
+      );
+    }
+    return report.retryAfterS;
+  } catch (error) {
+    // `runDailyWellness` ne lève pas ; ce filet est là pour ce qu'elle n'a pas su
+    // nommer, et il ne coûte rien.
+    if (!controls.stopping) {
+      pollLogError(
+        `${athleteDirName(account.athleteId)} : relevé bien-être impossible — ${errorMessage(error)}`,
+      );
+    }
+    return null;
+  }
 }
 
 /**
@@ -880,6 +940,14 @@ async function pollAccount(
   const cycleNumber = (state.cycleNumbers.get(account.athleteId) ?? 0) + 1;
   state.cycleNumbers.set(account.athleteId, cycleNumber);
 
+  /*
+   * Le rendez-vous quotidien d'abord : il ne coûte qu'une lecture d'état les
+   * 1 439 minutes où il n'est pas dû, et il n'a aucune raison d'attendre la fin
+   * d'un backfill de plusieurs centaines de fichiers pour avoir lieu.
+   */
+  const wellnessRetryAfterS = await readWellness(account, controls, state);
+  if (controls.stopping) return null;
+
   const outcome = await pollOnce(
     athleteDir,
     {
@@ -898,7 +966,9 @@ async function pollAccount(
   const summary = pollCycleSummary(cycleNumber, outcome);
   if (summary !== null) pollLog(`${athleteDirName(account.athleteId)} : ${summary}`);
 
-  return outcome.retryAfterS;
+  // Les deux appels parlent au même hôte : un quota atteint sur l'un vaut pour
+  // l'autre, et c'est le délai le plus long qui s'applique.
+  return mergeRetryAfterS([wellnessRetryAfterS, outcome.retryAfterS]);
 }
 
 /**
@@ -1033,6 +1103,7 @@ async function run(controls: StopControls): Promise<void> {
   }
 
   log(startupLine(config));
+  pollLog(wellnessStartupLine());
 
   // L'état du poller survit aux relances de `runForever` — cf. `initialPollLoopState`.
   const pollState = initialPollLoopState();

@@ -16,6 +16,8 @@ import {
 } from "../_lib/metric-unavailable";
 import { MetricInfo } from "./metric-info";
 import { MetricPlaceholder } from "./metric-placeholder";
+import { WellnessTile } from "./wellness-tile";
+import type { WellnessTileView } from "../_lib/wellness-view";
 
 export type KeyMetricsProps = {
   fitness: FitnessDto | null;
@@ -24,6 +26,11 @@ export type KeyMetricsProps = {
   vo2max: Vo2maxDto | null;
   /** Cause réelle de l'absence de VO₂max — non-`null` quand `vo2max` l'est. */
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /**
+   * Les dernières mesures de la montre. `null` sans profil : la grille se
+   * réduit alors à ce que l'onboarding permet de dire.
+   */
+  wellness: WellnessTileView | null;
   /** `false` quand aucun athlète n'existe encore : l'onboarding n'a pas eu lieu. */
   hasProfile: boolean;
 };
@@ -33,6 +40,7 @@ export function KeyMetrics({
   fitnessUnavailable,
   vo2max,
   vo2maxUnavailable,
+  wellness,
   hasProfile,
 }: KeyMetricsProps) {
   const tsb = fitness ? readTsb(fitness.tsb) : null;
@@ -96,6 +104,14 @@ export function KeyMetrics({
           {...describeFitnessUnavailable(fitnessUnavailable)}
         />
       ) : null}
+
+      {/* Deuxième rangée, pleine largeur : ces trois mesures-là ne sont pas
+          calculées par l'application et n'ont pas à s'intercaler entre deux
+          indicateurs qui le sont. Les tenir ensemble est aussi la seule façon de
+          les lire (« HRV basse *et* FC de repos haute »). */}
+      {wellness === null ? null : (
+        <WellnessTile wellness={wellness} className="col-span-2 md:col-span-3" />
+      )}
     </section>
   );
 }

@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CoachMessageDto } from '@/data/coach-chat';
-import type { PlanContextDto, TrainingSnapshotDto } from '@/data/coach-context';
+import type {
+  PlanContextDto,
+  TrainingSnapshotDto,
+  WellnessContextDto,
+} from '@/data/coach-context';
 
 import {
   COACH_CONTEXT_TURNS,
@@ -19,6 +23,7 @@ const { dal } = vi.hoisted(() => ({
   dal: {
     getTrainingSnapshot: vi.fn(),
     getPlanContext: vi.fn(),
+    getWellnessContext: vi.fn(),
     listCoachMessages: vi.fn(),
     appendCoachExchange: vi.fn(),
   },
@@ -28,6 +33,7 @@ vi.mock('./client', () => ({ chatCompletion }));
 vi.mock('@/data/coach-context', () => ({
   getTrainingSnapshot: dal.getTrainingSnapshot,
   getPlanContext: dal.getPlanContext,
+  getWellnessContext: dal.getWellnessContext,
 }));
 vi.mock('@/data/coach-chat', () => ({
   listCoachMessages: dal.listCoachMessages,
@@ -98,6 +104,20 @@ const PLAN_CONTEXT: PlanContextDto = {
   ],
 };
 
+const WELLNESS_CONTEXT: WellnessContextDto = {
+  today: '2026-08-11',
+  days: [
+    {
+      date: '2026-08-11',
+      restingHrBpm: 47,
+      hrvRmssdMs: 63,
+      sleepTimeS: 25_800,
+      sleepScore: 82,
+      weightKg: null,
+    },
+  ],
+};
+
 function message(id: number, role: 'user' | 'assistant', content: string): CoachMessageDto {
   return { id, role, content, createdAt: '2026-08-11T09:00:00.000Z' };
 }
@@ -111,6 +131,7 @@ beforeEach(() => {
 
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
   dal.getPlanContext.mockResolvedValue(PLAN_CONTEXT);
+  dal.getWellnessContext.mockResolvedValue(WELLNESS_CONTEXT);
   dal.listCoachMessages.mockResolvedValue([
     message(1, 'user', 'Je suis fatiguée, je cours ?'),
     message(2, 'assistant', 'Repose-toi.'),

@@ -17,6 +17,7 @@ import { db } from './db/client';
 import { activities, type Activity, type Athlete, type AthleteSex } from './db/schema';
 import { getActivePlanWithSessions, planEndExclusive, type PlanSessionDto } from './plans';
 import { buildDailyTrimp, buildFitness, buildVo2max, isRunning } from './training-metrics';
+import { listWellnessDays } from './wellness';
 
 /**
  * Le « R » du RAG du coach : la récupération structurée qui alimente ses
@@ -166,6 +167,53 @@ export type PlanContextDto =
       /** Les séances de la fenêtre, de la plus ancienne à la plus lointaine. */
       upcoming: UpcomingSessionDto[];
     };
+
+/**
+ * Le bien-être récent tel que le **chat** du coach le lit.
+ *
+ * Bloc **distinct** de {@link TrainingSnapshotDto}, et pour exactement la même
+ * raison que {@link PlanContextDto} : le snapshot alimente aussi la génération de
+ * plan, la revue, le feedback et les tests chronométrés. Y verser ces mesures
+ * ferait bouger quatre prompts éprouvés pour le seul besoin du chat.
+ *
+ * Ce sont des mesures de **montre**, pas de l'application : elle ne les calcule
+ * pas, ne les corrige pas, et n'en dérive rien. Le formateur le dit au modèle,
+ * qui n'a donc aucune raison d'en tirer une charge ou une forme.
+ */
+export type WellnessContextDayDto = {
+  /** Jour civil `YYYY-MM-DD`. */
+  date: string;
+  restingHrBpm: number | null;
+  /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+  hrvRmssdMs: number | null;
+  sleepTimeS: number | null;
+  /** Score de sommeil de la montre, sur 100. */
+  sleepScore: number | null;
+  weightKg: number | null;
+};
+
+export type WellnessContextDto = {
+  /** Jour de la lecture : le prompt date ce qu'il affirme. */
+  today: string;
+  /**
+   * Les journées **portant au moins une mesure**, de la plus récente à la plus
+   * ancienne. Une journée entièrement muette n'est pas une ligne à écrire — son
+   * absence de la liste dit déjà tout, et le formateur nomme séparément les
+   * mesures qui manquent sur toute la fenêtre.
+   */
+  days: WellnessContextDayDto[];
+};
+
+/**
+ * Fenêtre du bien-être envoyé au chat : 7 jours, aujourd'hui compris.
+ *
+ * Une semaine, parce que c'est l'horizon d'une question de chat (« je suis
+ * cuite, je fais quoi demain ? ») : ce qui compte est la nuit dernière et la
+ * tendance des derniers jours. Trente jours tripleraient le bloc pour répondre à
+ * une question que personne ne pose au chat — la page « Progression » montre la
+ * tendance longue bien mieux qu'une liste.
+ */
+export const COACH_WELLNESS_DAYS = 7;
 
 /** Quatre semaines : de quoi voir une progression de volume sans noyer le prompt. */
 export const SNAPSHOT_WEEKS = 4;
@@ -510,6 +558,53 @@ export async function getPlanContext(): Promise<PlanContextDto> {
     // d'une échéance, donc du dernier jour couvert.
     endsOn: shiftCivilDate(planEndExclusive(plan.startsOn, plan.weeks), -1),
     upcoming: buildUpcomingSessions(sessions, today),
+  };
+}
+
+/**
+ * Le bien-être des {@link COACH_WELLNESS_DAYS} derniers jours, tel que le
+ * **chat** le lit.
+ *
+ * Lecture **de requête** uniquement : l'athlète vient de la session, et une
+ * fenêtre vide (`days: []`) est une réponse — « aucune mesure », que le
+ * formateur énonce — jamais un trou que le modèle comblerait.
+ */
+export async function getWellnessContext(): Promise<WellnessContextDto> {
+  const today = todayCivilDate();
+
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { today, days: [] };
+
+  const rows = await listWellnessDays(
+    athleteId,
+    shiftCivilDate(today, -(COACH_WELLNESS_DAYS - 1)),
+    today,
+  );
+
+  return {
+    today,
+    days: rows
+      // Une journée entièrement muette (la ligne existe, aucune mesure n'est
+      // arrivée) ne se rend pas : elle coûterait des tokens pour ne rien dire.
+      .filter(
+        (row) =>
+          row.restingHrBpm !== null ||
+          row.hrvRmssdMs !== null ||
+          row.sleepTimeS !== null ||
+          row.sleepScore !== null ||
+          row.weightKg !== null,
+      )
+      // La plus récente d'abord : c'est la nuit dernière qui répond à la
+      // question posée, et le modèle lit le haut de la liste en premier.
+      .reverse()
+      .map((row) => ({
+        date: row.day,
+        restingHrBpm: row.restingHrBpm,
+        hrvRmssdMs: row.hrvRmssdMs,
+        sleepTimeS: row.sleepTimeS,
+        sleepScore: row.sleepScore,
+        weightKg: row.weightKg,
+      })),
   };
 }
 

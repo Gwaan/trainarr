@@ -16,10 +16,12 @@ import 'server-only';
 import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
 import { canInvite, listPendingInvitations } from '@/data/invitations';
 import { getMaxHrSuggestion } from '@/data/max-hr-suggestion';
+import { getRestingHrSuggestion } from '@/data/resting-hr-suggestion';
 import { getForecastLocationLabel } from '@/data/weather-forecast';
 import { getAccountSummary } from '@/lib/auth/session';
 
 import { toMaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
+import { toRestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 
 import { toProfileFormValues } from './form-values';
 import { toIntervalsFormDefaults } from './intervals-values';
@@ -49,10 +51,19 @@ async function loadInvitations(): Promise<InvitationsSettings> {
 }
 
 export async function loadSettingsData(): Promise<SettingsData> {
-  const [profile, maxHrSuggestion, intervals, forecastLocationLabel, account, invitations] =
+  const [
+    profile,
+    maxHrSuggestion,
+    restingHrSuggestion,
+    intervals,
+    forecastLocationLabel,
+    account,
+    invitations,
+  ] =
     await Promise.all([
       getAthleteProfile(),
       getMaxHrSuggestion(),
+      getRestingHrSuggestion(),
       getIntervalsSettings(),
       getForecastLocationLabel(),
       getAccountSummary(),
@@ -71,6 +82,11 @@ export async function loadSettingsData(): Promise<SettingsData> {
     // Une date lisible, un nom, un lien : de quoi expliquer la proposition. La
     // même que celle du tableau de bord — même lecture, même composant.
     maxHrSuggestion: toMaxHrSuggestionView(maxHrSuggestion),
+    // Son pendant pour la FC de repos, au même endroit et pour la même raison :
+    // l'encart se pose contre le champ qu'il propose de changer. Les deux
+    // peuvent être là en même temps ; aucun des deux ne porte l'accent ici,
+    // « Enregistrer » l'a déjà.
+    restingHrSuggestion: toRestingHrSuggestionView(restingHrSuggestion),
     intervals: toIntervalsFormDefaults(intervals),
     // Reconstruit champ par champ plutôt que passé tel quel : ce qui part au
     // navigateur est ce qui est écrit ici, et rien de ce que la session

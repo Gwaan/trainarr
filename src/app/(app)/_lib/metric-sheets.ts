@@ -24,6 +24,13 @@
  * | best-segments        | `lib/metrics/best-segments.ts`                                |
  * | splits               | `lib/metrics/splits.ts`, `lib/metrics/series.ts`              |
  * | stride               | `lib/metrics/stride.ts`, `data/activities.ts`                 |
+ * | hrv / resting-hr     | `lib/intervals/wellness-client.ts`, `lib/metrics/resting-hr.ts`, `data/wellness.ts` |
+ *
+ * **Deux fiches décrivent des mesures que Trainarr ne produit pas** (`hrv`,
+ * `resting-hr`) : elles sont prises par la montre. Leur section « computed » dit
+ * donc ce que l'application **fait** de ces valeurs — d'où elle les tient, ce
+ * qu'elle en calcule (une médiane, et rien d'autre), ce qu'elle en propose — et
+ * jamais comment la montre les mesure, ce qu'aucune ligne de ce dépôt ne sait.
  *
  * Aucun `server-only` ici : le déclencheur ⓘ est un composant client, et ces
  * fiches sont du texte figé — rien à protéger, rien à aller chercher.
@@ -43,7 +50,9 @@ export type MetricSheetId =
   | "hr-distribution"
   | "best-segments"
   | "splits"
-  | "stride";
+  | "stride"
+  | "hrv"
+  | "resting-hr";
 
 export type MetricSheet = {
   id: MetricSheetId;
@@ -379,6 +388,50 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
       "Un point dont la vitesse ou la cadence est muette vaut « pas de mesure » : la dernière cadence connue n'est jamais reportée sur une vitesse fraîche.",
       "À l'arrêt, rien n'est calculé — il n'y a ni pas ni foulée, et une cadence nulle ferait diverger le quotient.",
     ],
+  },
+
+  hrv: {
+    id: "hrv",
+    abbreviation: "HRV",
+    name: "Variabilité cardiaque (rMSSD)",
+    question: "Qu'est-ce que la HRV ?",
+    what: "L'irrégularité, en millisecondes, des intervalles entre deux battements pendant ton sommeil. C'est un reflet de l'équilibre de ton système nerveux autonome — grossièrement : à quel point ton organisme est en récupération plutôt qu'en alerte.",
+    interpret: [
+      "Il n'existe aucune valeur « normale » : la HRV dépend de l'âge, de la génétique et surtout de la méthode de mesure. La seule comparaison qui vaut, c'est toi contre toi-même, sur le même appareil.",
+      "Ce qui se lit est la tendance sur plusieurs jours, jamais une nuit. Une valeur basse isolée signale une soirée arrosée, un dîner tardif ou une chambre trop chaude aussi souvent qu'un excès d'entraînement.",
+      "Une baisse qui dure plusieurs jours en même temps qu'une FC de repos qui monte est le signal classique d'une charge mal absorbée, d'un début d'infection ou d'un manque de sommeil.",
+      "Une HRV haute n'est pas un but à atteindre : elle monte aussi quand tu ne t'entraînes plus du tout.",
+    ],
+    computed: [
+      "Trainarr ne mesure rien : la valeur est celle que ta montre a calculée pendant la nuit, synchronisée vers intervals.icu par HealthFit, puis rapatriée telle quelle une fois par jour.",
+      "La grandeur stockée est le rMSSD, en millisecondes — le champ `hrv` d'intervals.icu. Si ta montre expose un « score de HRV » sur une autre échelle, ce n'est pas ce nombre-là.",
+      "Une nuit sans mesure reste vide : jamais de report de la valeur de la veille, jamais de zéro.",
+      "L'application n'en dérive strictement rien : ni charge, ni forme, ni recommandation automatique. Elle l'affiche, la trace sur 30 jours, et la donne à lire au coach.",
+    ],
+    caveat:
+      "La mesure appartient à ta montre, pas à cette application : sa fenêtre (nuit entière ou phase de sommeil profond), son filtrage des artefacts et son échelle sont ceux du constructeur, et changer de modèle rend la série incomparable avec la précédente. Une ceinture mal placée produit une valeur plausible et fausse.",
+  },
+
+  "resting-hr": {
+    id: "resting-hr",
+    abbreviation: "FC repos",
+    name: "Fréquence cardiaque de repos",
+    question: "Qu'est-ce que la FC de repos ?",
+    what: "Le rythme le plus bas de ton cœur au repos, relevé par ta montre — en pratique pendant ton sommeil. C'est l'indicateur de récupération le plus ancien et le plus robuste qui soit.",
+    interpret: [
+      "Elle baisse avec l'entraînement d'endurance, sur des mois : c'est un des rares chiffres qui dit que le travail de fond paie.",
+      "Une hausse de 5 à 10 bpm sur plusieurs matins consécutifs est un signal — fatigue accumulée, infection qui démarre, sommeil dégradé, alcool. Un seul matin haut ne dit rien.",
+      "Elle sert aussi de valeur de profil : c'est le plancher de la réserve cardiaque, donc elle pèse dans tout ce que l'appli calcule à partir de ta FC.",
+    ],
+    computed: [
+      "La mesure vient de la montre (champ `restingHR` d'intervals.icu), rapatriée une fois par jour. Trainarr ne la calcule pas et ne la corrige pas.",
+      "Le seul calcul de l'application est la **médiane des 14 derniers jours mesurés**, à partir de 5 nuits : c'est elle qui est proposée pour ton profil, jamais une nuit isolée.",
+      "La proposition n'a lieu que si cette médiane s'écarte d'au moins 5 bpm de la FC de repos de ton profil — dans un sens **ou dans l'autre**, puisqu'une FC de repos baisse quand la forme monte et remonte sinon.",
+      "Rien ne s'applique tout seul : tu acceptes ou tu écartes. Une valeur écartée n'est reproposée que si la médiane s'en éloigne d'au moins 2 bpm.",
+      "La FC de repos du **profil** (celle que tu as acceptée ou saisie) est ce qui entre dans le TRIMP de Karvonen, donc dans la CTL, l'ATL et le TSB. Le relevé quotidien, lui, n'entre dans aucun calcul.",
+    ],
+    caveat:
+      "Ce que la montre appelle « FC de repos » n'est pas normalisé : selon le constructeur c'est la valeur la plus basse de la nuit, une moyenne du sommeil profond, ou une moyenne des périodes d'inactivité de la journée. Deux appareils ne donnent pas le même nombre, et la série n'est comparable qu'avec elle-même.",
   },
 };
 

@@ -15,6 +15,7 @@ import {
   getComparableActivities,
   getPlanContext,
   getTrainingSnapshot,
+  getWellnessContext,
   longestRunKm,
   recentRunPace,
   toComparableActivityDto,
@@ -135,6 +136,8 @@ const ATHLETE_ROW: Athlete = {
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
+  restingHrSuggestionDismissedBpm: null,
+  wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
@@ -690,5 +693,74 @@ describe('getPlanContext', () => {
         raceDate: null,
       }),
     );
+  });
+});
+
+
+describe('getWellnessContext', () => {
+  // Lecture de **requête** (le chat) : elle résout l'athlète de la session.
+  beforeEach(() => {
+    dbState.rows.athlete = [ATHLETE_ROW];
+  });
+
+  /** Une journée de relevé, dont chaque test ne renseigne que ce qu'il éprouve. */
+  function wellnessRow(day: string, measures: Record<string, number | null> = {}) {
+    return {
+      day,
+      restingHrBpm: null,
+      hrvRmssdMs: null,
+      sleepTimeS: null,
+      sleepScore: null,
+      avgSleepingHrBpm: null,
+      weightKg: null,
+      ...measures,
+    };
+  }
+
+  it("ne lit rien tant qu'aucun athlète n'est enregistré, et rend une fenêtre vide", async () => {
+    withoutSession();
+
+    expect(await getWellnessContext()).toEqual({ today: '2026-08-11', days: [] });
+  });
+
+  it('rend les journées de la plus récente à la plus ancienne', async () => {
+    dbState.rows.wellness_days = [
+      wellnessRow('2026-08-09', { restingHrBpm: 49 }),
+      wellnessRow('2026-08-11', { restingHrBpm: 47 }),
+    ];
+
+    const context = await getWellnessContext();
+
+    expect(context.days.map((day) => day.date)).toEqual(['2026-08-11', '2026-08-09']);
+    expect(context.days[0]).toEqual({
+      date: '2026-08-11',
+      restingHrBpm: 47,
+      hrvRmssdMs: null,
+      sleepTimeS: null,
+      sleepScore: null,
+      weightKg: null,
+    });
+  });
+
+  it('lit la fenêtre des sept derniers jours sous son athlète', async () => {
+    dbState.rows.wellness_days = [wellnessRow('2026-08-11', { restingHrBpm: 47 })];
+
+    await getWellnessContext();
+
+    const read = dbState.selects.filter((select) => select.table === 'wellness_days');
+    expect(read).toHaveLength(1);
+    const { params } = renderWhere(read[0].where);
+    expect(params).toContain(1);
+    expect(params).toContain('2026-08-05');
+    expect(params).toContain('2026-08-11');
+  });
+
+  it('écarte les journées entièrement muettes : elles coûteraient des tokens pour rien', async () => {
+    dbState.rows.wellness_days = [
+      wellnessRow('2026-08-10'),
+      wellnessRow('2026-08-11', { hrvRmssdMs: 63 }),
+    ];
+
+    expect((await getWellnessContext()).days.map((day) => day.date)).toEqual(['2026-08-11']);
   });
 });

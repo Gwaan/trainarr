@@ -82,6 +82,7 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
           mode="edit"
           values={data.profile}
           maxHrSuggestion={data.maxHrSuggestion}
+          restingHrSuggestion={data.restingHrSuggestion}
         />
       </TabsContent>
 

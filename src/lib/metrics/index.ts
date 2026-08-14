@@ -57,3 +57,12 @@ export {
   type BestSegment,
 } from './best-segments';
 export { SUSTAINED_HR_WINDOW_S, sustainedMaxHrBpm } from './sustained-hr';
+export {
+  RESTING_HR_MIN_SAMPLE,
+  RESTING_HR_REPROPOSE_DELTA_BPM,
+  RESTING_HR_SUGGESTION_DELTA_BPM,
+  RESTING_HR_WINDOW_DAYS,
+  medianRestingHrBpm,
+  restingHrSuggestionBpm,
+  type RestingHrSuggestionInput,
+} from './resting-hr';

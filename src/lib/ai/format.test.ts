@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import type { PlanContextDto, TrainingSnapshotDto } from '@/data/coach-context';
+import type {
+  PlanContextDto,
+  TrainingSnapshotDto,
+  WellnessContextDayDto,
+} from '@/data/coach-context';
 import type { PlanSessionSteps, PlanStep, PlanStepRole } from '@/lib/plan-steps/schema';
 
 import {
@@ -16,6 +20,7 @@ import {
   formatPlanSteps,
   formatSignedPercent,
   formatTrainingSnapshot,
+  formatWellnessContext,
 } from './format';
 
 /** Une étape complète : le contrat porte ses sept clés, `null` pour absent. */
@@ -478,5 +483,88 @@ describe('formatPaceRange', () => {
   it('ne répète pas l’unité sur une plage, et la tait sur une allure unique', () => {
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 320 })).toBe('5:00–5:20/km');
     expect(formatPaceRange({ minSecPerKm: 300, maxSecPerKm: 300 })).toBe('5:00/km');
+  });
+});
+
+
+/** Une journée de relevé, dont chaque test ne renseigne que ce qu'il éprouve. */
+function wellnessDay(
+  date: string,
+  measures: Partial<WellnessContextDayDto> = {},
+): WellnessContextDayDto {
+  return {
+    date,
+    restingHrBpm: null,
+    hrvRmssdMs: null,
+    sleepTimeS: null,
+    sleepScore: null,
+    weightKg: null,
+    ...measures,
+  };
+}
+
+describe('formatWellnessContext', () => {
+  it('date chaque relevé en toutes lettres et écrit chaque mesure avec son unité', () => {
+    const text = formatWellnessContext({
+      today: '2026-08-13',
+      days: [
+        wellnessDay('2026-08-13', {
+          restingHrBpm: 47,
+          hrvRmssdMs: 63.4,
+          sleepTimeS: 25_800,
+          sleepScore: 82,
+          weightKg: 61.4,
+        }),
+      ],
+    });
+
+    expect(text).toContain('jeudi 13 août 2026');
+    expect(text).toContain('FC de repos 47 bpm');
+    expect(text).toContain('HRV (rMSSD) 63 ms');
+    expect(text).toContain('sommeil 7 h 10');
+    expect(text).toContain('score de sommeil 82/100');
+    expect(text).toContain('poids 61,4 kg');
+  });
+
+  it('n’écrit pas les mesures qu’une journée ne porte pas', () => {
+    const text = formatWellnessContext({
+      today: '2026-08-13',
+      days: [wellnessDay('2026-08-13', { restingHrBpm: 47 })],
+    });
+
+    expect(text).toContain('FC de repos 47 bpm');
+    expect(text).not.toContain('HRV (rMSSD) null');
+    expect(text).not.toContain('null');
+  });
+
+  it('nomme, une fois, les mesures jamais prises sur la période', () => {
+    // Sans cette ligne, une HRV absente de toutes les journées se lit comme un
+    // oubli de formatage — et un modèle qui veut bien faire en invente une.
+    const text = formatWellnessContext({
+      today: '2026-08-13',
+      days: [
+        wellnessDay('2026-08-13', { restingHrBpm: 47, sleepTimeS: 25_800 }),
+        wellnessDay('2026-08-12', { restingHrBpm: 48, sleepTimeS: 24_000 }),
+      ],
+    });
+
+    expect(text).toContain('Jamais mesuré sur cette période : HRV (rMSSD), score de sommeil, poids.');
+  });
+
+  it('dit la provenance des mesures, et borne ce que le modèle connaît', () => {
+    const text = formatWellnessContext({
+      today: '2026-08-13',
+      days: [wellnessDay('2026-08-13', { restingHrBpm: 47 })],
+    });
+
+    expect(text).toContain('Trainarr ne les calcule pas');
+    expect(text).toContain('cette liste est complète');
+  });
+
+  it('énonce l’absence totale plutôt que de rendre un bloc vide', () => {
+    const text = formatWellnessContext({ today: '2026-08-13', days: [] });
+
+    expect(text).toContain('Aucune mesure de bien-être');
+    expect(text).toContain('ne les commente pas');
   });
 });

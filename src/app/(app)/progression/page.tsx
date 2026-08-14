@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { ChartSpline, Gauge, TrendingUp } from "lucide-react";
+import { ChartSpline, Gauge, HeartPulse, TrendingUp } from "lucide-react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
@@ -19,6 +19,7 @@ import { PeriodFilter } from "./_components/period-filter";
 import { ProgressionSkeleton } from "./_components/progression-skeleton";
 import { ProgressionStats } from "./_components/progression-stats";
 import { Vo2maxChart } from "./_components/vo2max-chart";
+import { WellnessPanel } from "./_components/wellness-panel";
 import {
   BUCKET_NOUN,
   buildTrimpBarsModel,
@@ -26,6 +27,7 @@ import {
   summarizeVolume,
 } from "./_lib/bucket-charts";
 import { formatFullDay } from "./_lib/date-axis";
+import { buildWellnessSeries, hasNoWellnessMeasure } from "./_lib/wellness-series";
 import { RANGE_PARAM, parseRangeParam, toProgressionRange } from "./_lib/range";
 import { MetricInfo } from "../_components/metric-info";
 import {
@@ -185,6 +187,35 @@ function VolumePanel({ progression }: { progression: ProgressionDto }) {
 }
 
 /**
+ * Les mesures de la montre, sur une fenêtre **fixe** de 30 jours — annoncée,
+ * puisqu'elle ne suit pas le filtre de période (cf. `ProgressionDto.wellness`).
+ *
+ * Rien n'y est coloré ni jugé : ce panneau montre des mesures que l'application
+ * ne produit pas, et la seule chose qu'il ajoute est de dire ce qui manque.
+ */
+function WellnessTrendPanel({ progression }: { progression: ProgressionDto }) {
+  const series = buildWellnessSeries(progression.wellness.days);
+
+  return (
+    <Panel
+      title="Bien-être"
+      meta={<span className="num">30 derniers jours</span>}
+      padded={!hasNoWellnessMeasure(series)}
+    >
+      {hasNoWellnessMeasure(series) ? (
+        <MetricEmptyState
+          icon={HeartPulse}
+          title="Aucun relevé bien-être"
+          description="HRV, FC de repos, sommeil et poids sont mesurés par ta montre et ta balance, puis rapatriés depuis intervals.icu une fois par jour. Il faut une clé API enregistrée dans les réglages."
+        />
+      ) : (
+        <WellnessPanel series={series} />
+      )}
+    </Panel>
+  );
+}
+
+/**
  * `requireSession()` juste après `connection()` : c'est ici que la vérification
  * fait autorité (le proxy, lui, n'a regardé que la présence du cookie). Dans le
  * composant suspendu, donc sans coûter le `◐` de la route.
@@ -220,6 +251,10 @@ async function ProgressionContent({ searchParams }: PageProps) {
       <Vo2maxPanel progression={progression} />
       <TrimpPanel progression={progression} />
       <VolumePanel progression={progression} />
+      {/* En dernier, et c'est voulu : ce sont les seules valeurs de la page que
+          l'application ne calcule pas — elles éclairent les précédentes, elles
+          ne les remplacent pas. */}
+      <WellnessTrendPanel progression={progression} />
     </>
   );
 }
