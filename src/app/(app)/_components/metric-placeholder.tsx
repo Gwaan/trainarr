@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { ChevronRight, type LucideIcon } from "lucide-react";
 
@@ -7,6 +8,12 @@ export type MetricPlaceholderProps = {
   icon: LucideIcon;
   /** Même libellé que la carte qu'elle remplace. */
   label: string;
+  /**
+   * Déclencheur d'explication (un ⓘ), comme sur la `StatCard` qu'elle remplace.
+   * C'est ici qu'il sert le plus : l'athlète qui n'a pas encore la métrique est
+   * précisément celle qui se demande ce que c'est.
+   */
+  info?: ReactNode;
   title: string;
   /** Ce qui manque, et comment l'obtenir. */
   description: string;
@@ -25,6 +32,7 @@ export type MetricPlaceholderProps = {
 export function MetricPlaceholder({
   icon: Icon,
   label,
+  info,
   title,
   description,
   action,
@@ -37,7 +45,10 @@ export function MetricPlaceholder({
         className,
       )}
     >
-      <h3 className="eyebrow">{label}</h3>
+      <h3 className="eyebrow flex items-center gap-1.5">
+        {label}
+        {info}
+      </h3>
       <p className="mt-3 flex items-center gap-2 text-[0.95rem] leading-tight font-semibold text-fg-muted">
         <Icon aria-hidden="true" strokeWidth={1.8} className="size-4 shrink-0 text-fg-faint" />
         {title}

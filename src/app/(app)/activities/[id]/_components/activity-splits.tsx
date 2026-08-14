@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import { isPartialSplit } from "@/lib/metrics";
 
+import { MetricInfo } from "../../../_components/metric-info";
 import { formatHeartRate, formatNumber } from "../../../_lib/format";
 import {
   MISSING,
@@ -44,6 +45,7 @@ export function ActivitySplits({
   return (
     <Panel
       title="Kilomètres"
+      info={<MetricInfo id="splits" />}
       padded={false}
       meta={<span className="num">{splits.length}</span>}
       className={className}

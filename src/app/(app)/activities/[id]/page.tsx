@@ -163,6 +163,7 @@ async function ActivityDetail({ params }: PageProps) {
           {paceBars === null ? null : (
             <DistributionPanel
               title="Distribution de l'allure"
+              sheet="pace-distribution"
               model={paceBars}
               hint="Temps passé dans chaque tranche d'allure."
             />
@@ -170,6 +171,7 @@ async function ActivityDetail({ params }: PageProps) {
           {hrBars === null ? null : (
             <DistributionPanel
               title="Distribution cardiaque"
+              sheet="hr-distribution"
               model={hrBars}
               // La couleur ne se devine pas : quand les tranches sont zonées,
               // la légende le dit — sinon elle ne promet rien.

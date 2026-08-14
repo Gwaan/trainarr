@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import { cn } from "@/lib/utils";
 
+import { MetricInfo } from "../../../_components/metric-info";
 import { formatNumber } from "../../../_lib/format";
 import { formatClock } from "../_lib/format-detail";
 import { totalZoneSeconds, zoneBarClass, zoneBarWidthPct } from "../_lib/hr-zones-model";
@@ -34,6 +35,10 @@ export function HrZonesPanel({
   return (
     <Panel
       title="Zones cardio"
+      // Un seul ⓘ pour les cinq zones : elles n'ont qu'un jeu de bornes, et
+      // cinq déclencheurs dans une liste de barres de 16 px se marcheraient
+      // dessus au doigt.
+      info={<MetricInfo id="hr-zones" />}
       meta={<span className="num">{formatClock(total)}</span>}
       className={className}
     >

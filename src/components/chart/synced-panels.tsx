@@ -40,6 +40,13 @@ export type SyncedPanelsProps<P> = {
    * (`null` hors survol) : le libellé du curseur est propre à chaque page.
    */
   header?: (hover: number | null) => ReactNode;
+  /**
+   * Déclencheur d'explication posé au bout du titre d'une série, appelé avec la
+   * clé de la série (`"ctl"`, `"stride"`…). Une fonction plutôt qu'un champ de
+   * `SeriesSpec` : le rendu de graphe est partagé et n'a pas à connaître le
+   * catalogue des fiches de métriques.
+   */
+  info?: (seriesKey: string) => ReactNode;
   className?: string;
 };
 
@@ -55,6 +62,7 @@ export function SyncedPanels<P>({
   model,
   ariaLabel,
   header,
+  info,
   className,
 }: SyncedPanelsProps<P>) {
   const [hover, setHover] = useState<number | null>(null);
@@ -110,6 +118,7 @@ export function SyncedPanels<P>({
             panel={panel}
             hover={hover}
             cursorRatio={cursorRatio}
+            info={info?.(panel.spec.key)}
             // Un seul panneau sert de repère au pointeur : tous ont la même
             // gouttière, donc la même géométrie de tracé.
             plotRef={index === 0 ? plotRef : null}
@@ -130,13 +139,21 @@ export type ChartPanelProps<P> = {
   cursorRatio: number;
   /** Renseigné sur le seul panneau qui sert de repère au pointeur. */
   plotRef: RefObject<HTMLDivElement | null> | null;
+  /** Déclencheur d'explication posé au bout du titre de la série. */
+  info?: ReactNode;
 };
 
 /**
  * Un panneau : ses graduations en gouttière, sa grille, sa courbe (et son
  * remplissage), le crosshair et la valeur survolée.
  */
-export function ChartPanel<P>({ panel, hover, cursorRatio, plotRef }: ChartPanelProps<P>) {
+export function ChartPanel<P>({
+  panel,
+  hover,
+  cursorRatio,
+  plotRef,
+  info,
+}: ChartPanelProps<P>) {
   const point = hover === null ? null : (panel.projected[hover] ?? null);
   const anchor = edgeAnchor(cursorRatio);
   const side = chipSide(point?.y ?? null);
@@ -148,7 +165,10 @@ export function ChartPanel<P>({ panel, hover, cursorRatio, plotRef }: ChartPanel
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
         {/* Le titre nomme la série : une seule par panneau, donc pas de légende. */}
-        <h3 className="eyebrow">{panel.spec.title}</h3>
+        <h3 className="eyebrow flex min-w-0 items-center gap-1.5">
+          {panel.spec.title}
+          {info}
+        </h3>
         <span className="num text-[0.7rem] text-fg-faint">{panel.rangeLabel}</span>
       </div>
 

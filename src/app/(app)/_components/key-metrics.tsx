@@ -14,6 +14,7 @@ import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
 } from "../_lib/metric-unavailable";
+import { MetricInfo } from "./metric-info";
 import { MetricPlaceholder } from "./metric-placeholder";
 
 export type KeyMetricsProps = {
@@ -55,6 +56,7 @@ export function KeyMetrics({
       {vo2max ? (
         <StatCard
           label="VO₂max estimée"
+          info={<MetricInfo id="vo2max" />}
           value={formatVo2max(vo2max.value)}
           delta={toDelta(vo2max.delta30d, 1, "negative")}
           className={fitness ? undefined : vo2maxSpan}
@@ -63,6 +65,7 @@ export function KeyMetrics({
         <MetricPlaceholder
           icon={Gauge}
           label="VO₂max estimée"
+          info={<MetricInfo id="vo2max" />}
           className={vo2maxSpan}
           {...describeVo2maxUnavailable(vo2maxUnavailable)}
         />
@@ -72,11 +75,13 @@ export function KeyMetrics({
         <>
           <StatCard
             label="Fitness CTL"
+            info={<MetricInfo id="ctl" />}
             value={formatLoad(fitness.ctl)}
             delta={toDelta(fitness.ctlDelta7d, 0, "warning")}
           />
           <StatCard
             label="Forme TSB"
+            info={<MetricInfo id="tsb" />}
             value={formatLoad(fitness.tsb)}
             tone={tsb.tone}
             note={tsb.note}

@@ -27,6 +27,7 @@ import {
 } from "./_lib/bucket-charts";
 import { formatFullDay } from "./_lib/date-axis";
 import { RANGE_PARAM, parseRangeParam, toProgressionRange } from "./_lib/range";
+import { MetricInfo } from "../_components/metric-info";
 import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
@@ -81,6 +82,8 @@ function LoadPanel({ progression }: { progression: ProgressionDto }) {
         title="Forme, fatigue et fraîcheur"
         meta={<span className="num">{progression.load.length} jours</span>}
       >
+        {/* Pas de ⓘ sur l'en-tête : le panneau trace trois métriques, et
+            chacune porte le sien au-dessus de sa propre courbe. */}
         <FitnessCharts load={progression.load} />
       </Panel>
     );
@@ -104,6 +107,7 @@ function Vo2maxPanel({ progression }: { progression: ProgressionDto }) {
   return (
     <Panel
       title="VO₂max effective (ml/kg/min)"
+      info={<MetricInfo id="vo2max" />}
       meta={<span>tendance 30 jours</span>}
       padded={progression.vo2max !== null}
     >
@@ -127,6 +131,7 @@ function TrimpPanel({ progression }: { progression: ProgressionDto }) {
   return (
     <Panel
       title={`Charge par ${noun.singular} (TRIMP)`}
+      info={<MetricInfo id="trimp" />}
       meta={note === null ? null : <span className="num">{note}</span>}
       padded={false}
     >

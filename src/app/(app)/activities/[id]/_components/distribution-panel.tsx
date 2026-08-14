@@ -5,6 +5,8 @@ import { useState } from "react";
 import { Panel } from "@/components/panel";
 import { cn } from "@/lib/utils";
 
+import { MetricInfo } from "../../../_components/metric-info";
+import type { MetricSheetId } from "../../../_lib/metric-sheets";
 import { formatNumber } from "../../../_lib/format";
 import type { DistributionModel } from "../_lib/distribution-model";
 import { formatBinTime } from "../_lib/format-detail";
@@ -17,6 +19,12 @@ const PLOT_HEIGHT = "h-32 sm:h-36";
 
 export type DistributionPanelProps = {
   title: string;
+  /**
+   * Fiche ouverte par le ⓘ de l'en-tête. Un identifiant plutôt qu'un
+   * `ReactNode` : ce composant est déjà client, il instancie le déclencheur
+   * lui-même, et une simple chaîne suffit à traverser la frontière.
+   */
+  sheet: MetricSheetId;
   model: DistributionModel;
   /** Ce que la hauteur des colonnes raconte, en une ligne. */
   hint: string;
@@ -40,6 +48,7 @@ export type DistributionPanelProps = {
  */
 export function DistributionPanel({
   title,
+  sheet,
   model,
   hint,
   className,
@@ -56,6 +65,7 @@ export function DistributionPanel({
   return (
     <Panel
       title={title}
+      info={<MetricInfo id={sheet} />}
       meta={<span className="num">{formatBinTime(totalSeconds)}</span>}
       className={className}
     >

@@ -5,6 +5,8 @@ import { Panel } from "@/components/panel";
 import { cn } from "@/lib/utils";
 import { defaultActivityName } from "@/lib/fit/sport";
 
+import { MetricInfo } from "../../../_components/metric-info";
+import type { MetricSheetId } from "../../../_lib/metric-sheets";
 import { formatDistance, formatHeartRate, formatPace, formatVo2max } from "../../../_lib/format";
 import {
   MISSING,
@@ -60,7 +62,12 @@ export function ActivityHeader({ activity }: { activity: ActivitySummaryData }) 
   );
 }
 
-type Stat = { label: string; value: string };
+/**
+ * Une tuile. `sheet` n'est renseigné que sur les grandeurs **calculées** : une
+ * distance ou un temps écoulé sortent du fichier tels quels, un ⓘ n'y aurait
+ * rien à expliquer.
+ */
+type Stat = { label: string; value: string; sheet?: MetricSheetId };
 
 /**
  * Chiffres clés, en mono comme toute donnée de l'appli.
@@ -97,13 +104,18 @@ function statsOf(activity: ActivitySummaryData): Stat[] {
       value:
         activity.avgCadenceSpm === null ? MISSING : formatCadence(activity.avgCadenceSpm),
     },
-    { label: "TRIMP", value: activity.trimp === null ? MISSING : formatTrimp(activity.trimp) },
+    {
+      label: "TRIMP",
+      value: activity.trimp === null ? MISSING : formatTrimp(activity.trimp),
+      sheet: "trimp",
+    },
     {
       label: "VO₂max eff.",
       value:
         activity.effectiveVo2max === null
           ? MISSING
           : formatVo2max(activity.effectiveVo2max),
+      sheet: "vo2max",
     },
     { label: "Temps écoulé", value: formatClock(activity.elapsedTimeS) },
   ];
@@ -124,7 +136,10 @@ export function ActivityStatsPanel({
       <dl className={cn("grid grid-cols-2 gap-x-4 gap-y-4", gridClassName)}>
         {statsOf(activity).map((stat) => (
           <div key={stat.label} className="min-w-0">
-            <dt className="eyebrow">{stat.label}</dt>
+            <dt className="eyebrow flex items-center gap-1.5">
+              {stat.label}
+              {stat.sheet === undefined ? null : <MetricInfo id={stat.sheet} />}
+            </dt>
             <dd className="num mt-1.5 truncate text-[1.05rem] leading-none font-semibold text-fg">
               {stat.value}
             </dd>

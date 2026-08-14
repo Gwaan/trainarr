@@ -1,9 +1,11 @@
+import type { ReactNode } from "react";
 import { CalendarRange, Dumbbell, Flag, Timer } from "lucide-react";
 
 import { MarkdownLite } from "@/components/markdown-lite";
 import type { PlanDto } from "@/data/plans";
 import { toCivilDate } from "@/lib/dates/civil";
 
+import { MetricInfo } from "../../_components/metric-info";
 import { formatDuration } from "../../_lib/format";
 import {
   LEVEL_LABELS,
@@ -95,10 +97,22 @@ function LastTestNote({ note }: { note: string }) {
 }
 
 /** Une contrainte du plan : label discret, valeur chiffrée en mono. */
-function Setting({ label, value }: { label: string; value: string }) {
+function Setting({
+  label,
+  info,
+  value,
+}: {
+  label: string;
+  /** Déclencheur d'explication, sur les seuls réglages qui portent un calcul. */
+  info?: ReactNode;
+  value: string;
+}) {
   return (
     <div className="rounded-button bg-surface-2 px-3 py-2">
-      <p className="eyebrow">{label}</p>
+      <p className="eyebrow flex items-center gap-1.5">
+        {label}
+        {info}
+      </p>
       <p className="num mt-1.5 text-[0.95rem] font-semibold text-fg">{value}</p>
     </div>
   );
@@ -149,6 +163,10 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
                 ? "Chrono de référence"
                 : `Chrono de référence · ${formatCivilDay(plan.referenceUpdatedOn)}`
             }
+            // Le chrono est une saisie, mais c'est le seul endroit de l'appli
+            // où le VDOT — qui en sort et qui fixe toutes les allures du plan —
+            // est visible en creux. La fiche s'accroche donc ici.
+            info={<MetricInfo id="vdot" />}
             value={`${REFERENCE_DISTANCE_LABELS[plan.referenceDistance]} · ${formatRaceTimeSeconds(plan.referenceTimeS)}`}
           />
         )}

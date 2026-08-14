@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import type { BestSegment } from "@/lib/metrics";
 
+import { MetricInfo } from "../../../_components/metric-info";
 import { formatNumber } from "../../../_lib/format";
 import { formatClock, formatPaceValue } from "../_lib/format-detail";
 
@@ -42,6 +43,7 @@ export function BestSegmentsPanel({
   return (
     <Panel
       title="Meilleurs segments"
+      info={<MetricInfo id="best-segments" />}
       padded={false}
       meta={<span className="num">{segments.length}</span>}
       className={className}

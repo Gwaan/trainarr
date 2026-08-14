@@ -8,6 +8,7 @@ import type {
   Vo2maxUnavailableDto,
 } from "@/data/progression";
 
+import { MetricInfo } from "../../_components/metric-info";
 import { MetricPlaceholder } from "../../_components/metric-placeholder";
 import { formatLoad, formatVo2max } from "../../_lib/format";
 import { readTsb, toDelta } from "../../_lib/metric-tone";
@@ -49,12 +50,14 @@ export function ProgressionStats({
         <>
           <StatCard
             label="Forme CTL"
+            info={<MetricInfo id="ctl" />}
             value={formatLoad(fitness.ctl)}
             delta={toDelta(fitness.ctlDelta7d, 0, "warning")}
             note="Charge chronique, lissée sur 42 jours."
           />
           <StatCard
             label="Fraîcheur TSB"
+            info={<MetricInfo id="tsb" />}
             value={formatLoad(fitness.tsb)}
             tone={tsb.tone}
             note={tsb.note}
@@ -72,6 +75,7 @@ export function ProgressionStats({
       {vo2max ? (
         <StatCard
           label="VO₂max estimée"
+          info={<MetricInfo id="vo2max" />}
           value={formatVo2max(vo2max.value)}
           delta={toDelta(vo2max.delta30d, 1, "negative")}
           note="Moyenne des 30 derniers jours."
@@ -81,6 +85,7 @@ export function ProgressionStats({
         <MetricPlaceholder
           icon={Gauge}
           label="VO₂max estimée"
+          info={<MetricInfo id="vo2max" />}
           className="col-span-2 md:col-span-1"
           {...describeVo2maxUnavailable(vo2maxUnavailable)}
         />

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -14,6 +15,12 @@ export type StatDelta = {
 
 export type StatCardProps = {
   label: string;
+  /**
+   * Déclencheur d'explication posé à droite du libellé (un ⓘ). Un `ReactNode`
+   * plutôt qu'un identifiant de métrique : cette carte est une primitive
+   * partagée, elle n'a pas à connaître le catalogue des fiches.
+   */
+  info?: ReactNode;
   /** Valeur déjà formatée — rendue en mono tabulaire. */
   value: string;
   delta?: StatDelta;
@@ -38,6 +45,7 @@ const DELTA_LABEL: Record<StatDelta["direction"], string> = {
 
 export function StatCard({
   label,
+  info,
   value,
   delta,
   tone = "default",
@@ -53,7 +61,10 @@ export function StatCard({
         className,
       )}
     >
-      <h3 className="eyebrow">{label}</h3>
+      <h3 className="eyebrow flex items-center gap-1.5">
+        {label}
+        {info}
+      </h3>
 
       <p className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span

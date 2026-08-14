@@ -6,6 +6,8 @@ import { SegmentedToggle, type SegmentedOption } from "@/components/chart/segmen
 import { SyncedPanels } from "@/components/chart/synced-panels";
 import { Panel } from "@/components/panel";
 
+import { MetricInfo } from "../../../_components/metric-info";
+import { isMetricSheetId } from "../../../_lib/metric-sheets";
 import {
   buildActivityChartsModel,
   hasDistanceAxis,
@@ -62,6 +64,10 @@ export function ActivityCharts({ points }: ActivityChartsProps) {
         model={model}
         ariaLabel="Graphes synchronisés de la séance"
         header={(hover) => <CursorReadout points={points} hover={hover} />}
+        // Seule la foulée est une grandeur **calculée** parmi ces cinq séries :
+        // allure, FC, altitude et cadence sortent des capteurs. Le garde ne
+        // laisse donc passer qu'elle, et n'a rien à savoir des autres clés.
+        info={(key) => (isMetricSheetId(key) ? <MetricInfo id={key} /> : null)}
       />
     </Panel>
   );

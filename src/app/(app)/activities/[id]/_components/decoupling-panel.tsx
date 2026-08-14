@@ -1,7 +1,10 @@
+import type { ReactNode } from "react";
+
 import { Panel } from "@/components/panel";
 import type { Decoupling, HalfStats } from "@/lib/metrics";
 import { cn } from "@/lib/utils";
 
+import { MetricInfo } from "../../../_components/metric-info";
 import { formatHeartRate, formatNumber, formatPace } from "../../../_lib/format";
 import { decouplingVerdict, pacePerKmOf } from "../_lib/decoupling-model";
 import { MISSING, formatSignedPercent } from "../_lib/format-detail";
@@ -40,7 +43,11 @@ export function DecouplingPanel({
   const verdict = decouplingVerdict(decoupling.decouplingPct);
 
   return (
-    <Panel title="Dérive cardiaque" className={className}>
+    <Panel
+      title="Dérive cardiaque"
+      info={<MetricInfo id="decoupling" />}
+      className={className}
+    >
       <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
         <span
           className={cn(
@@ -95,6 +102,7 @@ export function DecouplingPanel({
               deux moitiés afficheraient le même nombre. */}
           <HalfRow
             label="EF"
+            info={<MetricInfo id="ef" />}
             first={formatNumber(decoupling.firstHalf.ef, 3)}
             second={formatNumber(decoupling.secondHalf.ef, 3)}
           />
@@ -111,17 +119,23 @@ function paceOf(half: HalfStats): string {
 
 function HalfRow({
   label,
+  info,
   first,
   second,
 }: {
   label: string;
+  /** Déclencheur d'explication, sur les seules lignes qui sont un calcul. */
+  info?: ReactNode;
   first: string;
   second: string;
 }) {
   return (
     <tr className="border-b border-border last:border-b-0">
       <th scope="row" className="py-2 text-left font-medium text-fg-muted">
-        {label}
+        <span className="flex items-center gap-1.5">
+          {label}
+          {info}
+        </span>
       </th>
       <td className="num py-2 text-right whitespace-nowrap text-fg">{first}</td>
       <td className="num py-2 text-right whitespace-nowrap text-fg">{second}</td>

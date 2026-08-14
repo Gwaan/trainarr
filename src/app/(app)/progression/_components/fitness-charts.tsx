@@ -6,6 +6,9 @@ import { SyncedPanels } from "@/components/chart/synced-panels";
 import { civilDateToMs } from "@/lib/dates/civil";
 import type { LoadPoint } from "@/lib/metrics";
 
+import { MetricInfo } from "../../_components/metric-info";
+import { isMetricSheetId } from "../../_lib/metric-sheets";
+
 import { buildLoadChartsModel } from "../_lib/load-series";
 import { formatFullDay } from "../_lib/date-axis";
 
@@ -38,6 +41,9 @@ export function FitnessCharts({ load }: FitnessChartsProps) {
       model={model}
       ariaLabel="Graphes synchronisés de la charge d'entraînement"
       header={(hover) => <CursorReadout load={load} hover={hover} />}
+      // Les trois clés de `LOAD_SPECS` sont exactement `ctl`, `atl` et `tsb` :
+      // chaque panneau porte donc la fiche de la métrique qu'il trace.
+      info={(key) => (isMetricSheetId(key) ? <MetricInfo id={key} /> : null)}
     />
   );
 }

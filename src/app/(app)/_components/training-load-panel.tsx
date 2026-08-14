@@ -6,6 +6,7 @@ import { Sparkline } from "@/components/sparkline";
 import type { LoadWeekDto } from "@/data/dashboard";
 
 import { formatLoad } from "../_lib/format";
+import { MetricInfo } from "./metric-info";
 
 const PANEL_TITLE = "Charge d'entraînement";
 const PANEL_SPAN = "lg:col-span-3";
@@ -33,6 +34,7 @@ export function TrainingLoadPanel({ weeks }: { weeks: LoadWeekDto[] }) {
   return (
     <Panel
       title={PANEL_TITLE}
+      info={<MetricInfo id="ctl" />}
       meta={<span className="num">{weeks.length} semaines</span>}
       className={PANEL_SPAN}
     >
