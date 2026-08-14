@@ -120,6 +120,13 @@
       "when": 1786690318906,
       "tag": "0016_auth_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786695465251,
+      "tag": "0017_athlete_owner_and_intervals_credentials",
+      "breakpoints": true
     }
   ]
 }

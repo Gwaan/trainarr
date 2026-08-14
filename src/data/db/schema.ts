@@ -40,34 +40,69 @@ export const ATHLETE_SEXES = ['male', 'female'] as const;
 
 export type AthleteSex = (typeof ATHLETE_SEXES)[number];
 
-/** Profil de l'athlète. Application mono-utilisateur : une seule ligne, garantie par la base. */
-export const athlete = pgTable(
-  'athlete',
-  {
-    id: serial('id').primaryKey(),
-    displayName: text('display_name').notNull(),
-    sex: text('sex', { enum: ATHLETE_SEXES }),
-    maxHrBpm: integer('max_hr_bpm'),
-    restingHrBpm: integer('resting_hr_bpm'),
-    weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
-    /** Date civile (mode `string`, `YYYY-MM-DD`) : pas d'heure, donc pas de fuseau. */
-    birthDate: date('birth_date'),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
-  },
-  () => [
-    /**
-     * Contrainte de singleton : un index unique sur l'expression constante
-     * `true` produit la même clé pour toute ligne, donc la seconde insertion
-     * échoue (`23505`). C'est ce qui ferme la course entre deux soumissions
-     * simultanées de l'onboarding — un `SELECT` suivi d'un `INSERT` en
-     * `READ COMMITTED` ne la voit pas venir, les deux transactions lisant une
-     * table encore vide. Côté DAL, `createAthlete` traduit la violation en
-     * `AthleteAlreadyExistsError`.
-     */
-    uniqueIndex('athlete_singleton').on(sql`(true)`),
-  ],
-);
+/**
+ * Profil de l'athlète, **propriété d'un compte**.
+ *
+ * L'index unique `athlete_singleton` a disparu (migration 0017) : c'était lui
+ * qui interdisait matériellement un second athlète. Ce qui borne désormais la
+ * table, c'est l'unicité de `user_id` — un athlète par compte, et un compte par
+ * athlète.
+ */
+export const athlete = pgTable('athlete', {
+  id: serial('id').primaryKey(),
+  /**
+   * Compte propriétaire de l'athlète (`auth_users.id`).
+   *
+   * **Nullable**, et ça n'est pas un provisoire mal assumé : la migration peut
+   * s'appliquer avant qu'un seul compte existe (c'est même le cas courant — les
+   * tables d'authentification sont neuves), et une colonne `NOT NULL` n'aurait
+   * alors aucune valeur à écrire. Une ligne à `user_id IS NULL` est un athlète
+   * **à réclamer** : le premier compte qui se connecte sans athlète se
+   * l'attribue (cf. `getCurrentAthleteId` dans `src/data/athlete.ts`). Sans ce
+   * chemin, l'onboarding créerait un athlète neuf et vide pendant que des années
+   * d'entraînement dormiraient sous une ligne orpheline devenue invisible.
+   *
+   * **Unique** : deux comptes ne peuvent pas pointer sur le même athlète, ce qui
+   * ferme aussi la course entre deux réclamations simultanées.
+   *
+   * **`ON DELETE RESTRICT`.** Les deux autres comportements sont pires :
+   * `CASCADE` effacerait l'historique d'entraînement avec le compte (et
+   * échouerait de toute façon, `activities.athlete_id` ne cascadant pas), et
+   * `SET NULL` rendrait l'athlète orphelin — donc **réclamable par le prochain
+   * compte créé**, qui hériterait silencieusement des données de quelqu'un
+   * d'autre. Avec `RESTRICT`, la base refuse la suppression tant que l'athlète
+   * n'a pas été traité explicitement : rien ne disparaît ni ne change de mains
+   * par accident.
+   */
+  userId: text('user_id')
+    .unique()
+    .references(() => authUsers.id, { onDelete: 'restrict' }),
+  displayName: text('display_name').notNull(),
+  sex: text('sex', { enum: ATHLETE_SEXES }),
+  maxHrBpm: integer('max_hr_bpm'),
+  restingHrBpm: integer('resting_hr_bpm'),
+  weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
+  /** Date civile (mode `string`, `YYYY-MM-DD`) : pas d'heure, donc pas de fuseau. */
+  birthDate: date('birth_date'),
+  /**
+   * Identifiant intervals.icu de l'athlète (ex. `i123456`). `NULL` tant qu'il
+   * n'est pas renseigné : l'API résout alors l'athlète `0` en « le propriétaire
+   * de la clé ». Ce n'est pas un secret — il n'ouvre rien à lui seul.
+   */
+  intervalsAthleteId: text('intervals_athlete_id'),
+  /**
+   * Clé API intervals.icu, **chiffrée** (AES-256-GCM, cf. `src/lib/crypto/`).
+   * Jamais la clé en clair : la colonne porte l'enveloppe `v1:<base64>` qui
+   * embarque son vecteur d'initialisation et son marqueur d'authenticité.
+   *
+   * La clé de chiffrement dérive de `BETTER_AUTH_SECRET` : changer ce secret
+   * rend cette colonne indéchiffrable, ce que le DAL rapporte comme « clé
+   * illisible, à ressaisir » — jamais comme une panne.
+   */
+  intervalsApiKeyEncrypted: text('intervals_api_key_encrypted'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
 
 /**
  * Nom de l'index unique qui interdit deux activités du même sport au même

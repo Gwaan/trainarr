@@ -2,7 +2,7 @@ import 'server-only';
 
 import { and, eq, sql } from 'drizzle-orm';
 
-import { getAthleteId } from './athlete';
+import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, activityFeedbacks } from './db/schema';
 
@@ -43,7 +43,7 @@ export class ActivityNotFoundError extends Error {
 
 /** `true` si l'activité existe **et** appartient à l'athlète enregistré. */
 async function ownsActivity(activityId: number): Promise<boolean> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return false;
 
   const rows = await db

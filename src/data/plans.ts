@@ -15,7 +15,7 @@ import {
   type PlanSessionSteps,
 } from '@/lib/plan-steps/schema';
 
-import { AthleteNotFoundError, getAthleteId, isCivilDate, todayCivilDate } from './athlete';
+import { AthleteNotFoundError, getCurrentAthleteId, isCivilDate, todayCivilDate } from './athlete';
 import { db } from './db/client';
 import { isUniqueViolation } from './db/errors';
 import {
@@ -724,7 +724,7 @@ export type PlanWithSessions = { plan: PlanDto; sessions: PlanSessionDto[] };
  * brouillon ne sorte jamais par la porte du plan actif (et réciproquement).
  */
 async function getPlanWithSessions(status: PlanStatus): Promise<PlanWithSessions | null> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
   const planRows = await db
@@ -782,7 +782,7 @@ export function getDraftPlanWithSessions(): Promise<PlanWithSessions | null> {
 export async function getPlannedSessionForActivity(
   activityId: number,
 ): Promise<PlanSessionDto | null> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
   const rows = await db
@@ -1021,7 +1021,7 @@ async function writePlanSettings(
 export async function createDraftPlanWithSessions(input: CreatePlanInput): Promise<PlanDto> {
   const values = validatePlanInput(input);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new AthleteNotFoundError();
 
   const created = await writeDraftPlan(athleteId, values);
@@ -1116,7 +1116,7 @@ function draftPlanTransaction(athleteId: number, values: ValidatedPlanInput): Pr
  * @throws {PlanNotFoundError} si l'id ne désigne pas un brouillon de l'athlète.
  */
 export async function acceptDraftPlan(draftId: number): Promise<PlanDto> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new PlanNotFoundError();
 
   const today = todayCivilDate();
@@ -1168,7 +1168,7 @@ export async function acceptDraftPlan(draftId: number): Promise<PlanDto> {
  * @throws {PlanNotFoundError} si l'id ne désigne pas un brouillon de l'athlète.
  */
 export async function discardDraftPlan(draftId: number): Promise<void> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new PlanNotFoundError();
 
   const deleted = await db
@@ -1213,7 +1213,7 @@ export async function applyPlanUpdate(planId: number, update: PlanUpdate): Promi
   // aberrant ne doit pas commencer par supprimer des séances.
   const values = toPlanSettingsValues(update.settings);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new PlanNotFoundError();
 
   await db.transaction(async (tx) => {
@@ -1269,7 +1269,7 @@ export async function rescheduleSession(
     );
   }
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new PlanNotFoundError();
 
   await db.transaction(async (tx) => {
@@ -1314,7 +1314,7 @@ export async function rescheduleSession(
  * aucun plan ne les porte.
  */
 export async function archiveActivePlan(): Promise<boolean> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return false;
 
   return db.transaction(async (tx) => {

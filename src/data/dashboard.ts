@@ -1,13 +1,14 @@
 import 'server-only';
 
-import { and, asc, desc, eq, getTableColumns, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, isNull, or } from 'drizzle-orm';
 
 import { isoWeekEnd, isoWeekNumber, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
 
 import { toActivitySummaryDto, type ActivitySummaryDto } from './activities';
+import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
-import { activities, athlete, plannedSessions, plans, type PlannedSession } from './db/schema';
+import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
 import {
   buildDailyTrimp,
   buildFitness,
@@ -128,8 +129,7 @@ function toPlannedSessionDto(row: PlannedSession): PlannedSessionDto {
 
 /** Agrège en une seule passe tout ce que le dashboard affiche. */
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const profileRows = await db.select().from(athlete).orderBy(asc(athlete.id)).limit(1);
-  const profile = profileRows[0];
+  const profile = await getCurrentAthlete();
   if (!profile) return EMPTY_SUMMARY;
 
   const today = toCivilDate(new Date());

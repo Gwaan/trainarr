@@ -1,15 +1,15 @@
 import 'server-only';
 
-import { and, asc, desc, eq, gte, lt, lte } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, lte } from 'drizzle-orm';
 
 import { civilDaysBetween, isoWeekStart, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import { computeLoadSeries, computeTrimp } from '@/lib/metrics';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
-import { todayCivilDate } from './athlete';
+import { getCurrentAthlete, todayCivilDate } from './athlete';
 import { db } from './db/client';
-import { activities, athlete, type Activity, type Athlete, type AthleteSex } from './db/schema';
+import { activities, type Activity, type Athlete, type AthleteSex } from './db/schema';
 import { getActivePlanWithSessions, planEndExclusive, type PlanSessionDto } from './plans';
 import { buildDailyTrimp, buildFitness, buildVo2max, isRunning } from './training-metrics';
 
@@ -430,8 +430,7 @@ function emptySnapshot(today: string): TrainingSnapshotDto {
 export async function getTrainingSnapshot(): Promise<TrainingSnapshotDto> {
   const today = todayCivilDate();
 
-  const profileRows = await db.select().from(athlete).orderBy(asc(athlete.id)).limit(1);
-  const profile = profileRows[0];
+  const profile = await getCurrentAthlete();
   if (!profile) return emptySnapshot(today);
 
   const rows = await db
@@ -511,8 +510,7 @@ export async function getComparableActivities(
 ): Promise<ComparableActivityDto[]> {
   if (limit <= 0) return [];
 
-  const profileRows = await db.select().from(athlete).orderBy(asc(athlete.id)).limit(1);
-  const profile = profileRows[0];
+  const profile = await getCurrentAthlete();
   if (!profile) return [];
 
   const referenceRows = await db

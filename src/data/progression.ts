@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { asc, desc, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 
 import { APP_TIME_ZONE } from '@/config/time';
 import {
@@ -14,8 +14,9 @@ import {
 } from '@/lib/dates/civil';
 import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
 
+import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
-import { activities, athlete, type Activity } from './db/schema';
+import { activities, type Activity } from './db/schema';
 import {
   VO2MAX_WINDOW_DAYS,
   buildDailyTrimp,
@@ -406,8 +407,7 @@ function firstActivityDay(rows: readonly Activity[], today: string): string | nu
  * période.
  */
 export async function getProgression(range: ProgressionRange): Promise<ProgressionDto> {
-  const profileRows = await db.select().from(athlete).orderBy(asc(athlete.id)).limit(1);
-  const profile = profileRows[0];
+  const profile = await getCurrentAthlete();
   const today = toCivilDate(new Date());
   if (!profile) return emptyProgression(range, today);
 

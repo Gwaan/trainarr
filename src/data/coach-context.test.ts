@@ -26,6 +26,31 @@ import type { PlanDto, PlanSessionDto } from './plans';
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
 
+/**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthlete`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
 const { plansDal } = vi.hoisted(() => ({
   plansDal: { getActivePlanWithSessions: vi.fn() },
 }));
@@ -97,12 +122,15 @@ function renderWhere(clause: SQL | undefined): { sql: string; params: unknown[] 
 
 const ATHLETE_ROW: Athlete = {
   id: 1,
+  userId: 'user_1',
   displayName: 'Gwen',
   sex: 'female',
   maxHrBpm: 188,
   restingHrBpm: 48,
   weightKg: 62,
   birthDate: '1990-06-15',
+  intervalsAthleteId: null,
+  intervalsApiKeyEncrypted: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
@@ -365,6 +393,8 @@ describe('toComparableActivityDto', () => {
 
 describe('getTrainingSnapshot', () => {
   it("rend un instantané entièrement vide tant qu'aucun athlète n'existe", async () => {
+    withoutSession();
+
     const snapshot = await getTrainingSnapshot();
 
     expect(snapshot).toEqual({
@@ -413,6 +443,7 @@ describe('getTrainingSnapshot', () => {
 
 describe('getComparableActivities', () => {
   it('rend une liste vide sans athlète', async () => {
+    withoutSession();
     expect(await getComparableActivities(7)).toEqual([]);
   });
 

@@ -16,6 +16,31 @@ import {
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données.
  *
  * Chaque table sert une **file** de jeux de résultats, consommée dans l'ordre
@@ -424,6 +449,7 @@ describe('reconcilePlanSessions', () => {
   });
 
   it('ne fait rien tant que l’onboarding n’a pas eu lieu', async () => {
+    withoutSession();
     dbState.rows.athlete = [[]];
 
     await expect(reconcilePlanSessions(3)).resolves.toBe(0);

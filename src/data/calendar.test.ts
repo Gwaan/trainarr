@@ -63,7 +63,7 @@ const { athleteState } = vi.hoisted(() => ({ athleteState: { id: 1 as number | n
 
 vi.mock('./athlete', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./athlete')>()),
-  getAthleteId: () => Promise.resolve(athleteState.id),
+  getCurrentAthleteId: () => Promise.resolve(athleteState.id),
 }));
 
 const dialect = new PgDialect();

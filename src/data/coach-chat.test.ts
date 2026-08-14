@@ -23,6 +23,31 @@ import type { CoachMessage } from './db/schema';
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données : les lectures servent les lignes déclarées par table,
  * les écritures sont enregistrées avec leur clause `WHERE`. L'ordre et le
  * `LIMIT` des lectures sont enregistrés eux aussi — c'est là que se joue « les N
@@ -276,6 +301,7 @@ describe('listCoachMessages', () => {
   });
 
   it('rend une liste vide tant que l’onboarding n’a pas eu lieu', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(listCoachMessages()).resolves.toEqual([]);
@@ -346,6 +372,7 @@ describe('appendCoachMessage', () => {
   });
 
   it('refuse d’écrire tant qu’aucun athlète n’est enregistré', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(
@@ -407,6 +434,7 @@ describe('appendCoachExchange', () => {
   });
 
   it('refuse d’écrire tant qu’aucun athlète n’est enregistré', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(
@@ -463,6 +491,7 @@ describe('clearCoachConversation', () => {
   });
 
   it('réussit sans rien supprimer tant que l’onboarding n’a pas eu lieu', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(clearCoachConversation()).resolves.toBeUndefined();

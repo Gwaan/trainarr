@@ -2,7 +2,7 @@ import 'server-only';
 
 import { desc, eq } from 'drizzle-orm';
 
-import { AthleteNotFoundError, getAthleteId } from './athlete';
+import { AthleteNotFoundError, getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { COACH_MESSAGE_ROLES, coachMessages, type CoachMessage } from './db/schema';
 
@@ -169,7 +169,7 @@ export function resolveHistoryLimit(limit?: number): number {
 export async function listCoachMessages(limit?: number): Promise<CoachMessageDto[]> {
   const size = resolveHistoryLimit(limit);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return [];
 
   const rows = await db
@@ -204,7 +204,7 @@ export async function appendCoachMessage(input: {
   }
   const content = validateCoachMessageContent(input.content);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new AthleteNotFoundError();
 
   const inserted = await db
@@ -245,7 +245,7 @@ export async function appendCoachExchange(input: {
   const question = validateCoachMessageContent(input.question);
   const answer = validateCoachMessageContent(input.answer);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) throw new AthleteNotFoundError();
 
   const inserted = await db
@@ -274,7 +274,7 @@ export async function appendCoachExchange(input: {
  * emporter celui de l'autre.
  */
 export async function clearCoachConversation(): Promise<void> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return;
 
   await db.delete(coachMessages).where(eq(coachMessages.athleteId, athleteId));

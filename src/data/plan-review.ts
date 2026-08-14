@@ -4,7 +4,7 @@ import { and, asc, eq, lte } from 'drizzle-orm';
 
 import { toCivilDate } from '@/lib/dates/civil';
 
-import { getAthleteId } from './athlete';
+import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans } from './db/schema';
 
@@ -165,7 +165,7 @@ export function boundReviewSessions(
  * réussies.
  */
 export async function getPlanReview(planId: number): Promise<PlanReviewDto | null> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
   const planRows = await db
@@ -255,7 +255,7 @@ export async function getPlanReview(planId: number): Promise<PlanReviewDto | nul
  * pour comparer un horodatage serait payer la jointure des séances pour rien.
  */
 export async function getPlanUpdatedAt(planId: number): Promise<string | null> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
   const rows = await db
@@ -289,7 +289,7 @@ export async function markPlanReviewed(
   planId: number,
   completedSessionCount: number,
 ): Promise<void> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return;
 
   await db

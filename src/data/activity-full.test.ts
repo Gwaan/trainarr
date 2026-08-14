@@ -7,6 +7,31 @@ import type { Activity, ActivityStream, ActivityStreamType, Athlete } from './db
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données : la chaîne de requête est factice et sert les lignes
  * déclarées par table (activité, streams et profil sont lus en parallèle).
  *
@@ -45,12 +70,15 @@ vi.mock('./db/client', async () => {
 
 const ATHLETE: Athlete = {
   id: 1,
+  userId: 'user_1',
   displayName: 'Gwen',
   sex: 'female',
   maxHrBpm: 190,
   restingHrBpm: 48,
   weightKg: 58,
   birthDate: '1990-05-12',
+  intervalsAthleteId: null,
+  intervalsApiKeyEncrypted: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
@@ -146,6 +174,7 @@ beforeEach(() => {
 
 describe('getActivityFull', () => {
   it('rend null pour une activité inconnue', async () => {
+    withoutSession();
     expect(await getActivityFull(404)).toBeNull();
   });
 
@@ -310,6 +339,7 @@ describe('getActivityFull', () => {
   });
 
   it('garde les graphes et les splits sans profil athlète', async () => {
+    withoutSession();
     queryState.rows = { activities: [ACTIVITY], activity_streams: fullStreams() };
 
     const full = await getActivityFull(ACTIVITY.id);

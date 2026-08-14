@@ -79,11 +79,11 @@ vi.mock('./db/client', async () => {
 });
 
 const { athlete } = vi.hoisted(() => ({
-  athlete: { getAthleteId: vi.fn(), getAthleteProfile: vi.fn() },
+  athlete: { getCurrentAthleteId: vi.fn(), getAthleteProfile: vi.fn() },
 }));
 
 vi.mock('./athlete', () => ({
-  getAthleteId: athlete.getAthleteId,
+  getCurrentAthleteId: athlete.getCurrentAthleteId,
   getAthleteProfile: athlete.getAthleteProfile,
 }));
 
@@ -148,7 +148,7 @@ beforeEach(() => {
   dbState.returning = {};
   dbState.updates = [];
   dbState.selects = [];
-  athlete.getAthleteId.mockResolvedValue(1);
+  athlete.getCurrentAthleteId.mockResolvedValue(1);
   athlete.getAthleteProfile.mockResolvedValue({ maxHrBpm: 184 });
 });
 
@@ -349,7 +349,7 @@ describe('recordFitnessTest', () => {
   });
 
   it('n’écrit rien tant qu’aucun athlète n’est enregistré', async () => {
-    athlete.getAthleteId.mockResolvedValue(null);
+    athlete.getCurrentAthleteId.mockResolvedValue(null);
 
     expect(await recordFitnessTest(3, { note: 'Note.' })).toBe(false);
     expect(dbState.updates).toHaveLength(0);

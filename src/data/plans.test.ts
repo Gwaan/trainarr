@@ -33,6 +33,31 @@ import {
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données : les lectures servent les lignes déclarées par table,
  * les écritures sont enregistrées avec leur clause `WHERE` — c'est elle qui
  * porte l'anti-IDOR et la préservation des séances réalisées, donc c'est elle
@@ -1154,6 +1179,7 @@ describe('acceptDraftPlan', () => {
   });
 
   it('lève PlanNotFoundError sans athlète, sans rien écrire', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(acceptDraftPlan(9)).rejects.toBeInstanceOf(PlanNotFoundError);
@@ -1223,6 +1249,7 @@ describe('archiveActivePlan', () => {
   });
 
   it('retourne false sans athlète, sans rien écrire', async () => {
+    withoutSession();
     dbState.rows = { athlete: [] };
 
     await expect(archiveActivePlan()).resolves.toBe(false);

@@ -6,7 +6,7 @@ import {
   upsertActivityFromFit,
   type FitUpsertOutcome,
 } from '@/data/activities';
-import { getAthleteId } from '@/data/athlete';
+import { getCurrentAthleteId } from '@/data/athlete';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
@@ -139,7 +139,21 @@ export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
     console.error(`[fit] ${parsed.fileHash.slice(0, 12)} : ${warning}`);
   }
 
-  const athleteId = await getAthleteId();
+  /*
+   * TODO(multi-utilisateur) — étape suivante : donner son athlète au service FIT.
+   *
+   * Depuis que l'athlète appartient à un compte, cette lecture répond « l'athlète
+   * de la session en cours ». Elle vaut donc pour l'import manuel
+   * (`POST /api/fit/upload`, qui a bien une requête et une session), mais **pas
+   * pour le watcher ni le poller** : ils tournent dans une boucle de fond, sans
+   * requête, et n'ont plus d'athlète à qui rattacher un fichier — le fichier part
+   * dans `failed/` avec son motif, intact, et sera réingéré une fois cette étape
+   * faite (le service devra recevoir l'athlète explicitement, sans session).
+   *
+   * Signalé et non corrigé ici : rendre « le premier athlète venu » est
+   * exactement ce que le cloisonnement par compte interdit.
+   */
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) {
     throw new Error(
       "Aucun athlète enregistré : impossible d'importer un fichier FIT (onboarding requis).",

@@ -16,6 +16,31 @@ import {
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données — même doublure que `plan-reconciliation.test.ts` : une
  * file de jeux de résultats par table, et les clauses `WHERE` enregistrées
  * telles qu'elles partiront (c'est là que vit l'anti-IDOR).
@@ -278,6 +303,7 @@ describe('getPlanReview', () => {
   });
 
   it('ne rend rien tant qu’aucun athlète n’est enregistré', async () => {
+    withoutSession();
     dbState.rows.athlete = [[]];
 
     await expect(getPlanReview(3)).resolves.toBeNull();
@@ -304,6 +330,7 @@ describe('getPlanUpdatedAt', () => {
   });
 
   it('ne rend rien tant qu’aucun athlète n’est enregistré', async () => {
+    withoutSession();
     dbState.rows.athlete = [[]];
 
     await expect(getPlanUpdatedAt(3)).resolves.toBeNull();
@@ -326,6 +353,7 @@ describe('markPlanReviewed', () => {
   });
 
   it('n’écrit rien tant qu’aucun athlète n’est enregistré', async () => {
+    withoutSession();
     dbState.rows.athlete = [[]];
 
     await markPlanReviewed(3, 6);

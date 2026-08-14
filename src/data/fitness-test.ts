@@ -7,7 +7,7 @@ import { computeBestSegments } from '@/lib/metrics/best-segments';
 import { REFERENCE_DISTANCES } from '@/lib/metrics/vdot';
 import { FITNESS_TEST_EFFORT_M, FITNESS_TEST_KIND } from '@/lib/plan-skeleton';
 
-import { getAthleteId, getAthleteProfile } from './athlete';
+import { getAthleteProfile, getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, activityStreams, plannedSessions, plans } from './db/schema';
 import { isRunning } from './training-metrics';
@@ -288,7 +288,7 @@ export async function recordFitnessTest(
   planId: number,
   record: FitnessTestRecord,
 ): Promise<boolean> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return false;
 
   const updated = await db

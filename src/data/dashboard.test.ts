@@ -17,6 +17,31 @@ import type { Activity, Athlete, PlannedSession } from './db/schema';
 vi.mock('server-only', () => ({}));
 
 /**
+ * L'athlète appartient à un compte : le DAL le résout depuis la session
+ * (`getCurrentAthlete`). Les tests de ce fichier travaillent donc sous une
+ * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
+ * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ */
+const { sessionState } = vi.hoisted(() => {
+  type Session = { userId: string; name: string; email: string } | null;
+  const sessionState: { current: Session } = {
+    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
+  };
+  return { sessionState };
+});
+
+vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+
+/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
+function withoutSession(): void {
+  sessionState.current = null;
+}
+
+beforeEach(() => {
+  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+});
+
+/**
  * Aucune base de données : la chaîne de requête est factice et sert les lignes
  * déclarées par table (les requêtes du dashboard visent des tables différentes).
  */
@@ -110,12 +135,15 @@ afterAll(() => {
 
 const ATHLETE: Athlete = {
   id: 1,
+  userId: 'user_1',
   displayName: 'Gwen',
   sex: 'female',
   maxHrBpm: 188,
   restingHrBpm: 48,
   weightKg: 58.5,
   birthDate: '1992-03-14',
+  intervalsAthleteId: null,
+  intervalsApiKeyEncrypted: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -183,6 +211,7 @@ beforeEach(() => {
 
 describe('getDashboardSummary — base vide', () => {
   it('retourne un état vide explicite quand aucun athlète n’est enregistré', async () => {
+    withoutSession();
     const summary = await getDashboardSummary();
 
     expect(summary).toEqual({

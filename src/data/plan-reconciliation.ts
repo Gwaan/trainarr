@@ -4,7 +4,7 @@ import { and, eq, gte, isNotNull, isNull, lte, or } from 'drizzle-orm';
 
 import { civilDateToMs, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 
-import { getAthleteId } from './athlete';
+import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans } from './db/schema';
 import { isRunning } from './training-metrics';
@@ -257,7 +257,7 @@ export async function linkActivityToPlannedSession(activityId: number): Promise<
  * @returns le nombre de liens posés.
  */
 export async function reconcilePlanSessions(planId: number): Promise<number> {
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return 0;
 
   const today = toCivilDate(new Date());

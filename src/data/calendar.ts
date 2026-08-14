@@ -5,7 +5,7 @@ import { and, asc, eq, gte, lte } from 'drizzle-orm';
 import { civilDateToMs, isCivilDate, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
-import { getAthleteId, todayCivilDate } from './athlete';
+import { getCurrentAthleteId, todayCivilDate } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type Activity, type PlannedSession } from './db/schema';
 import { planEndExclusive } from './plans';
@@ -220,7 +220,7 @@ export function calendarActivities(
 export async function getCalendarRange(from: string, to: string): Promise<CalendarRangeDto> {
   validateRange(from, to);
 
-  const athleteId = await getAthleteId();
+  const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return emptyRange(from, to);
 
   const today = todayCivilDate();

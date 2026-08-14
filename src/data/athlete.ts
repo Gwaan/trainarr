@@ -1,7 +1,9 @@
 import 'server-only';
 
-import { asc, eq } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
+import { decryptStoredSecret, encryptStoredSecret } from '@/lib/crypto/app-secret';
+import { SecretDecryptionError, SecretKeyUnavailableError } from '@/lib/crypto/secret-box';
 import { isCivilDate, toCivilDate } from '@/lib/dates/civil';
 
 /**
@@ -15,6 +17,7 @@ export { isCivilDate };
 import { db } from './db/client';
 import { isUniqueViolation } from './db/errors';
 import { ATHLETE_SEXES, athlete, type Athlete, type AthleteSex } from './db/schema';
+import { getSession } from './session';
 
 /**
  * DTO du profil athlète exposé à l'UI.
@@ -22,7 +25,7 @@ import { ATHLETE_SEXES, athlete, type Athlete, type AthleteSex } from './db/sche
  * Déclaré explicitement (pas de `typeof row`) : ajouter une colonne au schéma ne
  * doit jamais l'élargir en silence. Il porte exactement les champs que le
  * formulaire de profil pré-remplit en édition — et **pas** l'identifiant
- * interne, qui ne franchit pas la frontière client (cf. `getAthleteId`).
+ * interne, qui ne franchit pas la frontière client (cf. `getCurrentAthleteId`).
  */
 export type AthleteProfileDto = {
   displayName: string;
@@ -84,7 +87,7 @@ export class InvalidAthleteProfileError extends Error {
   }
 }
 
-/** Création demandée alors qu'un athlète est déjà enregistré (mono-utilisateur). */
+/** Création demandée alors que le compte connecté a déjà un athlète. */
 export class AthleteAlreadyExistsError extends Error {
   constructor() {
     super('Un athlète est déjà enregistré : le profil se modifie, il ne se recrée pas.');
@@ -97,6 +100,33 @@ export class AthleteNotFoundError extends Error {
   constructor() {
     super("Aucun athlète enregistré : le profil doit d'abord être créé.");
     this.name = 'AthleteNotFoundError';
+  }
+}
+
+/**
+ * Création demandée hors session.
+ *
+ * Ce n'est pas un contrôle d'accès (il n'y en a pas encore, cf. `proxy.ts`),
+ * c'est une **impossibilité de modélisation** : un athlète appartient à un
+ * compte, et sans session il n'y a pas de compte à inscrire dans `user_id`.
+ * Créer la ligne quand même produirait exactement l'orphelin que la réclamation
+ * existe pour rattraper.
+ */
+export class AthleteOwnerRequiredError extends Error {
+  constructor() {
+    super("Aucune session : un athlète appartient à un compte, il ne s'en crée pas sans.");
+    this.name = 'AthleteOwnerRequiredError';
+  }
+}
+
+/** Un identifiant intervals.icu est hors bornes. `field` désigne le champ fautif. */
+export class InvalidIntervalsSettingsError extends Error {
+  constructor(
+    readonly field: 'intervalsAthleteId' | 'apiKey',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'InvalidIntervalsSettingsError';
   }
 }
 
@@ -228,31 +258,323 @@ export function validateAthleteProfile(input: AthleteProfileInput): AthleteProfi
  */
 
 /**
- * Profil de l'athlète. Application mono-utilisateur : la première (et unique)
- * ligne de la table. `null` tant que l'onboarding n'a pas eu lieu.
+ * L'athlète du compte connecté, `null` s'il n'y a pas de session ou pas encore
+ * d'athlète.
+ *
+ * **Remplace `getAthleteId()`**, qui rendait « le premier athlète venu »
+ * (`ORDER BY id LIMIT 1`) — acceptable tant que la base n'en portait qu'un,
+ * indéfendable dès qu'un second compte peut exister. Tout le DAL passe désormais
+ * par ici : un chemin qui n'a pas de session n'a pas d'athlète, il n'en emprunte
+ * pas celui du voisin.
+ *
+ * **Usage serveur uniquement** : l'identifiant est volontairement absent de
+ * {@link AthleteProfileDto}, une clé de base ne franchit pas la frontière
+ * client.
+ *
+ * Volontairement **non mémoïsée** (contrairement à `getSession`, qui l'est et
+ * porte l'essentiel du coût) : la valeur change au sein d'une même requête —
+ * l'onboarding crée l'athlète, la réclamation l'attribue — et un cache la
+ * figerait à `null` juste après la création.
  */
-export async function getAthleteProfile(): Promise<AthleteProfileDto | null> {
-  const rows = await db.select().from(athlete).orderBy(asc(athlete.id)).limit(1);
-  const row = rows[0];
-  return row ? toAthleteProfileDto(row) : null;
+export async function getCurrentAthleteId(): Promise<number | null> {
+  const session = await getSession();
+  if (session === null) return null;
+
+  const owned = await db
+    .select({ id: athlete.id })
+    .from(athlete)
+    .where(eq(athlete.userId, session.userId))
+    .limit(1);
+  const id = owned[0]?.id;
+  if (id !== undefined) return id;
+
+  return claimOrphanAthlete(session.userId);
 }
 
 /**
- * Identifiant interne de l'athlète, `null` tant que l'onboarding n'a pas eu lieu.
+ * Attribue au compte l'athlète sans propriétaire le plus ancien, s'il en existe
+ * un. Rend son identifiant, ou `null` s'il n'y avait rien à réclamer.
  *
- * **Usage serveur uniquement** (import FIT : les activités portent une clé
- * étrangère vers l'athlète). Il est volontairement absent de
- * {@link AthleteProfileDto} : un identifiant de base ne franchit pas la
- * frontière client.
+ * **Pourquoi ce mécanisme existe** : les athlètes antérieurs à
+ * l'authentification portent `user_id IS NULL`. Sans réclamation, le compte qui
+ * se connecte ne verrait aucun athlète, l'onboarding lui en créerait un neuf et
+ * vide, et des années d'entraînement resteraient rattachées à une ligne
+ * orpheline devenue invisible dans l'application.
+ *
+ * **Une seule mise à jour conditionnelle**, et c'est essentiel : le `WHERE
+ * user_id IS NULL` est réévalué par Postgres sur la ligne verrouillée
+ * (`READ COMMITTED`), si bien que deux réclamations simultanées ne peuvent pas
+ * aboutir toutes les deux — la seconde ne touche aucune ligne et repart avec
+ * `null`, donc vers l'onboarding. Un `SELECT` suivi d'un `UPDATE` laisserait
+ * passer cette course. L'unicité de `athlete.user_id` reste le garde-fou de
+ * dernier recours.
+ *
+ * La sous-requête `min(id)` désigne **une** ligne : plus rien n'interdit
+ * plusieurs orphelins depuis la disparition de `athlete_singleton`, et une mise
+ * à jour non bornée les attribuerait tous au même compte (violation d'unicité).
  */
-export async function getAthleteId(): Promise<number | null> {
-  const rows = await db.select({ id: athlete.id }).from(athlete).orderBy(asc(athlete.id)).limit(1);
-  return rows[0]?.id ?? null;
+async function claimOrphanAthlete(userId: string): Promise<number | null> {
+  const claimed = await db
+    .update(athlete)
+    .set({ userId, updatedAt: new Date() })
+    .where(
+      and(
+        isNull(athlete.userId),
+        eq(
+          athlete.id,
+          sql`(select min(${athlete.id}) from ${athlete} where ${athlete.userId} is null)`,
+        ),
+      ),
+    )
+    .returning({ id: athlete.id });
+
+  return claimed[0]?.id ?? null;
 }
 
-/** `true` dès qu'un profil existe — ce qui décide entre onboarding et édition. */
+/**
+ * La ligne complète de l'athlète du compte connecté, `null` s'il n'y en a pas.
+ *
+ * **Usage serveur uniquement** : elle porte l'identifiant interne et les
+ * identifiants intervals.icu, elle ne franchit pas la frontière client — c'est
+ * {@link getAthleteProfile} qui rend le DTO.
+ *
+ * Elle existe pour les lectures qui ont besoin du profil *et* de son
+ * identifiant dans la foulée (tableau de bord, progression, contexte du coach) :
+ * elles lisaient la table en direct, `ORDER BY id LIMIT 1` — soit exactement le
+ * « premier athlète venu » que le cloisonnement par compte interdit.
+ */
+export async function getCurrentAthlete(): Promise<Athlete | null> {
+  const id = await getCurrentAthleteId();
+  if (id === null) return null;
+
+  const rows = await db.select().from(athlete).where(eq(athlete.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Profil de l'athlète du compte connecté. `null` tant que l'onboarding n'a pas
+ * eu lieu — ou qu'il n'y a personne de connecté.
+ */
+export async function getAthleteProfile(): Promise<AthleteProfileDto | null> {
+  const row = await getCurrentAthlete();
+  return row ? toAthleteProfileDto(row) : null;
+}
+
+/** `true` dès que le compte connecté a un athlète — ce qui décide entre onboarding et édition. */
 export async function hasAthlete(): Promise<boolean> {
-  return (await getAthleteId()) !== null;
+  return (await getCurrentAthleteId()) !== null;
+}
+
+/*
+ * Identifiants intervals.icu.
+ *
+ * Ils vivaient dans l'environnement du serveur (`INTERVALS_ATHLETE_ID`,
+ * `INTERVALS_API_KEY`) : une installation, un compte intervals.icu. Ils
+ * appartiennent maintenant à l'athlète.
+ */
+
+/**
+ * Ce que l'UI a le droit de savoir des identifiants intervals.icu.
+ *
+ * **La clé n'y figure pas, même tronquée, même masquée.** Une clé masquée reste
+ * une clé transmise au navigateur, et quatre caractères en clair suffisent à la
+ * reconnaître dans une capture d'écran. Ce que le formulaire a besoin de savoir,
+ * c'est s'il doit proposer « enregistrer » ou « remplacer » — un état, pas une
+ * valeur.
+ */
+export type IntervalsApiKeyState =
+  /** Aucune clé enregistrée. */
+  | 'absent'
+  /** Une clé est enregistrée et déchiffrable. */
+  | 'configured'
+  /**
+   * Une clé est enregistrée mais ne se déchiffre plus : `BETTER_AUTH_SECRET` a
+   * changé depuis. Elle est perdue, pas cassée — la ressaisir suffit. Cet état
+   * existe pour que l'UI le dise, plutôt que de laisser le poller échouer en
+   * silence.
+   */
+  | 'unreadable';
+
+export type IntervalsSettingsDto = {
+  /** Identifiant intervals.icu (ex. `i123456`), `null` s'il n'est pas renseigné. */
+  intervalsAthleteId: string | null;
+  apiKey: IntervalsApiKeyState;
+};
+
+/** Bornes de saisie — source unique pour la validation Zod de la Server Action. */
+export const INTERVALS_SETTINGS_LIMITS = {
+  athleteIdMaxChars: 64,
+  apiKeyMaxChars: 256,
+} as const;
+
+/**
+ * Ce que le formulaire soumet.
+ *
+ * `apiKey` distingue trois intentions, et c'est la seule façon de proposer un
+ * champ vide sans effacer la clé enregistrée à chaque enregistrement du
+ * formulaire :
+ * - `undefined` : ne pas toucher à la clé enregistrée ;
+ * - `null` : l'effacer ;
+ * - une chaîne : la remplacer.
+ */
+export type IntervalsSettingsInput = {
+  intervalsAthleteId: string | null;
+  apiKey?: string | null;
+};
+
+/**
+ * Les identifiants intervals.icu tels que l'UI peut les voir. `null` si le
+ * compte connecté n'a pas d'athlète.
+ *
+ * Tente le déchiffrement pour distinguer `configured` d'`unreadable` — la valeur
+ * déchiffrée, elle, est jetée aussitôt et ne sort pas d'ici.
+ */
+export async function getIntervalsSettings(): Promise<IntervalsSettingsDto | null> {
+  const id = await getCurrentAthleteId();
+  if (id === null) return null;
+
+  const rows = await db
+    .select({
+      intervalsAthleteId: athlete.intervalsAthleteId,
+      encrypted: athlete.intervalsApiKeyEncrypted,
+    })
+    .from(athlete)
+    .where(eq(athlete.id, id))
+    .limit(1);
+
+  const row = rows[0];
+  if (row === undefined) return null;
+
+  return {
+    intervalsAthleteId: row.intervalsAthleteId,
+    apiKey: apiKeyState(row.encrypted),
+  };
+}
+
+function apiKeyState(encrypted: string | null): IntervalsApiKeyState {
+  if (encrypted === null) return 'absent';
+  try {
+    decryptStoredSecret(encrypted);
+    return 'configured';
+  } catch (error) {
+    // Seuls ces deux cas-là sont un état de la donnée ; toute autre panne
+    // (mémoire, algorithme indisponible) reste une panne et remonte.
+    if (error instanceof SecretDecryptionError || error instanceof SecretKeyUnavailableError) {
+      return 'unreadable';
+    }
+    throw error;
+  }
+}
+
+/**
+ * Les identifiants intervals.icu **en clair**, pour un appel sortant depuis le
+ * serveur. `null` si le compte n'a pas d'athlète ou qu'aucune clé n'est
+ * enregistrée.
+ *
+ * Le seul point du code où la clé existe en clair — elle ne doit jamais être
+ * retournée par une Server Action, ni entrer dans une prop de composant.
+ *
+ * @throws {SecretDecryptionError} si la clé enregistrée ne se déchiffre plus
+ * (« clé illisible, à ressaisir ») — jamais un `null` silencieux, qui ferait
+ * passer une clé perdue pour une clé absente.
+ * @throws {SecretKeyUnavailableError} si l'installation n'a pas de secret.
+ */
+export async function getIntervalsCredentials(): Promise<{
+  intervalsAthleteId: string | null;
+  apiKey: string;
+} | null> {
+  const id = await getCurrentAthleteId();
+  if (id === null) return null;
+
+  const rows = await db
+    .select({
+      intervalsAthleteId: athlete.intervalsAthleteId,
+      encrypted: athlete.intervalsApiKeyEncrypted,
+    })
+    .from(athlete)
+    .where(eq(athlete.id, id))
+    .limit(1);
+
+  const row = rows[0];
+  if (row === undefined || row.encrypted === null) return null;
+
+  return {
+    intervalsAthleteId: row.intervalsAthleteId,
+    apiKey: decryptStoredSecret(row.encrypted),
+  };
+}
+
+/**
+ * Vérifie et normalise une saisie d'identifiants intervals.icu. Fonction pure,
+ * exportée pour les tests.
+ *
+ * Une chaîne vide (ou blanche) vaut « pas renseigné » : c'est `null` en base,
+ * jamais une chaîne vide qui se ferait passer pour une valeur.
+ *
+ * @throws {InvalidIntervalsSettingsError} au premier champ fautif.
+ */
+export function validateIntervalsSettings(input: IntervalsSettingsInput): {
+  intervalsAthleteId: string | null;
+  apiKey?: string | null;
+} {
+  const intervalsAthleteId = input.intervalsAthleteId?.trim() ?? '';
+  if (intervalsAthleteId.length > INTERVALS_SETTINGS_LIMITS.athleteIdMaxChars) {
+    throw new InvalidIntervalsSettingsError(
+      'intervalsAthleteId',
+      `L'identifiant intervals.icu dépasse ${INTERVALS_SETTINGS_LIMITS.athleteIdMaxChars} caractères.`,
+    );
+  }
+
+  if (input.apiKey === undefined) {
+    return { intervalsAthleteId: intervalsAthleteId === '' ? null : intervalsAthleteId };
+  }
+
+  const apiKey = input.apiKey?.trim() ?? '';
+  if (apiKey.length > INTERVALS_SETTINGS_LIMITS.apiKeyMaxChars) {
+    // Le message ne cite évidemment pas la valeur reçue.
+    throw new InvalidIntervalsSettingsError(
+      'apiKey',
+      `La clé API dépasse ${INTERVALS_SETTINGS_LIMITS.apiKeyMaxChars} caractères.`,
+    );
+  }
+
+  return {
+    intervalsAthleteId: intervalsAthleteId === '' ? null : intervalsAthleteId,
+    apiKey: apiKey === '' ? null : apiKey,
+  };
+}
+
+/**
+ * Enregistre les identifiants intervals.icu de l'athlète connecté. La clé est
+ * chiffrée ici et n'est jamais écrite en clair.
+ *
+ * @throws {InvalidIntervalsSettingsError} si une valeur est hors bornes.
+ * @throws {AthleteNotFoundError} si le compte n'a pas d'athlète.
+ * @throws {SecretKeyUnavailableError} si l'installation n'a pas de secret : la
+ * clé n'est alors pas enregistrée du tout, plutôt qu'enregistrée sans protection.
+ */
+export async function saveIntervalsSettings(input: IntervalsSettingsInput): Promise<void> {
+  const values = validateIntervalsSettings(input);
+
+  const id = await getCurrentAthleteId();
+  if (id === null) throw new AthleteNotFoundError();
+
+  const encrypted =
+    values.apiKey === undefined
+      ? {}
+      : {
+          intervalsApiKeyEncrypted:
+            values.apiKey === null ? null : encryptStoredSecret(values.apiKey),
+        };
+
+  await db
+    .update(athlete)
+    .set({
+      intervalsAthleteId: values.intervalsAthleteId,
+      ...encrypted,
+      updatedAt: new Date(),
+    })
+    .where(eq(athlete.id, id));
 }
 
 /*
@@ -260,27 +582,36 @@ export async function hasAthlete(): Promise<boolean> {
  */
 
 /**
- * Crée le profil de l'athlète (onboarding).
+ * Crée le profil de l'athlète du compte connecté (onboarding).
  *
+ * La ligne naît **avec son propriétaire** : jamais d'athlète orphelin créé par
+ * l'application elle-même — les seuls orphelins légitimes sont ceux d'avant
+ * l'authentification, que la réclamation rattrape.
+ *
+ * @throws {AthleteOwnerRequiredError} hors session : il n'y a pas de compte à
+ * inscrire dans `user_id`.
  * @throws {InvalidAthleteProfileError} si une valeur est hors bornes.
- * @throws {AthleteAlreadyExistsError} si un profil existe déjà — l'application
- * est mono-utilisateur : la seconde ligne n'aurait aucun sens, et les activités
- * importées pointeraient vers l'un ou l'autre selon l'ordre des requêtes.
+ * @throws {AthleteAlreadyExistsError} si ce compte a déjà un athlète — y compris
+ * celui qu'il vient de réclamer : son profil se modifie, il ne se recrée pas.
  */
 export async function createAthlete(input: AthleteProfileInput): Promise<void> {
   const values = validateAthleteProfile(input);
 
+  const session = await getSession();
+  if (session === null) throw new AthleteOwnerRequiredError();
+
+  // Réclamation comprise : si un athlète orphelin traîne, il revient à ce compte
+  // et c'est lui qu'il faut modifier — en créer un second enterrerait son
+  // historique sous un profil vide.
+  if ((await getCurrentAthleteId()) !== null) throw new AthleteAlreadyExistsError();
+
   try {
     // La lecture préalable rend l'erreur attendue sans dépendre d'un code SQL,
     // mais elle ne suffit pas : en READ COMMITTED, deux soumissions simultanées
-    // du formulaire d'onboarding lisent toutes les deux une table vide. C'est
-    // l'index unique de singleton (`athlete_singleton`, migration 0004) qui
-    // ferme la course ; le `catch` ci-dessous en fait le même cas métier.
-    await db.transaction(async (tx) => {
-      const existing = await tx.select({ id: athlete.id }).from(athlete).limit(1);
-      if (existing.length > 0) throw new AthleteAlreadyExistsError();
-      await tx.insert(athlete).values(values);
-    });
+    // du formulaire d'onboarding ne voient ni l'une ni l'autre la ligne de sa
+    // voisine. C'est l'unicité de `user_id` (migration 0017) qui ferme la
+    // course ; le `catch` ci-dessous en fait le même cas métier.
+    await db.insert(athlete).values({ ...values, userId: session.userId });
   } catch (error) {
     if (isUniqueViolation(error)) throw new AthleteAlreadyExistsError();
     throw error;
@@ -296,7 +627,7 @@ export async function createAthlete(input: AthleteProfileInput): Promise<void> {
 export async function updateAthleteProfile(input: AthleteProfileInput): Promise<void> {
   const values = validateAthleteProfile(input);
 
-  const id = await getAthleteId();
+  const id = await getCurrentAthleteId();
   if (id === null) throw new AthleteNotFoundError();
 
   await db
