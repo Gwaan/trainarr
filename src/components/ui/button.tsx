@@ -5,7 +5,7 @@ import { Slot } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 /**
- * Bouton shadcn/ui re-thémé « Night Track ».
+ * Bouton shadcn/ui re-thémé « Pulse ».
  * Un seul CTA `accent` par écran ; le reste en `secondary` / `ghost`.
  * Hauteur par défaut 44 px : cible tactile mobile.
  */

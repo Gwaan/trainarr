@@ -6,7 +6,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 /**
- * Boîte de dialogue modale « Night Track », bâtie sur Radix — la base shadcn/ui
+ * Boîte de dialogue modale « Pulse », bâtie sur Radix — la base shadcn/ui
  * du projet.
  *
  * Ce qu'on ne réécrit pas à la main : focus piégé, `aria-modal`, titre lié à la

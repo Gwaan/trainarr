@@ -1,40 +1,58 @@
 @import "tailwindcss";
 
 /* =========================================================================
-   Design system « Night Track » — source unique des tokens.
+   Design system « Pulse » — source unique des tokens.
    Cf. .claude/rules/design.md : aucune couleur ni typo hors de ce bloc.
    ========================================================================= */
 @theme {
   /* Fonds (du plus profond au plus élevé) */
-  --color-bg: #0a0e16;
-  --color-surface: #0f1420;
-  --color-surface-2: #141b2b;
-  --color-border: #1a2233;
+  --color-bg: #0b0d16;
+  --color-surface: #121624;
+  --color-surface-2: #1a2032;
+  --color-border: #272e44;
 
-  /* Texte */
-  --color-fg: #e9edf4;
-  --color-fg-muted: #aab3c2;
-  --color-fg-faint: #7a8598;
+  /* Texte — 17,0:1 / 8,4:1 / 4,8:1 (cf. .claude/rules/design.md) */
+  --color-fg: #eef0f8;
+  --color-fg-muted: #a9b1c6;
+  --color-fg-faint: #7a849d;
 
-  /* Accent — UN SEUL, ne jamais en introduire d'autre */
-  --color-accent: #ff4d00;
-  --color-accent-soft: rgba(255, 77, 0, 0.12);
+  /* Accent — UN SEUL, indigo électrique. L'accent est l'action et la
+     sélection, jamais une donnée.
+     `accent` porte le texte, les icônes actives et les filets (7,2:1 sur `bg`) ;
+     `accent-strong` porte les aplats, seul à supporter du blanc (4,9:1). */
+  --color-accent: #8a94ff;
+  --color-accent-strong: #5b5fe8;
+  --color-accent-soft: rgba(99, 102, 241, 0.14);
 
   /* Sémantique (≠ accent, réservé aux états) */
-  --color-positive: #a3e635;
+  --color-positive: #4ade80;
   --color-warning: #fbbf24;
   --color-negative: #f87171;
 
-  /* Zones cardio — graphes uniquement. Rampe SÉQUENTIELLE dans la famille de
-     l'accent : les zones sont une magnitude ordonnée, donc une seule teinte à
-     luminosité croissante (cf. .claude/rules/design.md).
+  /* Zones cardio — graphes uniquement. Rampe MULTI-TEINTES vert → framboise,
+     dont la séparation en vision déficiente repose sur un ZIGZAG de luminosité
+     (foncé/clair alterné) : c'est une propriété de conception, toute retouche
+     doit repasser le validateur dataviz (cf. .claude/rules/design.md).
      Les cinq remplissages tiennent ≥ 3:1 (WCAG non-textuel) contre le rail des
      barres, qui est `bg` — c'est ce rail-là qu'il faut mesurer, pas `surface`. */
-  --color-zone-1: #726152;
-  --color-zone-2: #946443;
-  --color-zone-3: #b95f27;
-  --color-zone-4: #e25613;
-  --color-zone-5: #ff4d00;
+  --color-zone-1: #217c44;
+  --color-zone-2: #b3910b;
+  --color-zone-3: #a74a04;
+  --color-zone-4: #ec5754;
+  --color-zone-5: #be1274;
+
+  /* Types de séance — un code couleur par nature d'entraînement, validé avec
+     la rampe de zones dans un même jeu de huit (pire ΔE daltonien adjacent
+     11,2). Course et test chronométré partagent l'indigo « événement » : un
+     violet distinct était indiscernable en vision deutan (ΔE 0,9). */
+  --color-type-recovery: #507cb5;
+  --color-type-easy: #217c44;
+  --color-type-long: #34a7a3;
+  --color-type-specific: #b3910b;
+  --color-type-threshold: #a74a04;
+  --color-type-interval: #ec5754;
+  --color-type-repetition: #be1274;
+  --color-type-event: #5d69cb;
 
   /* Séries de graphe hors accent — la cadence et la foulée, qu'aucun token
      existant ne peut porter (l'accent est pris par l'allure, `negative` par la
@@ -47,9 +65,9 @@
   --font-sans: var(--font-archivo);
   --font-mono: var(--font-jetbrains-mono);
 
-  /* Rayons : 10px cards, 8px boutons — cohérent partout */
-  --radius-card: 10px;
-  --radius-button: 8px;
+  /* Rayons : 14px cards, 10px boutons — cohérent partout */
+  --radius-card: 14px;
+  --radius-button: 10px;
 
   /* Motion : 120–180 ms, ease-out */
   --default-transition-duration: 150ms;

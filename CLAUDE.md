@@ -58,5 +58,5 @@ Flux d'une mutation : Server Action mince → valide (Zod) → délègue au DAL 
 - **JAMAIS de secret dans le repo** : ni PAT GitHub, ni `BETTER_AUTH_SECRET`, ni clés API. Tout passe par `.env.local` (gitignoré) et n'est lu que dans `src/config/` + le DAL. Vérifier avant chaque commit.
 - Les données d'entraînement sont la source de vérité : ne jamais inventer ou approximer des métriques physio — si un calcul manque de données, le dire.
 - **Rien de `(app)` sans session.** Deux étages : redirection optimiste dans `src/proxy.ts` (présence du cookie), puis vérification qui fait autorité dans les composants suspendus, dans chaque Server Action et dans chaque route handler. La liste des chemins publics est dans `src/lib/auth/public-paths.ts`, énumérée par `src/proxy.test.ts` — s'y tromper enferme dehors, en production.
-- Design : direction **Night Track** verrouillée, tokens dans `.claude/rules/design.md` — aucune couleur ni typo hors système.
+- Design : direction **Pulse** verrouillée (sombre, accent indigo, rampe de zones et types de séance validés au validateur dataviz), tokens dans `.claude/rules/design.md` — aucune couleur ni typo hors système.
 - Règles détaillées par domaine dans `.claude/rules/` (nextjs, security, typescript, design, ai-coach, data-import).

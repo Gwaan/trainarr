@@ -12,7 +12,7 @@ export type PanelProps = {
   className?: string;
 };
 
-/** Card « Night Track » : surface + bordure, jamais d'ombre portée. */
+/** Card « Pulse » : surface + bordure, jamais d'ombre portée. */
 export function Panel({
   title,
   meta,

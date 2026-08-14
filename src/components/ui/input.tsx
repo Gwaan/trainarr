@@ -3,7 +3,7 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Champ de saisie shadcn/ui re-thémé « Night Track ».
+ * Champ de saisie shadcn/ui re-thémé « Pulse ».
  *
  * Fond `surface-2` sur les cartes `surface` : le champ se lit comme un creux,
  * sans ombre. Hauteur 44 px — même cible tactile que les boutons. Le focus

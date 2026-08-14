@@ -1,14 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-label="Trainarr">
   <!--
-    Master vectoriel de la marque (piste d'athlétisme vue de dessus), copie exacte
-    de TrackMark (src/components/nav/logo.tsx) avec les tokens résolus en dur :
-    hors React, aucune classe Tailwind ne s'applique. Toute retouche du logo doit
-    être répercutée ici, puis les PNG régénérés.
+    Master vectoriel de la marque (piste d'athlétisme vue de dessus), même
+    géométrie que TrackMark (src/components/nav/logo.tsx) avec les tokens
+    résolus en dur : hors React, aucune classe Tailwind ne s'applique. Toute
+    retouche du logo doit être répercutée ici, puis les PNG régénérés.
+
+    Une seule divergence de couleur, assumée : l'anneau vaut ici
+    `accent-strong` (#5B5FE8) là où TrackMark porte `accent` (#8A94FF). Les
+    marques autonomes (favicon, icônes PWA) sont des aplats posés sur le fond
+    du système à très petite taille — c'est le rôle d'`accent-strong` ; dans
+    l'appli, le logo est un filet, donc `accent`. L'intérieur reste `fg-faint`.
 
     Emprise réelle, stroke compris : x 1.0..23.0 (22 u) et y 6.0..18.0 (12 u),
     centrée sur (12, 12) — c'est cette emprise de 22 u qui sert de base au
     cadrage des icônes (72 % de la largeur, 55 % pour la version maskable).
   -->
-  <rect x="1.9" y="6.9" width="20.2" height="10.2" rx="5.1" stroke="#FF4D00" stroke-width="1.8" />
-  <rect x="7.4" y="10.4" width="9.2" height="3.2" rx="1.6" stroke="#7A8598" stroke-width="1.4" />
+  <rect x="1.9" y="6.9" width="20.2" height="10.2" rx="5.1" stroke="#5B5FE8" stroke-width="1.8" />
+  <rect x="7.4" y="10.4" width="9.2" height="3.2" rx="1.6" stroke="#7A849D" stroke-width="1.4" />
 </svg>

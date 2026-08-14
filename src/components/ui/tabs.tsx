@@ -6,7 +6,7 @@ import { Tabs as TabsPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 /**
- * Onglets « Night Track », bâtis sur Radix — la base shadcn/ui du projet.
+ * Onglets « Pulse », bâtis sur Radix — la base shadcn/ui du projet.
  *
  * Ce qu'on ne réécrit pas à la main : `role="tablist"`/`tab`/`tabpanel`,
  * `aria-selected`, la liaison onglet ↔ panneau (`aria-controls`,

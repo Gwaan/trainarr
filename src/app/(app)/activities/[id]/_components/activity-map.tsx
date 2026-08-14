@@ -37,7 +37,7 @@ function token(name: string): string {
 }
 
 /**
- * Fond OpenStreetMap raster, assombri pour tenir dans « Night Track » sans
+ * Fond OpenStreetMap raster, assombri pour tenir dans « Pulse » sans
  * devenir illisible : désaturation partielle et plafond de luminosité, la trace
  * accent devant garder son contraste sur les zones claires (routes, bâti).
  */

@@ -40,7 +40,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0A0E16",
+  themeColor: "#0B0D16",
   colorScheme: "dark",
   /**
    * Sans `viewport-fit=cover`, `env(safe-area-inset-*)` vaut 0 : tout le travail
