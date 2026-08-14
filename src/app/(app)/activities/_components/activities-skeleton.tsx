@@ -51,6 +51,14 @@ export function ActivitiesSkeleton() {
             ))}
           </div>
         ))}
+
+        {/* Navigation entre les pages : deux cibles tactiles de 44 px encadrant
+            le repère de position. */}
+        <div className="flex items-center justify-between gap-3">
+          <Skeleton className="size-11" />
+          <Skeleton className="h-3.5 w-44 max-w-full" />
+          <Skeleton className="size-11" />
+        </div>
       </div>
 
       <span className="sr-only">Chargement des activités…</span>

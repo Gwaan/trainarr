@@ -1,7 +1,8 @@
 import 'server-only';
 
-import { and, desc, eq, gte, lte, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, gte, lte, notInArray, sql } from 'drizzle-orm';
 
+import { APP_TIME_ZONE } from '@/config/time';
 import { isoWeekNumber, isoWeekStart, toCivilDate } from '@/lib/dates/civil';
 import type { FitStreamSet, ParsedFitActivity } from '@/lib/fit/parse';
 import { defaultActivityName, usesFootCadenceSportType } from '@/lib/fit/sport';
@@ -25,7 +26,7 @@ import {
   type SeriesSample,
 } from '@/lib/metrics';
 
-import { getAthleteProfile } from './athlete';
+import { getAthleteProfileById, getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { uniqueViolationConstraint } from './db/errors';
 import {
@@ -39,6 +40,56 @@ import {
   type NewActivityStream,
 } from './db/schema';
 import { isRunning } from './training-metrics';
+
+/**
+ * Activités — lectures d'écran et écritures de l'import FIT.
+ *
+ * **Toute lecture est cloisonnée par athlète**, et de deux façons seulement :
+ *
+ * - les lectures de **requête** (historique, détail d'une séance) résolvent
+ *   l'athlète depuis la session ({@link getCurrentAthleteId}) et ne rendent rien
+ *   quand il n'y en a pas ;
+ * - les écritures de l'**ingestion** tournent hors requête (watcher, poller) :
+ *   elles reçoivent l'athlète en paramètre, comme `ingestFitBuffer` lui-même.
+ *
+ * Un identifiant d'activité venu du client (segment `[id]` d'URL, argument
+ * d'action) n'est jamais une preuve d'appartenance : chaque fonction qui en
+ * reçoit un le confronte à l'athlète avant de lire ou d'écrire, et une activité
+ * qui n'est pas la sienne se comporte exactement comme une activité inexistante
+ * (`null`, ou {@link ActivityNotFoundError} à l'écriture) — les distinguer
+ * révélerait l'existence de la ligne.
+ */
+
+/**
+ * L'activité visée n'existe pas ou n'appartient pas à l'athlète.
+ *
+ * Les deux cas partagent la même erreur : volontairement indistincte,
+ * anti-IDOR. Réexportée par `./activity-feedback`, où elle vivait, pour tous ses
+ * appelants historiques.
+ */
+export class ActivityNotFoundError extends Error {
+  constructor() {
+    super('Aucune activité ne correspond à cet identifiant.');
+    this.name = 'ActivityNotFoundError';
+  }
+}
+
+/**
+ * `true` si l'activité existe **et** appartient à l'athlète donné.
+ *
+ * Le filtre porte les deux critères dans la **même** clause : une lecture par
+ * `id` suivie d'une comparaison en mémoire aurait ramené la ligne d'autrui dans
+ * le process avant de la refuser.
+ */
+async function ownsActivity(activityId: number, athleteId: number): Promise<boolean> {
+  const rows = await db
+    .select({ id: activities.id })
+    .from(activities)
+    .where(and(eq(activities.id, activityId), eq(activities.athleteId, athleteId)))
+    .limit(1);
+
+  return rows.length > 0;
+}
 
 /**
  * DTOs des activités exposés à l'UI.
@@ -66,6 +117,14 @@ export type ActivityDetailDto = ActivitySummaryDto & {
 
 /** Une semaine ISO d'entraînement, telle que l'affiche la page « Activités ». */
 export type WeekOfActivities = {
+  /**
+   * Lundi de la semaine, date civile `YYYY-MM-DD`.
+   *
+   * C'est la **vraie** identité de la semaine : deux « S1 » d'années
+   * différentes portent le même libellé, jamais le même lundi. Elle sert de clé
+   * de rendu et de repère de position dans l'historique.
+   */
+  startsOn: string;
   /** Numéro de semaine ISO, ex. « S32 ». */
   weekLabel: string;
   totalDistanceM: number;
@@ -97,11 +156,19 @@ export function toActivityDetailDto(row: Activity): ActivityDetailDto {
   };
 }
 
-/** Les N activités les plus récentes, de la plus récente à la plus ancienne. */
+/**
+ * Les N activités les plus récentes **de l'athlète connecté**, de la plus
+ * récente à la plus ancienne. Liste vide s'il n'y a pas de session, ou pas
+ * encore d'athlète.
+ */
 export async function listRecentActivities(limit = 20): Promise<ActivitySummaryDto[]> {
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return [];
+
   const rows = await db
     .select()
     .from(activities)
+    .where(eq(activities.athleteId, athleteId))
     .orderBy(desc(activities.startedAt))
     .limit(limit);
   return rows.map(toActivitySummaryDto);
@@ -135,6 +202,7 @@ export function groupActivitiesByWeek(
     if (!week) {
       if (weeks.size === limit) continue;
       week = {
+        startsOn: key,
         weekLabel: `S${isoWeekNumber(day)}`,
         totalDistanceM: 0,
         totalMovingTimeS: 0,
@@ -153,22 +221,149 @@ export function groupActivitiesByWeek(
 }
 
 /**
- * Les `limit` dernières semaines ayant des activités, regroupées.
+ * Bornes de la pagination de l'historique.
  *
- * L'historique est lu en entier : les semaines à retenir ne forment pas une
- * plage de dates calculable à l'avance (une semaine sans sortie ne compte pas),
- * et une ligne d'activité est légère — les séries temporelles vivent à part.
+ * Les deux existent pour la même raison : `limit` et `offset` viennent d'une
+ * URL. Sans plafond, `?page=99999999` ferait balayer à Postgres un OFFSET
+ * arbitraire pour ne rien rendre. Les valeurs hors bornes sont **ramenées**
+ * dans la plage, jamais rejetées : une URL trafiquée doit donner un écran
+ * banal, pas une erreur.
  */
-export async function listActivitiesByWeek(limit: number): Promise<WeekOfActivities[]> {
-  if (limit <= 0) return [];
+export const ACTIVITY_WEEK_PAGE_LIMITS = {
+  /** Au-delà, une page ne se lit plus d'un seul coup d'œil. */
+  maxWeeksPerPage: 26,
+  /** Environ trente ans d'historique : très au-delà de toute carrière. */
+  maxOffset: 1_600,
+} as const;
 
-  const rows = await db.select().from(activities).orderBy(desc(activities.startedAt));
-  return groupActivitiesByWeek(rows.map(toActivitySummaryDto), limit);
+/** Une page de semaines, et de quoi savoir où l'on est dans l'historique. */
+export type ActivityWeekPage = {
+  /** Les semaines de la page, de la plus récente à la plus ancienne. */
+  weeks: WeekOfActivities[];
+  /** Rang de la première semaine affichée — 0 = la semaine la plus récente. */
+  offset: number;
+  /**
+   * `true` s'il reste au moins une semaine **plus ancienne** au-delà de cette
+   * page. Répondu par une semaine lue en trop (`limit + 1`), jamais par un
+   * comptage de l'historique : la question est « y a-t-il une suite ? », pas
+   * « combien de pages ? ».
+   */
+  hasOlder: boolean;
+};
+
+/** Ramène une valeur d'URL dans une plage d'entiers. Le non-fini retombe sur `min`. */
+function boundInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
-/** Une activité par son id interne. `null` si elle n'existe pas. */
+/**
+ * Le lundi de la semaine ISO d'une activité, en date civile `YYYY-MM-DD`,
+ * calculé **par Postgres**.
+ *
+ * `date_trunc('week', …)` tronque au lundi (ISO 8601), et `AT TIME ZONE` le
+ * fait dans le fuseau de l'athlète : c'est exactement la règle de
+ * `isoWeekStart(toCivilDate(…))`, dont dépend le regroupement en mémoire. Les
+ * deux doivent rester d'accord — une sortie du dimanche 23 h tombe sinon dans
+ * une semaine côté SQL et dans une autre côté JS.
+ *
+ * `to_char` plutôt qu'un `::date` : le pilote rendrait une `Date` JS à minuit
+ * *local du serveur*, alors qu'on veut une date civile, comparable et
+ * transportable telle quelle. Le fuseau est un paramètre lié (`$n::text`), pas
+ * une chaîne concaténée.
+ */
+const weekStartExpr = sql`to_char(date_trunc('week', ${activities.startedAt} at time zone ${APP_TIME_ZONE}::text), 'YYYY-MM-DD')`;
+
+/**
+ * Une page de l'historique hebdomadaire de l'athlète connecté.
+ *
+ * Deux requêtes, toutes deux bornées :
+ *
+ * 1. les lundis des semaines qui portent au moins une activité, agrégés par
+ *    Postgres et paginés (`LIMIT limit + 1 OFFSET offset`) — une ligne par
+ *    semaine, jamais l'historique entier ;
+ * 2. les activités de la fenêtre ainsi délimitée, regroupées en mémoire.
+ *
+ * Les semaines de repos ne comptent pas : la pagination porte sur les semaines
+ * **ayant couru**, ce qui rend chaque page pleine et interdit de calculer la
+ * fenêtre par un simple décalage de dates.
+ *
+ * Page vide (`weeks: []`) quand il n'y a pas de session, pas encore d'athlète,
+ * ou que le rang demandé dépasse l'historique.
+ */
+export async function listActivityWeekPage(input: {
+  limit: number;
+  offset: number;
+}): Promise<ActivityWeekPage> {
+  const limit = boundInteger(input.limit, 1, ACTIVITY_WEEK_PAGE_LIMITS.maxWeeksPerPage);
+  const offset = boundInteger(input.offset, 0, ACTIVITY_WEEK_PAGE_LIMITS.maxOffset);
+
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { weeks: [], offset, hasOlder: false };
+
+  const weekRows = await db
+    .select({ weekStart: weekStartExpr })
+    .from(activities)
+    .where(eq(activities.athleteId, athleteId))
+    // `1` désigne la première colonne du SELECT : répéter l'expression ici
+    // lierait deux fois de plus le paramètre de fuseau, pour le même résultat.
+    .groupBy(sql`1`)
+    .orderBy(sql`1 desc`)
+    .limit(limit + 1)
+    .offset(offset);
+
+  // Le contenu d'une colonne calculée n'est pas garanti par le typage : on
+  // vérifie sa forme au lieu de l'affirmer.
+  const starts: string[] = [];
+  for (const row of weekRows) {
+    if (typeof row.weekStart === 'string') starts.push(row.weekStart);
+  }
+
+  const hasOlder = starts.length > limit;
+  const page = starts.slice(0, limit);
+  const newest = page[0];
+  const oldest = page[page.length - 1];
+  if (newest === undefined || oldest === undefined) {
+    return { weeks: [], offset, hasOlder: false };
+  }
+
+  // Fenêtre fermée sur la **même** expression que la pagination : les bornes
+  // sont des lundis rendus par Postgres, comparés à des lundis calculés par
+  // Postgres. Les dates ISO se comparent dans l'ordre chronologique.
+  const rows = await db
+    .select()
+    .from(activities)
+    .where(
+      and(
+        eq(activities.athleteId, athleteId),
+        gte(weekStartExpr, oldest),
+        lte(weekStartExpr, newest),
+      ),
+    )
+    .orderBy(desc(activities.startedAt));
+
+  return {
+    weeks: groupActivitiesByWeek(rows.map(toActivitySummaryDto), page.length),
+    offset,
+    hasOlder,
+  };
+}
+
+/**
+ * Une activité de l'athlète connecté, par son id interne.
+ *
+ * `null` si elle n'existe pas **ou** si elle n'est pas la sienne : l'id vient
+ * du client, et les deux cas doivent être indistinguables.
+ */
 export async function getActivityById(id: number): Promise<ActivityDetailDto | null> {
-  const rows = await db.select().from(activities).where(eq(activities.id, id)).limit(1);
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return null;
+
+  const rows = await db
+    .select()
+    .from(activities)
+    .where(and(eq(activities.id, id), eq(activities.athleteId, athleteId)))
+    .limit(1);
   const row = rows[0];
   return row ? toActivityDetailDto(row) : null;
 }
@@ -445,9 +640,15 @@ function buildCharts(
 /**
  * Tout ce que la page de détail d'une activité affiche, en une lecture.
  *
- * `null` si l'activité n'existe pas. Sinon, chaque bloc se dégrade seul : pas de
- * streams → `charts` à `null` mais le détail et le TRIMP restent ; pas de FC max
- * au profil → pas de zones, mais les splits sont là.
+ * `null` si l'activité n'existe pas **ou** si elle n'est pas celle de l'athlète
+ * connecté — l'id vient de l'URL, les deux cas sont indistinguables. Sinon,
+ * chaque bloc se dégrade seul : pas de streams → `charts` à `null` mais le
+ * détail et le TRIMP restent ; pas de FC max au profil → pas de zones, mais les
+ * splits sont là.
+ *
+ * `activity_streams` n'a pas d'`athlete_id` : son cloisonnement passe par sa
+ * table parente, et la jointure le **vérifie** au lieu de le supposer — les
+ * séries d'autrui ne sont pas lues puis écartées, elles ne sont jamais lues.
  *
  * Distributions, dérive cardiaque et meilleurs segments se calculent **ici**, sur
  * les streams entiers : les points des graphes sont décimés (600 au plus), et un
@@ -455,10 +656,24 @@ function buildCharts(
  * celui de la séance.
  */
 export async function getActivityFull(id: number): Promise<ActivityFullDto | null> {
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return null;
+
   const [activityRows, streamRows, profile] = await Promise.all([
-    db.select().from(activities).where(eq(activities.id, id)).limit(1),
-    db.select().from(activityStreams).where(eq(activityStreams.activityId, id)),
-    getAthleteProfile(),
+    db
+      .select()
+      .from(activities)
+      .where(and(eq(activities.id, id), eq(activities.athleteId, athleteId)))
+      .limit(1),
+    db
+      .select(getTableColumns(activityStreams))
+      .from(activityStreams)
+      .innerJoin(
+        activities,
+        and(eq(activities.id, activityStreams.activityId), eq(activities.athleteId, athleteId)),
+      )
+      .where(eq(activityStreams.activityId, id)),
+    getAthleteProfileById(athleteId),
   ]);
 
   const row = activityRows[0];
@@ -582,9 +797,19 @@ function toIntegerBpm(value: number | null): number | null {
  * fichier.
  *
  * Les streams vides sont ignorés : une ligne sans point n'apporte rien.
+ *
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui l'appelle : elle
+ * tourne dans le watcher, hors requête, il n'y a pas de session à interroger.
+ * L'appartenance est vérifiée dans la transaction, avant toute écriture —
+ * `activity_streams` n'ayant pas d'`athlete_id`, c'est la table parente qui la
+ * porte.
+ *
+ * @throws {ActivityNotFoundError} si l'activité n'est pas celle de l'athlète
+ * (ou n'existe pas : les deux cas ne se distinguent pas).
  */
 export async function saveActivityStreams(
   activityId: number,
+  athleteId: number,
   streams: FitStreamSet,
 ): Promise<void> {
   const rows: NewActivityStream[] = [];
@@ -593,6 +818,8 @@ export async function saveActivityStreams(
     if (!data || data.length === 0) continue;
     rows.push({ activityId, type, data });
   }
+
+  if (!(await ownsActivity(activityId, athleteId))) throw new ActivityNotFoundError();
 
   await db.transaction(async (tx) => {
     if (rows.length > 0) {
@@ -620,7 +847,7 @@ export async function saveActivityStreams(
 }
 
 /**
- * `true` si l'activité porte au moins une série temporelle.
+ * `true` si l'activité **de cet athlète** porte au moins une série temporelle.
  *
  * Sert la politique de streams de l'ingestion (`src/lib/fit/ingest.ts`) : un
  * fichier rapproché **par séance** (autre source, autres octets) ne réécrit les
@@ -628,11 +855,22 @@ export async function saveActivityStreams(
  * meilleure version du même entraînement — il n'a donc aucun titre à écraser des
  * séries saines, alors que le redépôt du fichier d'origine, lui, doit toujours
  * les rafraîchir.
+ *
+ * `false` pour une activité qui n'est pas la sienne, exactement comme pour une
+ * activité inexistante : la jointure sur la table parente porte le
+ * cloisonnement que `activity_streams` ne peut pas porter seule.
  */
-export async function hasActivityStreams(activityId: number): Promise<boolean> {
+export async function hasActivityStreams(
+  activityId: number,
+  athleteId: number,
+): Promise<boolean> {
   const rows = await db
     .select({ id: activityStreams.id })
     .from(activityStreams)
+    .innerJoin(
+      activities,
+      and(eq(activities.id, activityStreams.activityId), eq(activities.athleteId, athleteId)),
+    )
     .where(eq(activityStreams.activityId, activityId))
     .limit(1);
   return rows.length > 0;

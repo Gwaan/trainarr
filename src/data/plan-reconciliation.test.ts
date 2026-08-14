@@ -124,9 +124,12 @@ afterAll(() => {
 });
 
 /** Une sortie du 12 août 2026, 8 h 30 à Paris. */
+/** L'athlète que l'ingestion passe au rapprochement — jamais déduit d'une session. */
+const ATHLETE_ID = 1;
+
 const RUN: ActivityCandidate & { athleteId: number } = {
   id: 42,
-  athleteId: 1,
+  athleteId: ATHLETE_ID,
   sportType: 'Run',
   startedAt: new Date('2026-08-12T06:30:00.000Z'),
 };
@@ -290,7 +293,7 @@ describe('linkActivityToPlannedSession', () => {
   it('rapproche l’activité de la séance du jour et le signale', async () => {
     givenPendingSession();
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(true);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(true);
 
     expect(dbState.updates).toHaveLength(1);
     expect(dbState.updates[0]?.table).toBe('planned_sessions');
@@ -300,7 +303,7 @@ describe('linkActivityToPlannedSession', () => {
   it('n’écrase jamais un lien posé entre-temps (course entre deux imports)', async () => {
     givenPendingSession();
 
-    await linkActivityToPlannedSession(42);
+    await linkActivityToPlannedSession(42, ATHLETE_ID);
 
     const where = renderWhere(dbState.updates[0]?.where);
     expect(where.params).toEqual([7]);
@@ -310,7 +313,7 @@ describe('linkActivityToPlannedSession', () => {
   it('cherche la séance du jour civil de l’activité, chez son athlète', async () => {
     givenPendingSession();
 
-    await linkActivityToPlannedSession(42);
+    await linkActivityToPlannedSession(42, ATHLETE_ID);
 
     const query = dbState.selects.filter((select) => select.table === 'planned_sessions')[1];
     const where = renderWhere(query?.where);
@@ -323,7 +326,7 @@ describe('linkActivityToPlannedSession', () => {
   it('ne retient que le plan actif : une proposition en attente n’est jamais rapprochée', async () => {
     givenPendingSession();
 
-    await linkActivityToPlannedSession(42);
+    await linkActivityToPlannedSession(42, ATHLETE_ID);
 
     const where = renderWhere(dbState.selects.find((select) => select.table === 'plans')?.where);
     // Le statut est dans le `WHERE` : les séances d'un brouillon (comme celles
@@ -337,7 +340,7 @@ describe('linkActivityToPlannedSession', () => {
     givenPendingSession([{ id: 7, planId: null }]);
     dbState.rows.plans = [[]];
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(true);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(true);
 
     const query = dbState.selects.filter((select) => select.table === 'planned_sessions')[1];
     const where = renderWhere(query?.where);
@@ -348,15 +351,36 @@ describe('linkActivityToPlannedSession', () => {
   it('ne fait rien pour une activité inconnue', async () => {
     dbState.rows.activities = [[]];
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(false);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(false);
     expect(dbState.updates).toEqual([]);
+  });
+
+  it('confronte l’activité à l’athlète reçu, dans la même clause', async () => {
+    givenPendingSession();
+
+    await linkActivityToPlannedSession(42, ATHLETE_ID);
+
+    const query = dbState.selects.find((select) => select.table === 'activities');
+    expect(renderWhere(query?.where).params).toEqual([42, ATHLETE_ID]);
+  });
+
+  it('ne rapproche rien pour l’activité d’un autre athlète', async () => {
+    // L'activité 42 existe et une séance l'attend — mais chez quelqu'un d'autre.
+    // Prendre l'athlète sur la ligne trouvée aurait posé le lien quand même :
+    // ici la lecture filtrée ne rend rien, et la fonction s'arrête là.
+    givenPendingSession();
+    dbState.rows.activities = [[]];
+
+    await expect(linkActivityToPlannedSession(42, 2)).resolves.toBe(false);
+    expect(dbState.updates).toEqual([]);
+    expect(dbState.selects.some((select) => select.table === 'planned_sessions')).toBe(false);
   });
 
   it('ne rapproche pas une activité qui n’est pas de la course à pied', async () => {
     givenPendingSession();
     dbState.rows.activities = [[{ ...RUN, sportType: 'Ride' }]];
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(false);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(false);
     expect(dbState.updates).toEqual([]);
     expect(dbState.selects.some((select) => select.table === 'planned_sessions')).toBe(false);
   });
@@ -365,14 +389,14 @@ describe('linkActivityToPlannedSession', () => {
     givenPendingSession();
     dbState.rows.planned_sessions = [[{ id: 7 }]];
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(false);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(false);
     expect(dbState.updates).toEqual([]);
   });
 
   it('ne fait rien quand aucune séance n’attend ce jour-là', async () => {
     givenPendingSession([]);
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(false);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(false);
     expect(dbState.updates).toEqual([]);
   });
 
@@ -380,7 +404,7 @@ describe('linkActivityToPlannedSession', () => {
     givenPendingSession();
     dbState.returning.planned_sessions = [[]];
 
-    await expect(linkActivityToPlannedSession(42)).resolves.toBe(false);
+    await expect(linkActivityToPlannedSession(42, ATHLETE_ID)).resolves.toBe(false);
   });
 });
 

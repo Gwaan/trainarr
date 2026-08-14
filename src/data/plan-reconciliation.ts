@@ -187,26 +187,30 @@ async function getActivePlanId(athleteId: number): Promise<number | null> {
  * — une activité déjà rapprochée ne l'est pas une seconde fois, et rend `false`
  * sans rien écrire.
  *
- * L'athlète n'est pas relu du contexte mais pris sur l'activité elle-même :
- * l'appelant est le pipeline d'import, pas un client, et les deux tables sont
- * rapprochées sous le **même** athlète — aucune séance d'un autre ne peut être
- * touchée.
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui l'appelle : elle
+ * tourne hors requête, il n'y a pas de session à interroger. Il sert d'abord à
+ * confronter l'activité demandée à son propriétaire — le lire sur la ligne
+ * trouvée aurait rendu la fonction obéissante à n'importe quel identifiant, y
+ * compris celui d'un autre compte — puis à ne chercher les séances que chez lui.
  *
  * Une séance d'un plan **archivé** n'est jamais rapprochée : l'athlète ne le
  * suit plus, le compléter a posteriori réécrirait un passé qui n'a pas eu lieu.
  * Les séances hors plan (`plan_id IS NULL`), elles, restent éligibles.
  *
- * @returns `true` si un lien vient d'être posé.
+ * @returns `true` si un lien vient d'être posé. `false` si l'activité n'est pas
+ * celle de l'athlète, exactement comme si elle n'existait pas.
  */
-export async function linkActivityToPlannedSession(activityId: number): Promise<boolean> {
+export async function linkActivityToPlannedSession(
+  activityId: number,
+  athleteId: number,
+): Promise<boolean> {
   const rows = await db
     .select({
-      athleteId: activities.athleteId,
       sportType: activities.sportType,
       startedAt: activities.startedAt,
     })
     .from(activities)
-    .where(eq(activities.id, activityId))
+    .where(and(eq(activities.id, activityId), eq(activities.athleteId, athleteId)))
     .limit(1);
 
   const activity = rows[0];
@@ -219,7 +223,7 @@ export async function linkActivityToPlannedSession(activityId: number): Promise<
     .limit(1);
   if (linked.length > 0) return false;
 
-  const activePlanId = await getActivePlanId(activity.athleteId);
+  const activePlanId = await getActivePlanId(athleteId);
   const eligiblePlan =
     activePlanId === null
       ? isNull(plannedSessions.planId)
@@ -230,7 +234,7 @@ export async function linkActivityToPlannedSession(activityId: number): Promise<
     .from(plannedSessions)
     .where(
       and(
-        eq(plannedSessions.athleteId, activity.athleteId),
+        eq(plannedSessions.athleteId, athleteId),
         eq(plannedSessions.scheduledOn, toCivilDate(activity.startedAt)),
         isNull(plannedSessions.completedActivityId),
         eligiblePlan,

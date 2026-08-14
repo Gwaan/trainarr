@@ -26,7 +26,13 @@ const { dal } = vi.hoisted(() => ({
 vi.mock('./client', () => ({ chatCompletion }));
 vi.mock('./availability', () => ({ requireAi }));
 vi.mock('@/config/env', () => ({ env: { AI_MODEL: 'qwen3-8b-q4' } }));
-vi.mock('@/data/activities', () => ({ getActivityFull: dal.getActivityFull }));
+// `ActivityNotFoundError` vit dans ce module (et `@/data/activity-feedback` la
+// réexporte) : le mock doit la laisser passer, sinon le service lève une tout
+// autre erreur en tentant de l'instancier.
+vi.mock('@/data/activities', async () => {
+  const actual = await vi.importActual<typeof import('@/data/activities')>('@/data/activities');
+  return { ...actual, getActivityFull: dal.getActivityFull };
+});
 vi.mock('@/data/activity-feedback', async () => {
   const actual =
     await vi.importActual<typeof import('@/data/activity-feedback')>('@/data/activity-feedback');

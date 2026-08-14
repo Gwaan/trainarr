@@ -54,9 +54,10 @@ export type IngestReport = {
 async function shouldRewriteStreams(
   status: IngestReport['status'],
   activityId: number,
+  athleteId: number,
 ): Promise<boolean> {
   if (status !== 'merged') return true;
-  return !(await hasActivityStreams(activityId));
+  return !(await hasActivityStreams(activityId, athleteId));
 }
 
 /**
@@ -82,9 +83,9 @@ const REPORT_STATUS = {
  * l'échec se journalise avec son type et son message — un silence ici ferait
  * passer « aucun plan rapproché » pour un état normal.
  */
-async function linkToPlannedSession(activityId: number): Promise<void> {
+async function linkToPlannedSession(activityId: number, athleteId: number): Promise<void> {
   try {
-    await linkActivityToPlannedSession(activityId);
+    await linkActivityToPlannedSession(activityId, athleteId);
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(`[fit] activité ${activityId} : rapprochement du plan impossible — ${reason}`);
@@ -165,11 +166,11 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
   const { activityId, outcome } = await upsertActivityFromFit(parsed, athleteId);
   const status = REPORT_STATUS[outcome];
 
-  if (await shouldRewriteStreams(status, activityId)) {
-    await saveActivityStreams(activityId, parsed.streams);
+  if (await shouldRewriteStreams(status, activityId, athleteId)) {
+    await saveActivityStreams(activityId, athleteId, parsed.streams);
   }
 
-  await linkToPlannedSession(activityId);
+  await linkToPlannedSession(activityId, athleteId);
   scheduleActivePlanFollowUp(activityId, athleteId);
 
   return { status, activityId };

@@ -1,3 +1,5 @@
+import { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getActivityFull } from './activities';
@@ -39,24 +41,41 @@ beforeEach(() => {
  * l'assemblage réel — le contrat du DTO et la dégradation bloc par bloc — sur
  * des séries construites à la main.
  */
-const { queryState } = vi.hoisted(() => ({
-  queryState: { rows: {} as Record<string, unknown[]> },
-}));
+const { queryState } = vi.hoisted(() => {
+  type RecordedQuery = { table: string; where: unknown; join: unknown };
+  return {
+    queryState: {
+      rows: {} as Record<string, unknown[]>,
+      queries: [] as RecordedQuery[],
+    },
+  };
+});
 
 vi.mock('./db/client', async () => {
   const { getTableName } = await import('drizzle-orm');
   type Table = Parameters<typeof getTableName>[0];
 
   type Chain = PromiseLike<unknown[]> & {
-    where: () => Chain;
+    where: (clause: unknown) => Chain;
+    innerJoin: (table: Table, clause: unknown) => Chain;
     orderBy: () => Chain;
     limit: () => Chain;
   };
 
   const chainFor = (table: Table): Chain => {
     const name = getTableName(table);
+    const query = { table: name, where: null as unknown, join: null as unknown };
+    queryState.queries.push(query);
+
     const chain: Chain = {
-      where: () => chain,
+      where: (clause) => {
+        query.where = clause;
+        return chain;
+      },
+      innerJoin: (_joined, clause) => {
+        query.join = clause;
+        return chain;
+      },
       orderBy: () => chain,
       limit: () => chain,
       then: (onFulfilled, onRejected) =>
@@ -104,6 +123,8 @@ const ACTIVITY: Activity = {
   avgCadenceSpm: 172,
   createdAt: new Date('2026-08-09T07:00:00.000Z'),
 };
+
+const dialect = new PgDialect();
 
 function indexes(): number[] {
   return Array.from({ length: POINT_COUNT }, (_, index) => index);
@@ -170,12 +191,72 @@ function longStreams(): ActivityStream[] {
 
 beforeEach(() => {
   queryState.rows = {};
+  queryState.queries = [];
 });
+
+/** Clause rendue en SQL + paramètres liés, pour l'affirmer telle qu'elle partira. */
+function render(clause: unknown): { sql: string; params: unknown[] } {
+  if (!isSql(clause)) throw new Error('Aucune clause enregistrée pour cette requête.');
+  const rendered = dialect.sqlToQuery(clause);
+  return { sql: rendered.sql, params: rendered.params };
+}
+
+function isSql(value: unknown): value is SQL {
+  return value instanceof SQL;
+}
 
 describe('getActivityFull', () => {
   it('rend null pour une activité inconnue', async () => {
-    withoutSession();
+    queryState.rows = { athlete: [ATHLETE] };
+
     expect(await getActivityFull(404)).toBeNull();
+  });
+
+  it('confronte l’identifiant reçu à l’athlète, dans la même clause', async () => {
+    queryState.rows = { activities: [ACTIVITY], athlete: [ATHLETE] };
+
+    await getActivityFull(ACTIVITY.id);
+
+    const activityQuery = queryState.queries.find((query) => query.table === 'activities');
+    expect(render(activityQuery?.where).params).toEqual([ACTIVITY.id, ATHLETE.id]);
+  });
+
+  it('cloisonne les séries temporelles par la jointure, pas par confiance', async () => {
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+    };
+
+    await getActivityFull(ACTIVITY.id);
+
+    // `activity_streams` n'a pas d'`athlete_id` : c'est la jointure sur sa table
+    // parente qui le porte, et elle est vérifiée dans la requête — les séries
+    // d'autrui ne sont pas lues puis écartées, elles ne sont jamais lues.
+    const streamQuery = queryState.queries.find((query) => query.table === 'activity_streams');
+    expect(render(streamQuery?.join).params).toEqual([ATHLETE.id]);
+    expect(render(streamQuery?.where).params).toEqual([ACTIVITY.id]);
+  });
+
+  it('reste introuvable pour l’activité d’un autre athlète', async () => {
+    // La séance existe et porte des séries, mais sous un autre compte : la
+    // lecture filtrée ne rend rien, et la réponse est celle d'un identifiant
+    // inexistant — aucun indice ne distingue les deux cas.
+    queryState.rows = { activities: [], activity_streams: fullStreams(), athlete: [ATHLETE] };
+
+    expect(await getActivityFull(ACTIVITY.id)).toBeNull();
+  });
+
+  it('ne lit rien tant que personne n’est connecté', async () => {
+    withoutSession();
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+    };
+
+    expect(await getActivityFull(ACTIVITY.id)).toBeNull();
+    expect(queryState.queries.filter((query) => query.table === 'activities')).toEqual([]);
   });
 
   it('assemble le détail, les graphes, les splits, les zones et les métriques', async () => {
@@ -338,9 +419,14 @@ describe('getActivityFull', () => {
     expect(full?.effectiveVo2max).toBeGreaterThan(20);
   });
 
-  it('garde les graphes et les splits sans profil athlète', async () => {
-    withoutSession();
-    queryState.rows = { activities: [ACTIVITY], activity_streams: fullStreams() };
+  it('garde les graphes et les splits sur un profil incomplet', async () => {
+    // Le compte a bien un athlète — sans quoi la séance ne serait pas lisible —
+    // mais son profil n'a ni sexe, ni FC de repos, ni FC max.
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [{ ...ATHLETE, sex: null, restingHrBpm: null, maxHrBpm: null }],
+    };
 
     const full = await getActivityFull(ACTIVITY.id);
 

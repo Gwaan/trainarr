@@ -95,7 +95,7 @@ describe('ingestFitBuffer', () => {
 
     expect(mocks.parseFitActivity).toHaveBeenCalledWith(BUFFER);
     expect(mocks.upsertActivityFromFit).toHaveBeenCalledWith(PARSED, ATHLETE_ID);
-    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
+    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, ATHLETE_ID, PARSED.streams);
     // Création : la question « a-t-elle déjà des séries ? » ne se pose même pas.
     expect(mocks.hasActivityStreams).not.toHaveBeenCalled();
   });
@@ -117,7 +117,7 @@ describe('ingestFitBuffer', () => {
 
     await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'updated', activityId: 42 });
 
-    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, REPARSED.streams);
+    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, ATHLETE_ID, REPARSED.streams);
   });
 
   it('rapporte `merged` et préserve les séries quand la séance en a déjà', async () => {
@@ -129,7 +129,7 @@ describe('ingestFitBuffer', () => {
 
     await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'merged', activityId: 42 });
 
-    expect(mocks.hasActivityStreams).toHaveBeenCalledWith(42);
+    expect(mocks.hasActivityStreams).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.saveActivityStreams).not.toHaveBeenCalled();
   });
 
@@ -139,13 +139,13 @@ describe('ingestFitBuffer', () => {
 
     await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'merged', activityId: 42 });
 
-    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
+    expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, ATHLETE_ID, PARSED.streams);
   });
 
   it('rapproche l’activité de sa séance planifiée, après les séries', async () => {
     await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
-    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42, ATHLETE_ID);
     // Les séries d'abord : le rapprochement est un enrichissement de fin de course.
     expect(mocks.saveActivityStreams.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.linkActivityToPlannedSession.mock.invocationCallOrder[0] ?? 0,
@@ -160,7 +160,7 @@ describe('ingestFitBuffer', () => {
 
     await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
-    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42, ATHLETE_ID);
   });
 
   it('journalise un rapprochement en échec sans faire échouer l’import', async () => {
@@ -219,7 +219,7 @@ describe('ingestFitBuffer', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeReviewActivePlan).toHaveBeenCalledWith(ATHLETE_ID);
   });

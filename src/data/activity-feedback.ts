@@ -2,6 +2,7 @@ import 'server-only';
 
 import { and, eq, sql } from 'drizzle-orm';
 
+import { ActivityNotFoundError } from './activities';
 import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, activityFeedbacks } from './db/schema';
@@ -31,15 +32,11 @@ export type ActivityFeedbackDto = {
 /**
  * L'activité visée n'existe pas ou n'appartient pas à l'athlète.
  *
- * Les deux cas partagent la même erreur : les distinguer révélerait l'existence
- * de la ligne (anti-IDOR).
+ * Déclarée dans `./activities` — elle parle d'une activité, et les écritures de
+ * séries temporelles la lèvent aussi — et réexportée ici, où elle vivait, pour
+ * tous ses appelants historiques.
  */
-export class ActivityNotFoundError extends Error {
-  constructor() {
-    super('Aucune activité ne correspond à cet identifiant.');
-    this.name = 'ActivityNotFoundError';
-  }
-}
+export { ActivityNotFoundError };
 
 /** `true` si l'activité existe **et** appartient à l'athlète enregistré. */
 async function ownsActivity(activityId: number): Promise<boolean> {
