@@ -25,10 +25,17 @@ import { PlanSessionDetailPanel } from "./plan-session-detail";
  * manquée.
  *
  * Le **filet de gauche**, lui, ne dit plus l'état : il porte le **type** de la
- * séance (`--color-type-*`), exactement comme la pastille du calendrier. Le
- * jour courant n'en a pas besoin — il garde son fond, son quantième en accent
- * et sa pastille « Aujourd'hui » —, et l'accent reste ainsi ce qu'il est dans
- * le système : l'interaction, jamais une donnée.
+ * séance (`--color-type-*`), de la même famille que le bandeau de tête d'une
+ * pastille du calendrier — 4 px de couleur pleine, sur toute la hauteur de la
+ * ligne. Le jour courant n'en a pas besoin — il garde son fond, son quantième
+ * en accent et sa pastille « Aujourd'hui » —, et l'accent reste ainsi ce qu'il
+ * est dans le système : l'interaction, jamais une donnée.
+ *
+ * **Pas de fond teinté ici**, contrairement à la pastille du calendrier : le
+ * fond d'une ligne est déjà pris par son état (l'`accent-soft` du jour, le
+ * `surface-2` du survol). Teinter la ligne collerait, pour une séance
+ * `type-event`, un indigo de donnée sous un indigo d'interaction — la seule
+ * chose que le système interdit absolument. Le filet, lui, ne recouvre rien.
  */
 
 const STATE_BADGES: Record<
@@ -117,7 +124,7 @@ export function PlanSessionRow({
         // Une séance dont le `kind` sort du vocabulaire de l'appli (plan écrit
         // avant la bascule sur squelette) n'a pas de filet : pas de couleur par
         // défaut, qui mentirait sur sa nature.
-        type === null ? null : cn("border-l-2", SESSION_TYPE_RAIL[type.token]),
+        type === null ? null : cn("border-l-4", SESSION_TYPE_RAIL[type.token]),
         // Lisible, mais elle ne dispute pas l'attention aux séances à venir.
         state === "missed" && "opacity-70",
       )}

@@ -2,7 +2,11 @@ import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import { CircleCheck, CircleDashed, Footprints, GripVertical, Lock } from "lucide-react";
 
-import { SESSION_TYPE_RAIL, SESSION_TYPE_SOFT } from "@/components/session-type";
+import {
+  SESSION_TYPE_BAR,
+  SESSION_TYPE_BLOCK,
+  SESSION_TYPE_EDGE_STRONG,
+} from "@/components/session-type";
 import { sessionType } from "@/lib/plan-session-type";
 import { cn } from "@/lib/utils";
 
@@ -18,12 +22,24 @@ import type {
  *
  * ## Ce que la couleur fait, et ce qu'elle ne fait pas
  *
- * Le **filet de gauche porte le type de la séance** : c'est le code couleur du
- * système (`--color-type-*`, huit teintes validées ensemble), et la course
- * objectif y ajoute un aplat de la même teinte. Rien d'autre n'est teinté — ni
- * le titre, ni le micro-label, qui sont du texte et portent des tokens de
- * texte. Une séance dont le `kind` sort du vocabulaire de l'appli n'a pas de
- * filet du tout : pas de couleur par défaut, qui mentirait sur sa nature.
+ * **La pastille entière est un bloc de la couleur de son type** : un bandeau de
+ * tête plein sur toute sa largeur (4 px), un fond teinté de la même teinte, une
+ * bordure teintée. C'est le code couleur du système (`--color-type-*`, huit
+ * teintes validées ensemble), et il se lit d'un coup d'œil sur un mois entier —
+ * un filet de 2 px au bord gauche, non : c'est ce qu'on a essayé, et c'était
+ * trop discret pour dire la répartition d'un mois.
+ *
+ * Rien d'autre n'est teinté — ni le titre, ni le micro-label, qui sont du texte
+ * et portent des tokens de texte (les dosages de fond sont calibrés pour ça, cf.
+ * {@link SESSION_TYPE_BLOCK}). Une séance dont le `kind` sort du vocabulaire de
+ * l'appli n'a ni bandeau ni teinte, et reste la carte `surface-2` d'avant : pas
+ * de couleur par défaut, qui mentirait sur sa nature.
+ *
+ * Le fond des pastilles est **opaque** : il se compose au build par un
+ * `color-mix` sur `bg`, jamais à l'écran sur ce qui passe dessous. C'est ce qui
+ * permet à `calendar-day-cell.tsx` de creuser une case sans toucher au
+ * contraste d'un seul texte, et à une pastille de garder le même contraste
+ * qu'elle tombe un jour ordinaire, aujourd'hui, ou sous un halo de dépôt.
  *
  * Le type reste **écrit en toutes lettres** sur chaque pastille : la couleur
  * accompagne le mot, elle ne le remplace jamais. C'est la garantie qui vaut
@@ -55,13 +71,19 @@ const STATE_MARKS: Record<
  * dépendrait de l'ordre d'émission des utilitaires. Même parti pris que le
  * `ROLE_LABEL` de `plan-session-detail.tsx`.
  *
- * Il reste en `fg-faint` pour **tout** le monde, course objectif comprise : à
- * 0,68 rem c'est du texte, donc 4,5:1 exigés, que cinq des huit jetons
- * n'atteignent pas sur `surface-2` — `type-easy` y est à 3,1:1, `type-event` à
- * 3,3:1. La couleur du type vit dans le filet, jamais dans les lettres.
+ * Il reste dans un token **texte** pour tout le monde, course objectif
+ * comprise : à 0,68 rem c'est du texte, donc 4,5:1 exigés, que cinq des huit
+ * jetons de type n'atteignent pas — la couleur du type vit dans le bandeau et
+ * le fond, jamais dans les lettres.
+ *
+ * `fg-muted` et non `fg-faint` : sur les fonds teintés des pastilles,
+ * `fg-faint` plafonne à 4,33:1 — sous AA, et aucun réglage d'opacité du fond
+ * ne l'y remonte (le plafond à alpha nul est déjà 4,33 sur `surface-2`).
+ * `fg-muted` y tient 7,6 à 8,4:1, et rend au passage le type plus affirmé —
+ * ce qui est exactement le reproche fait à la première livraison.
  */
 const KIND_LABEL =
-  "text-[0.68rem] leading-[1.1] font-medium tracking-[0.1em] text-fg-faint uppercase";
+  "text-[0.68rem] leading-[1.1] font-medium tracking-[0.1em] text-fg-muted uppercase";
 
 export type CalendarSessionChipProps = {
   session: CalendarSessionView;
@@ -93,12 +115,16 @@ export function CalendarSessionChip({
     <div
       className={cn(
         "min-w-0 rounded-[8px] border px-2 py-1.5",
+        // Le bloc de couleur du type — bandeau de tête compris, dont seule la
+        // géométrie est ici (`border-t-4`), la teinte venant en dernier.
+        type === null
+          ? "border-border bg-surface-2"
+          : cn("border-t-4", SESSION_TYPE_BLOCK[type.token]),
         // La course objectif est la seule séance qui structure le plan à elle
-        // seule : elle garde son aplat, désormais dans la teinte de sa famille
-        // (`type-event`) au lieu de l'accent, qui est l'interaction.
-        type !== null && session.emphasis === "race"
-          ? SESSION_TYPE_SOFT[type.token]
-          : "border-border bg-surface-2",
+        // seule : son bloc est cerné d'une bordure presque pleine.
+        type !== null && session.emphasis === "race" && SESSION_TYPE_EDGE_STRONG[type.token],
+        // Le cadre de la séance manquée se pointille, bandeau compris : c'est
+        // l'encadrement qui dit l'état, la teinte reste celle du type.
         session.state === "missed" && "border-dashed opacity-70",
         session.state === "completed" && "opacity-90",
         // La place laissée par la carte soulevée : un creux, pas un trou — la
@@ -108,11 +134,11 @@ export function CalendarSessionChip({
         // gagne qu'un liseré accent : le système ne pose pas d'ombre portée,
         // l'élévation s'y lit au contraste des fonds.
         lifted && "border-accent/60",
-        // **En dernier** : le filet de type reprend le bord gauche à tout ce qui
-        // précède, aplat de course et liseré de glissement compris. Sans quoi
+        // **En dernier** : le bandeau reprend le bord haut à tout ce qui
+        // précède, cran de la course et liseré de glissement compris. Sans quoi
         // l'accent de l'interaction recouvrirait la couleur de la donnée le
         // temps d'un déplacement.
-        type === null ? null : cn("border-l-2", SESSION_TYPE_RAIL[type.token]),
+        type === null ? null : SESSION_TYPE_BAR[type.token],
         className,
       )}
     >
@@ -158,9 +184,9 @@ export function CalendarSessionChip({
  * Une sortie réellement courue hors plan.
  *
  * Elle se lit tout de suite comme autre chose qu'une séance : fond creusé (`bg`
- * sous une surface), filet neutre à gauche là où une séance dure porte l'accent,
- * et le mot « hors plan » écrit. Elle ne se déplace pas — c'est de l'histoire —
- * et mène au détail de l'activité.
+ * sous une surface), filet neutre à gauche là où une séance du plan porte un
+ * bandeau de couleur en tête, et le mot « hors plan » écrit. Elle ne se déplace
+ * pas — c'est de l'histoire — et mène au détail de l'activité.
  */
 export function CalendarActivityChip({ activity }: { activity: CalendarActivityView }) {
   return (

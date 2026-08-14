@@ -650,7 +650,7 @@ function CalendarWeek({
 /**
  * La grille de lecture des pastilles.
  *
- * Deux groupes, séparés par un trait : ce que dit la **couleur** du filet — le
+ * Deux groupes, séparés par un trait : ce que dit la **couleur** du bloc — le
  * type de la séance —, puis ce que disent les **signes** — l'état. Les deux
  * canaux sont indépendants, et la légende les sépare comme les pastilles les
  * séparent.
@@ -675,11 +675,12 @@ function CalendarLegend({ types }: { types: readonly SessionType[] }) {
     <ul className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 text-[0.66rem] text-fg-faint lg:px-4">
       {types.map((type) => (
         <li key={type.token} className="flex items-center gap-1.5">
-          {/* La même géométrie que le filet d'une pastille : un segment
-              vertical, pas un rond — la légende montre le signe tel qu'il est. */}
+          {/* La même géométrie que le bandeau d'une pastille : une barre
+              horizontale, pas un rond — la légende montre le signe tel qu'il
+              est. */}
           <span
             aria-hidden="true"
-            className={cn("h-3 w-1 rounded-full", SESSION_TYPE_DOT[type.token])}
+            className={cn("h-1 w-4 rounded-full", SESSION_TYPE_DOT[type.token])}
           />
           {type.label}
         </li>
