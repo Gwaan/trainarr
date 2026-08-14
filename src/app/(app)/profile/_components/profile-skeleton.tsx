@@ -12,20 +12,6 @@ function FieldSkeleton({ inputClassName }: { inputClassName: string }) {
   );
 }
 
-/** Un bloc de la section « Ton compte » : sous-titre, ses champs, son bouton. */
-function AccountBlockSkeleton({ fields }: { fields: number }) {
-  return (
-    <div>
-      <Skeleton className="h-3.5 w-32" />
-      <Skeleton className="mt-2 h-3 w-80 max-w-full" />
-      {Array.from({ length: fields }, (_, index) => (
-        <Skeleton key={index} className="mt-3 h-11 w-full sm:max-w-xs" />
-      ))}
-      <Skeleton className="mt-3 h-11 w-full sm:w-48" />
-    </div>
-  );
-}
-
 function PanelSkeleton({
   titleWidth,
   children,
@@ -44,80 +30,97 @@ function PanelSkeleton({
 }
 
 /**
- * Squelette de la page « Profil ».
+ * Squelette des réglages à onglets, servi partout où `SettingsTabs` se charge :
+ * en repli du `<Suspense>` de la page comme de celui de la modale.
  *
- * Même géométrie que le formulaire réel (en-tête, deux panneaux, bouton) pour
- * qu'aucun bloc ne saute à l'arrivée des données. Toute modification de la mise
- * en page doit être répercutée ici.
+ * **Un seul squelette pour les deux hôtes**, exactement comme il n'y a qu'un
+ * seul `SettingsTabs` : une géométrie qui dériverait d'un côté seulement est le
+ * défaut qu'on cherche à rendre impossible.
+ *
+ * Il reprend la barre d'onglets puis le contenu de l'onglet ouvert par défaut,
+ * « Profil » — ses deux panneaux et son bouton. La colonne est plate, comme
+ * dans le rendu réel : le panneau d'onglet n'est qu'un `<div>` sans effet de
+ * mise en page, et la région live du formulaire est hors flux tant qu'elle est
+ * vide. Toute modification de `SettingsTabs` ou de `ProfileForm` doit être
+ * répercutée ici.
  */
-export function ProfileSkeleton() {
+export function SettingsTabsSkeleton() {
   return (
     <div
       role="status"
       aria-busy="true"
-      aria-label="Chargement du profil"
-      className="flex flex-col gap-5 sm:gap-6"
+      aria-label="Chargement des réglages"
+      className="flex flex-col gap-4 sm:gap-5"
     >
+      {/* Barre d'onglets : trois colonnes égales dans une gouttière bordée. */}
+      <div className="grid auto-cols-fr grid-flow-col gap-1 rounded-button border border-border p-0.5">
+        {[0, 1, 2].map((tab) => (
+          <Skeleton key={tab} className="h-11 rounded-[6px]" />
+        ))}
+      </div>
+
+      <PanelSkeleton titleWidth="w-16">
+        <FieldSkeleton inputClassName="w-full sm:max-w-xs" />
+        {/* Sexe : trois choix côte à côte à partir de `sm` */}
+        <div>
+          <Skeleton className="h-3.5 w-12" />
+          <Skeleton className="mt-2 h-3 w-full max-w-lg" />
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            {[0, 1, 2].map((choice) => (
+              <Skeleton key={choice} className="h-[2.85rem]" />
+            ))}
+          </div>
+        </div>
+        <FieldSkeleton inputClassName="w-full sm:w-48" />
+      </PanelSkeleton>
+
+      <PanelSkeleton titleWidth="w-40">
+        {/* Fréquences cardiaques : deux champs courts sur une ligne */}
+        <div>
+          <Skeleton className="h-3.5 w-40" />
+          <Skeleton className="mt-2 h-3 w-full max-w-md" />
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-3">
+            {[0, 1].map((field) => (
+              <div key={field}>
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="mt-2.5 h-11 w-32" />
+              </div>
+            ))}
+          </div>
+        </div>
+        <FieldSkeleton inputClassName="w-32" />
+      </PanelSkeleton>
+
+      {/* Bouton d'enregistrement, et la phrase qui le suit à partir de `sm`. */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <Skeleton className="h-12 w-full sm:w-32" />
+        <Skeleton className="h-3.5 w-72 max-w-full" />
+      </div>
+
+      <span className="sr-only">Chargement des réglages…</span>
+    </div>
+  );
+}
+
+/**
+ * Squelette de la page « Réglages » : son en-tête, puis les onglets.
+ *
+ * Il ne peut coller qu'à **une** des deux formes de la page, qui ne se décident
+ * qu'une fois le profil lu : l'édition à onglets, ou l'écran plein de création
+ * quand aucun profil n'existe. C'est l'édition qui est reprise ici — la
+ * création n'arrive qu'une fois dans la vie d'une installation, l'édition à
+ * chaque visite.
+ */
+export function ProfileSkeleton() {
+  return (
+    <div className="flex flex-col gap-5 sm:gap-6">
       {/* En-tête : titre + sous-titre */}
       <div>
         <Skeleton className="h-8 w-64 max-w-full sm:h-9" />
         <Skeleton className="mt-2.5 h-3.5 w-96 max-w-full" />
       </div>
 
-      <div className="flex flex-col gap-4 sm:gap-5">
-        <PanelSkeleton titleWidth="w-16">
-          <FieldSkeleton inputClassName="w-full sm:max-w-xs" />
-          {/* Sexe : trois choix côte à côte à partir de `sm` */}
-          <div>
-            <Skeleton className="h-3.5 w-12" />
-            <Skeleton className="mt-2 h-3 w-full max-w-lg" />
-            <div className="mt-3 grid gap-2 sm:grid-cols-3">
-              {[0, 1, 2].map((choice) => (
-                <Skeleton key={choice} className="h-[2.85rem]" />
-              ))}
-            </div>
-          </div>
-          <FieldSkeleton inputClassName="w-full sm:w-48" />
-        </PanelSkeleton>
-
-        <PanelSkeleton titleWidth="w-40">
-          {/* Fréquences cardiaques : deux champs courts sur une ligne */}
-          <div>
-            <Skeleton className="h-3.5 w-40" />
-            <Skeleton className="mt-2 h-3 w-full max-w-md" />
-            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-3">
-              {[0, 1].map((field) => (
-                <div key={field}>
-                  <Skeleton className="h-3 w-16" />
-                  <Skeleton className="mt-2.5 h-11 w-32" />
-                </div>
-              ))}
-            </div>
-          </div>
-          <FieldSkeleton inputClassName="w-32" />
-        </PanelSkeleton>
-
-        {/* « Import automatique » : cadrage, identifiant d'athlète, clé API.
-            À la création il précède le bouton (il fait partie du formulaire) ;
-            en édition il le suit, avec son propre bouton — une seule géométrie
-            pour les deux, le squelette ignore encore lequel s'affichera. */}
-        <PanelSkeleton titleWidth="w-32">
-          <Skeleton className="h-3 w-full max-w-xl" />
-          <FieldSkeleton inputClassName="w-full sm:max-w-sm" />
-          <FieldSkeleton inputClassName="w-full sm:max-w-sm" />
-        </PanelSkeleton>
-
-        <Skeleton className="h-12 w-full sm:w-44" />
-
-        {/* « Ton compte » : trois blocs — nom, mot de passe, déconnexion. */}
-        <PanelSkeleton titleWidth="w-24">
-          <AccountBlockSkeleton fields={1} />
-          <AccountBlockSkeleton fields={3} />
-          <AccountBlockSkeleton fields={0} />
-        </PanelSkeleton>
-      </div>
-
-      <span className="sr-only">Chargement du profil…</span>
+      <SettingsTabsSkeleton />
     </div>
   );
 }

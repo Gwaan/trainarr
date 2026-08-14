@@ -1,5 +1,5 @@
 import type { AthleteProfile } from "./athlete";
-import { AthleteAvatarLink } from "./athlete-link";
+import { AthleteAvatarTrigger } from "./athlete-trigger";
 import { Logo } from "./logo";
 
 /**
@@ -25,7 +25,7 @@ export function MobileHeader({ athlete }: { athlete: AthleteProfile }) {
   return (
     <header className="sticky top-0 z-30 flex min-h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between border-b border-border bg-bg/85 pt-[env(safe-area-inset-top)] pr-[max(1rem,env(safe-area-inset-right))] pl-[max(1rem,env(safe-area-inset-left))] backdrop-blur-md [view-transition-name:app-header] lg:hidden">
       <Logo />
-      <AthleteAvatarLink athlete={athlete} />
+      <AthleteAvatarTrigger athlete={athlete} />
     </header>
   );
 }

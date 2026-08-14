@@ -17,14 +17,15 @@ import {
 import { IntervalsFields } from "./intervals-fields";
 
 /**
- * Section « Import automatique » du profil, en mode édition.
+ * Section « Import automatique » des réglages, en mode édition.
  *
  * Un formulaire à part, avec sa propre action et son propre état : corriger un
  * identifiant intervals.icu ne doit pas obliger à repasser par le profil
  * physiologique, et l'échec de l'un ne dit rien de l'autre.
  *
- * **Aucun bouton accent ici** : le seul CTA de l'écran est l'enregistrement du
- * profil.
+ * **Aucun bouton accent ici** : l'accent des réglages est l'enregistrement du
+ * profil, et le déplacer d'un onglet à l'autre ferait de chaque section une
+ * candidate au même poids visuel.
  */
 
 /** Repli si l'action échoue sans message — elle en fournit un dans tous ses cas connus. */

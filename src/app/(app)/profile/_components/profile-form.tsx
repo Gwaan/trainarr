@@ -116,6 +116,10 @@ function Field({
  * Saisie chiffrée : mono, largeur ajustée au nombre de chiffres, unité suffixée.
  * L'unité affichée est décorative ; sa version lisible porte l'`id` `<id>-unit`,
  * que l'appelant ajoute à `aria-describedby`.
+ *
+ * **`text-base` n'est pas décoratif** : en dessous de 16 px, iOS zoome à la
+ * prise de focus, et en PWA `standalone` aucun geste ne ramène en arrière. Il
+ * l'emporte donc sur la taille par défaut de `Input`.
  */
 function NumberInput({
   id,
@@ -130,7 +134,13 @@ function NumberInput({
 }) {
   return (
     <div className={cn("relative", className)}>
-      <Input id={id} inputMode="numeric" autoComplete="off" {...props} className="num pr-12" />
+      <Input
+        id={id}
+        inputMode="numeric"
+        autoComplete="off"
+        {...props}
+        className="num pr-12 text-base"
+      />
       <span
         aria-hidden="true"
         className="num pointer-events-none absolute inset-y-0 right-3 flex items-center text-[0.78rem] text-fg-faint"
@@ -217,7 +227,8 @@ export function ProfileForm({ mode, values }: ProfileFormProps) {
               )}
               value={fields.displayName}
               onChange={(event) => setField("displayName", event.target.value)}
-              className="sm:max-w-xs"
+              // `text-base` : sous 16 px, iOS zoome à la prise de focus.
+              className="text-base sm:max-w-xs"
             />
           </Field>
 
@@ -303,7 +314,8 @@ export function ProfileForm({ mode, values }: ProfileFormProps) {
               )}
               value={fields.birthDate}
               onChange={(event) => setField("birthDate", event.target.value)}
-              className="num w-full sm:w-48"
+              // `text-base` : sous 16 px, iOS zoome à la prise de focus.
+              className="num w-full text-base sm:w-48"
             />
           </Field>
         </div>

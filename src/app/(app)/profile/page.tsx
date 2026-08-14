@@ -3,18 +3,15 @@ import { Suspense } from "react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
-import { getAthleteProfile, getIntervalsSettings } from "@/data/athlete";
-import { getAccountSummary } from "@/lib/auth/session";
 
 import { AccountPanel } from "./_components/account-panel";
-import { IntervalsPanel } from "./_components/intervals-panel";
 import { ProfileForm } from "./_components/profile-form";
 import { ProfileSkeleton } from "./_components/profile-skeleton";
-import { toProfileFormValues } from "./_lib/form-values";
-import { toIntervalsFormDefaults } from "./_lib/intervals-values";
+import { SettingsTabs } from "./_components/settings-tabs";
+import { loadSettingsData } from "./_lib/settings-data";
 
 export const metadata: Metadata = {
-  title: "Profil",
+  title: "Réglages",
 };
 
 /**
@@ -29,14 +26,22 @@ const HEADINGS = {
       "Une minute suffit : ces quelques informations permettent de calculer ta charge d'entraînement et d'importer tes séances.",
   },
   edit: {
-    title: "Ton profil",
+    title: "Tes réglages",
     subtitle:
-      "Les données sur lesquelles reposent tes calculs physiologiques. Modifiables à tout moment.",
+      "Ton profil physiologique, ton compte et l'import automatique de tes séances.",
   },
 } as const;
 
 /**
  * Contenu de la page.
+ *
+ * Elle reste atteignable et rend **les mêmes sections que la modale** : c'est le
+ * même `SettingsTabs`, monté ici dans la colonne de la page plutôt que dans le
+ * corps défilant de la boîte de dialogue. Aucun formulaire n'existe en deux
+ * exemplaires, et rien ne peut donc diverger entre les deux entrées.
+ *
+ * L'onboarding, lui, garde son écran plein : un premier profil se crée sur une
+ * page, pas dans une modale — il n'y a pas encore d'application autour d'elle.
  *
  * `connection()` est indispensable : `cacheComponents: true` prérendrait sinon
  * la page pendant `next build` (image Docker), où la base n'existe pas.
@@ -44,36 +49,31 @@ const HEADINGS = {
  */
 async function ProfileContent() {
   await connection();
-  // Trois lectures indépendantes : le profil athlète et ses identifiants
-  // intervals.icu (nos tables, via le DAL) et le compte connecté (la session,
-  // via better-auth). Les identifiants ne portent que l'état de la clé API,
-  // jamais sa valeur.
-  const [profile, intervals, account] = await Promise.all([
-    getAthleteProfile(),
-    getIntervalsSettings(),
-    getAccountSummary(),
-  ]);
-
-  const mode = profile === null ? "onboarding" : "edit";
+  const { mode, ...sections } = await loadSettingsData();
   const { title, subtitle } = HEADINGS[mode];
 
   return (
     <>
       <PageHeader title={title} subtitle={subtitle} />
-      {/* Le formulaire ne reçoit que des chaînes prêtes à afficher : la
-          conversion des mesures reste côté serveur, testée à part. */}
-      <ProfileForm mode={mode} values={toProfileFormValues(profile)} />
-      {/* En édition seulement : à la création, ces deux champs voyagent avec le
-          profil dans la même soumission — l'athlète n'existe pas encore, il n'y
-          a rien à modifier séparément. */}
-      {mode === "edit" ? (
-        <IntervalsPanel defaults={toIntervalsFormDefaults(intervals)} />
-      ) : null}
-      {/* Après le profil, et à part : l'identité de connexion n'a rien à voir
-          avec les données physiologiques, et son CTA ne doit pas concurrencer
-          l'enregistrement. Le composant ne reçoit que le nom — jamais l'e-mail,
-          l'identifiant interne ni quoi que ce soit de la session. */}
-      <AccountPanel account={account} />
+
+      {mode === "onboarding" ? (
+        <>
+          {/* Le formulaire ne reçoit que des chaînes prêtes à afficher : la
+              conversion des mesures reste côté serveur, testée à part. À la
+              création, les champs intervals.icu voyagent avec le profil dans la
+              même soumission — l'athlète n'existe pas encore, il n'y a rien à
+              modifier séparément, donc pas d'onglet « Import ». */}
+          <ProfileForm mode="onboarding" values={sections.profile} />
+          {/* À part : l'identité de connexion n'a rien à voir avec les données
+              physiologiques, et son CTA ne doit pas concurrencer
+              l'enregistrement. Le composant ne reçoit que le nom — jamais
+              l'e-mail, l'identifiant interne ni quoi que ce soit de la
+              session. */}
+          <AccountPanel account={sections.account} />
+        </>
+      ) : (
+        <SettingsTabs data={sections} />
+      )}
     </>
   );
 }

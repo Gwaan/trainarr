@@ -20,15 +20,17 @@ import { ACCOUNT_FORM_IDLE, type AccountFormState } from "../_lib/account-state"
 
 /**
  * Section « Ton compte » — l'identité de connexion, distincte du profil
- * physiologique qui la précède sur la page.
+ * physiologique.
  *
  * Trois formulaires côte à côte, jamais imbriqués (HTML l'interdit), chacun avec
  * son propre état : corriger son nom ne doit pas obliger à ressaisir un mot de
  * passe, et l'échec de l'un ne doit rien dire des deux autres.
  *
- * **Aucun bouton accent ici.** Le seul CTA de l'écran est l'enregistrement du
- * profil ; ces actions sont secondaires, et la déconnexion l'est doublement —
- * elle se déclencherait sinon en croyant valider.
+ * **Aucun bouton accent ici**, et c'est la conséquence directe des trois
+ * formulaires : la section n'a pas *une* action principale à désigner, elle en a
+ * trois. Les distinguer par l'accent reviendrait à en élire une au hasard, et la
+ * déconnexion doit rester doublement en retrait — elle se déclencherait sinon en
+ * croyant valider.
  */
 
 /** Repli si une action échoue sans message — elle en fournit un dans tous ses cas connus. */
@@ -135,7 +137,7 @@ function BlockHeading({ title, children }: { title: string; children: ReactNode 
   );
 }
 
-/** Bouton de soumission secondaire — jamais l'accent, réservé au profil. */
+/** Bouton de soumission secondaire — cf. l'en-tête du fichier : jamais l'accent. */
 function SecondarySubmit({
   pending,
   label,
@@ -172,9 +174,12 @@ function NameForm({ name }: { name: string }) {
 
   return (
     <div>
+      {/* Aucun repère de position (« plus haut ») : cette section est rendue
+          tantôt sous le formulaire de profil (création), tantôt dans son propre
+          onglet — la phrase doit rester vraie des deux côtés. */}
       <BlockHeading title="Nom du compte">
-        Le nom de ton identité de connexion. Il est indépendant du prénom réglé
-        plus haut, qui décrit la coureuse et sert aux calculs.
+        Le nom de ton identité de connexion. Il est indépendant de ton prénom de
+        profil, qui décrit la coureuse et sert aux calculs.
       </BlockHeading>
       <Feedback state={state} />
       <form action={formAction} noValidate className="flex flex-col gap-3">

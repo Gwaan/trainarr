@@ -1,5 +1,5 @@
 import type { AthleteProfile } from "./athlete";
-import { AthleteLink } from "./athlete-link";
+import { AthleteTrigger } from "./athlete-trigger";
 import { Logo } from "./logo";
 import { SidebarNav } from "./sidebar-nav";
 
@@ -25,7 +25,7 @@ export function Sidebar({ athlete }: { athlete: AthleteProfile }) {
       {/* Pas de padding latéral : le filet accent de l'item actif doit affleurer
           le bord de la sidebar, comme sur les liens de navigation. */}
       <div className="mt-auto border-t border-border py-2">
-        <AthleteLink athlete={athlete} />
+        <AthleteTrigger athlete={athlete} />
       </div>
     </aside>
   );
