@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import { CircleCheck, CircleDashed, Footprints, GripVertical, Lock } from "lucide-react";
@@ -45,6 +46,15 @@ import type {
  * accompagne le mot, elle ne le remplace jamais. C'est la garantie qui vaut
  * au-delà du validateur daltonien.
  *
+ * ## Deux interactifs, et jamais imbriqués
+ *
+ * La pastille **s'ouvre** sur le détail de sa séance, et sa poignée **se
+ * saisit**. Les deux boutons lui sont passés (`action`, `handle`) plutôt que
+ * construits ici : le calque de glissement re-rend la même carte sans aucun des
+ * deux, et une séance figée n'a pas de poignée. Le partage des gestes — souris,
+ * doigt, clavier — est documenté sur `calendar-session-card.tsx`, qui les
+ * fabrique.
+ *
  * L'état, lui, se double toujours d'un signe nommé, jamais d'une couleur seule :
  * une pastille réalisée porte sa coche, une pastille manquée son cercle
  * pointillé — la même grammaire que les lignes de séance du plan
@@ -53,8 +63,13 @@ import type {
  * l'état se lisent sur deux canaux séparés.
  */
 
-/** Le signe d'état, `null` pour une séance à venir : elle n'a rien à annoncer. */
-const STATE_MARKS: Record<
+/**
+ * Le signe d'état, `null` pour une séance à venir : elle n'a rien à annoncer.
+ *
+ * Exporté parce que la modale de détail le reprend tel quel : l'état d'une
+ * séance se dit d'un seul vocabulaire, du calendrier à la boîte qui l'ouvre.
+ */
+export const CALENDAR_STATE_MARKS: Record<
   CalendarSessionState,
   { icon: LucideIcon; label: string; className: string } | null
 > = {
@@ -91,30 +106,53 @@ export type CalendarSessionChipProps = {
   isDragging?: boolean;
   /** Rendu dans le calque de glissement — pas dans le flux de la page. */
   lifted?: boolean;
+  /**
+   * Le bouton qui **couvre** la pastille et ouvre son détail.
+   *
+   * Il est posé ici, en premier enfant absolu, plutôt qu'autour de la carte :
+   * la poignée de glissement est un bouton elle aussi, et deux interactifs ne
+   * s'imbriquent pas. Venant avant elle dans le document, il passe dessous sans
+   * qu'aucun `z-index` n'ait à l'arbitrer — la poignée reste donc saisissable au
+   * doigt comme à la souris.
+   */
+  action?: ReactNode;
+  /**
+   * Ce qui occupe la place du signe de déplacement, en bout de la ligne de type.
+   *
+   * Absent, la pastille rend un signe **inerte** : la poignée grisée du calque
+   * de glissement, le cadenas d'une séance figée. Le calendrier, lui, y pose la
+   * vraie poignée — un bouton, avec les écouteurs de dnd-kit.
+   */
+  handle?: ReactNode;
   className?: string;
 };
 
 /**
  * La pastille d'une séance.
  *
- * Purement visuelle : elle ne sait rien du glisser-déposer. C'est
- * `CalendarSessionDraggable` qui l'accroche à dnd-kit, et le calque de
- * glissement qui la re-rend telle quelle — même composant, donc rigoureusement
- * la même carte sous le doigt et sous le curseur.
+ * Purement visuelle : elle ne sait rien du glisser-déposer ni de la modale.
+ * C'est `CalendarSessionCard` qui l'accroche à dnd-kit et lui donne ses deux
+ * interactifs, et le calque de glissement qui la re-rend sans aucun des deux —
+ * même composant, donc rigoureusement la même carte sous le doigt et sous le
+ * curseur.
  */
 export function CalendarSessionChip({
   session,
   isDragging = false,
   lifted = false,
+  action,
+  handle,
   className,
 }: CalendarSessionChipProps) {
-  const mark = STATE_MARKS[session.state];
+  const mark = CALENDAR_STATE_MARKS[session.state];
   const type = sessionType(session.kind);
 
   return (
     <div
       className={cn(
-        "min-w-0 rounded-[8px] border px-2 py-1.5",
+        // `relative` sans `z-index` : le bouton d'ouverture s'y ancre, et la
+        // poignée reste au-dessus de lui par le seul ordre du document.
+        "relative min-w-0 rounded-[8px] border px-2 py-1.5",
         // Le bloc de couleur du type — bandeau de tête compris, dont seule la
         // géométrie est ici (`border-t-4`), la teinte venant en dernier.
         type === null
@@ -142,6 +180,8 @@ export function CalendarSessionChip({
         className,
       )}
     >
+      {action}
+
       <p className="flex min-w-0 items-center gap-1">
         {mark === null ? null : (
           <mark.icon
@@ -152,15 +192,20 @@ export function CalendarSessionChip({
         )}
         <span className={cn(KIND_LABEL, "min-w-0 flex-1 truncate")}>{session.kind}</span>
         {mark === null ? null : <span className="sr-only">{mark.label}</span>}
-        {session.movable ? (
-          <GripVertical
-            aria-hidden="true"
-            strokeWidth={1.8}
-            className="size-3 shrink-0 text-fg-faint/70"
-          />
-        ) : (
-          <Lock aria-hidden="true" strokeWidth={1.8} className="size-3 shrink-0 text-fg-faint/40" />
-        )}
+        {handle ??
+          (session.movable ? (
+            <GripVertical
+              aria-hidden="true"
+              strokeWidth={1.8}
+              className="size-3 shrink-0 text-fg-faint/70"
+            />
+          ) : (
+            <Lock
+              aria-hidden="true"
+              strokeWidth={1.8}
+              className="size-3 shrink-0 text-fg-faint/40"
+            />
+          ))}
       </p>
 
       <p

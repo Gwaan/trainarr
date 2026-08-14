@@ -25,7 +25,11 @@ import {
   formatWeekdayShort,
   ISO_DAY_LABELS,
 } from "@/app/(app)/plan/_lib/format-plan";
-import { planSessionTotals } from "@/app/(app)/plan/_lib/session-detail";
+import {
+  planSessionDetail,
+  planSessionTotals,
+  type PlanSessionDetail,
+} from "@/app/(app)/plan/_lib/session-detail";
 import { APP_TIME_ZONE } from "@/config/time";
 import type {
   CalendarActivityDto,
@@ -103,6 +107,16 @@ export type CalendarSessionView = {
   movable: boolean;
   /** Ce qu'annonce un lecteur d'écran, ex. « Seuil, 6 × 800 m ». */
   label: string;
+  /**
+   * Le déroulé complet, tel que la page Plan le rend — c'est la **même**
+   * projection (`planSessionDetail`), donc le même déroulé, les mêmes cibles et
+   * les mêmes totaux. Elle est calculée ici, avec le reste du modèle, plutôt que
+   * dans la modale : le calendrier n'a alors qu'une seule frontière entre les
+   * données et l'écran.
+   */
+  detail: PlanSessionDetail;
+  /** L'activité qui a réalisé la séance, `null` sinon — la sortie à ouvrir. */
+  completedActivityId: number | null;
 };
 
 /**
@@ -202,12 +216,12 @@ export function sessionEmphasis(kind: string): CalendarSessionEmphasis {
   return sessionPaceZone(kind) === "easy" ? "normal" : "hard";
 }
 
-/** Où en est la séance — `completed` prime, une séance courue est de l'histoire. */
+/** Où en est la séance — une séance courue est de l'histoire, quelle que soit sa date. */
 export function calendarSessionState(
-  session: Pick<CalendarSessionDto, "date" | "completed">,
+  session: Pick<CalendarSessionDto, "date" | "completedActivityId">,
   today: string,
 ): CalendarSessionState {
-  if (session.completed) return "completed";
+  if (session.completedActivityId !== null) return "completed";
   // Comparaison lexicographique : sur des dates civiles `YYYY-MM-DD` bien
   // formées, elle coïncide avec l'ordre chronologique.
   return session.date < today ? "missed" : "upcoming";
@@ -228,6 +242,12 @@ function sessionSummary(session: CalendarSessionDto): string | null {
 export function toCalendarSessionView(
   session: CalendarSessionDto,
   today: string,
+  /**
+   * FC max du profil, `null` tant qu'elle n'est pas saisie : elle traduit les
+   * zones cardiaques des étapes en battements. Résolue à l'affichage, jamais
+   * stockée dans la séance — exactement comme sur la page Plan.
+   */
+  maxHrBpm: number | null = null,
 ): CalendarSessionView {
   return {
     id: session.id,
@@ -240,8 +260,10 @@ export function toCalendarSessionView(
     // Recalculé plutôt que repris du DTO : après un déplacement optimiste, la
     // date affichée n'est plus celle que le serveur avait jugée. La formule est
     // celle du DAL (`toCalendarSessionDto`), au caractère près.
-    movable: !session.completed && session.date >= today,
+    movable: session.completedActivityId === null && session.date >= today,
     label: `${session.kind}, ${session.title}`,
+    detail: planSessionDetail(session, maxHrBpm),
+    completedActivityId: session.completedActivityId,
   };
 }
 
@@ -447,6 +469,11 @@ export type BuildCalendarMonthInput = {
   month: string;
   /** Jour civil courant, calculé côté serveur dans le fuseau de l'athlète. */
   today: string;
+  /**
+   * FC max du profil, `null` tant qu'elle n'est pas saisie : elle traduit en
+   * battements les zones cardiaques du détail des séances.
+   */
+  maxHrBpm: number | null;
   plan: CalendarPlanBounds | null;
   sessions: readonly CalendarSessionDto[];
   /**
@@ -482,7 +509,7 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
   const sessionsByDay = new Map<string, CalendarSessionView[]>();
   const volumeByDay = new Map<string, number>();
   for (const session of input.sessions) {
-    const view = toCalendarSessionView(session, today);
+    const view = toCalendarSessionView(session, today, input.maxHrBpm);
     const bucket = sessionsByDay.get(view.date);
     if (bucket === undefined) sessionsByDay.set(view.date, [view]);
     else bucket.push(view);

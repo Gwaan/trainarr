@@ -296,9 +296,13 @@ describe('getCalendarRange — lecture', () => {
         kind: 'Seuil',
         title: '3 × 2 km',
         steps: null,
+        warmup: null,
+        recovery: null,
+        cooldown: null,
+        targetPaceSecPerKm: 245,
         volumeM: 12_400,
         durationS: 3_900,
-        completed: false,
+        completedActivityId: null,
         movable: true,
       },
     ]);
@@ -449,13 +453,13 @@ describe('toCalendarSessionDto — ce qui se déplace', () => {
       today,
     );
 
-    expect(dto).toMatchObject({ completed: true, movable: false });
+    expect(dto).toMatchObject({ completedActivityId: 42, movable: false });
   });
 
   it('gèle une séance dont le jour est passé', () => {
     const dto = toCalendarSessionDto(sessionRow({ scheduledOn: '2026-08-11' }), today);
 
-    expect(dto).toMatchObject({ completed: false, movable: false });
+    expect(dto).toMatchObject({ completedActivityId: null, movable: false });
   });
 
   it("laisse déplaçable la séance du jour même", () => {

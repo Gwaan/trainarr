@@ -291,9 +291,22 @@ export function planSessionSummary(
   return summary;
 }
 
+/**
+ * Ce qu'il faut d'une séance pour en rendre le détail.
+ *
+ * Un `Pick` et non `PlanSessionDto` entier : le calendrier ouvre le même détail
+ * depuis son propre DTO ({@link "@/data/calendar".CalendarSessionDto}), qui ne
+ * porte ni `scheduledOn` ni les identifiants du plan. Deux lectures, un seul
+ * rendu — c'est la condition pour qu'il n'existe qu'une implémentation.
+ */
+export type PlanSessionDetailInput = Pick<
+  PlanSessionDto,
+  "steps" | "warmup" | "recovery" | "cooldown" | "volumeM" | "durationS" | "targetPaceSecPerKm"
+>;
+
 /** Le contenu déplié d'une séance : déroulé, consignes, récapitulatif. */
 export function planSessionDetail(
-  session: PlanSessionDto,
+  session: PlanSessionDetailInput,
   maxHrBpm: number | null = null,
 ): PlanSessionDetail {
   const blocks: PlanStepBlockView[] = (session.steps ?? []).map((block) => ({

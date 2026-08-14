@@ -64,7 +64,7 @@ import {
 
 import { CalendarActivityChip, CalendarSessionChip } from "./calendar-chips";
 import { CalendarDayCell } from "./calendar-day-cell";
-import { CalendarSessionDraggable } from "./calendar-session-draggable";
+import { CalendarSessionCard } from "./calendar-session-card";
 
 /**
  * Le calendrier d'entraînement : ce qui est prévu, ce qui a été couru, et le
@@ -104,6 +104,13 @@ export type TrainingCalendarProps = {
   range: { from: string; to: string };
   /** Jour civil courant, calculé côté serveur dans le fuseau de l'athlète. */
   today: string;
+  /**
+   * FC max du profil, `null` tant qu'elle n'est pas saisie — elle traduit en
+   * battements les zones cardiaques du détail des séances. Résolue à
+   * l'affichage, jamais stockée dans la séance : une correction du profil suit
+   * tout le plan, exactement comme sur la page Plan.
+   */
+  maxHrBpm: number | null;
   plan: CalendarPlanBounds | null;
   sessions: CalendarSessionDto[];
   /**
@@ -150,7 +157,7 @@ function toMoveSession(session: CalendarSessionDto): MoveSession {
     id: session.id,
     date: session.date,
     kind: session.kind,
-    completed: session.completed,
+    completed: session.completedActivityId !== null,
     volumeM: session.volumeM,
     steps: session.steps,
   };
@@ -249,6 +256,7 @@ export function TrainingCalendar({
   month,
   range,
   today,
+  maxHrBpm,
   plan,
   sessions,
   activities,
@@ -306,13 +314,25 @@ export function TrainingCalendar({
         to: range.to,
         month,
         today,
+        maxHrBpm,
         plan,
         sessions: visibleSessions,
         activities,
         weather,
         forecast,
       }),
-    [range.from, range.to, month, today, plan, visibleSessions, activities, weather, forecast],
+    [
+      range.from,
+      range.to,
+      month,
+      today,
+      maxHrBpm,
+      plan,
+      visibleSessions,
+      activities,
+      weather,
+      forecast,
+    ],
   );
 
   const sessionViews = useMemo(() => {
@@ -635,7 +655,14 @@ function CalendarWeek({
             accepted={acceptance === null ? null : (acceptance.get(day.date)?.allowed ?? false)}
           >
             {day.sessions.map((session) => (
-              <CalendarSessionDraggable key={session.id} session={session} />
+              <CalendarSessionCard
+                key={session.id}
+                session={session}
+                // Le jour et sa météo viennent de la case qui les affiche déjà :
+                // la modale n'a rien à relire, et surtout rien à recalculer.
+                dayLabel={day.label}
+                weather={day.weather}
+              />
             ))}
             {day.activities.map((activity) => (
               <CalendarActivityChip key={activity.id} activity={activity} />

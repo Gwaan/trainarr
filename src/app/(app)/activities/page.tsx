@@ -4,6 +4,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 
 import { listActivityWeekPage } from "@/data/activities";
+import { getAthleteProfile } from "@/data/athlete";
 import { getCalendarRange } from "@/data/calendar";
 import { getWeatherForecast } from "@/data/weather-forecast";
 import { toCivilDate } from "@/lib/dates/civil";
@@ -45,7 +46,8 @@ export const metadata: Metadata = {
  * deux autres onglets ne fait.
  */
 const SUBTITLES = {
-  calendar: "Ce qui est prévu, ce qui a été couru. Glisse une séance pour la replanifier.",
+  calendar:
+    "Ce qui est prévu, ce qui a été couru. Ouvre une séance pour son détail, glisse-la pour la replanifier.",
   list: "L'historique de tes sorties, semaine par semaine : distances, allures et fréquences cardiaques.",
 } as const;
 
@@ -88,11 +90,15 @@ async function ActivitiesContent({ searchParams }: PageProps) {
   }
 
   const range = monthGridRange(month);
-  const [calendar, forecast] = await Promise.all([
+  const [calendar, forecast, profile] = await Promise.all([
     getCalendarRange(range.from, range.to),
     // Le relevé du matin, tel quel : seize jours au plus, aucune coordonnée.
     // Lecture indépendante de la plage — un relevé les couvre tous d'un coup.
     getWeatherForecast(),
+    // Le profil n'est lu que pour sa **FC max** : c'est elle qui traduit en
+    // battements les zones cardiaques du détail d'une séance, ouvert depuis sa
+    // pastille. Même lecture, et même rôle, que sur la page Plan.
+    getAthleteProfile(),
   ]);
 
   return (
@@ -103,6 +109,7 @@ async function ActivitiesContent({ searchParams }: PageProps) {
         month={month}
         range={range}
         today={today}
+        maxHrBpm={profile?.maxHrBpm ?? null}
         plan={calendar.plan}
         sessions={calendar.sessions}
         // Projetées ici, pas au passage de la frontière client : le DTO du DAL

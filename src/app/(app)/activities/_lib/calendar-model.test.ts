@@ -6,6 +6,7 @@ import type {
   CalendarSessionDto,
 } from '@/data/calendar';
 import type { WeatherForecastDto } from '@/data/weather-forecast';
+import type { PlanSessionSteps, PlanStep } from '@/lib/plan-steps/schema';
 
 import {
   buildCalendarMonth,
@@ -34,13 +35,44 @@ function session(
     kind: 'Endurance fondamentale',
     title: 'Footing en endurance',
     steps: null,
+    warmup: null,
+    recovery: null,
+    cooldown: null,
+    targetPaceSecPerKm: null,
     volumeM: null,
     durationS: null,
-    completed: false,
+    completedActivityId: null,
     movable: true,
     ...overrides,
   };
 }
+
+/** Étape minimale : sans mesure ni cible, à compléter par le test. */
+function step(overrides: Partial<PlanStep> = {}): PlanStep {
+  return {
+    role: 'run',
+    distanceM: null,
+    durationS: null,
+    paceMinSecPerKm: null,
+    paceMaxSecPerKm: null,
+    hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
+    note: null,
+    ...overrides,
+  };
+}
+
+/** Six fois 800 m entre 4:00 et 4:10/km — un déroulé structuré typique. */
+const INTERVAL_STEPS: PlanSessionSteps = [
+  {
+    repeat: 6,
+    steps: [
+      step({ distanceM: 800, paceMinSecPerKm: 240, paceMaxSecPerKm: 250 }),
+      step({ role: 'recover', durationS: 90 }),
+    ],
+  },
+];
 
 function activity(
   id: number,
@@ -108,17 +140,27 @@ describe('calendarSessionState', () => {
   const today = '2026-08-13';
 
   it('range une séance courue dans l’histoire, quelle que soit sa date', () => {
-    expect(calendarSessionState({ date: '2026-08-10', completed: true }, today)).toBe('completed');
-    expect(calendarSessionState({ date: '2026-08-20', completed: true }, today)).toBe('completed');
+    expect(calendarSessionState({ date: '2026-08-10', completedActivityId: 42 }, today)).toBe(
+      'completed',
+    );
+    expect(calendarSessionState({ date: '2026-08-20', completedActivityId: 42 }, today)).toBe(
+      'completed',
+    );
   });
 
   it('distingue une séance passée non courue', () => {
-    expect(calendarSessionState({ date: '2026-08-12', completed: false }, today)).toBe('missed');
+    expect(calendarSessionState({ date: '2026-08-12', completedActivityId: null }, today)).toBe(
+      'missed',
+    );
   });
 
   it('compte la séance du jour parmi celles à venir', () => {
-    expect(calendarSessionState({ date: '2026-08-13', completed: false }, today)).toBe('upcoming');
-    expect(calendarSessionState({ date: '2026-08-14', completed: false }, today)).toBe('upcoming');
+    expect(calendarSessionState({ date: '2026-08-13', completedActivityId: null }, today)).toBe(
+      'upcoming',
+    );
+    expect(calendarSessionState({ date: '2026-08-14', completedActivityId: null }, today)).toBe(
+      'upcoming',
+    );
   });
 });
 
@@ -141,7 +183,7 @@ describe('toCalendarSessionView', () => {
     const moved = session(1, '2026-08-10', { movable: true });
     expect(toCalendarSessionView(moved, '2026-08-13').movable).toBe(false);
 
-    const completed = session(2, '2026-08-20', { completed: true, movable: true });
+    const completed = session(2, '2026-08-20', { completedActivityId: 42, movable: true });
     expect(toCalendarSessionView(completed, '2026-08-13').movable).toBe(false);
 
     expect(toCalendarSessionView(session(3, '2026-08-13'), '2026-08-13').movable).toBe(true);
@@ -153,6 +195,81 @@ describe('toCalendarSessionView', () => {
       '2026-08-13',
     );
     expect(view.label).toBe('Seuil, 6 × 800 m');
+  });
+});
+
+describe('toCalendarSessionView — le détail que la modale ouvre', () => {
+  it('projette le déroulé exactement comme la page Plan', () => {
+    const view = toCalendarSessionView(
+      session(1, '2026-08-14', {
+        kind: 'VMA',
+        title: '6 × 800 m',
+        steps: INTERVAL_STEPS,
+        volumeM: 9_600,
+      }),
+      '2026-08-13',
+    );
+
+    expect(view.detail.blocks).toEqual([
+      {
+        repeat: 6,
+        steps: [
+          {
+            role: 'run',
+            roleLabel: 'Course',
+            measure: '800 m',
+            target: '4:00–4:10/km',
+            note: null,
+          },
+          {
+            role: 'recover',
+            roleLabel: 'Récupération',
+            measure: '90 s',
+            target: null,
+            note: null,
+          },
+        ],
+      },
+    ]);
+    expect(view.detail.totals).toEqual([{ label: 'Distance', value: '9,6 km' }]);
+  });
+
+  it('traduit les zones cardiaques en battements dès que la FC max est connue', () => {
+    const easy = session(1, '2026-08-14', {
+      steps: [{ repeat: 1, steps: [step({ hrZone: 2, durationS: 2_400 })] }],
+    });
+
+    expect(toCalendarSessionView(easy, '2026-08-13', 190).detail.blocks[0].steps[0].target).toBe(
+      '124–150 bpm',
+    );
+    // Sans FC max au profil, le rang de zone nu — rien n'est inventé.
+    expect(toCalendarSessionView(easy, '2026-08-13').detail.blocks[0].steps[0].target).toBe('Z2');
+  });
+
+  it('reprend les consignes des séances d’avant le déroulé structuré', () => {
+    const view = toCalendarSessionView(
+      session(1, '2026-08-14', { warmup: '15 min en footing', cooldown: '10 min souple' }),
+      '2026-08-13',
+    );
+
+    expect(view.detail.notes).toEqual([
+      { role: 'warmup', label: 'Échauffement', value: '15 min en footing' },
+      { role: 'cooldown', label: 'Retour au calme', value: '10 min souple' },
+    ]);
+  });
+
+  it('n’a rien à déplier quand la séance ne porte ni déroulé ni consigne', () => {
+    expect(toCalendarSessionView(session(1, '2026-08-14'), '2026-08-13').detail.isEmpty).toBe(true);
+  });
+
+  it('porte l’activité qui a réalisé la séance, pour que le détail y mène', () => {
+    const view = toCalendarSessionView(
+      session(1, '2026-08-10', { completedActivityId: 42 }),
+      '2026-08-13',
+    );
+
+    expect(view.completedActivityId).toBe(42);
+    expect(toCalendarSessionView(session(2, '2026-08-14'), '2026-08-13').completedActivityId).toBeNull();
   });
 });
 
@@ -216,6 +333,7 @@ describe('buildCalendarMonth', () => {
 
   const base = {
     ...AUGUST,
+    maxHrBpm: null,
     plan: PLAN,
     sessions: [],
     activities: [],
@@ -278,6 +396,21 @@ describe('buildCalendarMonth', () => {
 
     expect(weeks.flatMap((week) => week.days).some((day) => day.inPlan)).toBe(false);
     expect(weeks.flatMap((week) => week.days).some((day) => day.isRaceDay)).toBe(false);
+  });
+
+  it('descend la FC max du profil jusqu’au détail de chaque séance', () => {
+    const sessions = [
+      session(1, '2026-08-12', {
+        steps: [{ repeat: 1, steps: [step({ hrZone: 2, durationS: 2_400 })] }],
+      }),
+    ];
+    const target = (weeks: ReturnType<typeof buildCalendarMonth>) =>
+      weeks
+        .flatMap((week) => week.days)
+        .find((day) => day.date === '2026-08-12')?.sessions[0]?.detail.blocks[0]?.steps[0]?.target;
+
+    expect(target(buildCalendarMonth({ ...base, maxHrBpm: 190, sessions }))).toBe('124–150 bpm');
+    expect(target(buildCalendarMonth({ ...base, sessions }))).toBe('Z2');
   });
 
   it('range chaque séance dans son jour, dans un ordre stable', () => {
@@ -383,6 +516,7 @@ describe('buildCalendarMonth — météo prévue', () => {
 
   const base = {
     ...AUGUST,
+    maxHrBpm: null,
     plan: PLAN,
     sessions: [] as CalendarSessionDto[],
     activities: [] as CalendarActivityView[],
@@ -473,6 +607,7 @@ describe('buildCalendarMonth — météo relevée', () => {
 
   const base = {
     ...AUGUST,
+    maxHrBpm: null,
     plan: PLAN,
     sessions: [] as CalendarSessionDto[],
     activities: [] as CalendarActivityView[],
@@ -542,7 +677,7 @@ describe('buildCalendarMonth — météo relevée', () => {
     const day = dayOf(
       {
         ...base,
-        sessions: [session(1, '2026-08-11', { completed: true })],
+        sessions: [session(1, '2026-08-11', { completedActivityId: 42 })],
         weather: [observation('2026-08-11', { status: 'no-location' })],
       },
       '2026-08-11',

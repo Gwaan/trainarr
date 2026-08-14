@@ -51,10 +51,26 @@ export type CalendarSessionDto = {
   title: string;
   /** Déroulé structuré, `null` quand la séance n'en porte pas. */
   steps: PlanSessionSteps | null;
+  /*
+   * Les trois consignes en texte libre et l'allure cible : le détail de la
+   * séance, tel que la page Plan le rend déjà. Une pastille de calendrier
+   * s'ouvre désormais sur ce détail-là — c'est le même composant, il lui faut
+   * donc la même matière. Rien de plus n'est entré : ni `planId`, ni `athleteId`.
+   */
+  warmup: string | null;
+  recovery: string | null;
+  cooldown: string | null;
+  targetPaceSecPerKm: number | null;
   volumeM: number | null;
   durationS: number | null;
-  /** Séance déjà courue : elle ne se déplace pas. */
-  completed: boolean;
+  /**
+   * Activité qui a réalisé la séance, `null` tant qu'elle ne l'est pas.
+   *
+   * Dit **deux** choses d'un seul champ : que la séance est courue — auquel cas
+   * elle ne se déplace plus — et où mène le lien du détail. Un booléen à côté
+   * n'aurait fait que répéter le premier point.
+   */
+  completedActivityId: number | null;
   /**
    * Déplaçable ? Faux si courue, ou si le jour est passé.
    *
@@ -196,9 +212,13 @@ export function toCalendarSessionDto(row: PlannedSession, today: string): Calend
     kind: row.kind,
     title: row.title,
     steps: row.steps,
+    warmup: row.warmup,
+    recovery: row.recovery,
+    cooldown: row.cooldown,
+    targetPaceSecPerKm: row.targetPaceSecPerKm,
     volumeM: row.volumeM,
     durationS: row.durationS,
-    completed,
+    completedActivityId: row.completedActivityId,
     movable: !completed && row.scheduledOn >= today,
   };
 }
