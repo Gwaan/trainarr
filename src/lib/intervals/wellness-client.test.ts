@@ -4,15 +4,14 @@ import { IntervalsApiError, IntervalsAuthError, type FetchLike } from './client'
 import { fetchWellness } from './wellness-client';
 
 /**
- * Ce que ces tests peuvent — et ne peuvent pas — garantir.
+ * Ce que ces tests éprouvent.
  *
- * Le schéma de `wellness-client.ts` sort de la **documentation** d'intervals.icu,
- * pas d'une réponse constatée : aucun test ne peut donc prouver qu'il lit la
- * vraie API. Ce qu'ils prouvent, c'est le contrat que ce module s'impose face à
- * une réponse quelconque — les deux graphies acceptées, l'absence traitée comme
- * une absence, les champs calculés ignorés, et l'échec **bruyant** quand la forme
- * ne correspond pas. C'est précisément ce qui rendra la correction rapide au
- * premier vrai appel.
+ * La fixture principale ({@link REAL_SHAPE_RECORD}) reprend la **forme
+ * réellement constatée** sur l'API : ses clés, ses types, et jusqu'aux champs
+ * hors périmètre qu'elle porte — c'est ce qui rend le test capable de dire que
+ * le module les ignore au lieu de s'en étouffer. Le reste du contrat s'éprouve
+ * tel quel : l'absence traitée comme une absence, les charges calculées
+ * ignorées, et l'échec **bruyant** quand la forme ne correspond pas.
  */
 
 const API_KEY = 'cle-api-de-test-a-ne-jamais-journaliser';
@@ -37,6 +36,47 @@ function json(body: unknown, status = 200): Response {
 }
 
 const WINDOW = { oldest: '2026-07-31', newest: '2026-08-13' } as const;
+
+/**
+ * Un enregistrement à la forme **réellement constatée** sur l'endpoint : mêmes
+ * clés, mêmes types, mêmes champs hors périmètre.
+ *
+ * **Les valeurs, elles, sont inventées** — neutres, plausibles, celles de
+ * personne. Les mesures de santé de l'utilisatrice n'entrent pas dans le dépôt,
+ * et un test n'a besoin que de la forme.
+ *
+ * À noter, deux constats qui ne se devinent pas : la montre pousse `hrvSDNN` et
+ * **jamais** `hrv` (les deux HRV ne sont pas la même grandeur), et elle ne
+ * pousse pas `sleepScore` — d'où son absence ici.
+ */
+const REAL_SHAPE_RECORD = {
+  id: '2026-08-13',
+  restingHR: 50,
+  sleepSecs: 25_200,
+  avgSleepingHR: 54.5,
+  weight: 60,
+  hrvSDNN: 45.5,
+  // Hors périmètre : présents dans la réponse réelle, jamais lus par le module.
+  ctl: 40,
+  atl: 35,
+  ctlLoad: 40,
+  atlLoad: 35,
+  rampRate: 0,
+  sportInfo: [],
+  vo2max: null,
+  spO2: null,
+  steps: null,
+  respiration: null,
+  bodyFat: null,
+  kcalConsumed: null,
+  protein: null,
+  carbohydrates: null,
+  fatTotal: null,
+  hydrationVolume: null,
+  tempRestingHR: null,
+  tempWeight: null,
+  updated: '2026-08-13T05:12:00',
+} as const;
 
 async function read(
   response: Response,
@@ -85,32 +125,37 @@ describe('fetchWellness — la requête', () => {
 });
 
 describe('fetchWellness — ce qui est lu', () => {
-  it('lit les mesures en camelCase, la graphie de la documentation', async () => {
-    const { days } = await read(
-      json([
-        {
-          id: '2026-08-13',
-          restingHR: 47,
-          hrv: 63.4,
-          sleepSecs: 25_800,
-          sleepScore: 82,
-          avgSleepingHR: 51.5,
-          weight: 61.4,
-        },
-      ]),
-    );
+  it('lit un enregistrement à la forme réelle, jusqu’au SDNN que la montre pousse', async () => {
+    const { days } = await read(json([REAL_SHAPE_RECORD]));
 
     expect(days).toEqual([
       {
         day: '2026-08-13',
-        restingHrBpm: 47,
-        hrvRmssdMs: 63.4,
-        sleepTimeS: 25_800,
-        sleepScore: 82,
-        avgSleepingHrBpm: 51.5,
-        weightKg: 61.4,
+        restingHrBpm: 50,
+        // La montre en service ne mesure pas de rMSSD : le champ reste vide, et
+        // le SDNN ne vient surtout pas le remplir.
+        hrvRmssdMs: null,
+        hrvSdnnMs: 45.5,
+        sleepTimeS: 25_200,
+        sleepScore: null,
+        avgSleepingHrBpm: 54.5,
+        weightKg: 60,
       },
     ]);
+  });
+
+  it('lit le rMSSD d’une montre qui pousse `hrv`, dans son propre champ', async () => {
+    const { days } = await read(json([{ id: '2026-08-13', hrv: 63.4, sleepScore: 82 }]));
+
+    expect(days[0]).toMatchObject({ hrvRmssdMs: 63.4, hrvSdnnMs: null, sleepScore: 82 });
+  });
+
+  it('garde les deux HRV séparées quand une montre pousse les deux', async () => {
+    // Ce sont deux grandeurs distinctes : aucune n'écrase l'autre, aucune n'est
+    // convertie. C'est l'affichage qui choisit laquelle montrer, et il le dit.
+    const { days } = await read(json([{ id: '2026-08-13', hrv: 63.4, hrvSDNN: 45.5 }]));
+
+    expect(days[0]).toMatchObject({ hrvRmssdMs: 63.4, hrvSdnnMs: 45.5 });
   });
 
   it('accepte aussi la graphie snake_case, au cas où le service la rendrait', async () => {
@@ -128,6 +173,7 @@ describe('fetchWellness — ce qui est lu', () => {
       day: '2026-08-13',
       restingHrBpm: 47,
       hrvRmssdMs: null,
+      hrvSdnnMs: null,
       sleepTimeS: null,
       sleepScore: null,
       avgSleepingHrBpm: null,

@@ -496,6 +496,7 @@ function wellnessDay(
     date,
     restingHrBpm: null,
     hrvRmssdMs: null,
+    hrvSdnnMs: null,
     sleepTimeS: null,
     sleepScore: null,
     weightKg: null,
@@ -548,7 +549,25 @@ describe('formatWellnessContext', () => {
       ],
     });
 
-    expect(text).toContain('Jamais mesuré sur cette période : HRV (rMSSD), score de sommeil, poids.');
+    // « HRV » sans variante ici : aucune n'a été mesurée, en annoncer une
+    // laisserait croire qu'on sait laquelle la montre aurait poussée.
+    expect(text).toContain('Jamais mesuré sur cette période : HRV, score de sommeil, poids.');
+  });
+
+  it('écrit la variante de HRV à côté de la valeur, jamais « HRV » tout court', () => {
+    // Sans elle, un modèle compare un SDNN de 45 ms à des repères de rMSSD —
+    // deux grandeurs différentes, sans conversion entre elles.
+    const sdnn = formatWellnessContext({
+      today: '2026-08-13',
+      days: [wellnessDay('2026-08-13', { hrvSdnnMs: 45.5 })],
+    });
+    const rmssd = formatWellnessContext({
+      today: '2026-08-13',
+      days: [wellnessDay('2026-08-13', { hrvRmssdMs: 63.4 })],
+    });
+
+    expect(sdnn).toContain('HRV (SDNN) 46 ms');
+    expect(rmssd).toContain('HRV (rMSSD) 63 ms');
   });
 
   it('dit la provenance des mesures, et borne ce que le modèle connaît', () => {

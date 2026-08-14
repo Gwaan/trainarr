@@ -24,7 +24,7 @@
  * | best-segments        | `lib/metrics/best-segments.ts`                                |
  * | splits               | `lib/metrics/splits.ts`, `lib/metrics/series.ts`              |
  * | stride               | `lib/metrics/stride.ts`, `data/activities.ts`                 |
- * | hrv / resting-hr     | `lib/intervals/wellness-client.ts`, `lib/metrics/resting-hr.ts`, `data/wellness.ts` |
+ * | hrv / resting-hr     | `lib/intervals/wellness-client.ts`, `lib/wellness/hrv.ts`, `lib/metrics/resting-hr.ts`, `data/wellness.ts` |
  *
  * **Deux fiches décrivent des mesures que Trainarr ne produit pas** (`hrv`,
  * `resting-hr`) : elles sont prises par la montre. Leur section « computed » dit
@@ -393,7 +393,7 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
   hrv: {
     id: "hrv",
     abbreviation: "HRV",
-    name: "Variabilité cardiaque (rMSSD)",
+    name: "Variabilité cardiaque (rMSSD ou SDNN)",
     question: "Qu'est-ce que la HRV ?",
     what: "L'irrégularité, en millisecondes, des intervalles entre deux battements pendant ton sommeil. C'est un reflet de l'équilibre de ton système nerveux autonome — grossièrement : à quel point ton organisme est en récupération plutôt qu'en alerte.",
     interpret: [
@@ -404,12 +404,14 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
     ],
     computed: [
       "Trainarr ne mesure rien : la valeur est celle que ta montre a calculée pendant la nuit, synchronisée vers intervals.icu par HealthFit, puis rapatriée telle quelle une fois par jour.",
-      "La grandeur stockée est le rMSSD, en millisecondes — le champ `hrv` d'intervals.icu. Si ta montre expose un « score de HRV » sur une autre échelle, ce n'est pas ce nombre-là.",
+      "Il y a deux HRV, et elles ne sont pas la même chose. Le rMSSD est la racine de la moyenne des carrés des écarts entre battements *successifs* : c'est la référence du domaine en récupération, la plus sensible au système parasympathique. Le SDNN est l'écart-type des intervalles sur toute la fenêtre : il mesure la variabilité *totale*, oscillations lentes comprises, et vaut couramment le double d'un rMSSD pris la même nuit.",
+      "Selon le modèle, une montre pousse l'une ou l'autre. Trainarr stocke chacune dans son propre champ et affiche **celle qui existe**, toujours étiquetée : « HRV (rMSSD) » ou « HRV (SDNN) ». Quand les deux sont mesurées le même jour, c'est le rMSSD qui s'affiche.",
+      "Ces deux nombres ne se comparent ni entre eux, ni d'une montre à l'autre : il n'existe pas de conversion, et l'application n'en tente aucune. C'est aussi pourquoi une courbe ne mélange jamais les deux — la tendance trace la variante majoritaire de la période et le dit dans son titre.",
       "Une nuit sans mesure reste vide : jamais de report de la valeur de la veille, jamais de zéro.",
       "L'application n'en dérive strictement rien : ni charge, ni forme, ni recommandation automatique. Elle l'affiche, la trace sur 30 jours, et la donne à lire au coach.",
     ],
     caveat:
-      "La mesure appartient à ta montre, pas à cette application : sa fenêtre (nuit entière ou phase de sommeil profond), son filtrage des artefacts et son échelle sont ceux du constructeur, et changer de modèle rend la série incomparable avec la précédente. Une ceinture mal placée produit une valeur plausible et fausse.",
+      "La mesure appartient à ta montre, pas à cette application : sa fenêtre (nuit entière ou phase de sommeil profond), son filtrage des artefacts et sa grandeur (rMSSD ou SDNN) sont ceux du constructeur. Changer de modèle rend la série incomparable avec la précédente — et d'autant plus si la variante change, où un même sommeil peut faire doubler le nombre affiché sans que rien n'ait bougé. Une ceinture mal placée produit une valeur plausible et fausse.",
   },
 
   "resting-hr": {

@@ -88,6 +88,7 @@ function day(date: string, measures: Partial<WellnessDayDto> = {}): WellnessDayD
     day: date,
     restingHrBpm: null,
     hrvRmssdMs: null,
+    hrvSdnnMs: null,
     sleepTimeS: null,
     sleepScore: null,
     avgSleepingHrBpm: null,
@@ -117,6 +118,7 @@ describe('saveWellnessDays', () => {
           day: '2026-08-13',
           restingHrBpm: 47,
           hrvRmssdMs: 63,
+          hrvSdnnMs: null,
           sleepTimeS: null,
           sleepScore: null,
           avgSleepingHrBpm: null,
@@ -147,6 +149,7 @@ describe('saveWellnessDays', () => {
         day: '2026-08-13',
         restingHrBpm: 47,
         hrvRmssdMs: null,
+        hrvSdnnMs: null,
         sleepTimeS: null,
         sleepScore: null,
         avgSleepingHrBpm: null,
@@ -160,6 +163,9 @@ describe('saveWellnessDays', () => {
     expect(render(conflict.set.sleepTimeS)).toContain('coalesce');
     expect(render(conflict.set.sleepTimeS)).toContain('excluded.sleep_time_s');
     expect(render(conflict.set.hrvRmssdMs)).toContain('excluded.hrv_rmssd_ms');
+    // Les deux HRV sont deux colonnes, et chacune se complète pour son compte.
+    expect(render(conflict.set.hrvSdnnMs)).toContain('coalesce');
+    expect(render(conflict.set.hrvSdnnMs)).toContain('excluded.hrv_sdnn_ms');
   });
 });
 
@@ -230,8 +236,24 @@ describe('selectWellnessSummary', () => {
     expect(await selectWellnessSummary(7, '2026-08-13', '2026-07-15')).toEqual({
       today: '2026-08-13',
       restingHr: { value: 47, day: '2026-08-13' },
-      hrv: { value: 61, day: '2026-08-11' },
+      hrv: { value: 61, day: '2026-08-11', variant: 'rmssd' },
       sleep: { value: 25_800, day: '2026-08-13' },
+    });
+  });
+
+  it('rend la HRV que la montre pousse, avec la grandeur que c’est', async () => {
+    queryState.selects.push([
+      day('2026-08-13', { hrvSdnnMs: 45.5 }),
+      day('2026-08-11', { hrvRmssdMs: 61 }),
+    ]);
+
+    // La journée la plus récente gagne, et la variante voyage avec la valeur :
+    // l'écran doit l'étiqueter, un SDNN affiché sous « HRV » se comparerait à
+    // des repères de rMSSD.
+    expect((await selectWellnessSummary(7, '2026-08-13', '2026-07-15')).hrv).toEqual({
+      value: 45.5,
+      day: '2026-08-13',
+      variant: 'sdnn',
     });
   });
 

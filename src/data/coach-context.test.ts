@@ -709,6 +709,7 @@ describe('getWellnessContext', () => {
       day,
       restingHrBpm: null,
       hrvRmssdMs: null,
+      hrvSdnnMs: null,
       sleepTimeS: null,
       sleepScore: null,
       avgSleepingHrBpm: null,
@@ -736,6 +737,7 @@ describe('getWellnessContext', () => {
       date: '2026-08-11',
       restingHrBpm: 47,
       hrvRmssdMs: null,
+      hrvSdnnMs: null,
       sleepTimeS: null,
       sleepScore: null,
       weightKg: null,
@@ -758,9 +760,11 @@ describe('getWellnessContext', () => {
   it('écarte les journées entièrement muettes : elles coûteraient des tokens pour rien', async () => {
     dbState.rows.wellness_days = [
       wellnessRow('2026-08-10'),
-      wellnessRow('2026-08-11', { hrvRmssdMs: 63 }),
+      wellnessRow('2026-08-11', { hrvSdnnMs: 45 }),
     ];
 
+    // La journée retenue ne porte que la HRV en SDNN : une mesure connue reste
+    // une mesure, quelle que soit la variante que la montre pousse.
     expect((await getWellnessContext()).days.map((day) => day.date)).toEqual(['2026-08-11']);
   });
 });

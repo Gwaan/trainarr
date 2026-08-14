@@ -111,6 +111,7 @@ const WELLNESS_CONTEXT: WellnessContextDto = {
       date: '2026-08-11',
       restingHrBpm: 47,
       hrvRmssdMs: 63,
+      hrvSdnnMs: null,
       sleepTimeS: 25_800,
       sleepScore: 82,
       weightKg: null,

@@ -1,10 +1,21 @@
-import { Sparkline } from "@/components/sparkline";
+"use client";
+
+import { useMemo } from "react";
+
+import { SyncedPanels } from "@/components/chart/synced-panels";
 
 import { MetricInfo } from "../../_components/metric-info";
-import type { WellnessSeriesView } from "../_lib/wellness-series";
+import { formatFullDay } from "../_lib/date-axis";
+import {
+  buildWellnessTrends,
+  wellnessSheetOf,
+  type WellnessDayLike,
+  type WellnessTrends,
+} from "../_lib/wellness-series";
 
 /**
- * Les quatre tendances de bien-être — FC de repos, HRV, sommeil, poids.
+ * Les quatre tendances de bien-être — FC de repos, HRV, sommeil, poids — en
+ * petits multiples synchronisés sur une abscisse de dates.
  *
  * ## Ce que ces courbes sont, et ne sont pas
  *
@@ -14,66 +25,71 @@ import type { WellnessSeriesView } from "../_lib/wellness-series";
  * il s'arrête là — aucune conclusion, aucun seuil, aucune couleur d'alerte. Une
  * HRV basse n'est pas une erreur système.
  *
- * **Une courbe est une suite de mesures, pas un axe de temps** : les nuits sans
- * mesure ne sont ni comblées ni creusées (cf. `_lib/wellness-series`). D'où le
- * compte de mesures affiché sous chaque courbe — c'est lui qui empêche de lire
- * six points comme un mois complet.
+ * ## Un seul curseur pour les quatre
  *
- * Aucune bibliothèque de graphe : le `Sparkline` maison, déjà utilisé ailleurs.
+ * Même rendu que la charge d'entraînement, et pour une raison propre à ces
+ * mesures : elles décrivent **la même nuit**, et c'est leur lecture croisée qui
+ * dit quelque chose (« HRV basse *et* FC de repos haute »). Le curseur les
+ * traverse donc toutes, à la souris comme au doigt (glissement — `SyncedPanels`
+ * laisse le défilement vertical de la page passer).
+ *
+ * Une nuit sans mesure n'est jamais comblée : la courbe s'y coupe et le curseur
+ * y affiche « — ».
+ *
+ * Le modèle se construit **ici**, côté client : il porte des fonctions de
+ * formatage, qui ne franchissent pas la frontière serveur.
  */
 
 export type WellnessPanelProps = {
-  series: readonly WellnessSeriesView[];
+  /** Les journées de la fenêtre, de la plus ancienne à la plus récente. */
+  days: readonly WellnessDayLike[];
 };
 
-/** Une mesure : son libellé, sa dernière valeur, sa courbe, son amplitude. */
-function SeriesCell({ entry }: { entry: WellnessSeriesView }) {
-  const measures = entry.values.length;
+export function WellnessPanel({ days }: WellnessPanelProps) {
+  // Mémoïsation manuelle assumée, comme sur les autres graphes de la page : le
+  // React Compiler n'est pas activé, et les chemins seraient reconstruits à
+  // chaque mouvement du pointeur.
+  const trends = useMemo(() => buildWellnessTrends(days), [days]);
 
   return (
-    <div className="min-w-0">
-      <div className="flex items-baseline justify-between gap-2">
-        <h3 className="eyebrow flex min-w-0 items-center gap-1.5">
-          {entry.label}
-          {entry.sheet === null ? null : <MetricInfo id={entry.sheet} />}
-        </h3>
-        {entry.latest === null ? null : (
-          <span className="num shrink-0 text-[1.05rem] leading-none font-semibold text-fg">
-            {entry.latest}
-          </span>
-        )}
-      </div>
-
-      {measures >= 2 ? (
-        <>
-          <Sparkline
-            data={entry.values}
-            label={`${entry.label} — ${measures} mesures sur la période`}
-            className="mt-3 h-14 sm:h-16"
-          />
-          <p className="num mt-2.5 text-[0.72rem] leading-snug text-fg-faint">
-            {measures} mesures{entry.range === null ? "" : ` · ${entry.range}`}
-          </p>
-        </>
-      ) : (
-        <p className="mt-3 text-[0.78rem] leading-snug text-fg-faint">
-          {/* Une seule mesure ne fait pas une tendance : on le dit, plutôt que
-              de tracer un point isolé qui ressemblerait à une droite plate. */}
-          {measures === 1
-            ? "Une seule mesure sur la période : pas encore de tendance."
-            : entry.absent}
-        </p>
+    <div className="flex flex-col gap-4">
+      {trends.charts === null ? null : (
+        <SyncedPanels
+          model={trends.charts}
+          ariaLabel="Graphes synchronisés des mesures de bien-être"
+          header={(hover) => <CursorReadout trends={trends} hover={hover} />}
+          info={(key) => {
+            const sheet = wellnessSheetOf(key);
+            return sheet === null ? null : <MetricInfo id={sheet} />;
+          }}
+        />
       )}
+
+      {trends.absences.map((absence) => (
+        <p key={absence.key} className="text-[0.78rem] leading-snug text-fg-faint">
+          {absence.message}
+        </p>
+      ))}
     </div>
   );
 }
 
-export function WellnessPanel({ series }: WellnessPanelProps) {
+/** Repère du curseur : la date lue, ou le dernier jour de la période au repos. */
+function CursorReadout({
+  trends,
+  hover,
+}: {
+  trends: WellnessTrends;
+  hover: number | null;
+}) {
+  const xs = trends.charts?.xs ?? [];
+  const day = hover === null ? xs[xs.length - 1] : xs[hover];
+  if (day === undefined) return null;
+
   return (
-    <div className="grid gap-5 sm:grid-cols-2 sm:gap-6">
-      {series.map((entry) => (
-        <SeriesCell key={entry.key} entry={entry} />
-      ))}
-    </div>
+    <p className="flex items-baseline justify-between gap-3">
+      <span className="eyebrow">{hover === null ? "Dernier jour" : "Curseur"}</span>
+      <span className="num text-[0.82rem] text-fg">{formatFullDay(day)}</span>
+    </p>
   );
 }

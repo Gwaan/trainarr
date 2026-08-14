@@ -27,7 +27,7 @@ import {
   summarizeVolume,
 } from "./_lib/bucket-charts";
 import { formatFullDay } from "./_lib/date-axis";
-import { buildWellnessSeries, hasNoWellnessMeasure } from "./_lib/wellness-series";
+import { hasNoWellnessMeasure } from "./_lib/wellness-series";
 import { RANGE_PARAM, parseRangeParam, toProgressionRange } from "./_lib/range";
 import { MetricInfo } from "../_components/metric-info";
 import {
@@ -194,22 +194,22 @@ function VolumePanel({ progression }: { progression: ProgressionDto }) {
  * ne produit pas, et la seule chose qu'il ajoute est de dire ce qui manque.
  */
 function WellnessTrendPanel({ progression }: { progression: ProgressionDto }) {
-  const series = buildWellnessSeries(progression.wellness.days);
+  const empty = hasNoWellnessMeasure(progression.wellness.days);
 
   return (
     <Panel
       title="Bien-être"
       meta={<span className="num">30 derniers jours</span>}
-      padded={!hasNoWellnessMeasure(series)}
+      padded={!empty}
     >
-      {hasNoWellnessMeasure(series) ? (
+      {empty ? (
         <MetricEmptyState
           icon={HeartPulse}
           title="Aucun relevé bien-être"
           description="HRV, FC de repos, sommeil et poids sont mesurés par ta montre et ta balance, puis rapatriés depuis intervals.icu une fois par jour. Il faut une clé API enregistrée dans les réglages."
         />
       ) : (
-        <WellnessPanel series={series} />
+        <WellnessPanel days={progression.wellness.days} />
       )}
     </Panel>
   );

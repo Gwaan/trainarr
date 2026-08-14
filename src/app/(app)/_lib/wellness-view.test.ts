@@ -12,7 +12,7 @@ describe('toWellnessTileView', () => {
       {
         today: TODAY,
         restingHr: { value: 47, day: TODAY },
-        hrv: { value: 63.4, day: TODAY },
+        hrv: { value: 63.4, day: TODAY, variant: 'rmssd' },
         sleep: { value: 25_800, day: TODAY },
       },
       NOW,
@@ -20,6 +20,9 @@ describe('toWellnessTileView', () => {
 
     expect(view.restingHr).toEqual({ value: '47', unit: 'bpm', observedOn: null });
     expect(view.hrv).toEqual({ value: '63', unit: 'ms', observedOn: null });
+    // La tuile dit **laquelle** des deux HRV elle montre : un SDNN affiché sous
+    // « HRV » se comparerait à des repères de rMSSD.
+    expect(view.hrvLabel).toBe('HRV (rMSSD)');
     // La durée porte déjà son unité : en ajouter une donnerait « 7 h 10 h ».
     expect(view.sleep).toEqual({ value: '7 h 10', unit: '', observedOn: null });
   });
@@ -29,7 +32,7 @@ describe('toWellnessTileView', () => {
       {
         today: TODAY,
         restingHr: { value: 47, day: TODAY },
-        hrv: { value: 63, day: '2026-08-12' },
+        hrv: { value: 63, day: '2026-08-12', variant: 'rmssd' },
         sleep: { value: 25_800, day: '2026-08-04' },
       },
       NOW,
@@ -54,8 +57,26 @@ describe('toWellnessTileView', () => {
     );
 
     expect(view.hrv).toBeNull();
+    // Sans mesure, aucune variante n'est annoncée : la colonne garde son titre
+    // pour dire l'absence, elle n'affirme pas une grandeur qu'on n'a pas.
+    expect(view.hrvLabel).toBe('HRV');
     expect(view.restingHr).not.toBeNull();
     expect(view.sleep).not.toBeNull();
+  });
+
+  it('étiquette la variante que la montre a poussée', () => {
+    const view = toWellnessTileView(
+      {
+        today: TODAY,
+        restingHr: null,
+        hrv: { value: 45.5, day: TODAY, variant: 'sdnn' },
+        sleep: null,
+      },
+      NOW,
+    );
+
+    expect(view.hrvLabel).toBe('HRV (SDNN)');
+    expect(view.hrv).toEqual({ value: '46', unit: 'ms', observedOn: null });
   });
 
   it('n’invente aucun zéro quand tout manque', () => {
@@ -64,7 +85,7 @@ describe('toWellnessTileView', () => {
       NOW,
     );
 
-    expect(view).toEqual({ restingHr: null, hrv: null, sleep: null });
+    expect(view).toEqual({ restingHr: null, hrvLabel: 'HRV', hrv: null, sleep: null });
   });
 });
 
@@ -75,7 +96,7 @@ describe('isWellnessTileEmpty', () => {
       NOW,
     );
     const partial = toWellnessTileView(
-      { today: TODAY, restingHr: null, hrv: { value: 63, day: TODAY }, sleep: null },
+      { today: TODAY, restingHr: null, hrv: { value: 63, day: TODAY, variant: 'sdnn' }, sleep: null },
       NOW,
     );
 

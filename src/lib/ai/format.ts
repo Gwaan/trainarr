@@ -28,6 +28,7 @@ import type {
 import type { PaceZone } from '@/lib/metrics/vdot';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps, PlanStep, PlanStepBlock, PlanStepRole } from '@/lib/plan-steps/schema';
+import { hrvLabel, readHrv } from '@/lib/wellness/hrv';
 
 /** Jours ISO en toutes lettres : `day` vaut 1 pour lundi … 7 pour dimanche. */
 const ISO_DAY_NAMES = [
@@ -425,7 +426,13 @@ export function formatPlanContext(context: PlanContextDto): string {
 
 /** Les mesures d'un relevé, dans l'ordre où elles se lisent, avec leur unité. */
 const WELLNESS_MEASURES: readonly {
+  /** Nom de la mesure — celui de la liste « jamais mesuré » en fin de bloc. */
   label: string;
+  /**
+   * Nom sur la ligne d'une journée, quand il dépend de ce qui a été mesuré ce
+   * jour-là. Seule la HRV s'en sert : elle existe en deux grandeurs.
+   */
+  labelOn?: (day: WellnessContextDayDto) => string;
   read: (day: WellnessContextDayDto) => string | null;
 }[] = [
   {
@@ -433,10 +440,15 @@ const WELLNESS_MEASURES: readonly {
     read: (day) => (day.restingHrBpm === null ? null : `${day.restingHrBpm} bpm`),
   },
   {
-    // « rMSSD » explicite : c'est la seule façon d'empêcher un modèle de comparer
-    // cette valeur à un score de HRV d'une autre échelle.
-    label: 'HRV (rMSSD)',
-    read: (day) => (day.hrvRmssdMs === null ? null : `${formatNumber(day.hrvRmssdMs, 0)} ms`),
+    // La variante est écrite à côté de la valeur : c'est la seule façon
+    // d'empêcher un modèle de comparer un SDNN à des repères de rMSSD — ou à un
+    // « score de HRV » d'une autre échelle encore.
+    label: 'HRV',
+    labelOn: (day) => hrvLabel(readHrv(day)?.variant ?? null),
+    read: (day) => {
+      const measure = readHrv(day);
+      return measure === null ? null : `${formatNumber(measure.value, 0)} ms`;
+    },
   },
   {
     label: 'sommeil',
@@ -453,7 +465,8 @@ const WELLNESS_MEASURES: readonly {
 function formatWellnessDay(day: WellnessContextDayDto): string {
   const measures = WELLNESS_MEASURES.map((measure) => {
     const value = measure.read(day);
-    return value === null ? null : `${measure.label} ${value}`;
+    if (value === null) return null;
+    return `${measure.labelOn?.(day) ?? measure.label} ${value}`;
   }).filter((measure): measure is string => measure !== null);
 
   return `- ${formatCivilDate(day.date)} — ${measures.join(' · ')}`;

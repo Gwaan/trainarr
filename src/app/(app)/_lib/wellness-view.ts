@@ -21,6 +21,8 @@
  * une alarme. Le composant s'en tient aux tokens de texte.
  */
 
+import { hrvLabel, type HrvVariant } from "@/lib/wellness/hrv";
+
 import { formatDuration, formatNumber, formatRelativeDay, parseCivilDate } from "./format";
 
 /** Une mesure prête à rendre : sa valeur, son unité, et sa date si elle n'est pas du jour. */
@@ -40,6 +42,15 @@ export type WellnessMeasureView = {
 /** Les trois mesures de la tuile, chacune indépendamment absente. */
 export type WellnessTileView = {
   restingHr: WellnessMeasureView | null;
+  /**
+   * Le libellé de la HRV — « HRV (rMSSD) », « HRV (SDNN) », ou « HRV » quand il
+   * n'y a rien à montrer.
+   *
+   * Il vit à côté de la mesure, et non dedans, parce que la tuile l'affiche
+   * **aussi** quand la mesure est absente : la colonne garde son titre pour dire
+   * « pas de HRV ». Sans variante mesurée, aucune n'est annoncée.
+   */
+  hrvLabel: string;
   hrv: WellnessMeasureView | null;
   sleep: WellnessMeasureView | null;
 };
@@ -48,7 +59,7 @@ export type WellnessTileView = {
 type WellnessSummaryLike = {
   today: string;
   restingHr: { value: number; day: string } | null;
-  hrv: { value: number; day: string } | null;
+  hrv: { value: number; day: string; variant: HrvVariant } | null;
   sleep: { value: number; day: string } | null;
 };
 
@@ -84,6 +95,9 @@ export function toWellnessTileView(
       value: formatNumber(value, 0),
       unit: "bpm",
     })),
+    // La variante est celle de la mesure affichée, jamais une supposition : sans
+    // mesure, la colonne s'intitule « HRV » tout court.
+    hrvLabel: hrvLabel(summary.hrv?.variant ?? null),
     hrv: toMeasure(summary.hrv, summary.today, now, (value) => ({
       value: formatNumber(value, 0),
       unit: "ms",

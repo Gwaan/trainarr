@@ -7,34 +7,54 @@
  * corps validée ({@link parseJsonBody}) plutôt que d'en écrire une seconde
  * version.
  *
- * ## ⚠ Un schéma tiré de la documentation, jamais d'une réponse constatée
+ * ## Un schéma confronté à l'API réelle
  *
- * **C'est le seul module du dépôt dans ce cas, et il faut le savoir en le
- * lisant.** L'endpoint exige une clé API personnelle : il n'a pas pu être appelé
- * pendant l'écriture, et rien de ce qui suit n'a été confronté au service réel.
- * Trois conséquences, assumées :
+ * Écrit d'abord sur la seule documentation, ce schéma a depuis été **comparé à
+ * une réponse réelle** de l'endpoint. Ce que la confrontation a établi :
+ *
+ * - la réponse est bien un **tableau**, le jour est bien porté par `id` au
+ *   format `AAAA-MM-JJ`, et le nommage est bien **camelCase** ;
+ * - portent des valeurs : `restingHR` (entier), `sleepSecs` (entier),
+ *   `avgSleepingHR`, `weight`, et **`hrvSDNN`** ;
+ * - `sleepScore` n'est pas poussé par la montre en service — le `nullish` du
+ *   schéma suffit, la colonne reste vide.
+ *
+ * Et le point qui a motivé la confrontation : **il existe deux HRV**. Le champ
+ * `hrv` d'intervals.icu porte un **rMSSD**, `hrvSDNN` un **SDNN** — deux
+ * grandeurs différentes, que les montres ne poussent pas toutes les deux (cf.
+ * `src/lib/wellness/hrv.ts`). Chercher le seul `hrv` faisait donc afficher
+ * « pas de HRV » à une montre qui en mesurait bien une. Les deux champs sont
+ * désormais lus, **chacun vers le sien** : convertir l'un en l'autre, ou les
+ * ranger sous le même nom, serait une donnée fausse.
+ *
+ * Deux propriétés restent inchangées, et pour de bonnes raisons :
  *
  * 1. **Tout champ est facultatif** (`nullish`). Un champ absent est une mesure
  *    absente — une nuit sans ceinture, une journée sans pesée — jamais une
  *    réponse malformée. Ce qui n'est pas reconnu est ignoré par le schéma.
  * 2. **Une forme inattendue lève**, avec le nom des champs en défaut
- *    ({@link parseJsonBody}) : au premier vrai appel, le journal dira exactement
- *    quoi corriger ici. Un `safeParse` silencieux aurait rendu une liste vide et
- *    laissé croire à un athlète sans données.
- * 3. **Le nommage est le point le plus incertain.** La documentation donne les
- *    champs de l'objet Wellness en **camelCase** (`restingHR`, `sleepSecs`,
- *    `avgSleepingHR`), là où l'objet Activity du même service est en snake_case
- *    (`start_date_local`). Les deux graphies sont donc acceptées ici pour chaque
- *    champ : c'est la seule tolérance de ce module, et elle ne coûte rien
- *    puisqu'une seule des deux arrivera.
+ *    ({@link parseJsonBody}) : le journal dit exactement quoi corriger ici. Un
+ *    `safeParse` silencieux aurait rendu une liste vide et laissé croire à un
+ *    athlète sans données.
+ *
+ * Les graphies **snake_case** acceptées à côté des camelCase datent d'avant la
+ * confrontation ; elles sont conservées telles quelles (elles ne coûtent rien,
+ * et une seule des deux arrive), mais aucune n'est ajoutée pour un champ
+ * nouveau : la graphie réelle est connue maintenant.
  *
  * ## Ce que ce module ne lit pas, et ne lira jamais
  *
  * L'objet Wellness d'intervals.icu porte aussi `ctl`, `atl`, `rampRate`,
- * `ctlLoad`… — **les charges que le service calcule de son côté**. Elles ne sont
- * ni lues ni stockées : Trainarr calcule les siennes depuis ses propres
- * activités (`lib/metrics/load.ts`), et deux vérités concurrentes sous le même
- * nom sont exactement ce que `CLAUDE.md` interdit.
+ * `ctlLoad`, `atlLoad` — **les charges que le service calcule de son côté**.
+ * Elles ne sont ni lues ni stockées : Trainarr calcule les siennes depuis ses
+ * propres activités (`lib/metrics/load.ts`), et deux vérités concurrentes sous
+ * le même nom sont exactement ce que `CLAUDE.md` interdit.
+ *
+ * La réponse réelle porte encore `sportInfo`, `vo2max`, `spO2`, `steps`,
+ * `respiration`, `bodyFat`, `kcalConsumed`, `protein`, `carbohydrates`,
+ * `fatTotal`, `hydrationVolume`, `tempRestingHR`, `tempWeight` et `updated` :
+ * hors périmètre, ignorés par le schéma sans bruit. Les ajouter demanderait une
+ * colonne et un écran, pas une ligne de plus ici.
  *
  * ## Documentation utilisée
  *
@@ -78,8 +98,14 @@ const wellnessListSchema = z.array(
     date: z.string().nullish(),
     restingHR: z.number().nullish(),
     resting_hr: z.number().nullish(),
-    /** rMSSD, en millisecondes. */
+    /**
+     * rMSSD, en millisecondes. Toutes les montres ne le poussent pas — celle de
+     * l'athlète pousse {@link hrvSDNN} — et les deux ne se convertissent pas
+     * l'un en l'autre.
+     */
     hrv: z.number().nullish(),
+    /** SDNN, en millisecondes. L'autre HRV, mesurée par d'autres montres. */
+    hrvSDNN: z.number().nullish(),
     sleepSecs: z.number().nullish(),
     sleep_secs: z.number().nullish(),
     sleepScore: z.number().nullish(),
@@ -103,8 +129,17 @@ export type WellnessReading = {
   /** Jour civil `YYYY-MM-DD` décrit par ce relevé. */
   day: string;
   restingHrBpm: number | null;
-  /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+  /**
+   * Variabilité cardiaque nocturne **rMSSD**, en millisecondes.
+   *
+   * Une seule des deux HRV est renseignée en pratique : celle que la montre
+   * mesure. Elles vivent dans deux champs distincts parce qu'un SDNN rangé dans
+   * un rMSSD serait une valeur juste sous un mauvais nom — cf.
+   * `src/lib/wellness/hrv.ts`.
+   */
   hrvRmssdMs: number | null;
+  /** Variabilité cardiaque nocturne **SDNN**, en millisecondes. */
+  hrvSdnnMs: number | null;
   sleepTimeS: number | null;
   /** Score de sommeil de la montre, sur 100. */
   sleepScore: number | null;
@@ -151,6 +186,7 @@ function toWellnessReading(record: WellnessRecord, day: string): WellnessReading
     day,
     restingHrBpm: toInteger(pick(record.restingHR, record.resting_hr)),
     hrvRmssdMs: pick(record.hrv),
+    hrvSdnnMs: pick(record.hrvSDNN),
     sleepTimeS: toInteger(pick(record.sleepSecs, record.sleep_secs)),
     sleepScore: pick(record.sleepScore, record.sleep_score),
     avgSleepingHrBpm: pick(record.avgSleepingHR, record.avg_sleeping_hr),

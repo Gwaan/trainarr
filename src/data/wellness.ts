@@ -3,6 +3,7 @@ import 'server-only';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 
 import type { WellnessReading } from '@/lib/intervals/wellness-client';
+import { readHrv, type HrvVariant } from '@/lib/wellness/hrv';
 
 import { db } from './db/client';
 import { athlete, wellnessDays } from './db/schema';
@@ -53,6 +54,17 @@ export type WellnessMeasureDto = {
 };
 
 /**
+ * La HRV de la tuile : sa valeur, son jour, et **la grandeur que c'est**.
+ *
+ * La variante voyage avec la valeur parce que l'écran doit l'étiqueter : un
+ * SDNN affiché sous « HRV » se compare mentalement à un rMSSD lu ailleurs, et
+ * les deux échelles n'ont rien à voir (cf. `src/lib/wellness/hrv.ts`).
+ */
+export type WellnessHrvMeasureDto = WellnessMeasureDto & {
+  variant: HrvVariant;
+};
+
+/**
  * Ce que la tuile du tableau de bord affiche : la dernière valeur connue de
  * chaque mesure, chacune avec sa date.
  *
@@ -64,7 +76,7 @@ export type WellnessSummaryDto = {
   /** Jour de la lecture : c'est lui qui décide si une mesure date d'aujourd'hui. */
   today: string;
   restingHr: WellnessMeasureDto | null;
-  hrv: WellnessMeasureDto | null;
+  hrv: WellnessHrvMeasureDto | null;
   sleep: WellnessMeasureDto | null;
 };
 
@@ -73,8 +85,10 @@ export type WellnessDayDto = {
   /** Jour civil `YYYY-MM-DD`. */
   day: string;
   restingHrBpm: number | null;
-  /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+  /** Variabilité cardiaque nocturne **rMSSD**, en millisecondes. */
   hrvRmssdMs: number | null;
+  /** Variabilité cardiaque nocturne **SDNN**, en millisecondes — l'autre HRV. */
+  hrvSdnnMs: number | null;
   sleepTimeS: number | null;
   /** Score de sommeil de la montre, sur 100 — ce n'est pas un calcul de Trainarr. */
   sleepScore: number | null;
@@ -114,6 +128,7 @@ export async function saveWellnessDays(
         day: reading.day,
         restingHrBpm: reading.restingHrBpm,
         hrvRmssdMs: reading.hrvRmssdMs,
+        hrvSdnnMs: reading.hrvSdnnMs,
         sleepTimeS: reading.sleepTimeS,
         sleepScore: reading.sleepScore,
         avgSleepingHrBpm: reading.avgSleepingHrBpm,
@@ -126,6 +141,7 @@ export async function saveWellnessDays(
       set: {
         restingHrBpm: sql`coalesce(excluded.resting_hr_bpm, ${wellnessDays.restingHrBpm})`,
         hrvRmssdMs: sql`coalesce(excluded.hrv_rmssd_ms, ${wellnessDays.hrvRmssdMs})`,
+        hrvSdnnMs: sql`coalesce(excluded.hrv_sdnn_ms, ${wellnessDays.hrvSdnnMs})`,
         sleepTimeS: sql`coalesce(excluded.sleep_time_s, ${wellnessDays.sleepTimeS})`,
         sleepScore: sql`coalesce(excluded.sleep_score, ${wellnessDays.sleepScore})`,
         avgSleepingHrBpm: sql`coalesce(excluded.avg_sleeping_hr_bpm, ${wellnessDays.avgSleepingHrBpm})`,
@@ -188,6 +204,7 @@ export async function listWellnessDays(
       day: wellnessDays.day,
       restingHrBpm: wellnessDays.restingHrBpm,
       hrvRmssdMs: wellnessDays.hrvRmssdMs,
+      hrvSdnnMs: wellnessDays.hrvSdnnMs,
       sleepTimeS: wellnessDays.sleepTimeS,
       sleepScore: wellnessDays.sleepScore,
       avgSleepingHrBpm: wellnessDays.avgSleepingHrBpm,
@@ -231,6 +248,23 @@ export function latestMeasure(
 }
 
 /**
+ * La dernière HRV connue, avec **la variante que c'est**. Pure, exportée pour
+ * les tests.
+ *
+ * Même parcours que {@link latestMeasure} — `days` du plus récent au plus
+ * ancien, la première journée qui en porte une gagne — mais la mesure n'est pas
+ * dans une colonne fixe : c'est `readHrv` qui décide, et qui fait primer le
+ * rMSSD sur une journée portant les deux.
+ */
+export function latestHrv(days: readonly WellnessDayDto[]): WellnessHrvMeasureDto | null {
+  for (const day of days) {
+    const measure = readHrv(day);
+    if (measure !== null) return { value: measure.value, day: day.day, variant: measure.variant };
+  }
+  return null;
+}
+
+/**
  * La dernière valeur connue de chaque mesure d'un athlète **désigné**, sur les
  * {@link WELLNESS_LATEST_WINDOW_DAYS} derniers jours.
  *
@@ -248,6 +282,7 @@ export async function selectWellnessSummary(
       day: wellnessDays.day,
       restingHrBpm: wellnessDays.restingHrBpm,
       hrvRmssdMs: wellnessDays.hrvRmssdMs,
+      hrvSdnnMs: wellnessDays.hrvSdnnMs,
       sleepTimeS: wellnessDays.sleepTimeS,
       sleepScore: wellnessDays.sleepScore,
       avgSleepingHrBpm: wellnessDays.avgSleepingHrBpm,
@@ -268,7 +303,7 @@ export async function selectWellnessSummary(
   return {
     today,
     restingHr: latestMeasure(rows, (day) => day.restingHrBpm),
-    hrv: latestMeasure(rows, (day) => day.hrvRmssdMs),
+    hrv: latestHrv(rows),
     sleep: latestMeasure(rows, (day) => day.sleepTimeS),
   };
 }

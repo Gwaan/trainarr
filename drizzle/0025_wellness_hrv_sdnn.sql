@@ -1,0 +1,1 @@
+ALTER TABLE "wellness_days" ADD COLUMN "hrv_sdnn_ms" real;

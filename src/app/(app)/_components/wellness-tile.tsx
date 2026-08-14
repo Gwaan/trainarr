@@ -114,7 +114,7 @@ export function WellnessTile({ wellness, className }: WellnessTileProps) {
           absent="pas de FC de repos"
         />
         <Measure
-          label="HRV"
+          label={wellness.hrvLabel}
           info={<MetricInfo id="hrv" />}
           measure={wellness.hrv}
           absent="pas de HRV"

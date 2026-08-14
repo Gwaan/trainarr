@@ -176,6 +176,13 @@
       "when": 1786731733797,
       "tag": "0024_wellness_days",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786733884845,
+      "tag": "0025_wellness_hrv_sdnn",
+      "breakpoints": true
     }
   ]
 }

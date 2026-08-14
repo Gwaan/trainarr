@@ -184,8 +184,19 @@ export type WellnessContextDayDto = {
   /** Jour civil `YYYY-MM-DD`. */
   date: string;
   restingHrBpm: number | null;
-  /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+  /**
+   * Variabilité cardiaque nocturne **rMSSD**, en millisecondes — une des deux
+   * HRV, celle que le domaine prend pour référence.
+   */
   hrvRmssdMs: number | null;
+  /**
+   * Variabilité cardiaque nocturne **SDNN**, en millisecondes — l'autre.
+   *
+   * Les deux voyagent séparément jusqu'au prompt, qui écrit la variante à côté
+   * de la valeur : un modèle qui verrait « HRV 45 ms » sans savoir laquelle
+   * comparerait à des repères de rMSSD. Une seule est renseignée en pratique.
+   */
+  hrvSdnnMs: number | null;
   sleepTimeS: number | null;
   /** Score de sommeil de la montre, sur 100. */
   sleepScore: number | null;
@@ -590,6 +601,7 @@ export async function getWellnessContext(): Promise<WellnessContextDto> {
         (row) =>
           row.restingHrBpm !== null ||
           row.hrvRmssdMs !== null ||
+          row.hrvSdnnMs !== null ||
           row.sleepTimeS !== null ||
           row.sleepScore !== null ||
           row.weightKg !== null,
@@ -601,6 +613,7 @@ export async function getWellnessContext(): Promise<WellnessContextDto> {
         date: row.day,
         restingHrBpm: row.restingHrBpm,
         hrvRmssdMs: row.hrvRmssdMs,
+        hrvSdnnMs: row.hrvSdnnMs,
         sleepTimeS: row.sleepTimeS,
         sleepScore: row.sleepScore,
         weightKg: row.weightKg,

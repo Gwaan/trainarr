@@ -592,8 +592,18 @@ export const wellnessDays = pgTable(
     day: date('day').notNull(),
     /** FC de repos de la journée, en bpm. */
     restingHrBpm: integer('resting_hr_bpm'),
-    /** Variabilité cardiaque nocturne (rMSSD), en millisecondes. */
+    /**
+     * Variabilité cardiaque nocturne **rMSSD**, en millisecondes.
+     *
+     * Deux colonnes pour « la HRV », et c'est voulu : `hrvSdnnMs` porte l'autre
+     * grandeur (SDNN), qui n'est ni la même mesure ni la même échelle. Selon le
+     * modèle, une montre pousse l'une **ou** l'autre ; les ranger ensemble
+     * donnerait une série qui saute d'un facteur deux au changement d'appareil
+     * sans que rien ne l'ait indiqué (cf. `src/lib/wellness/hrv.ts`).
+     */
     hrvRmssdMs: real('hrv_rmssd_ms'),
+    /** Variabilité cardiaque nocturne **SDNN**, en millisecondes. */
+    hrvSdnnMs: real('hrv_sdnn_ms'),
     /** Temps de sommeil, en secondes. */
     sleepTimeS: integer('sleep_time_s'),
     /** Score de sommeil de la montre, sur 100. Ce n'est pas un calcul de Trainarr. */
