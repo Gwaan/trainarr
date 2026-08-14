@@ -9,6 +9,7 @@ import { toActivitySummaryDto, type ActivitySummaryDto } from './activities';
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
+import { getWeatherForecast, type WeatherForecastDto } from './weather-forecast';
 import {
   buildDailyTrimp,
   buildFitness,
@@ -70,13 +71,24 @@ export type DashboardSummary = {
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
   loadWeeks: LoadWeekDto[];
   todaySession: PlannedSessionDto | null;
+  /**
+   * Le jour courant, tel que le DAL le calcule (fuseau de l'athlète).
+   *
+   * Rendu avec le reste plutôt que recalculé à l'affichage : c'est lui qui a
+   * sélectionné la séance du jour, et c'est lui qui doit décider de l'horizon de
+   * la prévision. Deux « aujourd'hui » différents entre minuit et l'aube, et le
+   * panneau annoncerait la météo de la veille.
+   */
+  today: string;
+  /** Prévisions de l'athlète — le relevé du matin, tel quel (cf. `./weather-forecast.ts`). */
+  forecast: WeatherForecastDto;
   recentActivities: ActivitySummaryDto[];
 };
 
 const RECENT_ACTIVITIES_COUNT = 3;
 const LOAD_WEEKS_COUNT = 6;
 
-const EMPTY_SUMMARY: DashboardSummary = {
+const EMPTY_SUMMARY: Omit<DashboardSummary, 'today'> = {
   athleteName: null,
   fitness: null,
   // Sans athlète, il n'y a pas de cause à expliquer : c'est l'onboarding qui parle.
@@ -85,6 +97,8 @@ const EMPTY_SUMMARY: DashboardSummary = {
   vo2maxUnavailable: null,
   loadWeeks: [],
   todaySession: null,
+  // Sans athlète, il n'y a ni séance ni lieu : la prévision n'a rien à dire.
+  forecast: { status: null, fetchedAt: null, days: [] },
   recentActivities: [],
 };
 
@@ -129,12 +143,12 @@ function toPlannedSessionDto(row: PlannedSession): PlannedSessionDto {
 
 /** Agrège en une seule passe tout ce que le dashboard affiche. */
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const profile = await getCurrentAthlete();
-  if (!profile) return EMPTY_SUMMARY;
-
   const today = toCivilDate(new Date());
 
-  const [activityRows, sessionRows] = await Promise.all([
+  const profile = await getCurrentAthlete();
+  if (!profile) return { ...EMPTY_SUMMARY, today };
+
+  const [activityRows, sessionRows, forecast] = await Promise.all([
     // Historique complet : la CTL est une moyenne mobile sur 42 jours, et une
     // ligne d'activité est légère (les séries temporelles vivent à part).
     db
@@ -165,6 +179,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
       // plutôt que celle que Postgres rend en premier ce jour-là.
       .orderBy(desc(plannedSessions.id))
       .limit(1),
+    getWeatherForecast(),
   ]);
 
   const daily = buildDailyTrimp(activityRows, profile, today);
@@ -184,6 +199,8 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     vo2maxUnavailable: vo2max ? null : buildVo2maxUnavailable(activityRows, profile, today),
     loadWeeks: buildLoadWeeks(loadSeries, today),
     todaySession: todaySession ? toPlannedSessionDto(todaySession) : null,
+    today,
+    forecast,
     recentActivities: activityRows.slice(0, RECENT_ACTIVITIES_COUNT).map(toActivitySummaryDto),
   };
 }

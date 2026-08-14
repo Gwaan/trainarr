@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
 import { getActivityFeedback } from "@/data/activity-feedback";
+import { getActivityWeather } from "@/data/activity-weather";
 import { getAiAvailability } from "@/lib/ai/availability";
 
 import { requireSession } from "../../_lib/require-session";
@@ -19,6 +20,7 @@ import { DecouplingPanel } from "./_components/decoupling-panel";
 import { DistributionPanel } from "./_components/distribution-panel";
 import { HrZonesPanel } from "./_components/hr-zones-panel";
 import { NoDetailedData } from "./_components/no-detailed-data";
+import { WeatherPanel } from "./_components/weather-panel";
 import { parseActivityId } from "./_lib/activity-id";
 import { hrDistributionModel, paceDistributionModel } from "./_lib/distribution-model";
 import { loadActivity } from "./_lib/load-activity";
@@ -88,7 +90,9 @@ async function ActivityDetail({ params }: PageProps) {
   const id = parseActivityId((await params).id);
   if (id === null) notFound();
 
-  const full = await loadActivity(id);
+  // Deux lectures indépendantes : la séance et sa météo partent ensemble. Le DAL
+  // borne l'une et l'autre à l'athlète de la session.
+  const [full, weather] = await Promise.all([loadActivity(id), getActivityWeather(id)]);
   if (full === null) notFound();
 
   const { detail, charts, splits, hrZones, decoupling, bestSegments } = full;
@@ -125,6 +129,13 @@ async function ActivityDetail({ params }: PageProps) {
         />
         {hasMap ? <ActivityMapPanel path={path} className="lg:col-span-3" /> : null}
       </div>
+
+      {/* Ce qu'on a fait (chiffres), où (carte), dans quelles conditions
+          (météo) — puis seulement ce que le coach en dit. La météo n'est pas
+          une donnée d'entraînement : elle ferme le tableau du contexte, elle
+          n'ouvre pas la page. Rien ne s'affiche tant que le relevé n'a pas eu
+          lieu : le panneau ne dit « pas de météo » que quand c'est établi. */}
+      {weather === null ? null : <WeatherPanel weather={weather} />}
 
       <Suspense fallback={<CoachPanelSkeleton />}>
         <CoachFeedback activityId={id} />

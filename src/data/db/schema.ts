@@ -7,6 +7,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   real,
   serial,
   text,
@@ -17,6 +18,7 @@ import {
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
+import type { WeatherForecastStatus } from '@/lib/weather/forecast-plan';
 import type { ActivityWeatherStatus, WeatherSource } from '@/lib/weather/plan';
 
 /**
@@ -328,6 +330,127 @@ export const activityWeather = pgTable(
      * table en quatre paquets très inégaux dont un seul est scanné.
      */
     index('activity_weather_status_last_attempt_idx').on(table.status, table.lastAttemptAt),
+  ],
+);
+
+/**
+ * Statuts recopiés de `lib/weather/forecast-plan` — même montage que
+ * {@link ACTIVITY_WEATHER_STATUSES}.
+ */
+export const WEATHER_FORECAST_STATUSES = [
+  'forecast',
+  'no-location',
+  'unsupported',
+  'failed',
+] as const satisfies readonly WeatherForecastStatus[];
+
+/**
+ * Le relevé de prévisions du matin : **une ligne par athlète**, celle du dernier
+ * relevé tenté.
+ *
+ * Il n'y a rien à versionner ici : la prévision de ce matin remplace celle
+ * d'hier, qui ne vaut plus rien. Cette ligne dit donc **où en est** le relevé
+ * quotidien, et elle existe aussi quand il n'a rien donné — c'est tout l'objet
+ * de `status`. Sans elle, « pas encore relevé » et « relevé sans résultat »
+ * seraient le même état (l'absence de ligne), et un athlète sans sortie
+ * géolocalisée verrait le service redemander la même chose à chaque cycle.
+ *
+ * `reading_day` est le **marqueur** du relevé : la date civile du dernier
+ * passage de 6 h (heure locale) révolu. Comparer ce marqueur à celui de
+ * l'instant courant donne d'un coup le relevé quotidien et son rattrapage — une
+ * application arrêtée à 6 h revient avec un marqueur en retard, et relève au
+ * premier cycle. Cf. `forecastReadingMarker`.
+ *
+ * Pas de colonne `attempts` par jour civil : le compteur appartient au marqueur
+ * et repart de 1 à chaque matin (cf. `FORECAST_MAX_ATTEMPTS`).
+ */
+export const weatherForecastRuns = pgTable('weather_forecast_runs', {
+  /**
+   * `ON DELETE CASCADE` : une prévision n'a aucun sens sans son athlète — même
+   * raison qu'`activity_weather` avec son activité. C'est une donnée dérivée et
+   * périssable, rien ne se perd à l'effacer avec son propriétaire.
+   */
+  athleteId: integer('athlete_id')
+    .primaryKey()
+    .references(() => athlete.id, { onDelete: 'cascade' }),
+  /** Marqueur du relevé dont cette ligne rend compte (date civile locale). */
+  readingDay: date('reading_day').notNull(),
+  status: text('status', { enum: WEATHER_FORECAST_STATUSES }).notNull(),
+  /**
+   * Instant du dernier essai — c'est lui qui date la prévision à l'écran
+   * (« relevé de 6 h 02 ») et qui espace les reprises.
+   */
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  /** Essais faits pour ce marqueur, échecs compris. Borné par `FORECAST_MAX_ATTEMPTS`. */
+  attempts: integer('attempts').notNull().default(0),
+  /**
+   * Coordonnées **arrondies** interrogées (deux décimales, ≈ 1 km — cf.
+   * `COORDINATE_DECIMALS`), déduites des départs récents. Conservées comme
+   * provenance : sans elles, impossible de dire de quel lieu parle une prévision
+   * qui semble fausse. Ne franchissent jamais la frontière client.
+   */
+  latitudeDeg: real('latitude_deg'),
+  longitudeDeg: real('longitude_deg'),
+  /** Motif du dernier échec (`nom : message`). `NULL` sous `forecast`. */
+  failureReason: text('failure_reason'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * La prévision d'un jour, pour un athlète — **une ligne par jour et par
+ * compte**.
+ *
+ * Table distincte d'`activity_weather`, et ce n'est pas un détail : celle-ci
+ * porte des **observations** immuables rattachées à une activité, celle-là des
+ * **estimations** périssables rattachées à un jour. Les mélanger ferait tôt ou
+ * tard écraser une mesure par une prévision — l'inverse de ce qu'on veut lire
+ * une fois la séance courue.
+ *
+ * Les valeurs sont des **agrégats de journée civile** (maximum, minimum, cumul),
+ * parce qu'une séance planifiée porte une date et jamais une heure. Le fuseau
+ * qui découpe ces journées est celui de l'application, imposé à Open-Meteo dans
+ * la requête.
+ *
+ * Toutes les lignes d'un athlète sont **remplacées** à chaque relevé du matin :
+ * une prévision ne s'accumule pas, elle se périme. `fetched_at` porte l'instant
+ * du relevé pour que l'écran puisse dire de quand elle date — dupliqué depuis
+ * `weather_forecast_runs` pour qu'une lecture d'écran n'ait pas à joindre.
+ *
+ * Pas de `created_at` / `updated_at` : une ligne n'est jamais modifiée sur
+ * place, elle est effacée puis réécrite. Trois horodatages dont un seul aurait
+ * du sens seraient trois occasions de se tromper de colonne.
+ */
+export const weatherForecasts = pgTable(
+  'weather_forecasts',
+  {
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id, { onDelete: 'cascade' }),
+    /** Jour civil couvert, dans le fuseau de l'application. */
+    forecastDate: date('forecast_date').notNull(),
+    /** Instant du relevé qui a écrit cette ligne. */
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull(),
+    /** Code temps WMO 4677 **dominant** de la journée. */
+    weatherCode: integer('weather_code'),
+    temperatureMaxC: real('temperature_max_c'),
+    temperatureMinC: real('temperature_min_c'),
+    /** Ressenti : humidité, vent et rayonnement compris. */
+    apparentTemperatureMaxC: real('apparent_temperature_max_c'),
+    apparentTemperatureMinC: real('apparent_temperature_min_c'),
+    /** Cumul de précipitations **sur toute la journée**, en mm. */
+    precipitationSumMm: real('precipitation_sum_mm'),
+    /** Probabilité de précipitations la plus forte de la journée, en %. */
+    precipitationProbabilityMaxPct: real('precipitation_probability_max_pct'),
+    windSpeedMaxKmh: real('wind_speed_max_kmh'),
+  },
+  (table) => [
+    /**
+     * Un athlète, un jour, une prévision. La clé est aussi le chemin d'accès de
+     * la seule lecture d'écran (« les prévisions de cet athlète entre deux
+     * dates »), qui parcourt donc un intervalle contigu de l'index.
+     */
+    primaryKey({ columns: [table.athleteId, table.forecastDate] }),
   ],
 );
 
@@ -922,6 +1045,12 @@ export type NewActivityStream = InferInsertModel<typeof activityStreams>;
 
 export type ActivityWeather = InferSelectModel<typeof activityWeather>;
 export type NewActivityWeather = InferInsertModel<typeof activityWeather>;
+
+export type WeatherForecastRun = InferSelectModel<typeof weatherForecastRuns>;
+export type NewWeatherForecastRun = InferInsertModel<typeof weatherForecastRuns>;
+
+export type WeatherForecast = InferSelectModel<typeof weatherForecasts>;
+export type NewWeatherForecast = InferInsertModel<typeof weatherForecasts>;
 
 export type Plan = InferSelectModel<typeof plans>;
 export type NewPlan = InferInsertModel<typeof plans>;

@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Panel } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import type { PlannedSessionDto } from "@/data/dashboard";
+import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { cn } from "@/lib/utils";
 
 import {
@@ -16,6 +17,8 @@ import {
   parseCivilDate,
 } from "../_lib/format";
 
+import { SessionForecast } from "./session-forecast";
+
 const PANEL_TITLE = "Séance du jour";
 const PANEL_SPAN = "lg:col-span-2";
 
@@ -24,7 +27,17 @@ function sessionDay(scheduledOn: string): string | null {
   return date ? capitalize(formatRelativeDay(date)) : null;
 }
 
-export function TodaySessionPanel({ session }: { session: PlannedSessionDto | null }) {
+export function TodaySessionPanel({
+  session,
+  forecast,
+  today,
+}: {
+  session: PlannedSessionDto | null;
+  /** Le relevé du matin, tel que le DAL le rend. */
+  forecast: WeatherForecastDto;
+  /** Jour courant, date civile calculée côté serveur dans le fuseau de l'athlète. */
+  today: string;
+}) {
   if (!session) {
     return (
       <Panel title={PANEL_TITLE} padded={false} className={PANEL_SPAN}>
@@ -110,6 +123,13 @@ export function TodaySessionPanel({ session }: { session: PlannedSessionDto | nu
           ))}
         </div>
       ) : null}
+
+      {/* La météo ferme le bloc d'information : c'est du contexte pour la séance,
+          pas une consigne d'entraînement. Elle passe donc après les allures, les
+          volumes et le déroulé — et avant le seul CTA de l'écran. */}
+      <div className="mt-4">
+        <SessionForecast forecast={forecast} date={session.scheduledOn} today={today} />
+      </div>
 
       {/* Pousse le CTA en pied de panneau quand la séance est peu détaillée. */}
       <div className="flex-1" />

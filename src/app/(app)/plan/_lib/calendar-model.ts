@@ -16,9 +16,12 @@
 
 import { APP_TIME_ZONE } from "@/config/time";
 import type { CalendarActivityDto, CalendarSessionDto } from "@/data/calendar";
+import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { sessionPaceZone } from "@/lib/ai/plan-schema";
 import { civilDateToMs, shiftCivilDate } from "@/lib/dates/civil";
 import { SESSION_KINDS } from "@/lib/plan-skeleton";
+import { resolveDayForecast } from "@/lib/weather/forecast-plan";
+import { describeWeatherCode, type WeatherIconName } from "@/lib/weather/wmo";
 
 import {
   capitalize,
@@ -26,6 +29,13 @@ import {
   formatDuration,
   formatFullDate,
 } from "../../_lib/format";
+import {
+  FORECAST_ABSENCE,
+  formatPercent,
+  formatPrecipitation,
+  formatTemperatureCompact,
+  formatTemperatureRange,
+} from "../../_lib/format-weather";
 
 import {
   formatCivilDay,
@@ -99,6 +109,26 @@ export type CalendarActivityView = {
   summary: string | null;
 };
 
+/**
+ * La météo d'une case de calendrier.
+ *
+ * **Une icône et une température**, pas davantage : la place est comptée, et
+ * une case de 50 px de large sur téléphone doit d'abord montrer la séance. Le
+ * détail (ressenti, vent, cumul de pluie, date du relevé) vit sur la séance du
+ * jour du tableau de bord, où il a la place d'être écrit proprement.
+ *
+ * `label` porte la phrase entière — celle que lit un lecteur d'écran et celle
+ * qu'affiche l'infobulle. C'est **toujours** une phrase : quand il n'y a pas de
+ * prévision, elle dit pourquoi. Un blanc se lirait « beau temps ».
+ */
+export type CalendarDayWeather = {
+  /** `null` quand il n'y a pas de prévision : rien à dessiner, mais tout à dire. */
+  icon: WeatherIconName | null;
+  /** `25°` — la maximale du jour, ou `null` sans prévision. */
+  temperature: string | null;
+  label: string;
+};
+
 export type CalendarDayView = {
   date: string;
   /** `10` */
@@ -115,6 +145,14 @@ export type CalendarDayView = {
   isRaceDay: boolean;
   sessions: CalendarSessionView[];
   activities: CalendarActivityView[];
+  /**
+   * Météo prévue, `null` quand la question ne se pose pas — c'est-à-dire quand
+   * aucune séance **à venir** ne tombe ce jour-là. Le calendrier reste un
+   * calendrier d'entraînement : une prévision sans séance à habiller serait du
+   * bruit, et une prévision sur une séance déjà courue serait un contresens
+   * (c'est alors la météo relevée de l'activité qui fait foi).
+   */
+  weather: CalendarDayWeather | null;
 };
 
 export type CalendarWeekView = {
@@ -244,6 +282,62 @@ export function formatMoveDetail(title: string, toDate: string): string {
   return `« ${title} » est passée au ${formatDayLabel(toDate)}.`;
 }
 
+/**
+ * La météo d'une journée du calendrier.
+ *
+ * Rien n'est rendu tant qu'aucune séance à venir n'occupe le jour : c'est ce qui
+ * garde la grille lisible, un mois entier de bulletins l'ayant transformée en
+ * autre chose.
+ */
+export function dayWeather(input: {
+  date: string;
+  today: string;
+  sessions: readonly CalendarSessionView[];
+  forecast: WeatherForecastDto;
+}): CalendarDayWeather | null {
+  if (!input.sessions.some((session) => session.state === "upcoming")) return null;
+
+  const resolved = resolveDayForecast({
+    status: input.forecast.status,
+    days: input.forecast.days,
+    date: input.date,
+    today: input.today,
+  });
+
+  if (resolved.day === null) {
+    return { icon: null, temperature: null, label: FORECAST_ABSENCE[resolved.availability] };
+  }
+
+  const { day } = resolved;
+  const condition = describeWeatherCode(day.weatherCode);
+
+  const sentences = [
+    day.temperatureMinC === null || day.temperatureMaxC === null
+      ? condition.label
+      : `${condition.label}, ${formatTemperatureRange(day.temperatureMinC, day.temperatureMaxC)}`,
+  ];
+
+  // « du jour », toujours : c'est un cumul de journée, pas la pluie qui tombera
+  // pendant la séance.
+  if (day.precipitationSumMm !== null && day.precipitationSumMm > 0) {
+    const probability =
+      day.precipitationProbabilityMaxPct === null
+        ? ""
+        : ` (${formatPercent(day.precipitationProbabilityMaxPct)})`;
+    sentences.push(
+      `Pluie du jour : ${formatPrecipitation(day.precipitationSumMm)}${probability}`,
+    );
+  }
+
+  return {
+    icon: condition.icon,
+    // La maximale : c'est elle qui décide de la tenue d'une sortie de journée.
+    temperature:
+      day.temperatureMaxC === null ? null : formatTemperatureCompact(day.temperatureMaxC),
+    label: `${sentences.join(". ")}.`,
+  };
+}
+
 export type BuildCalendarMonthInput = {
   /** Premier jour de la grille — un lundi (cf. `monthGridRange`). */
   from: string;
@@ -261,6 +355,11 @@ export type BuildCalendarMonthInput = {
    * pas, et rien de superflu ne doit franchir la frontière client.
    */
   activities: readonly CalendarActivityView[];
+  /**
+   * Le relevé de prévisions du matin, tel que le DAL le rend — au plus seize
+   * jours, aucune coordonnée.
+   */
+  forecast: WeatherForecastDto;
 };
 
 /**
@@ -322,6 +421,7 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
         // d'un rendu à l'autre.
         sessions: [...sessions].sort((left, right) => left.id - right.id),
         activities: activitiesByDay.get(date) ?? [],
+        weather: dayWeather({ date, today, sessions, forecast: input.forecast }),
       });
     }
 

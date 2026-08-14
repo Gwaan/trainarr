@@ -3,10 +3,11 @@
 import type { ReactNode } from "react";
 import { useDroppable } from "@dnd-kit/core";
 
+import { WeatherIcon } from "@/components/weather-icon";
 import { cn } from "@/lib/utils";
 
 import { dayDropId } from "../_lib/calendar-dnd";
-import type { CalendarDayView } from "../_lib/calendar-model";
+import type { CalendarDayView, CalendarDayWeather } from "../_lib/calendar-model";
 
 /**
  * La case d'un jour — cible de dépôt, et **une seule** géométrie pour les deux
@@ -44,6 +45,35 @@ import type { CalendarDayView } from "../_lib/calendar-model";
  * `calendar-chips.tsx` — un fond creusé sous une surface — et le principe même
  * du système, dont « le contraste vient des fonds superposés ».
  */
+
+/**
+ * La météo prévue du jour, dans l'en-tête de la case.
+ *
+ * Une icône et une température, et c'est tout ce que la place permet — le détail
+ * est sur la séance du jour du tableau de bord. La phrase entière reste
+ * accessible : `title` pour la souris, `sr-only` pour les lecteurs d'écran.
+ *
+ * Sans prévision, un tiret **et sa raison**, jamais un vide : une case muette se
+ * lirait « beau temps ». Le tiret est le même vocabulaire que la valeur absente
+ * du détail d'activité (`MISSING`).
+ *
+ * En `fg-faint`, jamais en accent : la météo est du contexte, l'accent appartient
+ * à l'effort.
+ */
+function DayWeatherBadge({ weather }: { weather: CalendarDayWeather }) {
+  return (
+    <span
+      title={weather.label}
+      className="relative ml-auto flex shrink-0 items-center gap-0.5 text-fg-faint"
+    >
+      <span className="sr-only">Météo prévue : {weather.label}</span>
+      {weather.icon === null ? null : <WeatherIcon name={weather.icon} className="size-3.5" />}
+      <span aria-hidden="true" className="num text-[0.68rem]">
+        {weather.temperature ?? "—"}
+      </span>
+    </span>
+  );
+}
 
 export type CalendarDayCellProps = {
   day: CalendarDayView;
@@ -134,6 +164,13 @@ export function CalendarDayCell({ day, accepted, children }: CalendarDayCellProp
           <p className="text-[0.7rem] leading-none text-fg-faint/70">Repos</p>
         ) : null}
       </div>
+
+      {/* En dernier, et non dans l'en-tête du jour : le quantième vit dans une
+          colonne de largeur fixe que la même ligne partage avec les pastilles.
+          Posée ici, la météo se range d'elle-même dans le coin libre des deux
+          mises en page — à droite de la ligne d'agenda, sous les pastilles de la
+          cellule — sans jamais recouvrir un titre de séance. */}
+      {day.weather === null ? null : <DayWeatherBadge weather={day.weather} />}
     </div>
   );
 }

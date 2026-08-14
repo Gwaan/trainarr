@@ -28,6 +28,7 @@ import { Undo2 } from "lucide-react";
 import { Banner } from "@/components/banner";
 import { Button } from "@/components/ui/button";
 import type { CalendarSessionDto } from "@/data/calendar";
+import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { judgeSessionMove, type MoveSession } from "@/lib/plan-calendar/move-rules";
 import { cn } from "@/lib/utils";
 
@@ -108,6 +109,12 @@ export type PlanCalendarProps = {
    * l'allure moyenne, dont cet écran ne fait rien.
    */
   activities: CalendarActivityView[];
+  /**
+   * Le relevé de prévisions du matin — seize jours au plus, et **aucune
+   * coordonnée** : le DAL les exclut de son DTO, elles n'ont rien à faire dans
+   * un document envoyé au navigateur.
+   */
+  forecast: WeatherForecastDto;
 };
 
 /**
@@ -238,6 +245,7 @@ export function PlanCalendar({
   plan,
   sessions,
   activities,
+  forecast,
 }: PlanCalendarProps) {
   const [visibleSessions, applyMove] = useOptimistic(
     sessions,
@@ -293,8 +301,9 @@ export function PlanCalendar({
         plan,
         sessions: visibleSessions,
         activities,
+        forecast,
       }),
-    [range.from, range.to, month, today, plan, visibleSessions, activities],
+    [range.from, range.to, month, today, plan, visibleSessions, activities, forecast],
   );
 
   const sessionViews = useMemo(() => {

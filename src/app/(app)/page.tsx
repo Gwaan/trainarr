@@ -53,7 +53,11 @@ async function DashboardContent() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <TodaySessionPanel session={summary.todaySession} />
+        <TodaySessionPanel
+          session={summary.todaySession}
+          forecast={summary.forecast}
+          today={summary.today}
+        />
         <TrainingLoadPanel weeks={summary.loadWeeks} />
       </div>
 

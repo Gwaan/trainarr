@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { CalendarActivityDto, CalendarSessionDto } from '@/data/calendar';
+import type { WeatherForecastDto } from '@/data/weather-forecast';
 
 import {
   buildCalendarMonth,
@@ -201,7 +202,16 @@ describe('libellés', () => {
 });
 
 describe('buildCalendarMonth', () => {
-  const base = { ...AUGUST, plan: PLAN, sessions: [], activities: [] } as const;
+  /** Aucun relevé de prévisions : le calendrier doit se construire sans. */
+  const NO_FORECAST: WeatherForecastDto = { status: null, fetchedAt: null, days: [] };
+
+  const base = {
+    ...AUGUST,
+    plan: PLAN,
+    sessions: [],
+    activities: [],
+    forecast: NO_FORECAST,
+  } as const;
 
   it('découpe la plage en semaines pleines, du lundi au dimanche', () => {
     const weeks = buildCalendarMonth(base);
@@ -330,5 +340,97 @@ describe('buildCalendarMonth', () => {
     expect(monday.dayNumber).toBe('3');
     expect(monday.label).toBe('lundi 3 août');
     expect(second.label).toBe('Semaine du 3 août');
+  });
+});
+
+/**
+ * La météo des cases du calendrier.
+ *
+ * Trois propriétés : la prévision ne s'affiche que là où elle habille une séance
+ * **à venir**, elle dit sa raison quand elle manque, et elle ne prend jamais la
+ * place de la séance (une icône, une température, le reste dans l'infobulle).
+ */
+describe('buildCalendarMonth — météo prévue', () => {
+  const forecastDay = {
+    date: '2026-08-16',
+    weatherCode: 61,
+    temperatureMaxC: 24.7,
+    temperatureMinC: 14.2,
+    apparentTemperatureMaxC: 23.1,
+    apparentTemperatureMinC: 13.4,
+    precipitationSumMm: 3.6,
+    precipitationProbabilityMaxPct: 39,
+    windSpeedMaxKmh: 13.5,
+  };
+
+  const withForecast: WeatherForecastDto = {
+    status: 'forecast',
+    fetchedAt: new Date('2026-08-13T04:00:12Z'),
+    days: [forecastDay],
+  };
+
+  const base = {
+    ...AUGUST,
+    plan: PLAN,
+    sessions: [] as CalendarSessionDto[],
+    activities: [] as CalendarActivityView[],
+    forecast: withForecast,
+  };
+
+  function dayOf(input: Parameters<typeof buildCalendarMonth>[0], date: string) {
+    const day = buildCalendarMonth(input)
+      .flatMap((week) => week.days)
+      .find((candidate) => candidate.date === date);
+    if (day === undefined) throw new Error(`Jour ${date} absent de la grille.`);
+    return day;
+  }
+
+  it('habille la séance à venir de son icône et de sa maximale', () => {
+    const day = dayOf({ ...base, sessions: [session(1, '2026-08-16')] }, '2026-08-16');
+
+    expect(day.weather).toEqual({
+      icon: 'rain',
+      temperature: '25°',
+      label: 'Pluie faible, 14 → 25 °C. Pluie du jour : 3,6 mm (39 %).',
+    });
+  });
+
+  it('nomme le cumul « du jour » — ce n’est pas la pluie pendant la séance', () => {
+    const day = dayOf({ ...base, sessions: [session(1, '2026-08-16')] }, '2026-08-16');
+    expect(day.weather?.label).toContain('Pluie du jour');
+  });
+
+  it('ne met pas de météo sur un jour sans séance', () => {
+    expect(dayOf(base, '2026-08-16').weather).toBeNull();
+  });
+
+  it('ne met pas de météo sur une séance déjà courue', () => {
+    const day = dayOf(
+      { ...base, sessions: [session(1, '2026-08-16', { completed: true })] },
+      '2026-08-16',
+    );
+    expect(day.weather).toBeNull();
+  });
+
+  it('dit pourquoi il n’y a pas de prévision, plutôt que de laisser un blanc', () => {
+    // Le 6 septembre est à plus de seize jours du 13 août.
+    const day = dayOf({ ...base, sessions: [session(1, '2026-09-06')] }, '2026-09-06');
+
+    expect(day.weather?.icon).toBeNull();
+    expect(day.weather?.temperature).toBeNull();
+    expect(day.weather?.label).toContain('16 jours');
+  });
+
+  it('fait remonter l’état du relevé sur les jours qu’il ne couvre pas', () => {
+    const day = dayOf(
+      {
+        ...base,
+        forecast: { status: 'no-location', fetchedAt: null, days: [] },
+        sessions: [session(1, '2026-08-16')],
+      },
+      '2026-08-16',
+    );
+
+    expect(day.weather?.label).toContain('pas de lieu connu');
   });
 });

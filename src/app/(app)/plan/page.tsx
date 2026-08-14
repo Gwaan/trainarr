@@ -8,6 +8,7 @@ import { Panel } from "@/components/panel";
 import { getAthleteProfile, getCurrentAthleteId } from "@/data/athlete";
 import { getCalendarRange } from "@/data/calendar";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
+import { getWeatherForecast } from "@/data/weather-forecast";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
@@ -97,12 +98,15 @@ async function PlanContent({ searchParams }: PageProps) {
   // fait) : ni plan actif, ni proposition — comme avant.
   const athleteId = await getCurrentAthleteId();
 
-  const [active, draft, availability, profile, calendar] = await Promise.all([
+  const [active, draft, availability, profile, calendar, forecast] = await Promise.all([
     athleteId === null ? null : getActivePlanWithSessions(athleteId),
     athleteId === null ? null : getDraftPlanWithSessions(athleteId),
     getAiAvailability(),
     getAthleteProfile(),
     getCalendarRange(range.from, range.to),
+    // Le relevé du matin, tel quel : seize jours au plus, aucune coordonnée.
+    // Lecture indépendante des séances — une prévision ne dépend d'aucun plan.
+    getWeatherForecast(),
   ]);
 
   const maxHrBpm = profile?.maxHrBpm ?? null;
@@ -211,6 +215,7 @@ async function PlanContent({ searchParams }: PageProps) {
             // porte le type de sport et l'allure moyenne, dont le calendrier ne
             // fait rien — et rien de superflu ne franchit la frontière.
             activities={calendar.activities.map(toCalendarActivityView)}
+            forecast={forecast}
           />
           <Panel title="Ajuster le plan">
             {availability.available ? (

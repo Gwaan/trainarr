@@ -1,10 +1,10 @@
 import 'server-only';
 
 /**
- * Relevé de la météo des séances **effectuées** : une tentative après chaque
- * import, et une boucle de rattrapage pour tout le reste.
+ * Le service météo : la météo relevée des séances **effectuées**, et le relevé
+ * quotidien des **prévisions**.
  *
- * ## Deux chemins, un seul mécanisme
+ * ## Trois chemins, une seule boucle
  *
  * - **Après un import** — `src/lib/fit/ingest.ts` appelle
  *   {@link lookupActivityWeather} pour la séance qu'il vient d'écrire. Un appel,
@@ -12,11 +12,18 @@ import 'server-only';
  * - **Le rattrapage** ({@link startWeatherService}) — l'historique importé avant
  *   que la météo n'existe, et les relevés qui ont échoué. Il tourne par petits
  *   lots espacés, indéfiniment, et s'arrête de lui-même quand il n'y a plus rien.
+ * - **Les prévisions** (`./forecast-service.ts`) — un relevé par compte et par
+ *   jour, à 6 h locales, porté par la **même** boucle. Pas de second
+ *   ordonnanceur : le cycle passe déjà toutes les minutes, et il suffit qu'il
+ *   demande à chaque tour si le rendez-vous du matin est encore dû. C'est aussi
+ *   ce qui donne le rattrapage gratuitement — une application arrêtée à 6 h
+ *   relève au premier cycle qui suit son retour.
  *
- * Les deux écrivent par le même DAL, avec la même règle : **une tentative écrit
- * toujours sa ligne**, succès comme échec. C'est cette ligne qui sort la séance
- * de l'ensemble des candidats — la reprise n'a donc rien à mémoriser, et
- * redémarrer le container ne refait pas le travail déjà fait.
+ * Tous écrivent par le DAL, avec la même règle : **une tentative écrit toujours
+ * sa ligne**, succès comme échec. C'est cette ligne qui sort la séance — ou la
+ * matinée, pour une prévision — de l'ensemble des candidats : la reprise n'a
+ * donc rien à mémoriser, et redémarrer le container ne refait pas le travail
+ * déjà fait.
  *
  * ## Ce que ce service ne fait jamais
  *
@@ -46,6 +53,8 @@ import {
   WeatherRejectedError,
   type FetchLike,
 } from './client';
+import { FORECAST_HORIZON_DAYS, FORECAST_READING_HOUR } from './forecast-plan';
+import { runDailyForecast } from './forecast-service';
 import {
   chooseWeatherSource,
   CYCLE_INTERVAL_MS,
@@ -308,6 +317,40 @@ async function runCycleForAthlete(
   }
 }
 
+/**
+ * Le relevé de prévisions d'un athlète, journalisé.
+ *
+ * Rien n'est écrit dans le journal quand il n'y avait rien à faire : le
+ * rendez-vous est quotidien, mais la question est posée toutes les minutes.
+ *
+ * Ses erreurs sont attrapées **ici** : une prévision qui ne se relève pas ne
+ * doit pas coûter le rattrapage des séances passées du même cycle, qui n'a rien
+ * à voir avec elle.
+ */
+async function runForecastForAthlete(athleteId: number, controls: StopControls): Promise<void> {
+  try {
+    const report = await runDailyForecast(athleteId, { signal: controls.signal });
+    if (report === null) return;
+
+    const day = `prévisions du ${report.readingDay}`;
+
+    if (report.status === 'forecast') {
+      log(`${day} : ${report.days} jour(s) relevé(s).`);
+      return;
+    }
+    if (report.status === 'no-location') {
+      log(
+        `${day} : aucune sortie géolocalisée récente, donc aucun lieu à interroger — pas de prévision.`,
+      );
+      return;
+    }
+    logError(`${day} : ${report.reason ?? 'échec sans motif'}`);
+  } catch (error) {
+    if (controls.stopping) return;
+    logError(`prévisions : relevé impossible — ${errorMessage(error)}`);
+  }
+}
+
 type LoopState = {
   /** Le premier cycle annonce toujours son résultat, même vide : c'est la réponse à « est-ce que ça marche ? ». */
   announcedFirstCycle: boolean;
@@ -328,11 +371,20 @@ async function backfillLoop(controls: StopControls, state: LoopState): Promise<v
     try {
       for (const athleteId of await listAthleteIds()) {
         if (controls.stopping) break;
+        // Le rendez-vous du matin d'abord : il ne coûte qu'une lecture d'état
+        // les 1 439 minutes où il n'est pas dû, et il ne doit pas attendre la
+        // fin d'un rattrapage d'historique pour avoir lieu.
+        await runForecastForAthlete(athleteId, controls);
+        if (controls.stopping) break;
         await runCycleForAthlete(athleteId, controls, report);
       }
       scanned = true;
     } catch (error) {
-      if (!controls.stopping) logError(`rattrapage impossible — ${errorMessage(error)}`);
+      // « le cycle », et non « le rattrapage » : ce tour porte aussi le relevé
+      // des prévisions, et une base injoignable les emporte tous les deux. Un
+      // message qui ne nommerait que le rattrapage laisserait croire que les
+      // prévisions, elles, sont à jour.
+      if (!controls.stopping) logError(`cycle météo impossible — ${errorMessage(error)}`);
     }
 
     if (!controls.stopping && scanned) {
@@ -392,6 +444,9 @@ export function startWeatherService(): WeatherService {
 
   log(
     `rattrapage météo démarré — Open-Meteo, au plus ${MAX_LOOKUPS_PER_CYCLE} séances par cycle de ${CYCLE_INTERVAL_MS / 1_000} s, espacées de ${lookupSpacingMs(1)} ms.`,
+  );
+  log(
+    `prévisions : un relevé par compte et par jour à ${FORECAST_READING_HOUR} h locales (${FORECAST_HORIZON_DAYS} jours d'horizon), rattrapé au premier cycle si l'heure a été manquée.`,
   );
 
   const state: LoopState = { announcedFirstCycle: false };

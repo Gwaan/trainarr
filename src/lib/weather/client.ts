@@ -364,32 +364,54 @@ async function rejectionReason(response: Response): Promise<string> {
   return parsed.success ? parsed.data.reason : `HTTP ${response.status}, sans motif exploitable`;
 }
 
+/** Ce dont tout appel à Open-Meteo a besoin, en plus de son URL. */
+export type OpenMeteoRequestOptions = {
+  /** `fetch` injectable — les tests n'ouvrent aucune connexion. */
+  fetchImpl?: FetchLike;
+  /** Annulation de l'appel en vol (arrêt du service). Combiné au délai de garde. */
+  signal?: AbortSignal;
+};
+
 /**
- * La série horaire brute d'une demande, validée.
+ * Le transport, et rien d'autre : une URL Open-Meteo, un corps JSON.
  *
- * Sépare l'appel de la sélection : ce qui suit (choisir l'échantillon) est pur
- * et testable sans réseau.
+ * Partagé par les deux lectures du service — la météo horaire d'une séance
+ * passée (ci-dessous) et la prévision quotidienne d'un lieu
+ * (`./forecast-client.ts`). Les deux endpoints répondent avec **la même
+ * grammaire d'erreur** (vérifié : 400 motivé, 429 avec `Retry-After`, corps
+ * `{"error": true, "reason": "…"}`) ; en écrire deux traductions, c'est
+ * s'assurer qu'elles divergeront.
+ *
+ * Le code HTTP est rendu avec le corps : c'est l'appelant qui valide la forme de
+ * la réponse, et un défaut de forme se journalise avec le statut sous lequel il
+ * est arrivé.
+ *
+ * @throws {WeatherRejectedError} demande refusée (définitif)
+ * @throws {WeatherRateLimitError} quota atteint
+ * @throws {WeatherUnavailableError} réseau, délai, 5xx
+ * @throws {WeatherMalformedError} corps non JSON
  */
-async function requestHourly(
-  params: FetchHourlyWeatherParams,
+export async function requestOpenMeteoJson(
+  url: string,
   context: string,
-): Promise<z.infer<typeof hourlyResponseSchema>['hourly']> {
+  options: OpenMeteoRequestOptions = {},
+): Promise<{ payload: unknown; status: number }> {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const combined =
-    params.signal === undefined ? timeout : AbortSignal.any([params.signal, timeout]);
+    options.signal === undefined ? timeout : AbortSignal.any([options.signal, timeout]);
 
-  const fetchImpl = params.fetchImpl ?? globalThis.fetch;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   let response: Response;
   try {
-    response = await fetchImpl(buildRequestUrl(params), {
+    response = await fetchImpl(url, {
       method: 'GET',
       headers: { accept: 'application/json' },
       signal: combined,
     });
   } catch (cause) {
     if (isAbortLike(cause) || combined.aborted) {
-      throw new WeatherAbortError(context, params.signal?.aborted !== true, { cause });
+      throw new WeatherAbortError(context, options.signal?.aborted !== true, { cause });
     }
     throw new WeatherUnavailableError(`${context} : appel réseau impossible.`, null, { cause });
   }
@@ -409,21 +431,36 @@ async function requestHourly(
     throw new WeatherUnavailableError(`${context} : HTTP ${response.status}.`, response.status);
   }
 
-  let payload: unknown;
   try {
-    payload = await response.json();
+    return { payload: await response.json(), status: response.status };
   } catch (cause) {
     throw new WeatherMalformedError(`${context} : réponse JSON illisible.`, response.status, {
       cause,
     });
   }
+}
+
+/**
+ * La série horaire brute d'une demande, validée.
+ *
+ * Sépare l'appel de la sélection : ce qui suit (choisir l'échantillon) est pur
+ * et testable sans réseau.
+ */
+async function requestHourly(
+  params: FetchHourlyWeatherParams,
+  context: string,
+): Promise<z.infer<typeof hourlyResponseSchema>['hourly']> {
+  const { payload, status } = await requestOpenMeteoJson(buildRequestUrl(params), context, {
+    fetchImpl: params.fetchImpl,
+    signal: params.signal,
+  });
 
   const parsed = hourlyResponseSchema.safeParse(payload);
   if (!parsed.success) {
     const fields = parsed.error.issues.map((issue) => issue.path.join('.') || '(racine)').join(', ');
     throw new WeatherMalformedError(
       `${context} : réponse inattendue (champs en défaut : ${fields}).`,
-      response.status,
+      status,
     );
   }
 
@@ -435,7 +472,7 @@ async function requestHourly(
     if (hourly[variable].length === hourly.time.length) continue;
     throw new WeatherMalformedError(
       `${context} : série « ${variable} » de ${hourly[variable].length} valeurs pour ${hourly.time.length} instants.`,
-      response.status,
+      status,
     );
   }
 

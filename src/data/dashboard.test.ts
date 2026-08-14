@@ -222,6 +222,12 @@ describe('getDashboardSummary — base vide', () => {
       vo2maxUnavailable: null,
       loadWeeks: [],
       todaySession: null,
+      // Le jour courant est rendu même sans athlète : c'est lui qui datera
+      // l'écran, et il ne dépend d'aucune donnée.
+      today: '2026-08-10',
+      // Sans athlète, il n'y a ni séance ni lieu : rien à prévoir, et un état
+      // explicite plutôt qu'un `null` de plus.
+      forecast: { status: null, fetchedAt: null, days: [] },
       recentActivities: [],
     });
   });
