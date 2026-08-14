@@ -6,9 +6,11 @@ import {
   upsertActivityFromFit,
   type FitUpsertOutcome,
 } from '@/data/activities';
+import { recordSustainedMaxHr } from '@/data/max-hr-suggestion';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
+import { sustainedMaxHrBpm } from '@/lib/metrics';
 import { recordActivityWeather } from '@/lib/weather/service';
 
 import { parseFitActivity } from './parse';
@@ -196,6 +198,15 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
 
   if (await shouldRewriteStreams(status, activityId, athleteId)) {
     await saveActivityStreams(activityId, athleteId, parsed.streams);
+    // **Après** les séries, et sous la même condition : cette mesure dérive du
+    // flux cardiaque qu'on vient d'écrire, et n'a de sens qu'accordée à lui. Un
+    // fichier dont on n'a pas retenu les séries (doublon venu d'une autre
+    // source) n'a pas non plus à décider de la FC max soutenue de la séance.
+    await recordSustainedMaxHr(
+      activityId,
+      athleteId,
+      sustainedMaxHrBpm(parsed.streams.heartrate ?? [], parsed.streams.time ?? []),
+    );
   }
 
   await linkToPlannedSession(activityId, athleteId);

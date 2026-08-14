@@ -56,3 +56,4 @@ export {
   computeBestSegments,
   type BestSegment,
 } from './best-segments';
+export { SUSTAINED_HR_WINDOW_S, sustainedMaxHrBpm } from './sustained-hr';

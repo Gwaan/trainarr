@@ -147,6 +147,7 @@ const ATHLETE: Athlete = {
   forecastLocationLabel: null,
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
+  maxHrSuggestionDismissedBpm: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -169,6 +170,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     maxHrBpm: 158,
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
+    sustainedMaxHrBpm: null,
     createdAt: new Date('2026-08-01T10:00:00.000Z'),
     ...overrides,
   };
@@ -232,6 +234,8 @@ describe('getDashboardSummary — base vide', () => {
       // explicite plutôt qu'un `null` de plus.
       forecast: { status: null, fetchedAt: null, location: { source: 'derived' }, days: [] },
       recentActivities: [],
+      // Sans athlète, il n'y a aucune séance : rien à proposer.
+      maxHrSuggestion: null,
     });
   });
 
@@ -679,5 +683,34 @@ describe('getDashboardSummary — dernières activités', () => {
     ]);
     expect(summary.recentActivities[0]).not.toHaveProperty('fitFileHash');
     expect(summary.recentActivities[0]).not.toHaveProperty('athleteId');
+  });
+});
+
+describe('getDashboardSummary — proposition de FC max', () => {
+  it('rend null quand aucune séance ne porte de FC max soutenue', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = dailyActivities('2026-08-01', '2026-08-09');
+
+    await expect(getDashboardSummary()).resolves.toMatchObject({ maxHrSuggestion: null });
+  });
+
+  it('remonte la proposition du DAL, réduite à ce que la carte affiche', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = [
+      makeActivity({
+        startedAt: new Date('2026-08-09T09:00:00.000Z'),
+        name: '10 km de Bordeaux',
+        sustainedMaxHrBpm: 194,
+      }),
+    ];
+
+    const summary = await getDashboardSummary();
+
+    expect(summary.maxHrSuggestion).toEqual({
+      bpm: 194,
+      activityId: expect.any(Number),
+      activityName: '10 km de Bordeaux',
+      activityStartedAt: new Date('2026-08-09T09:00:00.000Z'),
+    });
   });
 });

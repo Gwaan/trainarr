@@ -110,6 +110,7 @@ function existingRow(overrides: Partial<Activity> = {}): Activity {
     elevationGainM: null,
     avgHrBpm: null,
     maxHrBpm: null,
+    sustainedMaxHrBpm: null,
     avgPaceSecPerKm: null,
     avgCadenceSpm: null,
     createdAt: new Date('2026-08-02T08:00:00.000Z'),

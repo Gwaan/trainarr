@@ -11,6 +11,8 @@
  * masquée. Et le lieu des prévisions n'y est qu'un nom, jamais un point.
  */
 
+import type { MaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
+
 import type { ProfileFormValues } from './form-values';
 import type { IntervalsFormDefaults } from './intervals-values';
 import type { InvitationsSettings } from './invitation-values';
@@ -18,6 +20,13 @@ import type { InvitationsSettings } from './invitation-values';
 /** Ce dont les trois sections de réglages ont besoin, et rien d'autre. */
 export type SettingsSectionsData = {
   profile: ProfileFormValues;
+  /**
+   * La FC max soutenue observée sur une séance, quand elle dépasse celle du
+   * profil et n'a pas été écartée. `null` le reste du temps — l'encart n'existe
+   * alors pas. La même valeur que celle du tableau de bord : une seule lecture
+   * du DAL, un seul composant (`(app)/_components/max-hr-suggestion-card.tsx`).
+   */
+  maxHrSuggestion: MaxHrSuggestionView | null;
   intervals: IntervalsFormDefaults;
   /**
    * Le **nom** du lieu fixé pour les prévisions, `null` en mode automatique.

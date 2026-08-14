@@ -15,6 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
+import { MaxHrSuggestionCard } from "../../_components/max-hr-suggestion-card";
+import type { MaxHrSuggestionView } from "../../_lib/max-hr-suggestion";
+
 import { saveProfileAction, type ProfileFormState } from "../_lib/actions";
 import { SEX_CHOICES, type ProfileFormValues } from "../_lib/form-values";
 import { EMPTY_INTERVALS_FORM_VALUES } from "../_lib/intervals-values";
@@ -158,9 +161,19 @@ export type ProfileFormProps = {
   /** `onboarding` : aucun profil en base — c'est une création. */
   mode: "onboarding" | "edit";
   values: ProfileFormValues;
+  /**
+   * Une FC max plus haute que celle du profil, observée sur une séance
+   * importée. `null` s'il n'y a rien à proposer — et il n'y a jamais rien à
+   * proposer à l'onboarding, où aucune séance n'est encore rattachée.
+   */
+  maxHrSuggestion?: MaxHrSuggestionView | null;
 };
 
-export function ProfileForm({ mode, values }: ProfileFormProps) {
+export function ProfileForm({
+  mode,
+  values,
+  maxHrSuggestion = null,
+}: ProfileFormProps) {
   const [state, formAction, isPending] = useActionState(
     saveProfileAction,
     INITIAL_STATE,
@@ -335,6 +348,22 @@ export function ProfileForm({ mode, values }: ProfileFormProps) {
             >
               {HINTS.heartRate}
             </p>
+
+            {/* Au plus près du champ qu'il propose de changer : une proposition
+                affichée ailleurs demanderait de retrouver le champ, et une
+                proposition sans son champ ne se vérifie pas. */}
+            {maxHrSuggestion === null ? null : (
+              <MaxHrSuggestionCard
+                suggestion={maxHrSuggestion}
+                // L'accent de cet écran est déjà pris par « Enregistrer » : un
+                // second aplat accent ferait deux CTA sur la même colonne.
+                emphasis="secondary"
+                // Le champ est contrôlé : sans ça, il garderait l'ancienne
+                // valeur à l'écran alors que la base porte la nouvelle.
+                onAccepted={(bpm) => setField("maxHrBpm", String(bpm))}
+                className="mt-3"
+              />
+            )}
 
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-3">
               <div>

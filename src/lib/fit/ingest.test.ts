@@ -14,6 +14,7 @@ const { mocks } = vi.hoisted(() => ({
     maybeReviewActivePlan: vi.fn(),
     maybeApplyFitnessTest: vi.fn(),
     recordActivityWeather: vi.fn(),
+    recordSustainedMaxHr: vi.fn(),
   },
 }));
 
@@ -25,6 +26,10 @@ vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
   saveActivityStreams: mocks.saveActivityStreams,
   hasActivityStreams: mocks.hasActivityStreams,
+}));
+
+vi.mock('@/data/max-hr-suggestion', () => ({
+  recordSustainedMaxHr: mocks.recordSustainedMaxHr,
 }));
 
 vi.mock('@/data/plan-reconciliation', () => ({
@@ -75,6 +80,15 @@ const REPARSED: ParsedFitActivity = {
   },
 };
 
+/** Une séance dont le flux cardiaque tient un plateau, pic de capteur compris. */
+const SUSTAINED: ParsedFitActivity = {
+  ...PARSED,
+  streams: {
+    time: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    heartrate: [160, 214, 160, 191, 191, 191, 191, 191, 191, 191, 191],
+  },
+};
+
 const BUFFER = Buffer.from('fit');
 
 /**
@@ -93,6 +107,7 @@ beforeEach(() => {
   mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
   mocks.maybeApplyFitnessTest.mockResolvedValue(undefined);
   mocks.recordActivityWeather.mockResolvedValue(undefined);
+  mocks.recordSustainedMaxHr.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
@@ -137,6 +152,30 @@ describe('ingestFitBuffer', () => {
 
     expect(mocks.hasActivityStreams).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.saveActivityStreams).not.toHaveBeenCalled();
+    // La FC max soutenue dérive des séries : un fichier dont on n'a pas retenu
+    // les séries n'a pas non plus à la décider.
+    expect(mocks.recordSustainedMaxHr).not.toHaveBeenCalled();
+  });
+
+  it('enregistre la FC max soutenue, après les séries dont elle dérive', async () => {
+    mocks.parseFitActivity.mockReturnValue(SUSTAINED);
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    // Huit secondes tenues à 191, précédées d'un pic isolé à 214 : c'est bien la
+    // valeur soutenue qui est enregistrée, pas le maximum brut.
+    expect(mocks.recordSustainedMaxHr).toHaveBeenCalledWith(42, ATHLETE_ID, 191);
+    expect(mocks.saveActivityStreams.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.recordSustainedMaxHr.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it('écrit `null` quand aucune FC max soutenue n’est établie', async () => {
+    // Deux points d'une seconde : rien n'a tenu cinq secondes. `null` est une
+    // valeur écrite — la colonne suit les séries, elle ne les complète pas.
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordSustainedMaxHr).toHaveBeenCalledWith(42, ATHLETE_ID, null);
   });
 
   it('écrit les séries d’un rapprochement de séance quand l’activité n’en a aucune', async () => {

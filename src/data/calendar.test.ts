@@ -168,6 +168,7 @@ function activityRow(overrides: Partial<Activity> = {}): Activity {
     maxHrBpm: 161,
     avgPaceSecPerKm: 332.5,
     avgCadenceSpm: 86,
+    sustainedMaxHrBpm: null,
     createdAt: new Date('2026-08-11T12:00:00.000Z'),
     ...overrides,
   };

@@ -78,7 +78,11 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
       {/* `mode="edit"` : ce composant n'est monté que lorsqu'un profil existe —
           la création, elle, reste l'écran plein de `/profile`. */}
       <TabsContent value="profile" active={current === "profile"}>
-        <ProfileForm mode="edit" values={data.profile} />
+        <ProfileForm
+          mode="edit"
+          values={data.profile}
+          maxHrSuggestion={data.maxHrSuggestion}
+        />
       </TabsContent>
 
       {/* Les invitations sont une affaire de compte, pas de profil physiologique

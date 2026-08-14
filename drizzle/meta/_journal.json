@@ -155,6 +155,13 @@
       "when": 1786726009059,
       "tag": "0021_forecast_location",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1786727832511,
+      "tag": "0022_sustained_max_hr",
+      "breakpoints": true
     }
   ]
 }

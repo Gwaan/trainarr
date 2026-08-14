@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import type { ParsedFitActivity } from './parse';
 
@@ -45,6 +47,8 @@ const PLAN_ID = 3;
 
 /** L'activité que l'ingestion vient d'écrire. */
 const ACTIVITY_ID = 42;
+
+const dialect = new PgDialect();
 
 /*
  * La base : une file de jeux de résultats par table, consommée dans l'ordre des
@@ -131,6 +135,9 @@ const { activitiesDal } = vi.hoisted(() => ({
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
     hasActivityStreams: vi.fn(),
+    // `recordSustainedMaxHr`, lui, tourne pour de vrai : c'est un `UPDATE` de
+    // plus qui doit porter l'athlète du fichier. Il n'a besoin que de l'erreur.
+    ActivityNotFoundError: class ActivityNotFoundError extends Error {},
   },
 }));
 
@@ -350,7 +357,13 @@ beforeEach(() => {
       ],
     ],
   };
-  dbState.returning = { planned_sessions: [[{ id: 11 }]], plans: [[{ id: PLAN_ID }]] };
+  dbState.returning = {
+    planned_sessions: [[{ id: 11 }]],
+    plans: [[{ id: PLAN_ID }]],
+    // L'écriture de la FC max soutenue rend sa ligne : sans elle, le DAL conclut
+    // que l'activité n'appartient pas à l'athlète.
+    activities: [[{ id: ACTIVITY_ID }]],
+  };
 });
 
 afterEach(() => {
@@ -381,6 +394,19 @@ describe('ingestion de fond : la chaîne complète, sans session', () => {
         (update.values as Record<string, unknown>).lastTestNote !== undefined,
     );
     expect(record).toBeDefined();
+  });
+
+  it('écrit la FC max soutenue sous l’athlète du fichier', async () => {
+    await ingestFitBuffer(Buffer.from('fit'), ATHLETE_ID);
+    await drainFollowUp();
+
+    const write = dbState.updates.find(
+      (update) =>
+        update.table === 'activities' &&
+        (update.values as Record<string, unknown>).sustainedMaxHrBpm !== undefined,
+    );
+    expect(write).toBeDefined();
+    expect(dialect.sqlToQuery(write?.where as SQL).params).toContain(ATHLETE_ID);
   });
 
   it('relève la météo sous l’athlète du fichier, sans passer par une session', async () => {

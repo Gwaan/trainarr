@@ -8,11 +8,13 @@ import { requireSession } from "./_lib/require-session";
 
 import { DashboardSkeleton } from "./_components/dashboard-skeleton";
 import { KeyMetrics } from "./_components/key-metrics";
+import { MaxHrSuggestionCard } from "./_components/max-hr-suggestion-card";
 import { OnboardingCard } from "./_components/onboarding-card";
 import { RecentActivitiesPanel } from "./_components/recent-activities-panel";
 import { TodaySessionPanel } from "./_components/today-session-panel";
 import { TrainingLoadPanel } from "./_components/training-load-panel";
 import { capitalize, formatFullDate } from "./_lib/format";
+import { toMaxHrSuggestionView } from "./_lib/max-hr-suggestion";
 
 /**
  * Contenu du tableau de bord.
@@ -34,6 +36,7 @@ async function DashboardContent() {
 
   // Aucun nom d'athlète = aucun profil en base : l'installation est neuve.
   const hasProfile = summary.athleteName !== null;
+  const maxHrSuggestion = toMaxHrSuggestionView(summary.maxHrSuggestion);
 
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
@@ -43,6 +46,19 @@ async function DashboardContent() {
       />
 
       {hasProfile ? null : <OnboardingCard />}
+
+      {/* Juste sous l'en-tête, à la place qu'occupe l'invitation à créer son
+          profil — les deux s'excluent (sans profil, aucune séance n'est
+          rattachée) et c'est le seul endroit du tableau de bord réservé à un
+          état qui appelle une décision. Aucun risque de la voir clignoter
+          pendant le chargement : tout ce bloc est suspendu derrière
+          `connection()`, et le squelette ne réserve rien pour elle. */}
+      {maxHrSuggestion === null ? null : (
+        // Le tableau de bord ne porte aucun autre CTA accent : celui-ci peut le
+        // prendre (l'`OnboardingCard`, qui en a un, ne s'affiche jamais en même
+        // temps).
+        <MaxHrSuggestionCard suggestion={maxHrSuggestion} emphasis="accent" />
+      )}
 
       <KeyMetrics
         fitness={summary.fitness}

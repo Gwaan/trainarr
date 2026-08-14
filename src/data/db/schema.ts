@@ -129,6 +129,28 @@ export const athlete = pgTable('athlete', {
   forecastLocationLabel: text('forecast_location_label'),
   forecastLatitudeDeg: real('forecast_latitude_deg'),
   forecastLongitudeDeg: real('forecast_longitude_deg'),
+  /**
+   * Seuil de refus des propositions de FC max : **toute proposition supérieure
+   * ou égale à cette valeur a déjà été écartée** par l'athlète. `NULL` tant
+   * qu'aucune ne l'a été.
+   *
+   * L'application propose une FC max quand une séance importée a tenu une
+   * fréquence plus haute que celle du profil (cf. `src/data/max-hr-suggestion.ts`).
+   * L'athlète peut refuser — un artefact de capteur qui aurait passé le filtre
+   * des cinq secondes soutenues — et ce refus doit tenir : sans mémoire, la même
+   * proposition reviendrait à chaque lecture de l'écran.
+   *
+   * **Un seuil, et pas un simple « déjà vu »**, parce que la proposition est
+   * toujours la valeur la plus haute observée : mémoriser le refus sans borner
+   * ce qu'il couvre enterrerait aussi toutes les valeurs plus basses, et un seul
+   * artefact à 215 désactiverait la fonction pour de bon. Avec un seuil, refuser
+   * 215 fait remonter la meilleure valeur **strictement inférieure** — la vraie,
+   * le plus souvent.
+   *
+   * Il n'est pas remis à zéro par une acceptation : « 215 et au-dessus, c'est du
+   * bruit » reste vrai après avoir accepté 192.
+   */
+  maxHrSuggestionDismissedBpm: integer('max_hr_suggestion_dismissed_bpm'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -186,6 +208,23 @@ export const activities = pgTable(
     elevationGainM: real('elevation_gain_m'),
     avgHrBpm: integer('avg_hr_bpm'),
     maxHrBpm: integer('max_hr_bpm'),
+    /**
+     * FC max **soutenue** de la séance : la plus haute fréquence tenue cinq
+     * secondes d'affilée (cf. `src/lib/metrics/sustained-hr.ts`). `NULL` quand
+     * elle n'est pas établie — pas de canal cardiaque, ou aucune plage de
+     * mesures contiguës assez longue.
+     *
+     * Distincte de `max_hr_bpm`, qui est le maximum **instantané** annoncé par
+     * la session FIT : celui-ci porte les artefacts du capteur optique, et c'est
+     * précisément pour ça qu'il ne peut pas servir à proposer une FC max de
+     * profil. Les deux colonnes cohabitent — l'une décrit la séance, l'autre
+     * sert de preuve.
+     *
+     * Calculée à l'ingestion, en même temps que les séries temporelles dont elle
+     * dérive (cf. `src/lib/fit/ingest.ts`) : elle vaut donc pour les imports à
+     * venir, et reste `NULL` sur l'historique déjà en base.
+     */
+    sustainedMaxHrBpm: integer('sustained_max_hr_bpm'),
     avgPaceSecPerKm: real('avg_pace_sec_per_km'),
     avgCadenceSpm: real('avg_cadence_spm'),
     createdAt: createdAt(),

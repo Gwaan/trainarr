@@ -101,6 +101,7 @@ const ATHLETE: Athlete = {
   forecastLocationLabel: null,
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
+  maxHrSuggestionDismissedBpm: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
@@ -124,6 +125,7 @@ const ACTIVITY: Activity = {
   maxHrBpm: 168,
   avgPaceSecPerKm: 250,
   avgCadenceSpm: 172,
+  sustainedMaxHrBpm: null,
   createdAt: new Date('2026-08-09T07:00:00.000Z'),
 };
 

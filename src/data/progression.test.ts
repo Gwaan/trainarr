@@ -127,6 +127,7 @@ const ATHLETE: Athlete = {
   forecastLocationLabel: null,
   forecastLatitudeDeg: null,
   forecastLongitudeDeg: null,
+  maxHrSuggestionDismissedBpm: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -149,6 +150,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     maxHrBpm: 158,
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
+    sustainedMaxHrBpm: null,
     createdAt: new Date('2026-08-01T10:00:00.000Z'),
     ...overrides,
   };
