@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import { AiSuspendedPanel, type SuspendedAiFeature } from "@/components/ai-suspended-panel";
 import { PageHeader } from "@/components/page-header";
 import { getAthleteProfile, getCurrentAthleteId } from "@/data/athlete";
+import { getPendingPlanRevisionDetail } from "@/data/plan-revisions";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
@@ -13,6 +14,7 @@ import { requireSession } from "../_lib/require-session";
 
 import { PlanCreatePanel } from "./_components/plan-create-panel";
 import { PlanProposal } from "./_components/plan-proposal";
+import { PlanRevisionProposal } from "./_components/plan-revision-proposal";
 import { PlanSkeleton } from "./_components/plan-skeleton";
 import { PlanView } from "./_components/plan-view";
 import {
@@ -75,14 +77,33 @@ async function PlanContent() {
   // fait) : ni plan actif, ni proposition — comme avant.
   const athleteId = await getCurrentAthleteId();
 
-  const [active, draft, availability, profile] = await Promise.all([
+  const [active, draft, revision, availability, profile] = await Promise.all([
     athleteId === null ? null : getActivePlanWithSessions(athleteId),
     athleteId === null ? null : getDraftPlanWithSessions(athleteId),
+    // La réévaluation que le coach propose. La lecture exige déjà que son plan
+    // soit toujours le plan **actif** : il n'y a rien de plus à vérifier ici.
+    athleteId === null ? null : getPendingPlanRevisionDetail(athleteId),
     getAiAvailability(),
     getAthleteProfile(),
   ]);
 
   const maxHrBpm = profile?.maxHrBpm ?? null;
+
+  /*
+   * La réévaluation se pose **au-dessus du plan actif**, dans les deux
+   * dispositions possibles : ce qu'elle propose ne se juge que par comparaison
+   * avec le plan qu'elle réécrit, et il faut donc l'avoir sous les yeux juste en
+   * dessous. Elle n'apparaît jamais sans lui — la lecture la joint au plan actif.
+   */
+  const revisionBlock =
+    revision === null || active === null ? null : (
+      <PlanRevisionProposal
+        detail={revision}
+        plan={active.plan}
+        today={today}
+        maxHrBpm={maxHrBpm}
+      />
+    );
 
   /*
    * Une proposition en attente prend toute la place : c'est la décision du
@@ -106,6 +127,7 @@ async function PlanContent() {
           <div className="flex flex-col gap-3 sm:gap-4">
             <h2 className="eyebrow px-0.5">Ton plan en cours</h2>
             <div className="flex flex-col gap-5 sm:gap-6">
+              {revisionBlock}
               <PlanView
                 plan={active.plan}
                 sessions={active.sessions}
@@ -155,6 +177,7 @@ async function PlanContent() {
   return (
     <>
       <PageHeader title="Plan" subtitle={SUBTITLES.list} />
+      {revisionBlock}
       <PlanView
         plan={active.plan}
         sessions={active.sessions}

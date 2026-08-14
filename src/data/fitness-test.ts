@@ -264,28 +264,26 @@ function bestFiveKTimeS(rows: readonly { type: string; data: unknown[] }[]): num
   return segment?.timeS ?? null;
 }
 
-/** Ce qu'un test laisse au plan quand il n'y a aucune semaine à réécrire. */
+/** Ce qu'un test laisse au plan quand il n'y a rien à proposer. */
 export type FitnessTestRecord = {
   /** La phrase destinée à l'athlète — toujours écrite, quel que soit le verdict. */
   note: string;
-  /**
-   * Le chrono de référence mis à jour, absent quand le test ne le fait pas
-   * bouger (le cas de loin le plus fréquent).
-   */
-  reference?: { timeS: number; updatedOn: string };
 };
 
 /**
- * Inscrit le résultat d'un test sur le plan actif, **sans toucher aux séances**.
+ * Inscrit le résultat d'un test sur le plan actif : **la note, et rien d'autre**.
  *
- * Le chemin nominal d'un test qui améliore le chrono ne passe pas par ici : il
- * passe par `applyPlanUpdate`, qui écrit le nouveau chrono **et** les semaines
- * recalculées dans la même transaction — sans quoi le plan afficherait, entre
- * les deux écritures, des allures qui ne viennent pas du chrono qu'il annonce.
+ * Le chrono de référence ne s'écrit plus ici, et il ne s'écrit plus nulle part à
+ * l'import : un test qui améliore le chrono **propose** sa recalibration
+ * (`data/plan-revisions.ts`), et c'est l'acceptation de cette proposition qui
+ * écrit le chrono **et** les semaines qu'il recalcule, dans la même transaction.
+ * Écrire le chrono seul décalerait toutes les allures du plan sans en réécrire
+ * une seule séance — exactement l'incohérence que l'invariant existait pour
+ * éviter.
  *
- * Cette fonction couvre les deux cas où il n'y a rien à réécrire : un test qui
- * ne change rien (la note seule), et un test qui améliore le chrono alors qu'il
- * ne reste plus une semaine à recalculer.
+ * Reste donc ce que le résultat d'un test a de factuel, et qui vaut d'être lu
+ * quel que soit le sort de la proposition : la phrase. Elle est écrite pour tous
+ * les verdicts, y compris ceux qui ne changent rien.
  *
  * L'appartenance et l'état actif sont dans le `WHERE` de l'`UPDATE` : une
  * lecture préalable laisserait une fenêtre entre le contrôle et l'écriture.
@@ -300,17 +298,7 @@ export async function recordFitnessTest(
 ): Promise<boolean> {
   const updated = await db
     .update(plans)
-    .set({
-      lastTestNote: record.note,
-      ...(record.reference === undefined
-        ? {}
-        : {
-            referenceDistance: '5k',
-            referenceTimeS: Math.round(record.reference.timeS),
-            referenceUpdatedOn: record.reference.updatedOn,
-          }),
-      updatedAt: new Date(),
-    })
+    .set({ lastTestNote: record.note, updatedAt: new Date() })
     .where(and(eq(plans.id, planId), eq(plans.athleteId, athleteId), eq(plans.status, 'active')))
     .returning({ id: plans.id });
 

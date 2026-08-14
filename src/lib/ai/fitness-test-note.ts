@@ -46,12 +46,16 @@ export function fitnessTestNote(
       const time = `${formatRaceTime(verdict.timeS)} sur 5 km`;
       const paces =
         paceChange === null
-          ? 'Tes allures sont recalculées'
-          : `Ton allure de seuil passe de ${formatPace(paceChange.fromSecPerKm)} à ` +
+          ? 'Tes allures peuvent être recalculées'
+          : `Ton allure de seuil passerait de ${formatPace(paceChange.fromSecPerKm)} à ` +
             `${formatPace(paceChange.toSecPerKm)} (${Math.round(paceChange.fromSecPerKm - paceChange.toSecPerKm)} s/km de moins)`;
+      // Au conditionnel, et pas au passé : rien n'est appliqué tant que l'athlète
+      // n'a pas accepté la réévaluation (cf. `lib/ai/fitness-test-service.ts`).
+      // Une note au passé décrirait un plan qui n'a pas changé.
       return (
         `${head} : ${time}, soit un VDOT de ${formatNumber(verdict.vdot, 1)}. ` +
-        `${paces}, et la fin du plan est réécrite sur ce nouveau chrono.`
+        `${paces} — le coach te propose de réécrire la fin du plan sur ce nouveau chrono, ` +
+        `à accepter depuis la page du plan.`
       );
     }
     case 'not-improved':

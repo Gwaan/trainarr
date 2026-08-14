@@ -158,11 +158,13 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
         */}
         {plan.referenceDistance === null || plan.referenceTimeS === null ? null : (
           <Setting
-            label={
-              plan.referenceUpdatedOn === null
-                ? "Chrono de référence"
-                : `Chrono de référence · ${formatCivilDay(plan.referenceUpdatedOn)}`
-            }
+            // Sans date : `referenceUpdatedOn` marque désormais le dernier test
+            // **évalué**, pas le dernier chrono retenu — la recalibration se
+            // propose et peut être refusée (cf. `data/plan-revisions.ts`).
+            // L'accoler au chrono daterait donc parfois une valeur qui n'a pas
+            // bougé. Ce que le dernier test a donné se lit juste en dessous,
+            // dans son encart, qui le dit mieux qu'une date.
+            label="Chrono de référence"
             // Le chrono est une saisie, mais c'est le seul endroit de l'appli
             // où le VDOT — qui en sort et qui fixe toutes les allures du plan —
             // est visible en creux. La fiche s'accroche donc ici.
@@ -189,12 +191,17 @@ export function PlanOverview({ plan }: { plan: PlanDto }) {
 
       {/*
         La dernière relecture automatique du plan. Rien ne s'affiche tant qu'il
-        n'y en a pas eu : une ligne « jamais révisé » n'apprendrait rien, et
-        dater la révision par la création du plan serait faux.
+        n'y en a pas eu : une ligne « jamais relu » n'apprendrait rien, et dater
+        la relecture par la création du plan serait faux.
+
+        « Relu », et non plus « Révisé » : le marqueur avance dès que le coach a
+        jugé le passé, que sa réévaluation soit ensuite acceptée ou refusée (cf.
+        `data/plan-revisions.ts`). Écrire « révisé » ferait dire à cette ligne
+        qu'un plan a changé alors qu'il a seulement été examiné.
       */}
       {plan.reviewedAt === null ? null : (
         <p className="mt-3 text-[0.72rem] text-fg-faint">
-          Révisé par le coach le{" "}
+          Relu par le coach le{" "}
           <span className="num">{formatCivilDay(toCivilDate(new Date(plan.reviewedAt)))}</span>
         </p>
       )}

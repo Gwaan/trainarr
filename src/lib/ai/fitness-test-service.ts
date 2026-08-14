@@ -19,9 +19,22 @@ import 'server-only';
  * anciennes allures — exactement le genre d'incohérence silencieuse que ce
  * projet refuse. `rewriteRemainingPlan` est le seul chemin qui reconstruit la
  * fin d'un plan en cours, et il lit les allures depuis le plan : on lui passe
- * donc le plan **déjà porteur du nouveau chrono**, et l'écriture des deux
- * moitiés — chrono et séances — tient dans une seule transaction
- * (`applyPlanUpdate`).
+ * donc le plan **déjà porteur du nouveau chrono**, sans que ce chrono ne soit
+ * écrit nulle part.
+ *
+ * ## Rien ne s'applique sans accord
+ *
+ * Le chrono **et** les semaines recalculées partent ensemble dans une
+ * **proposition** (`data/plan-revisions.ts`), pas dans le plan. Les deux moitiés
+ * restent indissociables — c'est tout l'objet de l'invariant ci-dessus — mais
+ * elles sont désormais indissociables *dans le payload proposé*, et elles
+ * n'entrent en base que si l'athlète accepte. Un chrono appliqué seul, à
+ * l'import, aurait été le pire des deux mondes : la moitié qui décale toutes les
+ * allures, sans la moitié qui les réécrit.
+ *
+ * Le marqueur, lui, avance au dépôt (`referenceUpdatedOn`, `lastTestNote`) : le
+ * test a été évalué, et un refus ne doit pas le faire réévaluer au prochain
+ * réimport du même fichier.
  *
  * ## Le silence est un bug
  *
@@ -57,16 +70,15 @@ import 'server-only';
 import { todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot } from '@/data/coach-context';
 import { getFitnessTestCandidate, recordFitnessTest } from '@/data/fitness-test';
-import { reconcilePlanSessions } from '@/data/plan-reconciliation';
 import { getPlanUpdatedAt } from '@/data/plan-review';
+import { depositPlanRevision, toPlanRevisionSessions } from '@/data/plan-revisions';
 import {
   InvalidPlanError,
-  applyPlanUpdate,
   getActivePlanWithSessions,
   type PlanDto,
+  type PlanSessionDto,
 } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
-import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import {
   fitnessTestVerdict,
   MAXIMAL_EFFORT_HR_SHARE,
@@ -77,6 +89,11 @@ import {
   trainingPacesFromRace,
   vdotFromRace,
 } from '@/lib/metrics/vdot';
+
+import {
+  planRevisionDirection,
+  planRevisionTotals,
+} from '@/lib/plan-revision/direction';
 
 import { fitnessTestNote } from './fitness-test-note';
 import { mapPlanWeeksToSessions } from './plan-schema';
@@ -280,21 +297,23 @@ function paceChangeOf(
 }
 
 /**
- * Le chrono a progressé : on l'écrit, et on réécrit la fin du plan avec lui.
+ * Le chrono a progressé : on reconstruit la fin du plan avec lui, et on **propose**
+ * les deux ensemble.
  *
- * Les deux moitiés tiennent dans **une** transaction (`applyPlanUpdate`). Deux
- * écritures séparées laisseraient, entre elles, un plan dont les séances ne
- * viennent pas du chrono qu'il affiche.
+ * Les deux moitiés — le chrono et les séances qui en découlent — voyagent dans
+ * le même payload, et n'entrent en base que si l'athlète accepte. Les séparer
+ * laisserait un plan dont les séances ne viennent pas du chrono qu'il affiche ;
+ * appliquer le chrono seul à l'import ferait exactement cela.
  *
- * Deux replis, et chacun écrit quand même la note — le résultat d'un test est un
- * fait, il ne se perd pas parce que la reconstruction a échoué :
+ * Trois replis, et chacun écrit quand même la note — le résultat d'un test est un
+ * fait, il ne se perd pas parce qu'il n'y a rien à proposer. Aucun n'écrit le
+ * chrono : sans les semaines qui vont avec, il ne vaut rien, et rien ne
+ * s'applique sans accord.
  *
  * - **plus une semaine à réécrire** (le test tombait en fin de plan, ou le plan
- *   s'est terminé entre-temps) : le chrono est enregistré seul. Il servira au
- *   plan suivant ;
- * - **la reconstruction échoue** : le chrono est enregistré seul lui aussi, et
- *   la révision automatique — qui lit les allures sur le plan — recalculera les
- *   semaines restantes à son prochain palier ;
+ *   s'est terminé entre-temps) : il n'y a pas de réévaluation à proposer ;
+ * - **la reconstruction échoue** : de même, et la revue automatique reproposera
+ *   au prochain palier ;
  * - **le plan a changé pendant la reconstruction** : même issue, pour la raison
  *   décrite au contrôle de fraîcheur plus bas.
  */
@@ -308,16 +327,10 @@ async function applyImprovedTest(
   const note = fitnessTestNote(verdict, testedOn, paceChange);
   const timeS = Math.round(verdict.timeS);
   const today = todayCivilDate();
-  // La référence est datée du **jour du test**, jamais du jour de l'import : ce
-  // que cette date porte est la cadence de Daniels, c'est-à-dire l'écart entre
-  // deux **efforts**. Un fichier arrivé trois jours plus tard rognerait sinon
-  // trois jours sur la fenêtre du test suivant, qui, lui, est déjà posé dans le
-  // plan — et le rejetterait pour une raison qui n'a rien de physiologique.
-  const reference = { timeS, updatedOn: testedOn };
 
   const active = await getActivePlanWithSessions(athleteId);
   if (active === null || active.plan.id !== planId) {
-    console.log(`[plan/test] plan ${planId} : plus le plan actif — chrono non écrit.`);
+    console.log(`[plan/test] plan ${planId} : plus le plan actif — rien à proposer.`);
     return;
   }
 
@@ -330,7 +343,8 @@ async function applyImprovedTest(
   const fromDate = shiftCivilDate(today, 1);
 
   // Le plan **porteur du nouveau chrono** : c'est de lui que la reconstruction
-  // tire sa table d'allures (`planTrainingPaces`).
+  // tire sa table d'allures (`planTrainingPaces`). Il n'est écrit nulle part —
+  // ce chrono-là part dans la proposition, avec les séances qu'il calcule.
   const updated: PlanDto = { ...active.plan, referenceDistance: '5k', referenceTimeS: timeS };
 
   let remaining: RemainingPlanWindow;
@@ -339,9 +353,9 @@ async function applyImprovedTest(
   } catch (error) {
     if (!(error instanceof InvalidPlanError)) throw error;
     console.log(
-      `[plan/test] plan ${planId} : plus une semaine à recalculer — chrono enregistré seul.`,
+      `[plan/test] plan ${planId} : plus une semaine à recalculer — note seule, rien à proposer.`,
     );
-    await recordFitnessTest(planId, { note, reference }, athleteId);
+    await recordFitnessTest(planId, { note }, athleteId);
     return;
   }
 
@@ -357,42 +371,108 @@ async function applyImprovedTest(
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(
       `[plan/test] plan ${planId} : reconstruction impossible — ${reason} ; ` +
-        `chrono enregistré seul, la révision recalculera les semaines restantes.`,
+        `note seule, la revue reproposera au prochain palier.`,
     );
-    await recordFitnessTest(planId, { note, reference }, athleteId);
+    await recordFitnessTest(planId, { note }, athleteId);
     return;
   }
 
   // Le plan a-t-il bougé pendant les minutes de reconstruction ? Le même
   // contrôle que la révision (`review-service.ts`), et au même endroit : au plus
-  // près de la transaction, après la seule étape lente de la fonction.
+  // près du dépôt, après la seule étape lente de la fonction.
   //
   // Sans lui, les deux verrous de process — un par service — ne se voient pas
   // l'un l'autre : un import qui lance une révision, puis un second import deux
-  // secondes plus tard qui lance un test, et le test écrit des séances
+  // secondes plus tard qui lance un test, et le test proposerait des séances
   // construites sur des réglages que la révision vient de remplacer. Le sens
   // inverse était déjà sûr, c'est l'asymétrie qui posait problème.
   //
-  // Le chrono, lui, s'écrit quand même : il ne vient pas du plan mais de
-  // l'activité, et c'est un fait mesuré qui ne se perd pas parce qu'une révision
-  // est passée entre-temps. Seules les séances calculées dessus sont jetées ; la
-  // révision suivante les recalculera à partir du plan à jour.
+  // Le chrono ne s'écrit pas davantage : sans les semaines qui en découlent, il
+  // décalerait toutes les allures sans réécrire une seule séance. La note, elle,
+  // reste — c'est un fait mesuré.
   const updatedAtAfter = await getPlanUpdatedAt(planId, athleteId);
   if (updatedAtAfter !== updatedAtBefore) {
     console.log(
-      `[plan/test] plan ${planId} modifié pendant la reconstruction — séances abandonnées ; ` +
-        `chrono enregistré seul, la révision recalculera les semaines restantes.`,
+      `[plan/test] plan ${planId} modifié pendant la reconstruction — proposition abandonnée ; ` +
+        `note seule, la revue reproposera au prochain palier.`,
     );
-    await recordFitnessTest(planId, { note, reference }, athleteId);
+    await recordFitnessTest(planId, { note }, athleteId);
     return;
   }
 
-  try {
-    await applyPlanUpdate(
-      planId,
-      {
+  await proposeImprovedTest({
+    plan: active.plan,
+    sessions: active.sessions,
+    rewrite,
+    window: remaining,
+    fromDate,
+    testedOn,
+    timeS,
+    note,
+    verdict,
+    athleteId,
+  });
+}
+
+/** Ce qu'il faut pour déposer la proposition d'un test qui a fait mieux. */
+type ImprovedTestProposal = {
+  plan: PlanDto;
+  /** Toutes les séances du plan : la fenêtre restante s'y filtre. */
+  sessions: readonly PlanSessionDto[];
+  rewrite: RemainingPlanRewrite;
+  window: RemainingPlanWindow;
+  fromDate: string;
+  testedOn: string;
+  timeS: number;
+  note: string;
+  verdict: Extract<FitnessTestVerdict, { outcome: 'improved' }>;
+  athleteId: number;
+};
+
+/**
+ * Dépose la proposition : le nouveau chrono **et** les semaines qu'il recalcule.
+ *
+ * Le payload est exactement ce que l'écriture directe appliquait auparavant —
+ * même jour de reprise, mêmes séances, mêmes réglages —, à ceci près qu'il
+ * attend un accord. La note du test sert de **raison** : elle dit déjà ce qui
+ * s'est passé et ce que ça change, et deux formulations pour la même chose
+ * auraient fini par diverger.
+ *
+ * Le **sens** se calcule, en comparant ce que le plan prescrit encore sur la
+ * fenêtre — les séances non réalisées à partir du jour de reprise, exactement
+ * celles que l'acceptation remplacerait — à ce que la reconstruction y mettrait.
+ * Un chrono qui progresse ne veut pas dire « plus de charge » : les allures
+ * accélèrent, le kilométrage peut très bien descendre.
+ *
+ * Aucun effet de bord : ni rapprochement des séances, ni republication du
+ * calendrier intervals.icu. Pousser à la montre un plan que personne n'a accepté
+ * publierait une proposition.
+ */
+async function proposeImprovedTest(proposal: ImprovedTestProposal): Promise<void> {
+  const { plan, window, fromDate, note, testedOn, timeS, verdict, athleteId } = proposal;
+
+  const upcoming = proposal.sessions.filter(
+    (session) => session.scheduledOn >= fromDate && session.completedActivityId === null,
+  );
+  const sessions = toPlanRevisionSessions(
+    mapPlanWeeksToSessions(proposal.rewrite.weeks, window.firstWeekStart),
+  );
+
+  const before = planRevisionTotals(upcoming);
+  const after = planRevisionTotals(sessions);
+
+  const outcome = await depositPlanRevision(
+    {
+      source: 'fitness-test',
+      planId: plan.id,
+      reason: note,
+      direction: planRevisionDirection(before, after),
+      weeks: window.weeks,
+      before,
+      after,
+      payload: {
         fromDate,
-        sessions: mapPlanWeeksToSessions(rewrite.weeks, remaining.firstWeekStart),
+        sessions,
         settings: {
           referenceDistance: '5k',
           referenceTimeS: timeS,
@@ -400,42 +480,33 @@ async function applyImprovedTest(
           lastTestNote: note,
         },
       },
-      athleteId,
+      // Le marqueur avance avec le dépôt : le test a été évalué, et un réimport
+      // du même fichier ne doit pas reproposer ce que l'athlète a refusé. La
+      // date porte aussi la cadence de Daniels — l'écart entre deux **efforts**
+      // évalués —, et c'est le jour du test qu'elle compte, jamais celui de
+      // l'import : un fichier arrivé trois jours plus tard rognerait sinon trois
+      // jours sur la fenêtre du test suivant, déjà posé dans le plan.
+      referenceUpdatedOn: testedOn,
+      lastTestNote: note,
+    },
+    athleteId,
+  );
+
+  if (outcome === 'deposited') {
+    console.log(
+      `[plan/test] plan ${plan.id} : réévaluation proposée — 5 km en ${timeS} s ` +
+        `(VDOT ${verdict.vdot.toFixed(1)}, +${verdict.gain.toFixed(1)}), ` +
+        `${before.volumeKm} → ${after.volumeKm} km sur ${window.weeks} semaines.`,
     );
-  } catch (error) {
-    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
-    console.error(
-      `[plan/test] plan ${planId} : écriture du plan impossible — ${reason} ; ` +
-        `chrono enregistré seul, la révision recalculera les semaines restantes.`,
-    );
-    await recordFitnessTest(planId, { note, reference }, athleteId);
     return;
   }
 
+  // Ni l'une ni l'autre n'est une panne, et aucune n'a avancé le marqueur : la
+  // note seule est écrite, et le test sera réévalué au prochain passage.
   console.log(
-    `[plan/test] plan ${planId} : chrono de référence porté à 5 km en ${timeS} s ` +
-      `(VDOT ${verdict.vdot.toFixed(1)}, +${verdict.gain.toFixed(1)}) et fin du plan réécrite.`,
+    outcome === 'no-active-plan'
+      ? `[plan/test] plan ${plan.id} : plus le plan actif — proposition abandonnée.`
+      : `[plan/test] plan ${plan.id} : une autre proposition vient d'être déposée — abandon.`,
   );
-
-  await applyTestEffects(planId, athleteId);
-}
-
-/**
- * Les deux effets de bord d'un plan qui vient de changer, menés comme une tâche
- * de fond — mêmes raisons et mêmes gardes que `applyReviewEffects`
- * (`review-service.ts`), y compris l'attente de la synchronisation : le
- * déclencheur est le watcher FIT, qui tourne hors contexte de requête.
- */
-async function applyTestEffects(planId: number, athleteId: number): Promise<void> {
-  try {
-    await reconcilePlanSessions(planId, athleteId);
-  } catch (error) {
-    console.error(`[plan/test] rapprochement des séances du plan ${planId} impossible :`, error);
-  }
-
-  try {
-    await syncPlanToIntervalsSafely('test chronométré', athleteId);
-  } catch (error) {
-    console.error(`[plan/test] synchronisation du calendrier impossible :`, error);
-  }
+  await recordFitnessTest(plan.id, { note }, athleteId);
 }

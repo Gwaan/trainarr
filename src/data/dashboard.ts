@@ -10,6 +10,7 @@ import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
 import { selectMaxHrSuggestion, type MaxHrSuggestionDto } from './max-hr-suggestion';
+import { getPendingPlanRevision, type PlanRevisionDto } from './plan-revisions';
 import { getWeatherForecast, type WeatherForecastDto } from './weather-forecast';
 import {
   buildDailyTrimp,
@@ -94,6 +95,18 @@ export type DashboardSummary = {
    * réglages — {@link selectMaxHrSuggestion}, à qui le profil déjà lu est passé.
    */
   maxHrSuggestion: MaxHrSuggestionDto | null;
+  /**
+   * La **réévaluation de plan** que le coach propose, `null` s'il n'y en a pas
+   * (cf. `./plan-revisions.ts`).
+   *
+   * Elle vit ici pour la même raison que la proposition de FC max : le tableau
+   * de bord est le seul écran qu'on ouvre sans rien chercher, et une
+   * proposition que l'athlète ne verrait qu'en allant sur la page du plan
+   * n'aurait pas beaucoup plus d'existence que l'écriture silencieuse qu'elle
+   * remplace. Le DTO est **minimal** — le sens, la raison, les totaux : le
+   * contenu proposé, lui, ne se juge pas depuis un tableau de bord.
+   */
+  planRevision: PlanRevisionDto | null;
 };
 
 const RECENT_ACTIVITIES_COUNT = 3;
@@ -113,6 +126,8 @@ const EMPTY_SUMMARY: Omit<DashboardSummary, 'today'> = {
   recentActivities: [],
   // Sans athlète, il n'y a aucune séance : rien à proposer.
   maxHrSuggestion: null,
+  // Ni plan, donc aucune réévaluation en attente.
+  planRevision: null,
 };
 
 /**
@@ -161,7 +176,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
   const profile = await getCurrentAthlete();
   if (!profile) return { ...EMPTY_SUMMARY, today };
 
-  const [activityRows, sessionRows, forecast, maxHrSuggestion] = await Promise.all([
+  const [activityRows, sessionRows, forecast, maxHrSuggestion, planRevision] = await Promise.all([
     // Historique complet : la CTL est une moyenne mobile sur 42 jours, et une
     // ligne d'activité est légère (les séries temporelles vivent à part).
     db
@@ -195,6 +210,9 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     getWeatherForecast(),
     // Le profil est déjà lu : la proposition n'a pas à le relire, elle le reçoit.
     selectMaxHrSuggestion(profile),
+    // Même lecture que la page du plan, en version courte : l'athlète est passé,
+    // jamais redéduit.
+    getPendingPlanRevision(profile.id),
   ]);
 
   const daily = buildDailyTrimp(activityRows, profile, today);
@@ -218,5 +236,6 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     forecast,
     recentActivities: activityRows.slice(0, RECENT_ACTIVITIES_COUNT).map(toActivitySummaryDto),
     maxHrSuggestion,
+    planRevision,
   };
 }

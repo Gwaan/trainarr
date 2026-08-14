@@ -162,6 +162,13 @@
       "when": 1786727832511,
       "tag": "0022_sustained_max_hr",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786729522962,
+      "tag": "0023_plan_revisions",
+      "breakpoints": true
     }
   ]
 }

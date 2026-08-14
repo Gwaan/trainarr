@@ -13,6 +13,13 @@ import { cn } from "@/lib/utils";
  * exact : l'en-tête, le panneau « Objectif » et sa resynchronisation, les
  * semaines du programme, puis le panneau « Ajuster le plan ».
  *
+ * **Le bandeau de réévaluation n'est pas figuré**, et c'est la même décision que
+ * pour la proposition de plan : il n'existe que tant qu'une réévaluation attend
+ * une décision, c'est-à-dire rarement. Lui réserver de la place ferait sauter
+ * l'écran à chaque chargement ordinaire — bien plus souvent qu'il ne l'évite.
+ * Comme la proposition, il arrive **au-dessus** de ce squelette : ce qui suit ne
+ * se décale pas, il se pousse d'un bloc.
+ *
  * Ce fichier est rendu à l'identique par le `<Suspense>` de `page.tsx` et par
  * `loading.tsx` : les deux se succèdent pendant un même chargement, et toute
  * différence de géométrie se verrait comme un saut. Toute modification de la

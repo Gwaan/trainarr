@@ -6,13 +6,22 @@ import 'server-only';
  *
  * ## Ce que la révision écrit, et sur quoi
  *
- * Elle s'applique au **plan actif directement**, pas à un brouillon. C'est le
- * contraire de la génération, et c'est délibéré : une proposition attend une
- * décision de l'athlète, or ce qu'on veut ici est un suivi continu — un plan qui
- * se corrige tout seul entre deux séances. Une proposition muette qui attendrait
- * un clic ne réadapterait rien ; et l'athlète garde de toute façon la main, la
- * page du plan lui montrant la date de la dernière révision et son résumé
- * portant la raison invoquée.
+ * **Elle ne réécrit plus le plan : elle le propose.** Une révision qui conclut
+ * « adjust » calcule la suite du plan puis la **dépose** (`data/plan-revisions.ts`),
+ * avec sa raison, son sens (plus ou moins de charge) et les totaux qui le
+ * justifient. Rien ne s'applique — ni les séances, ni les réglages, ni la
+ * republication du calendrier intervals.icu — tant que l'athlète n'a pas accepté
+ * depuis la page du plan.
+ *
+ * C'était l'inverse jusqu'ici : la révision écrivait dans le plan actif, en
+ * tâche de fond après un import, et l'athlète découvrait le changement en
+ * ouvrant son calendrier. Le suivi continu reste continu — c'est le **calcul**
+ * qui l'est, pas l'écriture.
+ *
+ * Le marqueur, lui, avance **au dépôt** : le coach a relu ce passé-là, quelle
+ * que soit la décision de l'athlète ensuite. C'est ce qui fait qu'un refus est
+ * définitif, et que l'import suivant ne relance pas la même génération pendant
+ * qu'une proposition attend (cf. `depositPlanRevision`).
  *
  * ## Ce que le coach décide, et ce que l'appli calcule
  *
@@ -86,7 +95,6 @@ import 'server-only';
 
 import { todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
-import { reconcilePlanSessions } from '@/data/plan-reconciliation';
 import {
   getPlanReview,
   getPlanUpdatedAt,
@@ -95,16 +103,19 @@ import {
   type PlanReviewOutcomeDto,
   type PlanReviewSessionDto,
 } from '@/data/plan-review';
+import { depositPlanRevision, toPlanRevisionSessions } from '@/data/plan-revisions';
 import {
   InvalidPlanError,
-  applyPlanUpdate,
   getActivePlanWithSessions,
   type PlanDto,
   type PlanSessionDto,
 } from '@/data/plans';
 import { shiftCivilDate } from '@/lib/dates/civil';
-import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import type { TrainingPaces } from '@/lib/metrics/vdot';
+import {
+  planRevisionDirection,
+  planRevisionTotals,
+} from '@/lib/plan-revision/direction';
 
 import { getAiAvailability } from './availability';
 import { chatCompletionJson, type ChatMessage } from './client';
@@ -517,8 +528,7 @@ async function reviewActivePlan(athleteId: number): Promise<void> {
 }
 
 /**
- * La révision proprement dite : juger, reconstruire, écrire, avancer le
- * marqueur, puis les effets de bord.
+ * La révision proprement dite : juger, reconstruire, déposer la proposition.
  *
  * L'ordre n'est pas indifférent, et deux points s'y jouent.
  *
@@ -527,12 +537,14 @@ async function reviewActivePlan(athleteId: number): Promise<void> {
  * reconstruction (un appel par créneau de qualité, soit des minutes) : placer la
  * relecture de l'`updatedAt` entre le verdict et la reconstruction rouvrirait
  * exactement la fenêtre que ce contrôle est censé fermer. Elle se fait donc au
- * plus près de la transaction, à quelques millisecondes d'elle.
+ * plus près du dépôt, à quelques millisecondes de lui — et ce n'est pas
+ * redondant avec le témoin de péremption stocké : celui-ci protège l'intervalle
+ * **entre le dépôt et le clic**, celui-là l'intervalle entre le calcul et le
+ * dépôt. Un plan modifié pendant la reconstruction produirait sinon une
+ * proposition périmée dès sa naissance, que l'athlète ne pourrait qu'essuyer.
  *
- * Le **marqueur** avance dès que l'écriture a réussi : c'est elle le fait
- * générateur, et une révision déjà inscrite au plan ne doit jamais être remise
- * en jeu par un rapprochement ou une synchronisation ratés (cf.
- * {@link applyReviewEffects}).
+ * Le **marqueur** avance avec le dépôt, dans la même transaction que lui : c'est
+ * le dépôt qui prouve que le passé a été relu (cf. `depositPlanRevision`).
  */
 async function runReview(context: ReviewContext, athleteId: number): Promise<void> {
   const { plan, review } = context;
@@ -574,11 +586,7 @@ async function runReview(context: ReviewContext, athleteId: number): Promise<voi
     return;
   }
 
-  await writeReview(context, output, rewrite, athleteId);
-  await markPlanReviewed(plan.id, review.completedSessionCount, athleteId);
-  console.log(`[plan/review] plan ${plan.id} ajusté — ${output.reason}`);
-
-  await applyReviewEffects(plan.id, athleteId);
+  await proposeReview(context, output, rewrite, athleteId);
 }
 
 /**
@@ -739,67 +747,76 @@ async function generateReview(context: ReviewContext): Promise<PlanReviewOutput>
 }
 
 /**
- * L'écriture d'une révision qui ajuste : **exactement** le chemin de
- * l'ajustement, et c'est le point de tout ce chantier.
+ * Le dépôt d'une révision qui ajuste — **une proposition, pas une écriture**.
  *
- * Séances et réglages en une seule transaction, comme un ajustement. La raison
- * de la révision part avec, dans le résumé : c'est là que l'athlète la lira.
+ * Le payload est exactement ce qu'un ajustement aurait appliqué : le jour de
+ * reprise, les séances reconstruites, les réglages patchés, et la raison de la
+ * révision reportée dans le résumé du plan. Il est stocké tel quel, et c'est
+ * lui, et rien d'autre, qui sera rejoué si l'athlète accepte.
+ *
+ * Le **sens** ne se déclare pas — ni le coach ni cette fonction n'ont le droit
+ * de dire « j'allège » : il se calcule en comparant ce que le plan prescrit
+ * encore sur la fenêtre (`context.upcoming`, exactement les séances que
+ * l'acceptation remplacerait) à ce que la reconstruction y mettrait.
+ *
+ * Aucun effet de bord : ni rapprochement des séances, ni republication du
+ * calendrier intervals.icu. Pousser à la montre un plan que personne n'a accepté
+ * publierait une proposition — c'est l'acceptation qui les déclenche
+ * (`afterActivePlanChanged`).
  */
-async function writeReview(
+async function proposeReview(
   context: ReviewContext,
   output: Extract<PlanReviewOutput, { decision: 'adjust' }>,
   rewrite: RemainingPlanRewrite,
   athleteId: number,
 ): Promise<void> {
-  const { plan, window, fromDate, snapshot } = context;
+  const { plan, review, window, fromDate, snapshot, upcoming } = context;
   const settings = reviewSettings(output.settings);
+  const sessions = toPlanRevisionSessions(
+    mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
+  );
 
-  await applyPlanUpdate(
-    plan.id,
+  const before = planRevisionTotals(upcoming);
+  const after = planRevisionTotals(sessions);
+
+  const outcome = await depositPlanRevision(
     {
-      fromDate,
-      sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
-      settings: planSettingsPatch(
-        plan,
-        settings,
-        withReviewNote(plan.summary, snapshot.today, output.reason),
-      ),
+      source: 'review',
+      planId: plan.id,
+      reason: output.reason,
+      direction: planRevisionDirection(before, after),
+      weeks: window.weeks,
+      before,
+      after,
+      payload: {
+        fromDate,
+        sessions,
+        settings: planSettingsPatch(
+          plan,
+          settings,
+          withReviewNote(plan.summary, snapshot.today, output.reason),
+        ),
+      },
+      // Le marqueur avance avec le dépôt : le coach a relu ces séances-là, et un
+      // refus ne doit pas les lui faire rejuger au prochain import.
+      reviewedSessionCount: review.completedSessionCount,
     },
     athleteId,
   );
-}
 
-/**
- * Les deux effets de bord d'un plan que l'athlète suit, tels qu'une **tâche de
- * fond** doit les mener : rapprocher les séances des activités déjà en base, et
- * republier le calendrier intervals.icu.
- *
- * Même politique que {@link afterActivePlanChanged}, à un détail près qui
- * décide de tout : la synchronisation est **attendue ici**, elle ne part pas en
- * `after()`. Le déclencheur nominal d'une révision est le watcher FIT
- * (`instrumentation` → `startFitService`), qui tourne **hors contexte de
- * requête** ; `after()` y lève `E468` (« `after` was called outside a request
- * scope »). Cette erreur remonterait après une écriture déjà committée : le
- * marqueur ne serait jamais avancé, et chaque fichier importé relancerait une
- * génération qui réécrirait le plan — en boucle. La synchronisation n'y perd
- * rien : il n'y a personne à ne pas faire attendre.
- *
- * Aucun des deux ne remonte, et chacun a sa garde : le plan est écrit, valide,
- * et le marqueur déjà avancé. Un rapprochement raté se rattrape au prochain
- * import, une synchronisation ratée à la prochaine écriture.
- */
-async function applyReviewEffects(planId: number, athleteId: number): Promise<void> {
-  try {
-    await reconcilePlanSessions(planId, athleteId);
-  } catch (error) {
-    console.error(`[plan/review] rapprochement des séances du plan ${planId} impossible :`, error);
+  if (outcome === 'deposited') {
+    console.log(
+      `[plan/review] plan ${plan.id} : réévaluation proposée (${before.volumeKm} → ${after.volumeKm} km ` +
+        `sur ${window.weeks} semaines) — ${output.reason}`,
+    );
+    return;
   }
 
-  try {
-    // La garde vit déjà dans le module de synchronisation ; celle-ci ne couvre
-    // que ce qu'il ne prévoit pas.
-    await syncPlanToIntervalsSafely('révision du plan', athleteId);
-  } catch (error) {
-    console.error(`[plan/review] synchronisation du calendrier impossible :`, error);
-  }
+  // Ni l'une ni l'autre n'est une panne, et aucune n'a avancé le marqueur : la
+  // révision reste due, et se rejouera au prochain import sur l'état à jour.
+  console.log(
+    outcome === 'no-active-plan'
+      ? `[plan/review] plan ${plan.id} : plus le plan actif — proposition abandonnée.`
+      : `[plan/review] plan ${plan.id} : une autre proposition vient d'être déposée — abandon.`,
+  );
 }

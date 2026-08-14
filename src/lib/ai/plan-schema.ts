@@ -604,6 +604,20 @@ export function sessionPaceZone(kind: string): PaceZoneKey {
 }
 
 /**
+ * Ce `kind` désigne-t-il une séance de **qualité** (seuil, VMA, répétitions) ?
+ *
+ * La forme « chaîne nue » de {@link isIntensitySession} : une séance déjà écrite
+ * en base ne se présente pas comme un {@link PlanSessionOutput}, et le calcul du
+ * sens d'une révision (`lib/plan-revision/direction.ts`) compare précisément ces
+ * séances-là aux semaines proposées. Une seconde définition des motifs
+ * d'intensité aurait divergé de celle-ci ; il n'y en a donc qu'une.
+ */
+export function isIntensityKind(kind: string): boolean {
+  const normalized = normalizeText(kind);
+  return INTENSITY_ZONES.some((zone) => PACE_ZONE_PATTERNS[zone].test(normalized));
+}
+
+/**
  * La séance est-elle une séance de **qualité** (seuil, VMA, répétitions) ?
  *
  * Exportée pour le résumé de continuité d'une tranche (`plan-service.ts`) : la
@@ -611,8 +625,7 @@ export function sessionPaceZone(kind: string): PaceZoneKey {
  * sous peine d'en enchaîner trois du même type.
  */
 export function isIntensitySession(session: PlanSessionOutput): boolean {
-  const kind = normalizeText(session.kind);
-  return INTENSITY_ZONES.some((zone) => PACE_ZONE_PATTERNS[zone].test(kind));
+  return isIntensityKind(session.kind);
 }
 
 /**

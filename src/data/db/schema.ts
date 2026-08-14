@@ -16,6 +16,11 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
+import type { PlanRevisionDirection } from '@/lib/plan-revision/direction';
+// Type seul, donc effacé à la compilation : la table décrit la forme du payload
+// qu'elle stocke, et cette forme est celle que le DAL valide (`plan-revisions.ts`).
+// Une seconde déclaration aurait divergé de la première au premier champ ajouté.
+import type { PlanRevisionPayload } from '../plan-revisions';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 import type { WeatherForecastStatus } from '@/lib/weather/forecast-plan';
@@ -817,6 +822,119 @@ export const plannedSessions = pgTable(
 );
 
 /**
+ * D'où vient une réévaluation de plan en attente.
+ *
+ * Deux déclencheurs, et deux seulement : la **revue** périodique du coach
+ * (`lib/ai/review-service.ts`, toutes les quelques séances réalisées) et un
+ * **test chronométré** qui recalibre les allures (`lib/ai/fitness-test-service.ts`).
+ * L'ajustement demandé par l'athlète depuis la page du plan n'en est pas : elle
+ * l'a demandé, il s'applique directement.
+ *
+ * La source décide de ce que le dépôt marque comme déjà examiné (cf.
+ * `src/data/plan-revisions.ts`) : le compte de séances relues d'un côté, la date
+ * du dernier test pris en compte de l'autre.
+ */
+export const PLAN_REVISION_SOURCES = ['review', 'fitness-test'] as const;
+
+export type PlanRevisionSource = (typeof PLAN_REVISION_SOURCES)[number];
+
+/**
+ * Le sens d'une réévaluation, tel que le calcul le rend — jamais tel qu'un
+ * service ou un modèle le déclarerait (cf. `lib/plan-revision/direction.ts`).
+ *
+ * Recopié plutôt qu'importé — la base ne dépend pas du module de calcul — mais
+ * `satisfies` interdit qu'il en diverge.
+ */
+export const PLAN_REVISION_DIRECTIONS = [
+  'increase',
+  'decrease',
+  'neutral',
+] as const satisfies readonly PlanRevisionDirection[];
+
+/**
+ * Une **réévaluation de plan proposée**, en attente de la décision de l'athlète.
+ *
+ * ## Pourquoi cette table existe
+ *
+ * La revue périodique et la recalibration d'après test réécrivaient la suite du
+ * plan **directement**, en tâche de fond après un import : le plan changeait
+ * sans accord, et l'athlète le découvrait en ouvrant son calendrier. Elles
+ * déposent désormais une proposition ici, et rien ne s'applique tant qu'elle
+ * n'est pas acceptée.
+ *
+ * Une proposition qui ne survivrait pas à un redémarrage ne serait pas une
+ * proposition : le calcul coûte plusieurs minutes de modèle, et le conteneur
+ * redémarre à chaque déploiement. D'où une table, et non un état de processus
+ * comme les verrous des deux services.
+ *
+ * ## Ce qu'elle porte, et pourquoi
+ *
+ * - `payload` : **le contenu exact calculé**, dans la forme que le DAL sait
+ *   rejouer (`PlanUpdate` — jour de reprise, séances, réglages). Accepter
+ *   applique ce payload tel quel : recalculer au moment du clic donnerait un
+ *   autre plan que celui qui a été montré, et l'accord ne porterait plus sur
+ *   rien. Sa forme est tenue par Zod à l'écriture **et** à la lecture
+ *   (`src/data/plan-revisions.ts`) : Postgres rend ce qu'une version antérieure
+ *   du code y a écrit.
+ * - `direction` et les quatre totaux : ce que la proposition change à la charge,
+ *   calculé (cf. {@link PLAN_REVISION_DIRECTIONS}) et stocké — l'écran l'affiche
+ *   sans avoir à relire le plan.
+ * - `plan_updated_at` : l'état du plan **au moment du calcul**. Un ajustement
+ *   manuel, un déplacement de séance ou un archivage survenus entre-temps le
+ *   font bouger, et la proposition devient alors périmée : elle décrit une suite
+ *   qui ne prolonge plus le plan qu'elle visait. C'est ce témoin qui permet de le
+ *   dire plutôt que d'écrire par-dessus.
+ *
+ * ## Au plus une proposition en attente par athlète
+ *
+ * L'index unique le garantit, comme `plans_draft_per_athlete` garantit un seul
+ * brouillon. Il n'a **pas** de prédicat partiel, et c'est parce que cette table
+ * n'a pas d'autre état : une décision — acceptation comme refus — supprime la
+ * ligne. Toute ligne présente est donc en attente, et un prédicat
+ * `WHERE status = 'pending'` ne filtrerait rien tout en obligeant à porter une
+ * colonne qui ne prendrait jamais qu'une valeur.
+ */
+export const planRevisions = pgTable(
+  'plan_revisions',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    /** Plan visé. La proposition disparaît avec lui (`ON DELETE CASCADE`). */
+    planId: integer('plan_id')
+      .notNull()
+      .references(() => plans.id, { onDelete: 'cascade' }),
+    source: text('source', { enum: PLAN_REVISION_SOURCES }).notNull(),
+    /**
+     * Pourquoi le plan doit être réévalué, en une ou deux phrases françaises —
+     * rédigée par le service au moment du calcul (le constat de la revue, ou la
+     * note du test).
+     */
+    reason: text('reason').notNull(),
+    direction: text('direction', { enum: PLAN_REVISION_DIRECTIONS }).notNull(),
+    /** Nombre de semaines réécrites — « sur les 3 semaines restantes ». */
+    weeks: integer('weeks').notNull(),
+    /** Ce que le plan prescrit encore sur la fenêtre, avant la proposition. */
+    beforeVolumeKm: real('before_volume_km').notNull(),
+    beforeIntensityKm: real('before_intensity_km').notNull(),
+    /** Ce que la proposition y mettrait. */
+    afterVolumeKm: real('after_volume_km').notNull(),
+    afterIntensityKm: real('after_intensity_km').notNull(),
+    /** Le contenu rejouable de la proposition (cf. l'en-tête). */
+    payload: jsonb('payload').$type<PlanRevisionPayload>().notNull(),
+    /** `plans.updated_at` au moment du calcul — le témoin de péremption. */
+    planUpdatedAt: timestamp('plan_updated_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex('plan_revisions_pending_per_athlete').on(table.athleteId),
+    /** Chemin d'accès de la purge d'un plan archivé. */
+    index('plan_revisions_plan_id_idx').on(table.planId),
+  ],
+);
+
+/**
  * Le retour du coach sur une séance réalisée, en markdown.
  *
  * **Une ligne au plus par activité** (index unique) : le feedback n'est pas un
@@ -1119,6 +1237,9 @@ export type NewWeatherForecast = InferInsertModel<typeof weatherForecasts>;
 
 export type Plan = InferSelectModel<typeof plans>;
 export type NewPlan = InferInsertModel<typeof plans>;
+
+export type PlanRevision = InferSelectModel<typeof planRevisions>;
+export type NewPlanRevision = InferInsertModel<typeof planRevisions>;
 
 export type PlannedSession = InferSelectModel<typeof plannedSessions>;
 export type NewPlannedSession = InferInsertModel<typeof plannedSessions>;

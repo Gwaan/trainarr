@@ -29,7 +29,7 @@ describe('fitnessTestNote', () => {
     }
   });
 
-  it('annonce le chrono, le gain d’allure et la réécriture quand le test améliore', () => {
+  it('annonce le chrono, le gain d’allure et la proposition quand le test améliore', () => {
     const note = fitnessTestNote(VERDICTS[0], TESTED_ON, {
       fromSecPerKm: 343,
       toSecPerKm: 312,
@@ -39,13 +39,18 @@ describe('fitnessTestNote', () => {
     expect(note).toContain('VDOT de 37,1');
     expect(note).toContain('5:43/km à 5:12/km');
     expect(note).toContain('31 s/km de moins');
-    expect(note).toContain('la fin du plan est réécrite');
+    // Au conditionnel : rien n'est appliqué tant que l'athlète n'a pas accepté
+    // la réévaluation. Une note au passé décrirait un plan qui n'a pas changé.
+    expect(note).toContain('passerait de');
+    expect(note).toContain('le coach te propose de réécrire la fin du plan');
+    expect(note).toContain('à accepter depuis la page du plan');
+    expect(note).not.toContain('est réécrite');
   });
 
   it('reste lisible quand l’allure de seuil n’est pas calculable', () => {
     const note = fitnessTestNote(VERDICTS[0], TESTED_ON, null);
 
-    expect(note).toContain('Tes allures sont recalculées');
+    expect(note).toContain('Tes allures peuvent être recalculées');
     expect(note).not.toContain('undefined');
   });
 

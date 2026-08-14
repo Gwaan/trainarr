@@ -327,19 +327,18 @@ describe('recordFitnessTest', () => {
     expect(values).not.toHaveProperty('referenceUpdatedOn');
   });
 
-  it('écrit le chrono et sa date quand le test l’améliore', async () => {
+  it('n’écrit jamais le chrono, même quand le test l’améliore', async () => {
     dbState.returning = { plans: [[{ id: 3 }]] };
 
-    await recordFitnessTest(
-      3,
-      { note: 'Nouveau record.', reference: { timeS: 1_580.4, updatedOn: '2026-09-16' } },
-      1,
-    );
+    // Le chrono ne s'applique plus à l'import : il part dans la proposition, avec
+    // les semaines qu'il recalcule (cf. `lib/ai/fitness-test-service.ts`).
+    await recordFitnessTest(3, { note: 'Nouveau record.' }, 1);
 
     const values = dbState.updates[0]?.values as Record<string, unknown>;
-    expect(values.referenceDistance).toBe('5k');
-    expect(values.referenceTimeS).toBe(1_580);
-    expect(values.referenceUpdatedOn).toBe('2026-09-16');
+    expect(values.lastTestNote).toBe('Nouveau record.');
+    expect(values).not.toHaveProperty('referenceDistance');
+    expect(values).not.toHaveProperty('referenceTimeS');
+    expect(values).not.toHaveProperty('referenceUpdatedOn');
   });
 
   it('porte l’appartenance et l’état actif dans le `WHERE`, pas dans une lecture préalable', async () => {

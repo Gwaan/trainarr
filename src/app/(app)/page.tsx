@@ -10,6 +10,7 @@ import { DashboardSkeleton } from "./_components/dashboard-skeleton";
 import { KeyMetrics } from "./_components/key-metrics";
 import { MaxHrSuggestionCard } from "./_components/max-hr-suggestion-card";
 import { OnboardingCard } from "./_components/onboarding-card";
+import { PlanRevisionCard } from "./_components/plan-revision-card";
 import { RecentActivitiesPanel } from "./_components/recent-activities-panel";
 import { TodaySessionPanel } from "./_components/today-session-panel";
 import { TrainingLoadPanel } from "./_components/training-load-panel";
@@ -56,8 +57,17 @@ async function DashboardContent() {
       {maxHrSuggestion === null ? null : (
         // Le tableau de bord ne porte aucun autre CTA accent : celui-ci peut le
         // prendre (l'`OnboardingCard`, qui en a un, ne s'affiche jamais en même
-        // temps).
+        // temps ; la carte de réévaluation, elle, n'a aucun bouton).
         <MaxHrSuggestionCard suggestion={maxHrSuggestion} emphasis="accent" />
+      )}
+
+      {/* La réévaluation de plan que le coach propose, à la même place et pour
+          la même raison : c'est un état qui appelle une décision, et le tableau
+          de bord est le seul écran qu'on ouvre sans rien chercher. Elle ne
+          tranche pas ici — accepter trois semaines de séances réécrites sans les
+          avoir vues serait un mauvais réflexe : elle renvoie à la page du plan. */}
+      {summary.planRevision === null ? null : (
+        <PlanRevisionCard revision={summary.planRevision} />
       )}
 
       <KeyMetrics

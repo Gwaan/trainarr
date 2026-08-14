@@ -58,6 +58,7 @@ vi.mock('./db/client', async () => {
 
   type Chain = PromiseLike<unknown[]> & {
     leftJoin: () => Chain;
+    innerJoin: () => Chain;
     where: (clause: SQL) => Chain;
     orderBy: () => Chain;
     limit: () => Chain;
@@ -67,6 +68,7 @@ vi.mock('./db/client', async () => {
     const name = getTableName(table);
     const chain: Chain = {
       leftJoin: () => chain,
+      innerJoin: () => chain,
       where: (clause) => {
         queryState.whereClauses[name] = clause;
         return chain;
@@ -236,6 +238,8 @@ describe('getDashboardSummary — base vide', () => {
       recentActivities: [],
       // Sans athlète, il n'y a aucune séance : rien à proposer.
       maxHrSuggestion: null,
+      // Ni plan, donc aucune réévaluation en attente.
+      planRevision: null,
     });
   });
 

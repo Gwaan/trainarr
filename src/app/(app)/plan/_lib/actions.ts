@@ -25,6 +25,12 @@ import {
   todayCivilDate,
 } from '@/data/athlete';
 import {
+  PlanRevisionNotFoundError,
+  StalePlanRevisionError,
+  acceptPlanRevision,
+  rejectPlanRevision,
+} from '@/data/plan-revisions';
+import {
   acceptDraftPlan,
   archiveActivePlan,
   ConcurrentDraftError,
@@ -114,6 +120,12 @@ export type PlanDecisionState = {
   message?: string;
 };
 
+/** État des deux issues d'une **réévaluation** proposée : acceptée, ou refusée. */
+export type PlanRevisionDecisionState = {
+  status: 'idle' | 'success' | 'error';
+  message?: string;
+};
+
 /*
  * Messages — un seul endroit pour la traduction des erreurs typées.
  */
@@ -128,6 +140,8 @@ const SUSPENDED = {
 const INVALID_OUTPUT = "Le coach n'a pas réussi à produire un plan valide, réessaie.";
 const NO_ACTIVE_PLAN = "Aucun plan actif : recharge la page.";
 const NO_DRAFT = "Cette proposition n'existe plus : recharge la page.";
+/** Une réévaluation qui n'est pas (ou plus) celle de l'athlète — le même refus dans les deux cas. */
+const NO_REVISION = "Cette réévaluation n'existe plus : recharge la page.";
 /** Deux générations lancées en même temps : la base n'en garde qu'une (`plans_draft_per_athlete`). */
 const DRAFT_CONFLICT =
   "Une proposition vient d'être écrite par une autre génération : recharge la page pour la voir.";
@@ -661,6 +675,135 @@ export async function rejectPlanAction(
   // Le tableau de bord n'a jamais vu cette proposition : rien à y revalider.
   revalidateSafely(['/plan'], 'refus');
   return { status: 'success', message: 'Proposition écartée.' };
+}
+
+/*
+ * Réévaluation proposée par le coach — les deux issues.
+ *
+ * Elles sont l'exact pendant de {@link acceptPlanAction} / {@link rejectPlanAction}
+ * pour une **proposition de plan**, à une différence : la réévaluation ne
+ * remplace pas le plan, elle en réécrit la suite. C'est donc `applyPlanUpdate`
+ * qui l'écrit, depuis le payload stocké au moment du calcul — jamais un
+ * recalcul (cf. `data/plan-revisions.ts`).
+ *
+ * Les trois routes revalidées : la page du plan (le bandeau disparaît, les
+ * semaines changent), le tableau de bord (la carte disparaît, la séance du jour
+ * peut changer) et le calendrier (`/activities`), qui affiche les séances
+ * planifiées jour par jour.
+ */
+
+/** Les routes que toute décision sur une réévaluation fait bouger. */
+const REVISION_PATHS = ['/plan', '/', '/activities'] as const;
+
+/**
+ * Accepte la réévaluation : le payload calculé devient la suite du plan.
+ *
+ * L'id vient du client comme tout le reste : c'est le DAL qui vérifie qu'il
+ * désigne bien la proposition en attente **de cet athlète**, et qu'elle n'est
+ * pas périmée. Ne lève jamais — une Server Action qui lève fait afficher la
+ * frontière d'erreur, écran sur lequel l'athlète n'a plus ni message ni bouton.
+ */
+export async function acceptPlanRevisionAction(
+  _previous: PlanRevisionDecisionState,
+  formData: FormData,
+): Promise<PlanRevisionDecisionState> {
+  // Cf. `createPlanAction` : dans le corps, avant tout. Une réévaluation réelle
+  // et une inventée reçoivent le même refus.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
+
+  const parsed = planIdSchema.safeParse(textField(formData, 'revisionId'));
+  if (!parsed.success) return { status: 'error', message: NO_REVISION };
+
+  // L'athlète de la session : les suites de l'acceptation le prennent en
+  // paramètre — elles n'ont pas de requête à interroger.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { status: 'error', message: NO_REVISION };
+
+  let planId: number;
+  try {
+    planId = (await acceptPlanRevision(parsed.data)).planId;
+  } catch (error) {
+    if (error instanceof PlanRevisionNotFoundError) {
+      return { status: 'error', message: NO_REVISION };
+    }
+    // Le plan a bougé depuis le calcul : le message explique **pourquoi** rien
+    // n'a été appliqué, parce que la cause est presque toujours une action que
+    // l'athlète vient de faire elle-même.
+    if (error instanceof StalePlanRevisionError) {
+      revalidateSafely(REVISION_PATHS, 'réévaluation périmée');
+      return { status: 'error', message: error.message };
+    }
+    if (error instanceof InvalidPlanError) return { status: 'error', message: error.message };
+
+    return {
+      status: 'error',
+      message: failureMessage(
+        error,
+        'acceptation de la réévaluation',
+        "La réévaluation n'a pas pu être appliquée — réessaie.",
+      ),
+    };
+  }
+
+  // À partir d'ici l'écriture est commitée : le plan **est** réécrit, et plus
+  // rien ne doit pouvoir transformer ce fait en échec. C'est aussi le moment —
+  // et le seul — où le calendrier intervals.icu se republie : pousser à la montre
+  // un plan que personne n'avait accepté aurait publié une proposition.
+  try {
+    await afterActivePlanChanged(planId, athleteId);
+  } catch (error) {
+    console.error("[plan] suites de l'acceptation d'une réévaluation impossibles :", error);
+  }
+
+  revalidateSafely(REVISION_PATHS, 'acceptation de la réévaluation');
+  return { status: 'success', message: 'Plan réévalué.' };
+}
+
+/**
+ * Refuse la réévaluation : elle disparaît, et rien d'autre ne change — ni le
+ * plan, ni le calendrier intervals.icu, qui ne l'ont jamais connue.
+ *
+ * **Idempotent**, comme {@link rejectPlanAction} : le refus vise un état — plus
+ * aucune réévaluation en attente. Si elle a déjà disparu (refusée depuis un
+ * autre onglet, remplacée par un nouveau calcul), cet état est atteint.
+ */
+export async function rejectPlanRevisionAction(
+  _previous: PlanRevisionDecisionState,
+  formData: FormData,
+): Promise<PlanRevisionDecisionState> {
+  // Cf. `createPlanAction` : dans le corps, avant tout. Le refus précède
+  // l'idempotence — sans session, il n'y a rien à tenir pour déjà fait.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
+
+  const parsed = planIdSchema.safeParse(textField(formData, 'revisionId'));
+  if (!parsed.success) return { status: 'error', message: NO_REVISION };
+
+  try {
+    await rejectPlanRevision(parsed.data);
+  } catch (error) {
+    if (!(error instanceof PlanRevisionNotFoundError)) {
+      return {
+        status: 'error',
+        message: failureMessage(
+          error,
+          'refus de la réévaluation',
+          "Le refus n'a pas abouti — réessaie.",
+        ),
+      };
+    }
+    // Déjà partie : on tombe dans la revalidation, qui fera disparaître le
+    // bandeau resté à l'écran.
+  }
+
+  // Le tableau de bord porte la même carte : elle doit disparaître aussi. Le
+  // calendrier, lui, n'a rien vu — mais il partage la revalidation, et une route
+  // revalidée pour rien ne coûte qu'un rendu.
+  revalidateSafely(REVISION_PATHS, 'refus de la réévaluation');
+  return { status: 'success', message: 'Réévaluation écartée.' };
 }
 
 const instructionSchema = z
