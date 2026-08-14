@@ -27,16 +27,8 @@ import {
   getAuth,
 } from '@/lib/auth';
 
-/** Les champs que portent ces deux formulaires. */
-export type AuthField = 'name' | 'email' | 'password';
+import type { AuthField, AuthFormState } from './form-state';
 
-export type AuthFormState = {
-  status: 'idle' | 'error';
-  fieldErrors?: Partial<Record<AuthField, string>>;
-  message?: string;
-};
-
-export const AUTH_FORM_IDLE: AuthFormState = { status: 'idle' };
 
 /**
  * Message d'échec de connexion — **volontairement identique** que l'e-mail soit

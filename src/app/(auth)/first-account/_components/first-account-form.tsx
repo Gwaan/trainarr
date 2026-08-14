@@ -11,7 +11,8 @@ import {
   AuthHeading,
   AuthSubmit,
 } from "../../_components/auth-form";
-import { AUTH_FORM_IDLE, createFirstAccountAction } from "../../_lib/actions";
+import { createFirstAccountAction } from "../../_lib/actions";
+import { AUTH_FORM_IDLE } from "../../_lib/form-state";
 
 /**
  * Création du tout premier compte — l'écran d'une installation neuve.

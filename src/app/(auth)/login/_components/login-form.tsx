@@ -11,7 +11,8 @@ import {
   AuthHeading,
   AuthSubmit,
 } from "../../_components/auth-form";
-import { AUTH_FORM_IDLE, signInAction } from "../../_lib/actions";
+import { signInAction } from "../../_lib/actions";
+import { AUTH_FORM_IDLE } from "../../_lib/form-state";
 
 /**
  * Écran de connexion.

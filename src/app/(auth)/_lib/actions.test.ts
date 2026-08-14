@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_PASSWORD_MIN_LENGTH } from '@/lib/auth/limits';
 import { APIError } from 'better-auth/api';
 
-import { createFirstAccountAction, signInAction, type AuthFormState } from './actions';
+import { createFirstAccountAction, signInAction } from './actions';
+import type { AuthFormState } from './form-state';
 import { getAuth } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 
