@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { useDroppable } from "@dnd-kit/core";
 
+import { SESSION_TYPE_SOFT } from "@/components/session-type";
 import { WeatherIcon } from "@/components/weather-icon";
 import { cn } from "@/lib/utils";
 
@@ -155,8 +156,19 @@ export function CalendarDayCell({ day, accepted, children }: CalendarDayCellProp
         >
           {day.dayNumber}
         </span>
+        {/* Le jour J porte la teinte « événement », comme la pastille de course
+            qu'il surmonte — et non l'accent, qui vivait ici à deux centimètres
+            d'un aplat `type-event` alors que les deux ne doivent jamais se
+            retrouver dans le même rôle. Le texte reste en token de texte : à
+            0,58 rem c'est du texte, et `type-event` ne tient que 4,0:1 sur `bg`
+            — moins encore sur la surface de la carte, sous les 4,5:1 exigés. */}
         {day.isRaceDay ? (
-          <span className="rounded-[5px] bg-accent-soft px-1 py-px text-[0.58rem] font-semibold tracking-[0.08em] text-accent uppercase">
+          <span
+            className={cn(
+              "rounded-[5px] border px-1 py-px text-[0.58rem] font-semibold tracking-[0.08em] text-fg uppercase",
+              SESSION_TYPE_SOFT["type-event"],
+            )}
+          >
             Jour J
           </span>
         ) : null}

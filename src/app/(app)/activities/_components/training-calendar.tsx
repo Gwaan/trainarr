@@ -26,10 +26,12 @@ import {
 import { Undo2 } from "lucide-react";
 
 import { Banner } from "@/components/banner";
+import { SESSION_TYPE_DOT } from "@/components/session-type";
 import { Button } from "@/components/ui/button";
 import type { CalendarDayWeatherDto, CalendarSessionDto } from "@/data/calendar";
 import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { judgeSessionMove, type MoveSession } from "@/lib/plan-calendar/move-rules";
+import { sessionTypesPresent, type SessionType } from "@/lib/plan-session-type";
 import { cn } from "@/lib/utils";
 
 import { moveSessionAction } from "../_lib/calendar-actions";
@@ -323,6 +325,17 @@ export function TrainingCalendar({
     return views;
   }, [weeks]);
 
+  /**
+   * Les types de séance que le mois affiché porte réellement — ce que la
+   * légende a besoin de nommer, et rien de plus. Recalculé avec le mois : passer
+   * d'octobre (base, répétitions) à mars (spécifique, allure course) change les
+   * couleurs à l'écran, donc les couleurs à expliquer.
+   */
+  const legendTypes = useMemo(
+    () => sessionTypesPresent([...sessionViews.values()].map((session) => session.kind)),
+    [sessionViews],
+  );
+
   const activeSessionId = parseSessionDragId(activeId);
   const activeSession =
     activeSessionId === null
@@ -571,7 +584,7 @@ export function TrainingCalendar({
             <CalendarWeek key={week.startsOn} week={week} acceptance={acceptance} />
           ))}
 
-          <CalendarLegend />
+          <CalendarLegend types={legendTypes} />
         </section>
 
         <DragOverlay dropAnimation={dropAnimation}>
@@ -637,26 +650,43 @@ function CalendarWeek({
 /**
  * La grille de lecture des pastilles.
  *
- * Nécessaire parce que le système n'a qu'un accent : les séances se distinguant
- * par leur **traitement** et non par cinq couleurs, il faut dire une fois ce que
- * ce traitement veut dire. Chaque item montre le signe et l'écrit.
+ * Deux groupes, séparés par un trait : ce que dit la **couleur** du filet — le
+ * type de la séance —, puis ce que disent les **signes** — l'état. Les deux
+ * canaux sont indépendants, et la légende les sépare comme les pastilles les
+ * séparent.
+ *
+ * ## Pourquoi seulement les types du mois affiché
+ *
+ * Le système en compte huit ; un mois en porte trois à cinq. Dérouler les huit
+ * ferait de ce pied de carte un dictionnaire — deux lignes entières sur
+ * téléphone — dont l'essentiel ne concernerait aucune pastille à l'écran. La
+ * légende ne nomme donc que les couleurs réellement posées, dans l'ordre du
+ * système et non dans celui où le mois les a fait tomber
+ * ({@link sessionTypesPresent}).
+ *
+ * Un mois qui n'affiche que des séances hors vocabulaire (plan d'avant la
+ * bascule sur squelette) n'a aucune couleur à expliquer : le groupe disparaît,
+ * séparateur compris, et il ne reste que les états.
  */
-function CalendarLegend() {
+function CalendarLegend({ types }: { types: readonly SessionType[] }) {
   return (
     // Pas de bordure haute : la dernière semaine porte déjà la sienne, et les
     // deux se cumuleraient en un filet double.
     <ul className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 text-[0.66rem] text-fg-faint lg:px-4">
-      <li className="flex items-center gap-1.5">
-        <span aria-hidden="true" className="h-3 w-1 rounded-full bg-accent" />
-        Séance dure
-      </li>
-      <li className="flex items-center gap-1.5">
-        <span
-          aria-hidden="true"
-          className="h-3 w-4 rounded-[3px] border border-accent/45 bg-accent-soft"
-        />
-        Course objectif
-      </li>
+      {types.map((type) => (
+        <li key={type.token} className="flex items-center gap-1.5">
+          {/* La même géométrie que le filet d'une pastille : un segment
+              vertical, pas un rond — la légende montre le signe tel qu'il est. */}
+          <span
+            aria-hidden="true"
+            className={cn("h-3 w-1 rounded-full", SESSION_TYPE_DOT[type.token])}
+          />
+          {type.label}
+        </li>
+      ))}
+      {types.length === 0 ? null : (
+        <li aria-hidden="true" className="h-3 w-px bg-border" />
+      )}
       <li className="flex items-center gap-1.5">
         <span aria-hidden="true" className="size-2 rounded-full bg-positive" />
         Réalisée

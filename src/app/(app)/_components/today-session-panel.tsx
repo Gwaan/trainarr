@@ -3,6 +3,7 @@ import { Moon, Play } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { Panel } from "@/components/panel";
+import { SessionTypeLabel } from "@/components/session-type";
 import { Button } from "@/components/ui/button";
 import type { PlannedSessionDto } from "@/data/dashboard";
 import type { WeatherForecastDto } from "@/data/weather-forecast";
@@ -79,7 +80,10 @@ export function TodaySessionPanel({
       meta={day ? <span className="num">{day}</span> : undefined}
       className={PANEL_SPAN}
     >
-      <p className="eyebrow">{session.kind}</p>
+      {/* Le type, écrit et précédé de sa puce de couleur — la même grammaire que
+          la ligne de séance du plan. Aucun filet ici : le panneau n'en a pas, et
+          la puce est le véhicule prévu par le système pour ce cas. */}
+      <SessionTypeLabel kind={session.kind} />
 
       <p className="mt-2.5 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
         <span className="num text-[1.7rem] leading-none font-semibold text-fg">

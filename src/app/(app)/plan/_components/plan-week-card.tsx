@@ -15,9 +15,16 @@ import { PlanSessionRow } from "./plan-session-row";
  * défaut est calculée dans `plan-weeks` — sur téléphone, une pile de douze
  * semaines ouvertes n'est pas lisible.
  *
- * La semaine en cours se distingue par son filet accent et son en-tête surélevé,
- * sans rien emprunter au CTA de la page : c'est la même grammaire que l'item
- * actif de la navigation.
+ * La semaine en cours se distingue par son en-tête `accent-soft` et sa pastille
+ * « Cette semaine », sans rien emprunter au CTA de la page.
+ *
+ * **Elle n'a plus de filet accent à gauche**, et ce n'est pas un oubli : le bord
+ * gauche de la carte est désormais celui des séances, où chaque ligne porte la
+ * couleur de son **type** ({@link PlanSessionRow}). Un filet accent de carte
+ * viendrait coller un aplat d'interaction contre un filet de donnée — et pour
+ * une séance de type `type-event`, indigo contre indigo, ce que le système
+ * interdit explicitement. L'en-tête surélevé suffit à dire la semaine en cours,
+ * et il reste visible carte repliée.
  */
 export function PlanWeekCard({
   week,
@@ -37,7 +44,6 @@ export function PlanWeekCard({
       open={week.expanded}
       className={cn(
         "group overflow-hidden rounded-card border border-border bg-surface",
-        isCurrent && "border-l-2 border-l-accent",
         week.status === "past" && "opacity-70",
       )}
     >

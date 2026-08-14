@@ -1,7 +1,9 @@
 import type { LucideIcon } from "lucide-react";
 import { ChevronDown, CircleCheck, CircleDashed, CircleDot } from "lucide-react";
 
+import { SESSION_TYPE_RAIL, SessionTypeLabel } from "@/components/session-type";
 import type { PlanSessionDto } from "@/data/plans";
+import { sessionType } from "@/lib/plan-session-type";
 import { cn } from "@/lib/utils";
 
 import { formatSessionDay } from "../_lib/format-plan";
@@ -18,9 +20,15 @@ import { PlanSessionDetailPanel } from "./plan-session-detail";
  * entièrement rendue côté serveur. La séance du jour s'ouvre d'office — sur
  * téléphone, c'est elle qu'on vient lire.
  *
- * Son état se lit à trois endroits qui se doublent : la pastille nommée
- * (jamais une couleur seule), le filet accent du jour, l'atténuation d'une
- * séance manquée.
+ * Son état se lit à trois endroits qui se doublent : la pastille nommée (jamais
+ * une couleur seule), le fond `accent-soft` du jour, l'atténuation d'une séance
+ * manquée.
+ *
+ * Le **filet de gauche**, lui, ne dit plus l'état : il porte le **type** de la
+ * séance (`--color-type-*`), exactement comme la pastille du calendrier. Le
+ * jour courant n'en a pas besoin — il garde son fond, son quantième en accent
+ * et sa pastille « Aujourd'hui » —, et l'accent reste ainsi ce qu'il est dans
+ * le système : l'interaction, jamais une donnée.
  */
 
 const STATE_BADGES: Record<
@@ -52,6 +60,7 @@ export function PlanSessionRow({
   const state = planSessionState(session, today);
   const isToday = state === "today";
   const badge = STATE_BADGES[state];
+  const type = sessionType(session.kind);
 
   const detail = planSessionDetail(session, maxHrBpm);
   const summary = planSessionSummary(session, maxHrBpm);
@@ -72,7 +81,9 @@ export function PlanSessionRow({
 
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="eyebrow">{session.kind}</span>
+          {/* Le type-badge en tête de la séance : sa puce porte la couleur, le
+              mot reste écrit et en token de texte. */}
+          <SessionTypeLabel kind={session.kind} />
           {badge === null ? null : (
             <span
               className={cn(
@@ -103,7 +114,10 @@ export function PlanSessionRow({
     <li
       className={cn(
         "border-b border-border last:border-b-0",
-        isToday && "border-l-2 border-l-accent",
+        // Une séance dont le `kind` sort du vocabulaire de l'appli (plan écrit
+        // avant la bascule sur squelette) n'a pas de filet : pas de couleur par
+        // défaut, qui mentirait sur sa nature.
+        type === null ? null : cn("border-l-2", SESSION_TYPE_RAIL[type.token]),
         // Lisible, mais elle ne dispute pas l'attention aux séances à venir.
         state === "missed" && "opacity-70",
       )}
