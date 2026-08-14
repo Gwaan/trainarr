@@ -62,12 +62,13 @@ plutôt que ramené à 7 : deux dossiers pour un même athlète, c'est un backfi
 sans fin et une déduplication aveugle à son jumeau.
 
 **Les fichiers restés à la racine n'ont pas de propriétaire déductible** : rien
-dans un FIT ne désigne un compte, et l'authentification du dépôt WebDAV est celle
-de l'installation, pas celle d'un compte. Le watcher les **signale une fois
-chacun** et ne les touche pas — ni import, ni déplacement, ni suppression. Les
-réimporter depuis la page « Activités » les rattache au compte connecté, sans
-ambiguïté. Attribuer ces fichiers à un compte « au hasard » serait le seul vrai
-bug possible ici.
+dans un FIT ne désigne un compte, et il n'y a plus aucun canal d'écriture qui
+dépose à la racine (le dépôt WebDAV, qui le faisait, a été retiré — cf. plus
+bas). Il n'y reste donc que des fichiers antérieurs au cloisonnement, ou posés à
+la main dans le volume. Le watcher les **signale une fois chacun** et ne les
+touche pas — ni import, ni déplacement, ni suppression. Les réimporter depuis la
+page « Activités » les rattache au compte connecté, sans ambiguïté. Attribuer
+ces fichiers à un compte « au hasard » serait le seul vrai bug possible ici.
 
 ## Canal d'import
 
@@ -75,15 +76,15 @@ Le fichier FIT est le **seul** format d'entrée des données d'entraînement : q
 que soit la route empruntée, tout finit dans la même boîte de dépôt
 (`FIT_INBOX_DIR`) et passe par le même watcher.
 
-- **Chemin nominal** : HealthFit (iPhone) exporte automatiquement chaque séance
-  vers le point WebDAV `/dav` servi par l'appli (`src/lib/fit/dav.ts`) ; les
-  fichiers atterrissent à la **racine** de la boîte de dépôt — le dépôt est plat
-  (`MKCOL` ne crée rien) et son Basic auth n'identifie pas un compte. Ils sont
-  donc signalés et non importés, cf. la section précédente ; c'est la
-  conséquence assumée du cloisonnement par compte, et la suppression du canal
-  WebDAV est une tâche à part.
-- **Chemin intervals.icu** : voir la section dédiée plus bas — même boîte de
-  dépôt, dossier du compte dont la clé a servi.
+- **Chemin nominal** : HealthFit (iPhone) synchronise vers intervals.icu, d'où
+  le poller rapatrie les FIT **originaux**. Voir la section dédiée plus bas —
+  même boîte de dépôt, dossier du compte dont la clé a servi.
+- **Il n'y a plus de dépôt WebDAV.** `/dav`, `src/lib/fit/dav.ts` et les
+  variables `WEBDAV_*` ont été retirés : le point était plat et son Basic auth
+  était celui de l'installation, pas d'un compte — il déposait donc à la racine
+  des fichiers « sans propriétaire », que le watcher signalait sans jamais les
+  importer. Un canal d'écriture qui ne sait pas à qui attribuer un fichier n'a
+  pas sa place dans une application multi-comptes.
 - **Watcher** (`src/lib/fit/service.ts`) : parcourt les dossiers d'athlète à
   intervalle fixe, n'ingère qu'un fichier dont la taille est stable sur deux
   passes (sinon l'upload est encore en cours), puis le range dans `processed/` ou
@@ -96,10 +97,10 @@ que soit la route empruntée, tout finit dans la même boîte de dépôt
   aucun fichier.
 - **Reprise après onboarding** (`recoverPendingImports(athleteId)`) : remet en
   file le `failed/` **de cet athlète**, jamais la racine.
-- **Sécurité du dépôt** : `/dav` est exposé sur Internet en écriture. Basic auth
-  (`WEBDAV_USERNAME` / `WEBDAV_PASSWORD`) obligatoire — tant que les deux ne sont
-  pas renseignés, le point répond 503. Jamais d'état « ouvert sans
-  authentification ».
+- **Sécurité de la seule entrée en écriture restante** : `POST /api/fit/upload`
+  exige une session (401 sinon, avant toute lecture du corps), borne la taille
+  sur `Content-Length` avant de bufferiser le multipart, puis chaque fichier
+  sur `MAX_FIT_FILE_BYTES` — et ne renvoie jamais de trace d'exécution.
 
 ## intervals.icu (`src/lib/intervals/`)
 

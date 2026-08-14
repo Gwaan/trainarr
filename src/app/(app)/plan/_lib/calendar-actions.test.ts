@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionNotMovableError, type PlanWithSessions } from '@/data/plans';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 
 import { moveSessionAction, type SessionMoveState } from './calendar-actions';
 
@@ -23,8 +24,15 @@ const { mocks } = vi.hoisted(() => ({
     scheduleAfter: vi.fn(),
     /** L'action sert une requête : c'est elle qui résout l'athlète de la session. */
     getCurrentAthleteId: vi.fn(),
+    /**
+     * L'action vérifie la session dans son propre corps : elle est simulée ici,
+     * la vraie lecture étant éprouvée dans `src/data/session.test.ts`.
+     */
+    getSession: vi.fn(),
   },
 }));
+
+vi.mock('@/data/session', () => ({ getSession: mocks.getSession }));
 
 vi.mock('@/data/athlete', async (importOriginal) => ({
   // `todayCivilDate` est pure et reste le vrai code : c'est elle qui décide si
@@ -121,6 +129,11 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
   mocks.revalidatePath.mockImplementation(() => {});
+  mocks.getSession.mockResolvedValue({
+    userId: 'user-1',
+    name: 'Gwen',
+    email: 'gwen@trainarr.test',
+  });
   mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.getActivePlanWithSessions.mockResolvedValue(planWithSessions());
   mocks.rescheduleSession.mockResolvedValue(undefined);
@@ -230,5 +243,30 @@ describe('moveSessionAction — pannes de l’écriture', () => {
 
     expect(state.status).toBe('success');
     logged.mockRestore();
+  });
+});
+
+/**
+ * Une Server Action exportée est un endpoint public : elle s'appelle en POST
+ * direct, sans passer par le calendrier.
+ */
+describe('moveSessionAction — session', () => {
+  it('refuse sans session, avant même de lire le plan', async () => {
+    mocks.getSession.mockResolvedValue(null);
+
+    const state = await moveSessionAction(IDLE, form({ sessionId: '7', toDate: '2026-08-19' }));
+
+    expect(state).toEqual({ status: 'error', message: SESSION_REQUIRED_MESSAGE });
+    expect(mocks.getActivePlanWithSessions).not.toHaveBeenCalled();
+    expect(mocks.rescheduleSession).not.toHaveBeenCalled();
+  });
+
+  it('rend le même refus pour une séance du plan et pour un identifiant inventé', async () => {
+    mocks.getSession.mockResolvedValue(null);
+
+    const known = await moveSessionAction(IDLE, form({ sessionId: '7', toDate: '2026-08-19' }));
+    const unknown = await moveSessionAction(IDLE, form({ sessionId: '9999', toDate: '2026-08-19' }));
+
+    expect(known).toEqual(unknown);
   });
 });

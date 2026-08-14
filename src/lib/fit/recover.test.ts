@@ -15,7 +15,7 @@ const { fs } = vi.hoisted(() => ({
     access: vi.fn(),
     mkdir: vi.fn(),
     // `open` n'est utilisé par aucun chemin exercé ici : il n'est présent que
-    // parce que `dav.ts` (d'où vient `nameWithSuffix`) l'importe.
+    // parce que `service.ts`, importé pour le marqueur de backfill, le déclare.
     open: vi.fn(),
     readdir: vi.fn(),
     readFile: vi.fn(),

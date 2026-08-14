@@ -5,9 +5,9 @@ import { env } from '@/config/env';
 /**
  * Activation de l'authentification, décidée à partir du seul secret.
  *
- * Même parti pris que le poller intervals.icu (`planPollerActivation`) et que le
- * dépôt WebDAV : une variable absente ou inexploitable désactive **sa** fonction
- * en disant pourquoi, elle n'empêche jamais l'application de démarrer. Le
+ * Même parti pris que le poller intervals.icu (`planPollerActivation`) : une
+ * variable absente ou inexploitable désactive **sa** fonction en disant
+ * pourquoi, elle n'empêche jamais l'application de démarrer. Le
  * déploiement est automatique au push — un `getEnv()` qui lèverait au démarrage
  * couperait l'appli entière, y compris les pages qui n'ont rien à voir.
  */

@@ -6,12 +6,15 @@ import { MAX_FIT_UPLOAD_BYTES, fitUploadResponseSchema } from '../_lib/upload-co
 // La route importe l'ingestion, qui est `server-only` et parle au DAL.
 vi.mock('server-only', () => ({}));
 
-const { ingest, getCurrentAthleteId } = vi.hoisted(() => ({
+const { ingest, getCurrentAthleteId, getSession } = vi.hoisted(() => ({
   ingest: vi.fn(),
   getCurrentAthleteId: vi.fn(),
+  /** La vraie lecture est éprouvée dans `src/data/session.test.ts`. */
+  getSession: vi.fn(),
 }));
 vi.mock('@/lib/fit/ingest', () => ({ ingestFitBuffer: ingest }));
 vi.mock('@/data/athlete', () => ({ getCurrentAthleteId }));
+vi.mock('@/data/session', () => ({ getSession }));
 
 const { POST } = await import('./route');
 
@@ -33,6 +36,31 @@ beforeEach(() => {
   vi.clearAllMocks();
   ingest.mockResolvedValue({ status: 'created', activityId: 42 });
   getCurrentAthleteId.mockResolvedValue(7);
+  getSession.mockResolvedValue({ userId: 'user-1', name: 'Gwen', email: 'gwen@trainarr.test' });
+});
+
+describe('POST /api/fit/upload — session', () => {
+  it('refuse sans session, sans lire le corps ni la base', async () => {
+    getSession.mockResolvedValue(null);
+    const request = uploadRequest(4_096);
+    const formData = vi.spyOn(request, 'formData');
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    expect(formData).not.toHaveBeenCalled();
+    expect(getCurrentAthleteId).not.toHaveBeenCalled();
+    expect(ingest).not.toHaveBeenCalled();
+  });
+
+  it('rend le refus dans le format du contrat, pour qu’il s’affiche', async () => {
+    getSession.mockResolvedValue(null);
+
+    const parsed = fitUploadResponseSchema.safeParse(await (await POST(uploadRequest(4_096))).json());
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.results[0]).toMatchObject({ ok: false });
+  });
 });
 
 describe('POST /api/fit/upload — borne de taille', () => {

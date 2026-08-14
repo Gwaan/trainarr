@@ -1,9 +1,8 @@
 /**
  * Dépôt d'un fichier rapatrié dans la boîte d'import du watcher.
  *
- * Écriture sous un nom temporaire `.part` puis renommage, exactement comme le
- * dépôt WebDAV (`src/lib/fit/dav.ts`) : le watcher ne doit jamais voir un `.fit`
- * en cours d'écriture. Le renommage est atomique sur un même système de
+ * Écriture sous un nom temporaire `.part` puis renommage : le watcher ne doit
+ * jamais voir un `.fit` en cours d'écriture. Le renommage est atomique sur un même système de
  * fichiers — le fichier apparaît complet du premier coup. Sa règle de stabilité
  * de taille l'en protégeait déjà ; deux verrous valent mieux qu'un quand la
  * conséquence est une donnée d'entraînement fausse.

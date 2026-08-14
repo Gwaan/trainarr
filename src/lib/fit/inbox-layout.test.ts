@@ -4,6 +4,7 @@ import {
   ATHLETE_DIR_PREFIX,
   athleteDirName,
   athleteInboxDir,
+  nameWithSuffix,
   parseAthleteDirName,
 } from './inbox-layout';
 
@@ -59,5 +60,19 @@ describe('parseAthleteDirName', () => {
 describe('athleteInboxDir', () => {
   it('range le dossier de l’athlète sous la racine de la boîte', () => {
     expect(athleteInboxDir('/data/fit-inbox', 3)).toBe('/data/fit-inbox/athlete-3');
+  });
+});
+
+describe('nameWithSuffix', () => {
+  it('insère le suffixe avant l’extension', () => {
+    expect(nameWithSuffix('run.fit', 2)).toBe('run-2.fit');
+    expect(nameWithSuffix('a.b.fit', 1)).toBe('a.b-1.fit');
+  });
+
+  it('verrouille la forme du nom suffixé : « radical-N.fit », jamais « nom.fit-N »', () => {
+    // Un `x.fit-1` porterait la bonne donnée sous une extension que le watcher
+    // ignore : le fichier serait perdu sans le moindre message d'erreur.
+    expect(nameWithSuffix('x.fit', 1)).toBe('x-1.fit');
+    expect(nameWithSuffix('x.fit', 2)).toBe('x-2.fit');
   });
 });

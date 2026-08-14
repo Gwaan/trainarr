@@ -91,3 +91,17 @@ export function parseAthleteDirName(name: string): number | null {
 export function athleteInboxDir(inboxDir: string, athleteId: number): string {
   return join(/* turbopackIgnore: true */ inboxDir, athleteDirName(athleteId));
 }
+
+/**
+ * `run.fit` + 2 → `run-2.fit`. Le suffixe se glisse **avant** l'extension, pas
+ * après : un `run.fit-2` ne serait plus un `.fit`, et le watcher l'ignorerait à
+ * jamais (cf. `isFitFile`).
+ *
+ * Sert à trouver un nom libre quand un homonyme occupe déjà la place — les noms
+ * produits par HealthFit sont datés au jour, deux séances du même jour portent
+ * donc le même nom (cf. `recoverPendingImports`).
+ */
+export function nameWithSuffix(name: string, suffix: number): string {
+  const dot = name.lastIndexOf('.');
+  return dot <= 0 ? `${name}-${suffix}` : `${name.slice(0, dot)}-${suffix}${name.slice(dot)}`;
+}

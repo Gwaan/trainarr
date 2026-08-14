@@ -33,9 +33,8 @@ import 'server-only';
  * `failed/` faute de propriétaire.
  *
  * **Les fichiers restés à la racine de la boîte n'ont pas de propriétaire
- * déductible** : dépôts antérieurs à ce cloisonnement, ou dépôts WebDAV — dont
- * l'authentification Basic est celle de l'installation, pas celle d'un compte.
- * Le watcher les signale (une fois chacun) et les laisse strictement où ils
+ * déductible** : dépôts antérieurs à ce cloisonnement, ou fichiers posés à la
+ * main dans le volume. Le watcher les signale (une fois chacun) et les laisse strictement où ils
  * sont. Les attribuer « au premier athlète venu » est exactement ce que le
  * cloisonnement par compte interdit ; les réimporter depuis la page « Activités »
  * les rattache au compte connecté, en une manipulation et sans ambiguïté.
@@ -499,8 +498,8 @@ async function scanAthleteInbox(
  * Signale les fichiers restés à la racine, **une fois chacun**.
  *
  * Ils n'ont pas de propriétaire : rien dans un FIT ne désigne un compte, et les
- * deux façons d'en déposer un à la racine (dépôt WebDAV, dépôt antérieur au
- * cloisonnement) sont anonymes par construction. Ils ne sont donc ni importés,
+ * façons d'en déposer un à la racine (dépôt antérieur au cloisonnement, fichier
+ * posé à la main dans le volume) sont anonymes par construction. Ils ne sont donc ni importés,
  * ni déplacés, ni supprimés — mais le silence en ferait des séances perdues sans
  * trace, ce qui serait pire que tout.
  */

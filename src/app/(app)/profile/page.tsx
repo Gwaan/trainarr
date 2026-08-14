@@ -4,6 +4,8 @@ import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
 
+import { requireSession } from "../_lib/require-session";
+
 import { AccountPanel } from "./_components/account-panel";
 import { ProfileForm } from "./_components/profile-form";
 import { ProfileSkeleton } from "./_components/profile-skeleton";
@@ -46,9 +48,15 @@ const HEADINGS = {
  * `connection()` est indispensable : `cacheComponents: true` prérendrait sinon
  * la page pendant `next build` (image Docker), où la base n'existe pas.
  * Cf. `.claude/rules/nextjs.md`.
+ *
+ * `requireSession()` juste après : c'est ici que la vérification fait autorité
+ * (le proxy, lui, n'a regardé que la présence du cookie). Dans le composant
+ * suspendu, donc sans coûter le `◐` de la route.
  */
 async function ProfileContent() {
   await connection();
+  await requireSession();
+
   const { mode, ...sections } = await loadSettingsData();
   const { title, subtitle } = HEADINGS[mode];
 

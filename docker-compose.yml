@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Toutes les variables (DATABASE_URL, clés IA, identifiants WebDAV)
+    # Toutes les variables (DATABASE_URL, clés IA, BETTER_AUTH_SECRET)
     # viennent de .env — jamais du repo.
     env_file: .env
     environment:
@@ -16,8 +16,8 @@ services:
       TZ: ${TZ:-Europe/Paris}
       # Fixé ici et non dans .env : le chemin doit coïncider avec le point de
       # montage ci-dessous, et compose est le seul à connaître les deux. Un seul
-      # container applicatif : c'est ce process-ci qui dépose (WebDAV sur /dav),
-      # scanne et ingère (cf. src/instrumentation.ts).
+      # container applicatif : c'est ce process-ci qui dépose (poller
+      # intervals.icu), scanne et ingère (cf. src/instrumentation.ts).
       FIT_INBOX_DIR: /data/fit-inbox
     volumes:
       - trainarr-fit-inbox:/data/fit-inbox
@@ -58,7 +58,7 @@ services:
     # Le `chown` du Dockerfile ne couvre qu'un volume nommé **neuf** : Docker n'en
     # recopie la propriété qu'à l'initialisation. Sur un volume déjà créé (toute
     # mise à jour du stack), le répertoire reste à root et l'appli, qui tourne en
-    # uid 1001, part en EACCES sur chaque PUT WebDAV comme sur chaque scan. Ce
+    # uid 1001, part en EACCES sur chaque dépôt comme sur chaque scan. Ce
     # service-ci tourne en root et s'achève avant `app` : c'est le seul endroit
     # d'où la correction est déterministe. Le chown est idempotent et instantané
     # sur quelques fichiers.
@@ -102,8 +102,8 @@ services:
 volumes:
   trainarr-db-data:
   # Boîte de dépôt des fichiers FIT. Un seul service applicatif la monte : `app`
-  # y écrit (point WebDAV /dav, cf. src/lib/fit/dav.ts), la scanne et range les
-  # fichiers ingérés dans processed/ ou failed/ (src/lib/fit/service.ts).
+  # y écrit (poller intervals.icu, cf. src/lib/intervals/inbox.ts), la scanne et
+  # range les fichiers ingérés dans processed/ ou failed/ (src/lib/fit/service.ts).
   # `migrate` la monte aussi, le temps d'en fixer la propriété à l'uid 1001 sous
   # lequel `app` tourne.
   trainarr-fit-inbox:

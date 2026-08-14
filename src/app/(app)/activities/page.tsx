@@ -5,6 +5,8 @@ import { connection } from "next/server";
 
 import { listActivityWeekPage } from "@/data/activities";
 
+import { requireSession } from "../_lib/require-session";
+
 import { ActivitiesHeader } from "./_components/activities-header";
 import { ActivitiesSkeleton } from "./_components/activities-skeleton";
 import { ActivityWeek } from "./_components/activity-week";
@@ -35,9 +37,14 @@ type PageProps = {
  * `connection()` est indispensable : `cacheComponents: true` prérendrait sinon
  * la page pendant `next build` (image Docker), où la base n'existe pas.
  * Cf. `.claude/rules/nextjs.md`.
+ *
+ * `requireSession()` juste après : c'est ici que la vérification fait autorité
+ * (le proxy, lui, n'a regardé que la présence du cookie). Dans le composant
+ * suspendu, donc sans coûter le `◐` de la route.
  */
 async function ActivitiesContent({ searchParams }: PageProps) {
   await connection();
+  await requireSession();
 
   const page = parsePageParam((await searchParams)[PAGE_PARAM]);
   const { weeks, hasOlder } = await listActivityWeekPage({

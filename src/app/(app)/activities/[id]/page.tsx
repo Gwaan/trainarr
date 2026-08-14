@@ -6,6 +6,8 @@ import { connection } from "next/server";
 import { getActivityFeedback } from "@/data/activity-feedback";
 import { getAiAvailability } from "@/lib/ai/availability";
 
+import { requireSession } from "../../_lib/require-session";
+
 import { ActivityCharts } from "./_components/activity-charts";
 import { ActivityDetailSkeleton } from "./_components/activity-detail-skeleton";
 import { ActivityMapPanel } from "./_components/activity-map-panel";
@@ -70,8 +72,18 @@ async function CoachFeedback({ activityId }: { activityId: number }) {
   );
 }
 
+/**
+ * `requireSession()` juste après `connection()` : c'est ici que la vérification
+ * fait autorité (le proxy, lui, n'a regardé que la présence du cookie). Dans le
+ * composant suspendu, donc sans coûter le `◐` de la route.
+ *
+ * Rien ne fuite en amont pour autant : `loadActivity` passe par le DAL, borné à
+ * l'athlète de la session — sans session il ne rend rien, et le titre de
+ * l'onglet retombe sur « Activité ».
+ */
 async function ActivityDetail({ params }: PageProps) {
   await connection();
+  await requireSession();
 
   const id = parseActivityId((await params).id);
   if (id === null) notFound();

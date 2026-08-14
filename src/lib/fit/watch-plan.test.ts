@@ -55,7 +55,7 @@ describe('decideFileAction', () => {
     expect(decideFileAction(file('a.fit', 4_096), EMPTY)).toBe('wait');
   });
 
-  it('attend tant que la taille change (upload WebDAV en cours)', () => {
+  it('attend tant que la taille change (dépôt encore en cours)', () => {
     expect(decideFileAction(file('a.fit', 8_192), STABLE(4_096))).toBe('wait');
   });
 
@@ -80,7 +80,7 @@ describe('decideFileAction', () => {
   });
 
   it('refuse un fichier hors gabarit sans attendre qu’il se stabilise', () => {
-    // Un .fit de 800 Mo déposé sur le WebDAV : le lire ferait sauter la mémoire
+    // Un .fit de 800 Mo déposé dans la boîte : le lire ferait sauter la mémoire
     // du service, qui redémarrerait en boucle sans jamais archiver le fichier.
     const huge = file('bombe.fit', 800 * 1024 * 1024);
 
@@ -197,7 +197,7 @@ describe('balayage des .part orphelins', () => {
   const scanAt = (files: ScannedFile[], now: number) =>
     planScan(files, { sizes: new Map(), handled: new Set(), now });
 
-  it('laisse en place un .part récent : un dépôt WebDAV est peut-être en cours', () => {
+  it('laisse en place un .part récent : un dépôt est peut-être en cours', () => {
     const plan = scanAt([file('run.fit.part', 1_024, NOW - 60_000)], NOW);
 
     expect(plan.orphanParts).toEqual([]);

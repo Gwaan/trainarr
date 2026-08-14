@@ -8,7 +8,7 @@ paths:
 # TypeScript
 
 - Mode `strict` obligatoire. Jamais de `any` (utiliser `unknown` + narrowing) ; pas de `as` sauf impossibilité prouvée.
-- Valider **toutes** les entrées externes avec Zod : inputs de Server Actions, corps des route handlers (upload FIT, WebDAV), réponses des APIs LLM, variables d'env (`src/config/`).
+- Valider **toutes** les entrées externes avec Zod : inputs de Server Actions, corps des route handlers (upload FIT, chat coach), réponses des APIs LLM, variables d'env (`src/config/`).
 - Types inférés depuis le schéma Drizzle (`InferSelectModel`) et depuis les schémas Zod (`z.infer`) — ne pas dupliquer les types à la main.
 - Erreurs : les services retournent des erreurs typées (pattern Result ou throw d'erreurs métier nommées) ; jamais de `catch` silencieux.
 - Nommage : fichiers en kebab-case, composants React en PascalCase, le reste en camelCase.

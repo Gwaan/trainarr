@@ -4,6 +4,8 @@ import { connection } from "next/server";
 import { PageHeader } from "@/components/page-header";
 import { getDashboardSummary } from "@/data/dashboard";
 
+import { requireSession } from "./_lib/require-session";
+
 import { DashboardSkeleton } from "./_components/dashboard-skeleton";
 import { KeyMetrics } from "./_components/key-metrics";
 import { OnboardingCard } from "./_components/onboarding-card";
@@ -19,9 +21,15 @@ import { capitalize, formatFullDate } from "./_lib/format";
  * la page pendant `next build` (image Docker), où la base n'existe pas.
  * Cf. `.claude/rules/nextjs.md` — il bascule la route en Partial Prerender :
  * coquille statique immédiate, données streamées à la requête.
+ *
+ * `requireSession()` juste après : c'est ici que la vérification fait autorité
+ * (le proxy, lui, n'a regardé que la présence du cookie). Dans le composant
+ * suspendu, donc sans coûter le `◐` de la route.
  */
 async function DashboardContent() {
   await connection();
+  await requireSession();
+
   const summary = await getDashboardSummary();
 
   // Aucun nom d'athlète = aucun profil en base : l'installation est neuve.

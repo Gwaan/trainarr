@@ -32,6 +32,7 @@ import {
   describeVo2maxUnavailable,
   type MetricUnavailableCopy,
 } from "../_lib/metric-unavailable";
+import { requireSession } from "../_lib/require-session";
 
 export const metadata: Metadata = {
   title: "Progression",
@@ -178,8 +179,14 @@ function VolumePanel({ progression }: { progression: ProgressionDto }) {
   );
 }
 
+/**
+ * `requireSession()` juste après `connection()` : c'est ici que la vérification
+ * fait autorité (le proxy, lui, n'a regardé que la présence du cookie). Dans le
+ * composant suspendu, donc sans coûter le `◐` de la route.
+ */
 async function ProgressionContent({ searchParams }: PageProps) {
   await connection();
+  await requireSession();
 
   const param = parseRangeParam((await searchParams)[RANGE_PARAM]);
   const progression = await getProgression(toProgressionRange(param));

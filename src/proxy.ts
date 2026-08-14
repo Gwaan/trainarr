@@ -1,49 +1,62 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { getSessionCookie } from 'better-auth/cookies';
 
-import { env } from '@/config/env';
-import { DAV_BASE_PATH, handleDavRequest, nodeDavFileSystem } from '@/lib/fit/dav';
+import { isPublicPath } from '@/lib/auth/public-paths';
 
 /**
  * Interception réseau (ex-`middleware.ts`, déprécié en v16). Runtime Node.js.
  *
- * Un seul usage : servir le point de dépôt WebDAV des fichiers FIT sur `/dav`.
- * Le proxy est le seul endroit qui puisse le faire — il s'exécute **avant** le
- * routage, donc avant que Next ne rejette `PROPFIND` ou `MKCOL`, que les route
- * handlers ne savent pas déclarer (vérifié en dev comme en build standalone).
+ * Un seul usage : **la redirection optimiste** d'un visiteur sans session vers
+ * l'écran de connexion. C'est le premier des deux étages du contrôle d'accès,
+ * et le seul qui puisse répondre avant qu'une page ne soit rendue — c'est donc
+ * lui qui fait qu'on « tombe forcément sur la connexion ».
  *
- * Il reste une enveloppe : tout le protocole vit dans `src/lib/fit/dav.ts`,
- * testable sans serveur HTTP. Ce n'est pas non plus la couche d'auth de
- * l'application — l'authentification Basic ici ne protège que `/dav`.
+ * **Optimiste, et rien de plus.** Il regarde la *présence* du cookie de
+ * session, jamais sa validité : aucune requête en base, aucune vérification de
+ * signature. `.claude/rules/security.md` le dit — « `proxy.ts` peut faire du
+ * routage optimiste mais n'est pas la couche d'auth ». Un cookie périmé,
+ * falsifié ou copié d'une autre installation passe donc ici ; c'est le second
+ * étage qui le refuse :
  *
- * Deux réglages de `next.config.ts` en dépendent, ne pas les retirer :
- * `skipTrailingSlashRedirect` (sans lui, `PROPFIND /dav/` est redirigé en 308
- * avant d'atteindre le proxy, or les clients WebDAV suffixent les collections)
- * et `experimental.proxyClientMaxBodySize` (Next bufferise le corps et le
- * tronque silencieusement au-delà — la valeur doit couvrir `MAX_FIT_FILE_BYTES`).
+ * - les pages du groupe `(app)` appellent `requireSession()` dans le composant
+ *   suspendu qui porte déjà `connection()` — hors du `Suspense`, la coquille
+ *   statique disparaîtrait et le Partial Prerender avec elle ;
+ * - chaque Server Action et chaque route handler revérifie la session dans son
+ *   propre corps. Une action exportée est un endpoint public appelable en POST
+ *   direct : un contrôle posé ici ne la protégerait pas (Next le documente —
+ *   une Server Function est un POST sur la route qui l'utilise, et un matcher
+ *   qui exclut cette route l'exclut aussi).
+ *
+ * La liste des chemins qui doivent répondre sans session vit dans
+ * `src/lib/auth/public-paths.ts`, pure et énumérée par son test : se tromper
+ * là-dessus n'ouvre pas une porte de trop, ça les ferme toutes.
  */
-export async function proxy(request: NextRequest): Promise<Response> {
+export function proxy(request: NextRequest): NextResponse {
   const { pathname } = request.nextUrl;
 
-  if (pathname === DAV_BASE_PATH || pathname.startsWith(`${DAV_BASE_PATH}/`)) {
-    return handleDavRequest(request, {
-      credentials:
-        env.WEBDAV_USERNAME !== undefined && env.WEBDAV_PASSWORD !== undefined
-          ? { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD }
-          : null,
-      inboxDir: env.FIT_INBOX_DIR,
-      fs: nodeDavFileSystem,
-    });
-  }
+  if (isPublicPath(pathname)) return NextResponse.next();
 
-  return NextResponse.next();
+  /**
+   * `getSessionCookie` de better-auth plutôt qu'une lecture de cookie à la
+   * main : c'est lui qui connaît le nom réel du cookie (`better-auth.
+   * session_token`) et sa variante `__Secure-` posée en HTTPS. Fonction pure —
+   * elle ne lit que l'en-tête `Cookie`.
+   */
+  if (getSessionCookie(request) !== null) return NextResponse.next();
+
+  return NextResponse.redirect(new URL('/login', request.nextUrl));
 }
 
 /**
- * Le proxy ne s'exécute que sur `/dav` : tout le reste de l'application (pages,
- * route handlers, assets) n'a rien à en attendre, autant ne pas lui faire
- * traverser une couche de plus.
+ * Le matcher n'écarte que ce qui n'a **rien** à gagner à traverser le proxy :
+ * les fabriqués du build, les fichiers, et les routes d'API — dont la session
+ * se vérifie dans le handler, pas par une redirection HTML.
+ *
+ * Il ne décide de rien : `isPublicPath` réserve déjà le même sort à ces
+ * chemins. Le matcher ne peut donc que réduire le nombre d'invocations, jamais
+ * changer une réponse.
  */
 export const config = {
-  matcher: ['/dav', '/dav/:path*'],
+  matcher: ['/((?!_next/|api/|.*\\.).*)'],
 };

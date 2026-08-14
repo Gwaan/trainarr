@@ -7,6 +7,13 @@ import { AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
 // La route importe le service, `server-only` et branché au DAL.
 vi.mock('server-only', () => ({}));
 
+/**
+ * La session est la première garde de la route : elle est simulée ici, la vraie
+ * lecture (better-auth, base) étant éprouvée dans `src/data/session.test.ts`.
+ */
+const { getSession } = vi.hoisted(() => ({ getSession: vi.fn() }));
+vi.mock('@/data/session', () => ({ getSession }));
+
 const { answerCoachQuestion } = vi.hoisted(() => ({ answerCoachQuestion: vi.fn() }));
 vi.mock('@/lib/ai/coach-service', async () => {
   // Les bornes de la question sont du vrai code : la route doit refuser
@@ -48,11 +55,36 @@ beforeEach(() => {
   // le suivant refusé d'office.
   resetCoachChatGuard();
   errored = vi.spyOn(console, 'error').mockImplementation(() => {});
+  getSession.mockResolvedValue({ userId: 'user-1', name: 'Gwen', email: 'gwen@trainarr.test' });
   answersWith('Repose-toi.');
 });
 
 afterEach(() => {
   errored.mockRestore();
+});
+
+describe('POST /api/coach/chat — session', () => {
+  it('refuse sans session, en JSON et sans ouvrir de flux', async () => {
+    getSession.mockResolvedValue(null);
+
+    const response = await POST(chatRequest({ question: 'Je cours demain ?' }));
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(answerCoachQuestion).not.toHaveBeenCalled();
+  });
+
+  it('refuse avant la garde de charge : un inconnu n’occupe pas le GPU', async () => {
+    getSession.mockResolvedValue(null);
+    await POST(chatRequest({ question: 'Je cours demain ?' }));
+
+    // Le créneau n'a pas été pris : une requête légitime passe tout de suite.
+    getSession.mockResolvedValue({ userId: 'user-1', name: 'Gwen', email: 'g@t.test' });
+    const response = await POST(chatRequest({ question: 'Je cours demain ?' }));
+    await response.text();
+
+    expect(response.status).toBe(200);
+  });
 });
 
 describe('POST /api/coach/chat — entrée', () => {

@@ -17,8 +17,6 @@ describe('parseEnv — cas nominal', () => {
     expect(env.AI_BASE_URL).toBeUndefined();
     expect(env.AI_MODEL).toBeUndefined();
     expect(env.AI_API_KEY).toBeUndefined();
-    expect(env.WEBDAV_USERNAME).toBeUndefined();
-    expect(env.WEBDAV_PASSWORD).toBeUndefined();
     // Sans secret, l'authentification est inopérante — mais l'appli démarre.
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
     // Une minute : c'est la latence typique entre une séance synchronisée sur
@@ -64,8 +62,6 @@ describe('parseEnv — cas nominal', () => {
       AI_API_KEY: 'cle-de-test',
       APP_BASE_URL: 'https://exemple.test',
       FIT_INBOX_DIR: '/tmp/fit',
-      WEBDAV_USERNAME: 'gwen',
-      WEBDAV_PASSWORD: 'mot-de-passe-de-test',
       BETTER_AUTH_SECRET: 'un-secret-de-test-suffisamment-long-pour-passer',
     });
 
@@ -73,7 +69,6 @@ describe('parseEnv — cas nominal', () => {
     expect(env.AI_BASE_URL).toBe('https://api.anthropic.com');
     expect(env.APP_BASE_URL).toBe('https://exemple.test');
     expect(env.FIT_INBOX_DIR).toBe('/tmp/fit');
-    expect(env.WEBDAV_USERNAME).toBe('gwen');
     expect(env.BETTER_AUTH_SECRET).toBe('un-secret-de-test-suffisamment-long-pour-passer');
   });
 

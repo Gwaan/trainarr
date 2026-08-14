@@ -31,27 +31,26 @@ dépôt.
 
 ```
 Montre → HealthFit (iPhone)
-           │                              │
-           │  export WebDAV               │  synchronisation intervals.icu
-           ▼                              ▼
-   https://<domaine>/dav            intervals.icu
-   ← point servi par l'appli              │  API : le poller récupère
-     (Basic auth WEBDAV_*)                │  le fichier original
-           │                              ▼
-           └──────────────►  FIT_INBOX_DIR  ← volume trainarr-fit-inbox
-                                   │  scan périodique
-                                   ▼
-                        service d'import  → ingestion, puis processed/ ou failed/
+           │  synchronisation intervals.icu
+           ▼
+      intervals.icu
+           │  API : le poller récupère le fichier original
+           ▼
+   FIT_INBOX_DIR/athlete-<id>/  ← volume trainarr-fit-inbox
+           │  scan périodique          ▲
+           ▼                           │ import manuel (page « Activités »)
+ service d'import  → ingestion, puis processed/ ou failed/
 ```
 
-Tout cela tourne dans **un seul container applicatif** : le dépôt WebDAV, le
-poller et le watcher vivent dans le process du serveur Next, démarrés au boot par
+Tout cela tourne dans **un seul container applicatif** : le poller et le watcher
+vivent dans le process du serveur Next, démarrés au boot par
 `src/instrumentation.ts`. Leurs journaux sont donc ceux de l'appli
 (`docker logs trainarr`), préfixés `[fit]` et `[fit/intervals]`.
 
-- **HealthFit** est configuré une fois pour envoyer chaque séance en WebDAV vers
-  `https://<domaine>/dav`. Tant que `WEBDAV_USERNAME` et `WEBDAV_PASSWORD` ne
-  sont pas renseignés, le dépôt répond 503 (jamais ouvert sans authentification).
+- **HealthFit** est configuré une fois pour synchroniser chaque séance vers
+  intervals.icu, d'où Trainarr la rapatrie (cf. section suivante). Il n'y a plus
+  de dépôt WebDAV : un canal d'écriture qui ne sait pas à quel compte attribuer
+  un fichier n'a pas sa place ici.
 - Le **watcher** n'ingère un fichier que si sa taille est stable sur deux scans
   (`FIT_WATCH_INTERVAL_S`, 30 s par défaut), puis le range dans `processed/` ou
   dans `failed/` avec un `.err.txt` expliquant le rejet.
@@ -67,8 +66,8 @@ poller et le watcher vivent dans le process du serveur Next, démarrés au boot 
 
 Si HealthFit synchronise déjà les séances vers [intervals.icu](https://intervals.icu),
 Trainarr peut y récupérer les fichiers d'activité **originaux** et les déposer
-lui-même dans la boîte d'import. C'est un filet : une séance que l'envoi WebDAV a
-manquée arrive quand même.
+lui-même dans la boîte d'import — dans le dossier du compte dont la clé a servi,
+`athlete-<id>/`. C'est le chemin nominal d'arrivée des séances.
 
 Configuration, une fois **par compte** :
 

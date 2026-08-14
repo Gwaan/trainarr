@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
 import { getCurrentAthleteId } from '@/data/athlete';
+import { getSession } from '@/data/session';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 import { ingestFitBuffer } from '@/lib/fit/ingest';
 import { FitParseError } from '@/lib/fit/parse';
 
@@ -17,7 +19,7 @@ import {
 
 /**
  * Import manuel de fichiers FIT (montre, export HealthFit…), en complément du
- * dépôt automatique sur `/dav` que ramasse le watcher.
+ * rapatriement automatique depuis intervals.icu que ramasse le watcher.
  *
  * Route handler et non Server Action : l'entrée est un `multipart/form-data`
  * de plusieurs fichiers volumineux, et la réponse est un rapport par fichier.
@@ -30,6 +32,20 @@ import {
  */
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Tout premier contrôle : le proxy ne couvre pas `/api/`, et cette route est
+  // la seule entrée en écriture de fichiers qui reste. Sans session, rien n'est
+  // lu — ni le corps, ni la base.
+  //
+  // La réponse garde la forme du contrat (`{ results }`), qui est la seule que
+  // l'écran d'import sache lire : un refus doit s'afficher, pas se traduire en
+  // « import impossible » générique.
+  if ((await getSession()) === null) {
+    return NextResponse.json(
+      { results: [{ name: 'Envoi', ok: false as const, error: SESSION_REQUIRED_MESSAGE }] },
+      { status: 401 },
+    );
+  }
+
   // Avant toute lecture du corps : `formData()` matérialise l'intégralité du
   // multipart en mémoire, un envoi démesuré doit être refusé sans être bufferisé.
   if (exceedsUploadLimit(request.headers.get('content-length'))) {

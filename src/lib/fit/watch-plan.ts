@@ -40,17 +40,18 @@ export function isFitFile(name: string): boolean {
 }
 
 /**
- * Suffixe des fichiers en cours de réception WebDAV (cf. `lib/fit/dav.ts`), et
- * âge à partir duquel un tel fichier n'est plus une réception mais un reliquat.
+ * Suffixe des fichiers en cours d'écriture (cf. `lib/intervals/inbox.ts`), et
+ * âge à partir duquel un tel fichier n'est plus un dépôt en cours mais un
+ * reliquat.
  *
- * Un quart d'heure : très au-delà du temps d'envoi d'un FIT de quelques Mo, et
- * assez court pour libérer le nom avant que les homonymes suivants n'épuisent
- * les cent suffixes de collision du dépôt.
+ * Un quart d'heure : très au-delà du temps d'écriture d'un FIT de quelques Mo,
+ * et assez court pour libérer le nom avant que les homonymes suivants
+ * n'épuisent les cent suffixes de collision.
  */
 const PART_SUFFIX = '.part';
 export const ORPHAN_PART_MAX_AGE_MS = 15 * 60 * 1_000;
 
-/** `true` pour un fichier temporaire de réception WebDAV. */
+/** `true` pour un fichier temporaire de dépôt, encore en cours d'écriture. */
 export function isPartFile(name: string): boolean {
   return name.endsWith(PART_SUFFIX);
 }
@@ -77,8 +78,8 @@ export function tooLargeReason(sizeBytes: number): string {
 /**
  * Que faire d'un fichier à ce scan.
  *
- * Le dépôt se fait par WebDAV : le fichier apparaît dans le répertoire dès le
- * premier octet écrit. On n'ouvre donc un fichier que lorsque sa taille est
+ * Un dépôt fait apparaître le fichier dans le répertoire dès le premier octet
+ * écrit. On n'ouvre donc un fichier que lorsque sa taille est
  * **identique à celle du scan précédent** — deux observations séparées par
  * l'intervalle de scan. Un fichier vu pour la première fois attend toujours un
  * tour, et un fichier vide attend aussi (un FIT de 0 octet n'existe pas ; c'est

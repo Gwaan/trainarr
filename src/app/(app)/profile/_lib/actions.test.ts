@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AthleteOwnerRequiredError, InvalidAthleteProfileError } from '@/data/athlete';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 
 import { saveProfileAction, type ProfileFormState } from './actions';
 import { CLEAR_API_KEY_VALUE } from './intervals-state';
@@ -22,8 +23,15 @@ const { mocks } = vi.hoisted(() => ({
     saveIntervalsSettings: vi.fn(),
     recoverPendingImports: vi.fn(),
     revalidatePath: vi.fn(),
+    /**
+     * L'action vérifie la session dans son propre corps : elle est simulée ici,
+     * la vraie lecture étant éprouvée dans `src/data/session.test.ts`.
+     */
+    getSession: vi.fn(),
   },
 }));
+
+vi.mock('@/data/session', () => ({ getSession: mocks.getSession }));
 
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
 
@@ -61,6 +69,11 @@ function form(overrides: Record<string, string> = {}): FormData {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.getSession.mockResolvedValue({
+    userId: 'user-1',
+    name: 'Gwen',
+    email: 'gwen@trainarr.test',
+  });
   mocks.hasAthlete.mockResolvedValue(false);
   mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.createAthlete.mockResolvedValue(undefined);
@@ -332,5 +345,33 @@ describe('saveProfileAction — erreurs du DAL', () => {
     expect(state.status).toBe('error');
     expect(JSON.stringify(state)).not.toContain('ECONNREFUSED');
     expect(logged).toHaveBeenCalled();
+  });
+});
+
+/**
+ * Une Server Action exportée est un endpoint public : elle s'appelle en POST
+ * direct, sans passer par le formulaire.
+ */
+describe('saveProfileAction — session', () => {
+  it('refuse sans session, avant toute validation et toute écriture', async () => {
+    mocks.getSession.mockResolvedValue(null);
+
+    const state = await saveProfileAction(IDLE, form());
+
+    expect(state).toEqual({ status: 'error', message: SESSION_REQUIRED_MESSAGE });
+    expect(mocks.hasAthlete).not.toHaveBeenCalled();
+    expect(mocks.createAthlete).not.toHaveBeenCalled();
+    expect(mocks.updateAthleteProfile).not.toHaveBeenCalled();
+    expect(mocks.saveIntervalsSettings).not.toHaveBeenCalled();
+    expect(mocks.recoverPendingImports).not.toHaveBeenCalled();
+  });
+
+  it('refuse de la même façon un profil valide et un profil invalide', async () => {
+    mocks.getSession.mockResolvedValue(null);
+
+    const valid = await saveProfileAction(IDLE, form());
+    const invalid = await saveProfileAction(IDLE, form({ displayName: '' }));
+
+    expect(valid).toEqual(invalid);
   });
 });

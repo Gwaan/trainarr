@@ -9,7 +9,9 @@
  * Rappel de sécurité : une Server Action exportée est un endpoint public,
  * appelable par POST direct sans passer par le formulaire. Tout ce qui arrive
  * ici vient du client et n'est donc jamais fiable — d'où un schéma Zod sur
- * chaque entrée, y compris la confirmation d'archivage, qui est destructive.
+ * chaque entrée, y compris la confirmation d'archivage, qui est destructive, et
+ * **une vérification de session dans le corps de chacune** : ni le proxy ni la
+ * page ne protègent un POST direct sur l'endpoint de l'action.
  */
 
 import { revalidatePath } from 'next/cache';
@@ -31,6 +33,7 @@ import {
   PlanNotFoundError,
   type PlanInputField,
 } from '@/data/plans';
+import { getSession } from '@/data/session';
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
 import {
   MAX_PLAN_WEEKS,
@@ -40,6 +43,7 @@ import {
   updatePlanFromInstruction,
   type PlanRequest,
 } from '@/lib/ai/plan-service';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 import {
   resyncPlanToIntervalsOnDemand,
   syncPlanToIntervalsSafely,
@@ -467,9 +471,12 @@ export async function createPlanAction(
   _previous: PlanFormState,
   formData: FormData,
 ): Promise<PlanFormState> {
-  // TODO(auth) : pas encore de session dans Trainarr (mono-utilisateur, accès
-  // réseau restreint). Dès qu'elle existera, vérifier ici l'identité de
-  // l'appelant — un contrôle au niveau de la page ne protège pas cette action.
+  // Dans le corps de l'action, avant toute validation : le contrôle de la page
+  // ne la protège pas, elle s'appelle en POST direct. Et sans ce garde, un
+  // inconnu occuperait le GPU pendant plusieurs minutes.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = planFormSchema.safeParse({
     intent: textField(formData, 'intent'),
@@ -570,7 +577,11 @@ export async function acceptPlanAction(
   _previous: PlanDecisionState,
   formData: FormData,
 ): Promise<PlanDecisionState> {
-  // TODO(auth) : cf. `createPlanAction`.
+  // Cf. `createPlanAction` : dans le corps, avant tout. Un identifiant de
+  // brouillon réel et un inventé reçoivent le même refus.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = planIdSchema.safeParse(textField(formData, 'planId'));
   if (!parsed.success) return { status: 'error', message: NO_DRAFT };
@@ -623,7 +634,11 @@ export async function rejectPlanAction(
   _previous: PlanDecisionState,
   formData: FormData,
 ): Promise<PlanDecisionState> {
-  // TODO(auth) : cf. `createPlanAction`.
+  // Cf. `createPlanAction` : dans le corps, avant tout. Le refus précède
+  // l'idempotence — sans session, il n'y a rien à tenir pour déjà fait.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   // Un identifiant illisible n'est pas un brouillon disparu, c'est une requête
   // qui ne veut rien dire : elle ne peut pas être tenue pour un refus abouti.
@@ -665,7 +680,11 @@ export async function updatePlanAction(
   _previous: PlanUpdateState,
   formData: FormData,
 ): Promise<PlanUpdateState> {
-  // TODO(auth) : cf. `createPlanAction`.
+  // Cf. `createPlanAction` : dans le corps, avant tout — cette action écrit
+  // dans le plan et occupe le coach.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = instructionSchema.safeParse(textField(formData, 'instruction'));
   if (!parsed.success) {
@@ -705,7 +724,11 @@ export async function archivePlanAction(
   _previous: PlanArchiveState,
   formData: FormData,
 ): Promise<PlanArchiveState> {
-  // TODO(auth) : cf. `createPlanAction`.
+  // Cf. `createPlanAction` : dans le corps, avant tout — l'archivage est
+  // destructif, et la confirmation ne prouve rien de l'appelant.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = archiveSchema.safeParse(textField(formData, 'confirm'));
   if (!parsed.success) {
@@ -774,7 +797,11 @@ function syncedMessage(pushed: number, deleted: number): string {
  * sans rien dire ne vaudrait pas mieux que pas de bouton.
  */
 export async function resyncIntervalsAction(): Promise<PlanSyncState> {
-  // TODO(auth) : cf. `createPlanAction`.
+  // Cf. `createPlanAction` : dans le corps, avant tout. C'est la seule garde
+  // que cette action porte elle-même — elle n'a aucune entrée à valider.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const outcome = await resyncPlanToIntervalsOnDemand();
 

@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PlanNotFoundError } from '@/data/plans';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 
 import {
   acceptPlanAction,
+  archivePlanAction,
   createPlanAction,
   rejectPlanAction,
   resyncIntervalsAction,
+  updatePlanAction,
   type PlanDecisionState,
   type PlanFormState,
 } from './actions';
+import { ARCHIVE_CONFIRMATION } from './form-options';
 import { earliestPlanStart, latestPlanStart, latestRaceDate } from './plan-window';
 
 vi.mock('server-only', () => ({}));
@@ -33,8 +37,15 @@ const { mocks } = vi.hoisted(() => ({
     scheduleAfter: vi.fn(),
     /** Les actions servent une requête : c'est là que l'athlète se résout. */
     getCurrentAthleteId: vi.fn(),
+    /**
+     * Chaque action vérifie la session dans son propre corps : elle est simulée
+     * ici, la vraie lecture étant éprouvée dans `src/data/session.test.ts`.
+     */
+    getSession: vi.fn(),
   },
 }));
+
+vi.mock('@/data/session', () => ({ getSession: mocks.getSession }));
 
 vi.mock('@/data/athlete', async (importOriginal) => ({
   // `todayCivilDate` et les bornes de validation restent le vrai code.
@@ -101,6 +112,11 @@ beforeEach(() => {
   // `clearAllMocks` efface les appels, pas les implémentations : les doublons
   // qui lèvent (revalidation, `after`) doivent être remis à neuf explicitement.
   mocks.revalidatePath.mockImplementation(() => {});
+  mocks.getSession.mockResolvedValue({
+    userId: 'user-1',
+    name: 'Gwen',
+    email: 'gwen@trainarr.test',
+  });
   mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.generatePlan.mockResolvedValue(undefined);
   mocks.acceptDraftPlan.mockResolvedValue({ id: 9 });
@@ -707,5 +723,62 @@ describe('resyncIntervalsAction', () => {
       status: 'error',
       message: "Le calendrier n'a pas pu être resynchronisé — réessaie dans un instant.",
     });
+  });
+});
+
+/**
+ * Une Server Action exportée est un endpoint public : elle s'appelle en POST
+ * direct, sans passer par l'écran. Chacune doit donc refuser d'elle-même, avant
+ * de valider quoi que ce soit et avant tout appel au coach, au DAL ou à
+ * intervals.icu.
+ */
+describe('session — chaque action se garde elle-même', () => {
+  const field = (name: string, value: string): FormData => {
+    const data = new FormData();
+    data.set(name, value);
+    return data;
+  };
+
+  const withoutSession = () => {
+    mocks.getSession.mockResolvedValue(null);
+  };
+
+  const CALLS: readonly [string, () => Promise<{ status: string; message?: string }>][] = [
+    ['createPlanAction', () => createPlanAction(IDLE, form())],
+    ['acceptPlanAction', () => acceptPlanAction(DECISION_IDLE, decisionForm('9'))],
+    ['rejectPlanAction', () => rejectPlanAction(DECISION_IDLE, decisionForm('9'))],
+    ['updatePlanAction', () => updatePlanAction({ status: 'idle' }, field('instruction', 'Allège la semaine.'))],
+    ['archivePlanAction', () => archivePlanAction({ status: 'idle' }, field('confirm', ARCHIVE_CONFIRMATION))],
+    ['resyncIntervalsAction', () => resyncIntervalsAction()],
+  ];
+
+  it.each(CALLS)('%s refuse sans session', async (_name, call) => {
+    withoutSession();
+
+    const state = await call();
+
+    expect(state.status).toBe('error');
+    expect(state.message).toBe(SESSION_REQUIRED_MESSAGE);
+  });
+
+  it('refuse avant de toucher au plan ou au coach', async () => {
+    withoutSession();
+
+    for (const [, call] of CALLS) await call();
+
+    expect(mocks.generatePlan).not.toHaveBeenCalled();
+    expect(mocks.updatePlanFromInstruction).not.toHaveBeenCalled();
+    expect(mocks.acceptDraftPlan).not.toHaveBeenCalled();
+    expect(mocks.discardDraftPlan).not.toHaveBeenCalled();
+    expect(mocks.resyncPlanToIntervalsOnDemand).not.toHaveBeenCalled();
+  });
+
+  it('rend le même refus pour un brouillon réel et pour un identifiant inventé', async () => {
+    withoutSession();
+
+    const real = await acceptPlanAction(DECISION_IDLE, decisionForm('9'));
+    const invented = await acceptPlanAction(DECISION_IDLE, decisionForm('987654321'));
+
+    expect(real).toEqual(invented);
   });
 });

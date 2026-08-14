@@ -11,6 +11,8 @@ import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plan
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
 
+import { requireSession } from "../_lib/require-session";
+
 import { PlanAdjustForm } from "./_components/plan-adjust-form";
 import { PlanCalendar } from "./_components/plan-calendar";
 import { PlanCalendarToolbar } from "./_components/plan-calendar-toolbar";
@@ -71,9 +73,14 @@ const PLAN_CREATION: SuspendedAiFeature = {
  * battements les zones cardiaques prescrites sur les séances faciles. La
  * conversion se fait à l'affichage, jamais à l'écriture du plan — une FC max
  * corrigée met donc tout le programme à jour au rechargement suivant.
+ *
+ * `requireSession()` juste après `connection()` : c'est ici que la vérification
+ * fait autorité (le proxy, lui, n'a regardé que la présence du cookie). Dans le
+ * composant suspendu, donc sans coûter le `◐` de la route.
  */
 async function PlanContent({ searchParams }: PageProps) {
   await connection();
+  await requireSession();
 
   const today = toCivilDate(new Date());
   const currentMonth = civilMonth(today);

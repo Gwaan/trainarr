@@ -19,7 +19,7 @@
  * complet même si le voisin a déjà rapatrié des années d'historique.
  */
 
-/** Préfixe des fichiers déposés par le poller, qui les distingue des dépôts WebDAV. */
+/** Préfixe des fichiers déposés par le poller, qui les distingue de tout autre dépôt. */
 const FILE_PREFIX = 'intervals-';
 
 /** Seule extension que le watcher ingère (cf. `src/lib/fit/watch-plan.ts`). */

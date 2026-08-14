@@ -6,6 +6,8 @@ import { PageHeader } from "@/components/page-header";
 import { listCoachMessages } from "@/data/coach-chat";
 import { getAiAvailability } from "@/lib/ai/availability";
 
+import { requireSession } from "../_lib/require-session";
+
 import { CoachConversation } from "./_components/coach-conversation";
 import { CoachSkeleton } from "./_components/coach-skeleton";
 
@@ -27,9 +29,15 @@ export const metadata: Metadata = {
  * Le fil est réduit à ce que l'écran affiche avant de franchir la frontière
  * client : ni `createdAt` (aucun horodatage n'est rendu), ni rien d'autre que le
  * texte, son rôle et une clé de liste.
+ *
+ * `requireSession()` juste après `connection()` : c'est ici que la vérification
+ * fait autorité (le proxy, lui, n'a regardé que la présence du cookie). Dans le
+ * composant suspendu, donc sans coûter le `◐` de la route.
  */
 async function CoachContent() {
   await connection();
+  await requireSession();
+
   const [messages, availability] = await Promise.all([
     listCoachMessages(),
     getAiAvailability(),

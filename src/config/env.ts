@@ -13,9 +13,9 @@ const envSchema = z.object({
   // Base de données
   DATABASE_URL: z.url({ error: 'URL Postgres requise (ex: postgres://user:pass@host:5432/trainarr)' }),
 
-  // URL publique de l'application (ex: https://watchenv.gwenzr.dev) — celle par
-  // laquelle la montre atteint le dépôt WebDAV, et qu'affichent les liens
-  // absolus construits côté serveur.
+  // URL publique de l'application (ex: https://watchenv.gwenzr.dev) — l'origine
+  // de confiance de better-auth, et celle qu'affichent les liens absolus
+  // construits côté serveur.
   APP_BASE_URL: z.url().optional(),
 
   // Coach IA — abstraction compatible OpenAI, jamais de couplage direct à un provider
@@ -63,12 +63,6 @@ const envSchema = z.object({
   // athlète, cf. src/lib/crypto/) : le changer les rend illisibles — les comptes
   // concernés sont alors sautés par le rapatriement, avec leur motif.
   BETTER_AUTH_SECRET: z.string().min(1).optional(),
-
-  // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).
-  // Optionnels, mais tant que les deux ne sont pas renseignés le dépôt répond
-  // 503 : il n'existe pas d'état « ouvert sans authentification ».
-  WEBDAV_USERNAME: z.string().min(1).optional(),
-  WEBDAV_PASSWORD: z.string().min(1).optional(),
 });
 
 export type Env = Readonly<z.infer<typeof envSchema>>;

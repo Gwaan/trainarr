@@ -17,8 +17,10 @@
 import { revalidatePath } from "next/cache";
 
 import { ActivityNotFoundError } from "@/data/activity-feedback";
+import { getSession } from "@/data/session";
 import { AiInvalidOutputError, AiResponseError, AiUnavailableError } from "@/lib/ai/errors";
 import { generateActivityFeedback } from "@/lib/ai/feedback-service";
+import { SESSION_REQUIRED_MESSAGE } from "@/lib/auth/messages";
 
 import { parseActivityId } from "./activity-id";
 import {
@@ -45,9 +47,12 @@ export async function requestFeedbackAction(
   _previous: CoachFeedbackState,
   formData: FormData,
 ): Promise<CoachFeedbackState> {
-  // TODO(auth) : pas encore de session dans Trainarr (mono-utilisateur, accès
-  // réseau restreint). Dès qu'elle existera, vérifier ici l'identité de
-  // l'appelant — un contrôle au niveau de la page ne protège pas cette action.
+  // Dans le corps de l'action, avant toute lecture : le contrôle de la page ne
+  // la protège pas, elle s'appelle en POST direct. Le refus est le même quel
+  // que soit l'identifiant envoyé — il ne dit rien de ce qui existe.
+  if ((await getSession()) === null) {
+    return { status: "error", message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const raw = formData.get("activityId");
   // Même validation Zod que le segment d'URL : entier positif, forme unique.

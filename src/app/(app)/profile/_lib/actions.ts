@@ -31,6 +31,8 @@ import {
   type AthleteProfileInput,
 } from '@/data/athlete';
 import { ATHLETE_SEXES } from '@/data/db/schema';
+import { getSession } from '@/data/session';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 import { recoverPendingImports, type RecoveryReport } from '@/lib/fit/recover';
 
 import { parseIntervalsFields } from './intervals-input';
@@ -191,9 +193,14 @@ export async function saveProfileAction(
   _previous: ProfileFormState,
   formData: FormData,
 ): Promise<ProfileFormState> {
-  // TODO(auth) : pas encore de session dans Trainarr (mono-utilisateur, accès
-  // réseau restreint). Dès qu'elle existera, vérifier ici l'identité de
-  // l'appelant — un contrôle au niveau de la page ne protège pas cette action.
+  // Dans le corps de l'action, avant toute validation : le contrôle de la page
+  // ne la protège pas, elle s'appelle en POST direct. Sans session, il n'y a
+  // de toute façon aucun compte à qui rattacher un profil (le DAL le redit avec
+  // `AthleteOwnerRequiredError`) — mais l'écrire ici, c'est le dire avant
+  // d'avoir touché à quoi que ce soit.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = profileSchema.safeParse({
     displayName: textField(formData, 'displayName'),

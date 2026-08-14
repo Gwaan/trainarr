@@ -31,6 +31,8 @@ import {
   type PlanSessionDto,
   type PlanWithSessions,
 } from '@/data/plans';
+import { getSession } from '@/data/session';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 import { syncPlanToIntervalsSafely } from '@/lib/intervals/push-plan';
 import { judgeSessionMove, type MoveSession } from '@/lib/plan-calendar/move-rules';
 
@@ -136,9 +138,12 @@ export async function moveSessionAction(
   _previous: SessionMoveState,
   formData: FormData,
 ): Promise<SessionMoveState> {
-  // TODO(auth) : pas encore de session dans Trainarr (mono-utilisateur, accès
-  // réseau restreint). Dès qu'elle existera, vérifier ici l'identité de
-  // l'appelant — un contrôle au niveau de la page ne protège pas cette action.
+  // Dans le corps de l'action, avant toute lecture : le contrôle de la page ne
+  // la protège pas, elle s'appelle en POST direct. Le refus est le même pour un
+  // identifiant de séance réel et pour un inventé — il ne dit pas lequel.
+  if ((await getSession()) === null) {
+    return { status: 'error', message: SESSION_REQUIRED_MESSAGE };
+  }
 
   const parsed = moveSchema.safeParse({
     sessionId: textField(formData, 'sessionId'),

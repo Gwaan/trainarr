@@ -33,15 +33,14 @@ import { join } from 'node:path';
 
 import { env } from '@/config/env';
 
-import { nameWithSuffix } from './dav';
-import { athleteInboxDir, FAILED_DIR } from './inbox-layout';
+import { athleteInboxDir, FAILED_DIR, nameWithSuffix } from './inbox-layout';
 import { setBackfillMarker } from './service';
 import { isFitFile } from './watch-plan';
 
 /**
  * Nombre de variantes de nom essayées avant d'abandonner un fichier dans
- * `failed/` (même borne que le dépôt WebDAV). Cent séances homonymes le même
- * jour ne se produisent pas ; la borne existe pour que la boucle finisse.
+ * `failed/`. Cent séances homonymes le même jour ne se produisent pas ; la
+ * borne existe pour que la boucle finisse.
  */
 const MAX_NAME_ATTEMPTS = 100;
 
@@ -89,10 +88,10 @@ async function exists(path: string): Promise<boolean> {
  * un fichier fraîchement déposé et encore en attente d'ingestion — une séance
  * perdue sans la moindre trace.
  *
- * Reste une fenêtre de course entre ce contrôle et le `rename` : un dépôt WebDAV
- * qui réserverait le nom dans cet intervalle serait écrasé. Elle est étroite (la
- * reprise est un événement unique de l'onboarding) et le dépôt, lui, se protège
- * déjà en créant son `.part` en exclusif ; la fermer demanderait un `link` +
+ * Reste une fenêtre de course entre ce contrôle et le `rename` : un dépôt du
+ * poller qui réserverait le nom dans cet intervalle serait écrasé. Elle est
+ * étroite (la reprise est un événement unique de l'onboarding) et le poller, lui,
+ * écrit d'abord un `.part` avant de renommer ; la fermer demanderait un `link` +
  * `unlink` dont le gain ne vaut pas la complication ici.
  */
 async function freeTargetName(inboxDir: string, name: string): Promise<string | null> {

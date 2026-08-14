@@ -1,9 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 
+import { getSession } from '@/data/session';
 import { acquireCoachChatSlot } from '@/lib/ai/chat-guard';
 import { COACH_QUESTION_LIMITS, answerCoachQuestion } from '@/lib/ai/coach-service';
 import { AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
+import { SESSION_REQUIRED_MESSAGE } from '@/lib/auth/messages';
 
 /**
  * Le chat du coach : `POST /api/coach/chat`, réponse en flux SSE.
@@ -35,8 +37,9 @@ import { AiResponseError, AiUnavailableError } from '@/lib/ai/errors';
  *
  * ## Ce qui se refuse avant d'ouvrir le flux
  *
- * Une entrée invalide et un refus de charge répondent en **JSON**, avec un vrai
- * code HTTP (400/409/429). C'est la seule fenêtre où c'est encore possible :
+ * L'absence de session, une entrée invalide et un refus de charge répondent en
+ * **JSON**, avec un vrai code HTTP (401/400/409/429). C'est la seule fenêtre où
+ * c'est encore possible :
  * une fois les en-têtes envoyés, le statut est figé à 200 et une panne ne peut
  * plus se dire que par un `event: error` (cf. plus bas).
  *
@@ -117,10 +120,15 @@ function athleteMessage(error: unknown): string {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  // TODO(auth) : pas encore de session dans Trainarr (mono-utilisateur, accès
-  // réseau restreint). Dès qu'elle existera, vérifier ici l'identité de
-  // l'appelant — cette route est exposée en écriture (elle ajoute au fil et
-  // occupe le GPU), et rien d'autre ne la protège.
+  // Avant le corps, avant la garde de charge : cette route est exposée en
+  // écriture (elle ajoute au fil et occupe le GPU), et le proxy ne couvre pas
+  // `/api/` — rien d'autre qu'elle-même ne la protège.
+  if ((await getSession()) === null) {
+    return NextResponse.json(
+      { message: SESSION_REQUIRED_MESSAGE },
+      { status: 401, headers: JSON_HEADERS },
+    );
+  }
 
   const payload: unknown = await request.json().catch(() => null);
   const parsed = chatRequestSchema.safeParse(payload);

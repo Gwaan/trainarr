@@ -178,7 +178,7 @@ describe('planPollWindow', () => {
   });
 
   it('ignore les fichiers déposés par une autre voie que le poller', () => {
-    // Un dépôt WebDAV de la montre ne prouve pas qu'intervals.icu a été
+    // Un fichier arrivé par une autre voie ne prouve pas qu'intervals.icu a été
     // interrogé : l'historique reste à rapatrier.
     const decision = window(['2026-08-09-run.fit', 'processed', 'intervals-i900.fit.part']);
 
