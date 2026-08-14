@@ -28,6 +28,7 @@ export function FirstAccountForm() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
   const uid = useId();
 
   return (
@@ -79,6 +80,19 @@ export function FirstAccountForm() {
           error={state.fieldErrors?.password}
           value={password}
           onChange={setPassword}
+        />
+        {/* La confirmation est vérifiée par l'action, pas ici : ce champ aide,
+            il ne fait pas autorité. Une faute de frappe sur l'unique saisie
+            créerait un compte dont le mot de passe n'est connu de personne. */}
+        <AuthField
+          id={`${uid}-password-confirm`}
+          name="passwordConfirm"
+          label="Confirme ton mot de passe"
+          type="password"
+          autoComplete="new-password"
+          error={state.fieldErrors?.passwordConfirm}
+          value={passwordConfirm}
+          onChange={setPasswordConfirm}
         />
         <AuthSubmit
           pending={isPending}

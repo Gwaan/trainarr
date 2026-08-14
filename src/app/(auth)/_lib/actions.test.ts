@@ -152,17 +152,62 @@ describe('createFirstAccountAction', () => {
   it('refuse un mot de passe trop court avant tout appel', async () => {
     const state = await createFirstAccountAction(
       IDLE,
-      formData({ name: 'Gwen', email: 'gwen@example.test', password: 'court' }),
+      formData({
+        name: 'Gwen',
+        email: 'gwen@example.test',
+        password: 'court',
+        passwordConfirm: 'court',
+      }),
     );
 
     expect(state.fieldErrors?.password).toContain(String(AUTH_PASSWORD_MIN_LENGTH));
     expect(getAuthMock).not.toHaveBeenCalled();
   });
 
+  it("refuse deux saisies différentes, et le dit sur la confirmation", async () => {
+    // Le formulaire contrôle déjà cette égalité ; ce test fige le fait que
+    // l'action ne s'y fie pas — elle est appelable sans lui.
+    const state = await createFirstAccountAction(
+      IDLE,
+      formData({
+        name: 'Gwen',
+        email: 'gwen@example.test',
+        password: VALID_PASSWORD,
+        passwordConfirm: `${VALID_PASSWORD}x`,
+      }),
+    );
+
+    expect(state.status).toBe('error');
+    expect(state.fieldErrors?.passwordConfirm).toBeDefined();
+    // L'erreur se pose sur la confirmation, jamais sur le mot de passe : c'est
+    // la seconde frappe qu'on corrige.
+    expect(state.fieldErrors?.password).toBeUndefined();
+    expect(getAuthMock).not.toHaveBeenCalled();
+  });
+
+  it('refuse une confirmation absente — le champ manquant ne vaut pas accord', async () => {
+    const state = await createFirstAccountAction(
+      IDLE,
+      formData({
+        name: 'Gwen',
+        email: 'gwen@example.test',
+        password: VALID_PASSWORD,
+      }),
+    );
+
+    expect(state.fieldErrors?.passwordConfirm).toBeDefined();
+    expect(getAuthMock).not.toHaveBeenCalled();
+  });
+
   it('refuse une adresse e-mail invalide', async () => {
     const state = await createFirstAccountAction(
       IDLE,
-      formData({ name: 'Gwen', email: 'pas-un-email', password: VALID_PASSWORD }),
+      formData({
+        name: 'Gwen',
+        email: 'pas-un-email',
+        password: VALID_PASSWORD,
+        passwordConfirm: VALID_PASSWORD,
+      }),
     );
 
     expect(state.fieldErrors?.email).toBeDefined();
@@ -175,7 +220,12 @@ describe('createFirstAccountAction', () => {
     await expect(
       createFirstAccountAction(
         IDLE,
-        formData({ name: 'Gwen', email: 'gwen@example.test', password: VALID_PASSWORD }),
+        formData({
+          name: 'Gwen',
+          email: 'gwen@example.test',
+          password: VALID_PASSWORD,
+          passwordConfirm: VALID_PASSWORD,
+        }),
       ),
     ).rejects.toThrow('NEXT_REDIRECT');
     expect(redirectMock).toHaveBeenCalledWith('/');
@@ -193,7 +243,12 @@ describe('createFirstAccountAction', () => {
 
     const state = await createFirstAccountAction(
       IDLE,
-      formData({ name: 'Gwen', email: 'gwen@example.test', password: VALID_PASSWORD }),
+      formData({
+        name: 'Gwen',
+        email: 'gwen@example.test',
+        password: VALID_PASSWORD,
+        passwordConfirm: VALID_PASSWORD,
+      }),
     );
 
     expect(state).toEqual({ status: 'error', message: SIGN_UP_CLOSED_MESSAGE });
@@ -216,7 +271,12 @@ describe('createFirstAccountAction', () => {
 
     const state = await createFirstAccountAction(
       IDLE,
-      formData({ name: 'Gwen', email: 'gwen@example.test', password: VALID_PASSWORD }),
+      formData({
+        name: 'Gwen',
+        email: 'gwen@example.test',
+        password: VALID_PASSWORD,
+        passwordConfirm: VALID_PASSWORD,
+      }),
     );
 
     expect(state).toEqual({ status: 'error', message: "Le compte n'a pas pu être créé. Réessaie." });

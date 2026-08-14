@@ -34,7 +34,11 @@ import { AUTH_PASSWORD_MAX_LENGTH, AUTH_PASSWORD_MIN_LENGTH } from './limits';
 import { guardSignUp } from './sign-up-guard';
 
 export { AUTH_DISABLED_MESSAGES, AUTH_SECRET_MIN_LENGTH } from './config';
-export { AUTH_PASSWORD_MAX_LENGTH, AUTH_PASSWORD_MIN_LENGTH } from './limits';
+export {
+  AUTH_NAME_MAX_LENGTH,
+  AUTH_PASSWORD_MAX_LENGTH,
+  AUTH_PASSWORD_MIN_LENGTH,
+} from './limits';
 export { SIGN_UP_CLOSED_CODE, SIGN_UP_CLOSED_MESSAGE } from './sign-up-guard';
 
 function buildAuth(secret: string) {

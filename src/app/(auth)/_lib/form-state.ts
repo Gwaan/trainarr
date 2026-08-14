@@ -9,7 +9,7 @@
  */
 
 /** Les champs que portent les deux formulaires d'identité. */
-export type AuthField = 'name' | 'email' | 'password';
+export type AuthField = 'name' | 'email' | 'password' | 'passwordConfirm';
 
 export type AuthFormState = {
   status: 'idle' | 'error';

@@ -4,7 +4,9 @@ import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
 import { getAthleteProfile } from "@/data/athlete";
+import { getAccountSummary } from "@/lib/auth/session";
 
+import { AccountPanel } from "./_components/account-panel";
 import { ProfileForm } from "./_components/profile-form";
 import { ProfileSkeleton } from "./_components/profile-skeleton";
 import { toProfileFormValues } from "./_lib/form-values";
@@ -40,7 +42,12 @@ const HEADINGS = {
  */
 async function ProfileContent() {
   await connection();
-  const profile = await getAthleteProfile();
+  // Deux lectures indépendantes : le profil athlète (nos tables, via le DAL) et
+  // le compte connecté (la session, via better-auth).
+  const [profile, account] = await Promise.all([
+    getAthleteProfile(),
+    getAccountSummary(),
+  ]);
 
   const mode = profile === null ? "onboarding" : "edit";
   const { title, subtitle } = HEADINGS[mode];
@@ -51,6 +58,11 @@ async function ProfileContent() {
       {/* Le formulaire ne reçoit que des chaînes prêtes à afficher : la
           conversion des mesures reste côté serveur, testée à part. */}
       <ProfileForm mode={mode} values={toProfileFormValues(profile)} />
+      {/* Après le profil, et à part : l'identité de connexion n'a rien à voir
+          avec les données physiologiques, et son CTA ne doit pas concurrencer
+          l'enregistrement. Le composant ne reçoit que le nom — jamais l'e-mail,
+          l'identifiant interne ni quoi que ce soit de la session. */}
+      <AccountPanel account={account} />
     </>
   );
 }

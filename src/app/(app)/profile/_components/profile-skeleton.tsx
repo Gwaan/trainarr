@@ -12,6 +12,20 @@ function FieldSkeleton({ inputClassName }: { inputClassName: string }) {
   );
 }
 
+/** Un bloc de la section « Ton compte » : sous-titre, ses champs, son bouton. */
+function AccountBlockSkeleton({ fields }: { fields: number }) {
+  return (
+    <div>
+      <Skeleton className="h-3.5 w-32" />
+      <Skeleton className="mt-2 h-3 w-80 max-w-full" />
+      {Array.from({ length: fields }, (_, index) => (
+        <Skeleton key={index} className="mt-3 h-11 w-full sm:max-w-xs" />
+      ))}
+      <Skeleton className="mt-3 h-11 w-full sm:w-48" />
+    </div>
+  );
+}
+
 function PanelSkeleton({
   titleWidth,
   children,
@@ -84,6 +98,13 @@ export function ProfileSkeleton() {
         </PanelSkeleton>
 
         <Skeleton className="h-12 w-full sm:w-44" />
+
+        {/* « Ton compte » : trois blocs — nom, mot de passe, déconnexion. */}
+        <PanelSkeleton titleWidth="w-24">
+          <AccountBlockSkeleton fields={1} />
+          <AccountBlockSkeleton fields={3} />
+          <AccountBlockSkeleton fields={0} />
+        </PanelSkeleton>
       </div>
 
       <span className="sr-only">Chargement du profil…</span>

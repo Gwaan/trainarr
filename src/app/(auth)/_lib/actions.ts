@@ -19,6 +19,7 @@ import { isAPIError } from 'better-auth/api';
 import { z } from 'zod';
 
 import {
+  AUTH_NAME_MAX_LENGTH,
   AUTH_PASSWORD_MAX_LENGTH,
   AUTH_PASSWORD_MIN_LENGTH,
   SIGN_UP_CLOSED_CODE,
@@ -57,17 +58,45 @@ const signInSchema = z.object({
 });
 
 /**
+ * Le message des deux saisies qui doivent coïncider. Il se pose sur la
+ * confirmation, jamais sur le mot de passe : c'est la seconde frappe qu'on
+ * corrige, et signaler la première laisserait croire qu'elle est mauvaise.
+ */
+const PASSWORD_MISMATCH_MESSAGE =
+  'Les deux saisies diffèrent — retape ton mot de passe.';
+
+/**
  * À la création, au contraire, tout est dit : c'est le seul moment où ces
  * valeurs se choisissent, et une erreur de frappe y enferme dehors.
+ *
+ * D'où la confirmation, **vérifiée ici** : le formulaire peut la contrôler pour
+ * aider, il ne fait pas autorité — cette action est appelable sans lui. Sans ce
+ * second passage, une frappe de travers donne un compte dont le mot de passe
+ * n'est connu de personne, sans récupération par e-mail pour le rattraper.
  */
-const firstAccountSchema = z.object({
-  name: z.string().trim().min(1, 'Renseigne un nom.').max(100, 'Nom trop long (100 caractères max).'),
-  email: z.email({ error: 'Adresse e-mail invalide.' }).max(254, 'Adresse e-mail trop longue.'),
-  password: z
-    .string()
-    .min(AUTH_PASSWORD_MIN_LENGTH, `Mot de passe : ${AUTH_PASSWORD_MIN_LENGTH} caractères minimum.`)
-    .max(AUTH_PASSWORD_MAX_LENGTH, `Mot de passe : ${AUTH_PASSWORD_MAX_LENGTH} caractères maximum.`),
-});
+const firstAccountSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, 'Renseigne un nom.')
+      .max(AUTH_NAME_MAX_LENGTH, `Nom trop long (${AUTH_NAME_MAX_LENGTH} caractères max).`),
+    email: z.email({ error: 'Adresse e-mail invalide.' }).max(254, 'Adresse e-mail trop longue.'),
+    password: z
+      .string()
+      .min(AUTH_PASSWORD_MIN_LENGTH, `Mot de passe : ${AUTH_PASSWORD_MIN_LENGTH} caractères minimum.`)
+      .max(AUTH_PASSWORD_MAX_LENGTH, `Mot de passe : ${AUTH_PASSWORD_MAX_LENGTH} caractères maximum.`),
+    passwordConfirm: z.string().max(AUTH_PASSWORD_MAX_LENGTH),
+  })
+  .superRefine((values, ctx) => {
+    if (values.passwordConfirm !== values.password) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['passwordConfirm'],
+        message: PASSWORD_MISMATCH_MESSAGE,
+      });
+    }
+  });
 
 /**
  * Convertit un échec Zod en erreurs par champ — le premier message de chaque
@@ -143,8 +172,11 @@ export async function createFirstAccountAction(
     name: textField(formData, 'name'),
     email: textField(formData, 'email'),
     password: textField(formData, 'password'),
+    passwordConfirm: textField(formData, 'passwordConfirm'),
   });
-  if (!parsed.success) return fieldErrorsOf(parsed.error, ['name', 'email', 'password']);
+  if (!parsed.success) {
+    return fieldErrorsOf(parsed.error, ['name', 'email', 'password', 'passwordConfirm']);
+  }
 
   const auth = getAuth();
   if (auth === null) {

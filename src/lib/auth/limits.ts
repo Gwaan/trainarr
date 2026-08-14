@@ -1,5 +1,5 @@
 /**
- * Bornes du mot de passe.
+ * Bornes des champs d'identité (mot de passe, nom du compte).
  *
  * Module volontairement **sans `server-only`** — comme `src/lib/fit/limits.ts` :
  * ce sont les seules valeurs d'authentification que le navigateur a le droit de
@@ -19,3 +19,12 @@
 
 export const AUTH_PASSWORD_MIN_LENGTH = 12;
 export const AUTH_PASSWORD_MAX_LENGTH = 128;
+
+/**
+ * Longueur maximale du nom du compte.
+ *
+ * Deux écrans écrivent cette même colonne — la création du premier compte et la
+ * section « Ton compte » du profil. Sans borne commune, l'un accepterait ce que
+ * l'autre refuse.
+ */
+export const AUTH_NAME_MAX_LENGTH = 100;
