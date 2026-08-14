@@ -658,14 +658,10 @@ function qualitySessionViolations(session: PlanSessionOutput, slot: QualitySlot)
   if (!isIntensitySession(session)) {
     const roles = new Set((session.steps ?? []).flatMap((block) => block.steps.map((s) => s.role)));
     if (!roles.has('warmup')) {
-      violations.push(
-        `${where} : aucun échauffement — commence par une étape \`warmup\` de 10 à 20 min avant les efforts.`,
-      );
+      violations.push(`${where} : aucun échauffement — commence par une étape \`warmup\`.`);
     }
     if (!roles.has('cooldown')) {
-      violations.push(
-        `${where} : aucun retour au calme — termine par une étape \`cooldown\` de 5 à 10 min.`,
-      );
+      violations.push(`${where} : aucun retour au calme — termine par une étape \`cooldown\`.`);
     }
   }
 

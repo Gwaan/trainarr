@@ -26,6 +26,7 @@ import { fitnessTestWeekNumbers, FITNESS_TEST_KIND } from './fitness-test';
 import { PLAN_INTENTS, type PlanIntent } from './intent';
 import { planPhases, type PlanPhase } from './phases';
 import { buildPlanSkeleton, type QualitySlot, type SkeletonWeek } from './skeleton';
+import { STRIDE_RESERVE_M } from './variations';
 
 /*
  * Le squelette est écrit pour passer les règles du plan : c'est toute sa raison
@@ -1352,24 +1353,36 @@ describe('buildPlanSkeleton', () => {
       }
     });
 
-    it('couvre exactement la distance déclarée par chaque déroulé', () => {
+    /**
+     * L'invariant qui fait tenir les volumes une fois `imposedDistanceKm`
+     * passé : ce qu'un déroulé impute au budget de sa séance vaut sa distance
+     * déclarée, **et jamais davantage**. Une étape chronométrée n'y figure pas
+     * pour une distance qu'elle n'a pas, mais pour la réserve que le squelette
+     * lui met de côté ({@link STRIDE_RESERVE_M}), qui majore ce qu'elle couvrira
+     * réellement — d'où une couverture réelle légèrement inférieure, du bon côté
+     * de la comparaison.
+     */
+    it('impute exactement la distance déclarée par chaque déroulé', () => {
       let checked = 0;
       for (const week of skeleton) {
         for (const session of week.sessions) {
           if (session.steps === undefined) continue;
           checked += 1;
           const covered = flattenSteps(session.steps).reduce(
-            (sum, step) => sum + (step.distanceM ?? 0),
+            (sum, step) => sum + (step.distanceM ?? STRIDE_RESERVE_M),
             0,
           );
           expect(covered, `semaine ${week.weekNumber}, ${session.title}`).toBe(
             Math.round((session.distanceKm ?? 0) * 1_000),
           );
-          // Aucune étape en durée : c'est la contrainte qui fait tenir les
-          // volumes une fois `imposedDistanceKm` passé.
+          // La seule étape que le squelette prescrit au chrono est la ligne
+          // droite : partout ailleurs, l'intention est une distance et la mesure
+          // la suit.
           for (const step of flattenSteps(session.steps)) {
-            expect(step.durationS, `semaine ${week.weekNumber}`).toBeNull();
-            expect(step.distanceM).not.toBeNull();
+            if (step.distanceM !== null) continue;
+            expect(step.durationS, `semaine ${week.weekNumber}, ${session.title}`).toBe(20);
+            expect(step.role, `semaine ${week.weekNumber}, ${session.title}`).toBe('run');
+            expect(step.note ?? '', `semaine ${week.weekNumber}`).toContain('Ligne droite');
           }
         }
       }
@@ -1456,12 +1469,14 @@ describe('buildPlanSkeleton', () => {
       expect(blocks[1].repeat).toBeGreaterThanOrEqual(4);
       expect(blocks[1].repeat).toBeLessThanOrEqual(6);
       expect(blocks[1].steps.map((step) => step.role)).toEqual(['run', 'recover']);
-      // ~20 s d'accélération, soit 80 à 100 m — au-dessus du plancher de 10 m des
-      // étapes, et sous les 200 m d'une « étape courte » pour la validation.
-      expect(blocks[1].steps[0].distanceM).toBeGreaterThanOrEqual(80);
-      expect(blocks[1].steps[0].distanceM).toBeLessThanOrEqual(100);
-      // La section reste une fin de séance, pas la séance.
-      const section = blocks[1].repeat * (blocks[1].steps[0].distanceM ?? 0);
+      // L'accélération se prescrit **au chrono** : 20 s, et aucune distance. Sous
+      // les 60 s qu'`isShortStep` traite comme trop brèves pour une cible
+      // cardiaque, donc la ligne droite reste en allure.
+      expect(blocks[1].steps[0].durationS).toBe(20);
+      expect(blocks[1].steps[0].distanceM).toBeNull();
+      // La section reste une fin de séance, pas la séance — comptée sur ce
+      // qu'elle réserve au budget, faute d'une distance à sommer.
+      const section = blocks[1].repeat * STRIDE_RESERVE_M;
       expect(section / ((strides?.distanceKm ?? 1) * 1_000)).toBeLessThan(0.1);
     });
 

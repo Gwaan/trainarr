@@ -1585,6 +1585,13 @@ export function planWeeksPostProcessing(
  * calme, et répéter un bloc d'effort sans récupération entre les passages (un
  * « 6 × 800 m » enchaîné sans respirer n'est pas la séance décrite).
  *
+ * Ces messages sont lus par le **modèle**, et ils réclament donc une étape, pas
+ * une longueur : ils disaient « un `warmup` de 10 à 20 min » quand la grammaire
+ * de `quality-fill` n'autorise que des mètres — une consigne qu'aucune sortie
+ * conforme ne pouvait honorer littéralement, et un chiffre de plus dans un
+ * contexte où le modèle ancre sur tout ce qui traîne. Ce que la séance totalise
+ * est réclamé ailleurs, par la règle de budget.
+ *
  * Exportée pour le remplissage d'un **créneau de qualité** (`quality-fill.ts`),
  * qui juge une séance seule : une séance écrite créneau par créneau se juge
  * exactement comme celle d'un plan entier, et deux définitions de ces règles
@@ -1606,14 +1613,10 @@ export function sessionStepViolations(session: PlanSessionOutput, label: string)
     } else {
       const roles = new Set(steps.flatMap((block) => block.steps.map((step) => step.role)));
       if (!roles.has('warmup')) {
-        violations.push(
-          `${where} : aucun échauffement — commence par une étape \`warmup\` de 10 à 20 min avant les efforts.`,
-        );
+        violations.push(`${where} : aucun échauffement — commence par une étape \`warmup\`.`);
       }
       if (!roles.has('cooldown')) {
-        violations.push(
-          `${where} : aucun retour au calme — termine par une étape \`cooldown\` de 5 à 10 min.`,
-        );
+        violations.push(`${where} : aucun retour au calme — termine par une étape \`cooldown\`.`);
       }
     }
   }

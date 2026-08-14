@@ -41,17 +41,24 @@
  * La cible change d'amplitude, jamais de zone : ni les durées, ni les distances,
  * ni le budget temps ne bougent, et un test le prouve.
  *
- * ## Deux contraintes dures, héritées et non négociables
+ * ## Une contrainte dure, et la seule exception qu'elle admet
  *
- * 1. **Toutes les étapes se mesurent en distance** (`distanceM`), jamais en
- *    durée. Mesuré sur la matrice du test de propriété : un déroulé en durée
- *    fait sortir 98,3 % des semaines de leur cible une fois `applyImposedPaces`
- *    passé, parce qu'`imposedDistanceKm` remplace la distance déclarée par la
- *    couverture du déroulé dès qu'elle lui est supérieure.
- * 2. **La couverture vaut exactement la distance déclarée.** Chaque constructeur
- *    ci-dessous pose son dernier segment par soustraction, jamais par un second
- *    arrondi : la somme des étapes retombe au mètre près sur `distanceKm`, donc
- *    rien en aval n'a d'arbitrage à faire.
+ * 1. **La couverture ne dépasse jamais la distance déclarée.** C'est la vraie
+ *    règle, celle que la mesure impose : `imposedDistanceKm` remplace la
+ *    distance déclarée par la couverture du déroulé dès que celle-ci lui est
+ *    supérieure, et un déroulé en durée fait alors sortir 98,3 % des semaines de
+ *    leur cible (matrice du test de propriété). D'où le principe : **une étape
+ *    se mesure en distance dès que son intention est une distance**, et chaque
+ *    constructeur pose son dernier segment par soustraction plutôt que par un
+ *    second arrondi — la somme retombe au mètre près sur `distanceKm`.
+ * 2. **L'exception est la ligne droite, et elle est bornée.** Son intention est
+ *    une durée (« 20 s en accélérant »), donc sa mesure en est une
+ *    ({@link STRIDE_S}) : la traduire en mètres écrivait sur la montre autre
+ *    chose que ce que la séance prescrivait. Ce que sa durée coûte au budget
+ *    kilométrique est réservé par un **majorant** ({@link STRIDE_RESERVE_M}),
+ *    calculé sur le pire VDOT du domaine — la couverture d'un footing à lignes
+ *    droites tombe donc légèrement *sous* sa distance déclarée, jamais au-dessus,
+ *    et le piège des 98,3 % reste refermé.
  *
  * Module **pur** et strictement **déterministe** : la variation se décide du
  * numéro de semaine, de la phase et du rang du footing dans sa semaine — ni
@@ -95,6 +102,31 @@ export function distanceStep(
 }
 
 /**
+ * Une étape mesurée en **durée** : le pendant de {@link distanceStep}, pour ce
+ * qui se prescrit au chrono et pas au mètre.
+ *
+ * Le module n'en écrit qu'une sorte, et c'est délibéré (cf. {@link STRIDE_S}) :
+ * tout ce qui se compte dans le budget kilométrique d'une semaine reste en
+ * mètres, seul ce dont l'intention *est* une durée passe ici. Sans sous-créneau
+ * cardiaque : les étapes chronométrées de ce module sont trop brèves pour qu'une
+ * fréquence cardiaque veuille dire quoi que ce soit (`isShortStep`, dans
+ * `lib/ai/plan-schema`).
+ */
+function durationStep(role: PlanStep['role'], durationS: number, note: string): PlanStep {
+  return {
+    role,
+    distanceM: null,
+    durationS,
+    paceMinSecPerKm: null,
+    paceMaxSecPerKm: null,
+    hrZone: null,
+    hrPercentMin: null,
+    hrPercentMax: null,
+    note,
+  };
+}
+
+/**
  * Ce qu'un footing peut porter en plus de ses kilomètres.
  *
  * - `plain` : le footing nu, celui d'avant ce module — et il reste majoritaire.
@@ -131,19 +163,80 @@ export type WeeklyEasyVariation = {
 const EASY_VARIATION_MIN_KM = 5;
 
 /**
- * Une ligne droite : 90 m, soit une vingtaine de secondes aux allures de ces
- * plans.
+ * Une ligne droite : **20 secondes**, et c'est une durée parce que c'en est une.
  *
- * Ce n'est pas un sprint et ce n'est pas une répétition : c'est une
- * accélération progressive sur une foulée déjà chaude, qui entretient la
- * mécanique sans coût aérobie. Bien au-dessus du plancher de 10 m des étapes
- * (`PLAN_STEP_BOUNDS.distanceM`), et sous les 200 m que la validation traite
- * encore comme une étape courte.
+ * ## Le défaut que cela corrige
+ *
+ * L'étape valait 90 m, avec pour consigne « ~20 s en accélérant
+ * progressivement ». La prose disait le temps, la mesure disait la distance, et
+ * c'est la mesure qui part sur la montre : intervals.icu recevait `90mtr` là où
+ * la séance prescrivait vingt secondes — reproché tel quel par l'utilisatrice.
+ * Or 90 m ne veut pas dire vingt secondes pour tout le monde : c'est 41 s à
+ * VDOT 30 et 18 s à VDOT 90. Une accélération se compte au chrono, elle ne se
+ * mesure pas au décamètre — d'autant que personne ne borne une ligne droite au
+ * sol.
+ *
+ * La syntaxe d'intervals.icu porte les deux mesures depuis toujours
+ * (`formatDurationToken` de `lib/plan-steps/intervals-syntax`), et le contrat
+ * d'étapes aussi : il n'y avait rien à construire, seulement une intention à
+ * cesser de traduire.
+ *
+ * Ce n'est pas un sprint et ce n'est pas une répétition : c'est une accélération
+ * progressive sur une foulée déjà chaude, qui entretient la mécanique sans coût
+ * aérobie. Au-dessus du plancher de 5 s des étapes
+ * (`PLAN_STEP_BOUNDS.durationS`), et sous les 60 s qu'`isShortStep` traite comme
+ * trop brèves pour une cible cardiaque — ce qui laisse la ligne droite en
+ * allure, comme il se doit.
  */
-const STRIDE_M = 90;
+const STRIDE_S = 20;
 
-/** Le trot entre deux lignes droites : plus long que l'accélération, souffle complet. */
-const STRIDE_RECOVERY_M = 110;
+/**
+ * Ce qu'une ligne droite **coûte au budget kilométrique** de la séance, en
+ * mètres.
+ *
+ * Une étape chronométrée ne porte pas de distance : la place qu'elle prend dans
+ * une séance budgétée en kilomètres doit donc être réservée ici, à la main. Ce
+ * n'est pas une conversion (la mesure de l'étape reste sa durée, du squelette
+ * jusqu'à la montre), c'est le prix qu'on lui met de côté sur le corps du
+ * footing.
+ *
+ * **100 m, et ce chiffre est un majorant, pas une moyenne.** La règle à ne pas
+ * enfreindre est `couverture ≤ distance déclarée` : au-delà, `imposedDistanceKm`
+ * remplace la distance de la séance par la couverture de son déroulé, et la
+ * semaine sort de sa cible — c'est le piège mesuré à 98,3 % (cf. l'en-tête de
+ * `skeleton.ts`), et les ancrages hebdomadaires ont par endroits 10 m de marge.
+ * Le post-traitement convertit une étape chronométrée à l'allure qu'il lui a
+ * posée, ici le milieu de la plage d'endurance ; sur tout le domaine de VDOT que
+ * l'appli sait produire (30 à 90, bornes de `MAX_PLAUSIBLE_VO2MAX` dans
+ * `lib/metrics/vdot`), 20 s couvrent de **41,6 m** (VDOT 30, E ≈ 8:01/km) à
+ * **99,5 m** (VDOT 90, E ≈ 3:21/km). 100 m borne donc le pire cas, et le cas
+ * courant sous-consomme sa réserve — une séance couvre un peu moins que sa
+ * distance déclarée, jamais plus.
+ *
+ * **Exporté** parce que c'est un contrat, pas un détail : les tests qui
+ * vérifient qu'un footing tombe sur son budget doivent compter la ligne droite
+ * pour ce qu'elle réserve, et non pour ce qu'elle mesure.
+ */
+export const STRIDE_RESERVE_M = 100;
+
+/**
+ * Le trot entre deux lignes droites : 100 m, et **en distance**.
+ *
+ * Pourquoi celui-là reste au mètre quand l'accélération passe au chrono : sa
+ * consigne ne promet aucune durée (« souffle complètement avant la suivante »),
+ * et c'est lui qui garde l'arithmétique de la séance saine. Une réserve de plus
+ * ({@link STRIDE_RESERVE_M}) devrait sinon majorer un second poste, et le corps
+ * du footing paierait deux fois la prudence — pour un trot que personne ne
+ * chronomètre. Il reste bien plus long que l'accélération : 100 m de trot font
+ * une quarantaine de secondes à l'allure d'endurance, contre 20 s d'effort.
+ *
+ * **100 et non 110**, depuis que la réserve d'une ligne droite vaut 100 m : ce
+ * qu'un passage coûte au budget (100 + 100) est ainsi un multiple de la centaine
+ * de mètres, donc le corps du footing tombe sur la grille que tout ce module
+ * respecte — « 7 km » et non « 6 950 m », qui ne se court pas. Accessoirement,
+ * le dénominateur de {@link strideCount} ne bouge pas d'un mètre.
+ */
+const STRIDE_RECOVERY_M = 100;
 
 /**
  * La part de la séance consacrée à la section de lignes droites, récupérations
@@ -252,7 +345,7 @@ function roundHundredM(meters: number): number {
 
 /** Le nombre de lignes droites que porte un footing de cette longueur. */
 function strideCount(totalM: number): number {
-  const raw = Math.round((totalM * STRIDES_SECTION_SHARE) / (STRIDE_M + STRIDE_RECOVERY_M));
+  const raw = Math.round((totalM * STRIDES_SECTION_SHARE) / (STRIDE_RESERVE_M + STRIDE_RECOVERY_M));
   return Math.min(Math.max(raw, STRIDE_COUNT.min), STRIDE_COUNT.max);
 }
 
@@ -264,22 +357,28 @@ function strideCount(totalM: number): number {
  * Le bloc répété porte son étape de récupération, ce que
  * `sessionStepViolations` exige de tout bloc répété — et ce qu'un athlète
  * attend : une ligne droite se court sur un souffle refait.
+ *
+ * **La seule section du module qui mélange les deux mesures**, et c'est
+ * l'intention de chaque étape qui tranche : l'accélération au chrono
+ * ({@link STRIDE_S}), le trot au mètre ({@link STRIDE_RECOVERY_M}). Les notes ne
+ * répètent plus la mesure — c'était le défaut d'origine, deux sources pour un
+ * même fait, dont une seule arrivait sur la montre.
  */
 function stridesSteps(totalM: number, uphill: boolean): PlanSessionSteps {
   const count = strideCount(totalM);
-  const bodyM = totalM - count * (STRIDE_M + STRIDE_RECOVERY_M);
+  const bodyM = totalM - count * (STRIDE_RESERVE_M + STRIDE_RECOVERY_M);
 
   return [
     { repeat: 1, steps: [distanceStep('run', bodyM, 'Footing en endurance, souple et régulier')] },
     {
       repeat: count,
       steps: [
-        distanceStep(
+        durationStep(
           'run',
-          STRIDE_M,
+          STRIDE_S,
           uphill
-            ? 'Ligne droite en côte : ~20 s en montée, appui dynamique, buste droit'
-            : 'Ligne droite : ~20 s en accélérant progressivement, épaules relâchées',
+            ? 'Ligne droite en côte : accélère en montée, appui dynamique, buste droit'
+            : 'Ligne droite : accélère progressivement, épaules relâchées',
         ),
         distanceStep(
           'recover',
@@ -358,8 +457,11 @@ function progressiveSteps(totalM: number): PlanSessionSteps {
  * ou que la séance est trop courte pour porter quoi que ce soit
  * ({@link EASY_VARIATION_MIN_KM}), auquel cas l'appelant écrit un footing nu.
  *
- * La couverture vaut **exactement** `distanceKm` : le dernier segment de chaque
- * forme est posé par soustraction.
+ * Le déroulé **rend compte** de `distanceKm` au mètre près : le dernier segment
+ * de chaque forme est posé par soustraction. Sur les lignes droites, la part
+ * chronométrée y figure pour sa réserve ({@link STRIDE_RESERVE_M}) et non pour
+ * une distance qu'elle n'a pas — la couverture réelle passe donc juste en
+ * dessous, jamais au-dessus.
  */
 export function easySessionSteps(
   variation: EasyVariation,

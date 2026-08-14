@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EASY_HR_BANDS, EASY_HR_ZONE, PRESCRIBED_HR_ZONES } from '@/lib/metrics/hr-targets';
+import { stepsToIntervalsSyntax } from '@/lib/plan-steps/intervals-syntax';
 import { flattenSteps } from '@/lib/plan-steps/schema';
 
 import type { PlanPhase } from './phases';
@@ -8,6 +9,7 @@ import {
   easySessionSteps,
   longRunFinishSteps,
   spreadEasyDistances,
+  STRIDE_RESERVE_M,
   weeklyEasyVariation,
   type EasyVariation,
 } from './variations';
@@ -18,9 +20,20 @@ import {
  * l'utilisatrice les recevra ; ce fichier-ci éprouve les arêtes.
  */
 
-/** La couverture d'un déroulé, en mètres — la seule mesure qui compte en aval. */
+/**
+ * Ce qu'un déroulé impute au budget kilométrique de sa séance, en mètres.
+ *
+ * Une étape chronométrée n'a pas de distance : elle compte pour la réserve que
+ * le module lui met de côté ({@link STRIDE_RESERVE_M}), qui est un **majorant**
+ * de ce qu'elle couvrira réellement. C'est cette somme-là qui doit retomber sur
+ * la distance déclarée — la couverture réelle, elle, passe en dessous, et c'est
+ * exactement ce que `imposedDistanceKm` demande.
+ */
 function coveredM(steps: ReturnType<typeof easySessionSteps>): number {
-  return flattenSteps(steps ?? []).reduce((sum, step) => sum + (step.distanceM ?? 0), 0);
+  return flattenSteps(steps ?? []).reduce(
+    (sum, step) => sum + (step.distanceM ?? STRIDE_RESERVE_M),
+    0,
+  );
 }
 
 describe('weeklyEasyVariation', () => {
@@ -67,7 +80,7 @@ describe('easySessionSteps', () => {
     expect(easySessionSteps('plain', 12)).toBeUndefined();
   });
 
-  it('couvre exactement la distance déclarée, au mètre près', () => {
+  it('rend compte de la distance déclarée, au mètre près', () => {
     for (const variation of VARIATIONS) {
       // Toutes les distances du dixième de km, de 5 à 20 km : c'est le domaine
       // que les budgets hebdomadaires produisent.
@@ -79,17 +92,41 @@ describe('easySessionSteps', () => {
     }
   });
 
-  it('ne mesure aucune étape en durée, et n’écrit aucune allure', () => {
+  /**
+   * La règle du module : la mesure suit l'intention. Une tranche de footing se
+   * prescrit en mètres, une accélération au chrono — et rien ne porte les deux,
+   * ce que le contrat d'étapes refuserait de toute façon.
+   */
+  it('mesure chaque étape par son intention, et n’écrit aucune allure', () => {
     for (const variation of VARIATIONS) {
       for (const step of flattenSteps(easySessionSteps(variation, 8.3) ?? [])) {
-        expect(step.durationS, variation).toBeNull();
-        expect(step.distanceM, variation).not.toBeNull();
+        const timed = variation !== 'progressive' && step.role === 'run' && step.distanceM === null;
+        expect(step.durationS, variation).toBe(timed ? 20 : null);
+        expect(step.distanceM === null, variation).toBe(timed);
         expect(step.paceMinSecPerKm, variation).toBeNull();
         expect(step.paceMaxSecPerKm, variation).toBeNull();
         expect(step.hrZone, variation).toBeNull();
         expect(step.note?.length ?? 0).toBeGreaterThan(0);
       }
     }
+  });
+
+  /**
+   * Le reproche, textuel : « sur les plans tu dis "courir pendant 20 secondes à
+   * telle allure", tu mets une pace avec une distance — mais intervals gère les
+   * durées aussi ». La ligne droite valait `90mtr` sur la montre pendant que sa
+   * consigne annonçait vingt secondes ; elle part désormais en `20s`, et plus
+   * rien du déroulé ne réclame de mètres pour une accélération.
+   */
+  it('prescrit la ligne droite au chrono, jusque dans la syntaxe intervals.icu', () => {
+    const syntax = stepsToIntervalsSyntax(easySessionSteps('strides', 8) ?? []);
+    const stride = syntax.split('\n').find((line) => line.includes('Ligne droite'));
+
+    expect(stride).toBeDefined();
+    expect(stride).toContain(' 20s');
+    expect(stride).not.toContain('mtr');
+    // Et la consigne ne redit plus la mesure : une seule source par fait.
+    expect(stride).not.toContain('20 s');
   });
 
   it('garde 4 à 6 lignes droites quelle que soit la longueur du footing', () => {
@@ -108,7 +145,8 @@ describe('easySessionSteps', () => {
     const uphill = easySessionSteps('hillStrides', 8) ?? [];
 
     expect(uphill.map((block) => block.repeat)).toEqual(flat.map((block) => block.repeat));
-    expect(uphill[1].steps[0].distanceM).toBe(flat[1].steps[0].distanceM);
+    expect(uphill[1].steps[0].durationS).toBe(flat[1].steps[0].durationS);
+    expect(uphill[1].steps[1].distanceM).toBe(flat[1].steps[1].distanceM);
     expect(uphill[1].steps[0].note).toContain('côte');
     expect(flat[1].steps[0].note).not.toContain('côte');
   });

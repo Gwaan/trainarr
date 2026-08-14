@@ -514,11 +514,14 @@ describe('validatePlanBusinessRules', () => {
         EXPECTED,
       );
 
+      // Une étape réclamée, jamais une longueur : la grammaire du modèle ne sait
+      // écrire que des mètres, et lui demander « 10 à 20 min » était une consigne
+      // qu'aucune sortie conforme ne pouvait honorer.
       expect(violations).toContain(
-        'Semaine 1, séance du jeudi (VMA) : aucun échauffement — commence par une étape `warmup` de 10 à 20 min avant les efforts.',
+        'Semaine 1, séance du jeudi (VMA) : aucun échauffement — commence par une étape `warmup`.',
       );
       expect(violations).toContain(
-        'Semaine 1, séance du jeudi (VMA) : aucun retour au calme — termine par une étape `cooldown` de 5 à 10 min.',
+        'Semaine 1, séance du jeudi (VMA) : aucun retour au calme — termine par une étape `cooldown`.',
       );
     });
 
