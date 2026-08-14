@@ -1044,6 +1044,93 @@ export const planRevisions = pgTable(
 );
 
 /**
+ * Le verdict d'une revue de plan : le plan tient, ou il est recalculé.
+ *
+ * Recopié depuis le contrat de sortie du coach (`lib/ai/plan-schema.ts`) plutôt
+ * qu'importé — la base ne dépend pas du module qui parle au modèle.
+ */
+export const PLAN_REVIEW_VERDICTS = ['keep', 'adjust'] as const;
+
+export type PlanReviewVerdict = (typeof PLAN_REVIEW_VERDICTS)[number];
+
+/**
+ * Le **journal des décisions de revue** : ce que le coach a conclu, sur quoi, et
+ * quand.
+ *
+ * ## Pourquoi cette table existe
+ *
+ * Une revue qui conclut « adjust » laisse une trace — la proposition déposée
+ * dans `plan_revisions`. Une revue qui conclut « keep » n'en laissait aucune :
+ * elle avançait le marqueur, écrivait une ligne de log, et disparaissait au
+ * redémarrage du conteneur. Or c'est le verdict le plus fréquent, et de loin.
+ * Impossible, dans ces conditions, de répondre à la seule question qui vaille
+ * sur un juge : rend-il la même décision deux fois sur des situations
+ * semblables ? Le journal la rend vérifiable, en gardant côte à côte le verdict,
+ * sa justification et les entrées qui l'ont produit.
+ *
+ * **Il observe, il ne gouverne pas** : rien dans l'application ne le lit pour
+ * décider quoi que ce soit, et une panne d'écriture n'interrompt pas la revue
+ * (cf. `lib/ai/review-service.ts`). Le marqueur qui cadence les revues reste
+ * `plans.reviewed_session_count` — pas cette table.
+ *
+ * ## Le résumé des entrées, et pas les entrées
+ *
+ * Quatre chiffres et un rang de semaine, en colonnes simples : ce qu'il faut
+ * pour reconnaître deux situations semblables, et rien de plus. Le bilan complet
+ * envoyé au modèle (séance par séance, le plan restant, l'état de forme) se
+ * recalcule depuis les activités et le plan, qui sont la source de vérité — le
+ * copier ici en ferait une seconde, qui divergerait.
+ *
+ * ## `revision_id` sans clé étrangère, délibérément
+ *
+ * Une ligne de `plan_revisions` est **éphémère** : accepter ou refuser la
+ * supprime. Une clé étrangère obligerait donc à effacer le lien (`SET NULL`) au
+ * moment précis où la décision de l'athlète devient intéressante, ou à retenir
+ * une ligne que le DAL veut supprimer. L'identifiant est gardé tel quel : c'est
+ * une trace, pas une jointure garantie.
+ */
+export const planReviewDecisions = pgTable(
+  'plan_review_decisions',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    /** Plan relu. Le journal disparaît avec lui (`ON DELETE CASCADE`). */
+    planId: integer('plan_id')
+      .notNull()
+      .references(() => plans.id, { onDelete: 'cascade' }),
+    verdict: text('verdict', { enum: PLAN_REVIEW_VERDICTS }).notNull(),
+    /** Ce que le modèle a dit de sa décision, en une ou deux phrases. */
+    reason: text('reason').notNull(),
+    /** Rang de la semaine du plan au jour de la décision : 1 = première semaine. */
+    planWeek: integer('plan_week').notNull(),
+    /** Séances réalisées sur la fenêtre relue (le détail **et** les plus anciennes). */
+    sessionsCompleted: integer('sessions_completed').notNull(),
+    /** Séances manquées sur cette même fenêtre. */
+    sessionsMissed: integer('sessions_missed').notNull(),
+    /**
+     * La charge du jour telle que le modèle l'a lue. `NULL` quand elle n'était
+     * pas calculable — un zéro serait une donnée inventée.
+     */
+    ctl: real('ctl'),
+    atl: real('atl'),
+    tsb: real('tsb'),
+    /**
+     * La proposition déposée par cette décision, `NULL` quand il n'y en a pas :
+     * un « keep », ou un « adjust » abandonné avant le dépôt (plan modifié
+     * pendant la reconstruction, plan archivé, dépôt concurrent).
+     */
+    revisionId: integer('revision_id'),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    /** Chemin d'accès de la lecture : les décisions d'un athlète, les récentes d'abord. */
+    index('plan_review_decisions_athlete_created_at_idx').on(table.athleteId, table.createdAt),
+  ],
+);
+
+/**
  * Le retour du coach sur une séance réalisée, en markdown.
  *
  * **Une ligne au plus par activité** (index unique) : le feedback n'est pas un
@@ -1352,6 +1439,9 @@ export type NewPlan = InferInsertModel<typeof plans>;
 
 export type PlanRevision = InferSelectModel<typeof planRevisions>;
 export type NewPlanRevision = InferInsertModel<typeof planRevisions>;
+
+export type PlanReviewDecision = InferSelectModel<typeof planReviewDecisions>;
+export type NewPlanReviewDecision = InferInsertModel<typeof planReviewDecisions>;
 
 export type PlannedSession = InferSelectModel<typeof plannedSessions>;
 export type NewPlannedSession = InferInsertModel<typeof plannedSessions>;

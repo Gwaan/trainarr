@@ -27,6 +27,8 @@ const { dal } = vi.hoisted(() => ({
     getPlanUpdatedAt: vi.fn(),
     markPlanReviewed: vi.fn(),
     depositPlanRevision: vi.fn(),
+    getPendingPlanRevision: vi.fn(),
+    recordPlanReviewDecision: vi.fn(),
     reconcilePlanSessions: vi.fn(),
   },
 }));
@@ -56,12 +58,19 @@ vi.mock('@/data/plan-review', () => ({
   getPlanUpdatedAt: dal.getPlanUpdatedAt,
   markPlanReviewed: dal.markPlanReviewed,
 }));
+vi.mock('@/data/plan-review-decisions', () => ({
+  recordPlanReviewDecision: dal.recordPlanReviewDecision,
+}));
 vi.mock('@/data/plan-revisions', async () => {
   // `toPlanRevisionSessions` est du vrai code — c'est lui qui normalise ce que
   // le service dépose. Seul le dépôt lui-même est remplacé.
   const actual =
     await vi.importActual<typeof import('@/data/plan-revisions')>('@/data/plan-revisions');
-  return { ...actual, depositPlanRevision: dal.depositPlanRevision };
+  return {
+    ...actual,
+    depositPlanRevision: dal.depositPlanRevision,
+    getPendingPlanRevision: dal.getPendingPlanRevision,
+  };
 });
 vi.mock('@/data/plans', async () => {
   // Les erreurs et les bornes sont du vrai code métier : seules les fonctions
@@ -224,6 +233,10 @@ beforeEach(() => {
   dal.applyPlanUpdate.mockResolvedValue(undefined);
   dal.markPlanReviewed.mockResolvedValue(undefined);
   dal.depositPlanRevision.mockResolvedValue('deposited');
+  // La proposition en attente juste après un dépôt : c'est la nôtre, et c'est
+  // elle que le journal des décisions rattache au verdict.
+  dal.getPendingPlanRevision.mockResolvedValue({ id: 88, planId: 3 });
+  dal.recordPlanReviewDecision.mockResolvedValue(undefined);
   dal.reconcilePlanSessions.mockResolvedValue(0);
   scheduleAfter.mockImplementation(() => {
     throw outsideRequestScope();
@@ -389,6 +402,35 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
     expect(user).toContain('Allure moyenne des dernières sorties : 5:24/km.');
   });
 
+  it('donne les bandes de TSB comme grille de lecture, jamais comme déclencheur', async () => {
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
+    // Les mêmes chiffres que ceux dont l'appli glose la valeur à l'écran
+    // (`(app)/_lib/metric-tone.ts`) : deux lectures divergentes du même nombre
+    // feraient dire deux choses différentes du même jour.
+    expect(user).toContain('au-dessus de +5');
+    expect(user).toContain('entre -10 et -30');
+    expect(user).toContain('sous -30');
+    // Et la mise en garde, qui compte autant que les chiffres : un modèle à qui
+    // l'on donne des seuils en fait une règle (« TSB sous -30 donc adjust »).
+    expect(user).toContain('elles ne décident de rien');
+    expect(user).toContain('valeur modélisée dont la validité individuelle est modérée');
+    expect(user).toContain('aucune bande franchie ne justifie à elle seule un « adjust »');
+  });
+
+  it('ne glose aucune bande quand la charge n’est pas calculable', async () => {
+    dal.getTrainingSnapshot.mockResolvedValue({ ...SNAPSHOT, fitness: null });
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
+    expect(user).toContain('Charge (CTL/ATL/TSB) : non calculable');
+    // Gloser des bandes à côté d'un « non calculable » ferait parler le prompt
+    // d'un chiffre absent.
+    expect(user).not.toContain('Repères de lecture du TSB');
+  });
+
   it('impose « ne rien changer » comme réponse par défaut', async () => {
     await maybeReviewActivePlan(ATHLETE_ID);
 
@@ -550,6 +592,128 @@ describe('maybeReviewActivePlan — décision', () => {
 
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
     expect(logs()).toContain("une autre proposition vient d'être déposée");
+  });
+});
+
+/**
+ * Le journal des décisions : une ligne par verdict rendu, « keep » compris.
+ *
+ * C'était le trou de l'observabilité du juge — un « adjust » laissait une
+ * proposition derrière lui, un « keep » ne laissait rien du tout, alors que
+ * c'est le verdict ordinaire. Sans trace, rien ne dit si le modèle décide la
+ * même chose deux fois sur des situations semblables.
+ */
+describe('maybeReviewActivePlan — journal des décisions', () => {
+  /** La décision journalisée, et l'athlète sous lequel elle l'a été. */
+  function journaled() {
+    return dal.recordPlanReviewDecision.mock.calls[0];
+  }
+
+  it('journalise un « keep », avec le résumé des entrées de la décision', async () => {
+    chatCompletionJson.mockResolvedValue({
+      decision: 'keep',
+      reason: 'Les quatre séances sont dans les cibles.',
+    });
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    expect(dal.recordPlanReviewDecision).toHaveBeenCalledTimes(1);
+    const [decision, athleteId] = journaled();
+    expect(athleteId).toBe(ATHLETE_ID);
+    expect(decision).toEqual({
+      planId: 3,
+      verdict: 'keep',
+      reason: 'Les quatre séances sont dans les cibles.',
+      // Plan démarré le 10 août, décision le 11 : première semaine.
+      planWeek: 1,
+      // La fenêtre relue : une séance courue, une manquée (cf. `REVIEW`).
+      sessionsCompleted: 1,
+      sessionsMissed: 1,
+      fitness: { ctl: 52.4, atl: 61.2, tsb: -8.8 },
+      // Un « keep » ne dépose rien.
+      revisionId: null,
+    });
+  });
+
+  it('rattache la proposition déposée au verdict « adjust »', async () => {
+    chatCompletionJson.mockResolvedValue(ADJUST);
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    expect(journaled()[0]).toMatchObject({
+      verdict: 'adjust',
+      reason: 'Charge trop élevée.',
+      revisionId: 88,
+    });
+  });
+
+  it('journalise le verdict même quand la proposition est abandonnée', async () => {
+    chatCompletionJson.mockResolvedValue(ADJUST);
+    dal.depositPlanRevision.mockResolvedValue('conflict');
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    // Un journal qui ne garderait que les décisions abouties dirait du coach
+    // autre chose que ce qu'il a décidé.
+    expect(journaled()[0]).toMatchObject({ verdict: 'adjust', revisionId: null });
+    expect(dal.getPendingPlanRevision).not.toHaveBeenCalled();
+  });
+
+  it('journalise aussi le verdict abandonné au contrôle de fraîcheur', async () => {
+    chatCompletionJson.mockResolvedValue(ADJUST);
+    dal.getPlanUpdatedAt.mockResolvedValue('2026-08-11T09:30:00.000Z');
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    expect(dal.depositPlanRevision).not.toHaveBeenCalled();
+    expect(journaled()[0]).toMatchObject({ verdict: 'adjust', revisionId: null });
+  });
+
+  it('compte la fenêtre relue en entier, séances non détaillées comprises', async () => {
+    chatCompletionJson.mockResolvedValue(KEEP);
+    dal.getPlanReview.mockResolvedValue({
+      ...REVIEW,
+      older: { count: 23, completed: 18, missed: 5 },
+    });
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    // Le détail (1 courue, 1 manquée) plus l'agrégat des plus anciennes.
+    expect(journaled()[0]).toMatchObject({ sessionsCompleted: 19, sessionsMissed: 6 });
+  });
+
+  it('compte le rang de semaine depuis le départ du plan', async () => {
+    chatCompletionJson.mockResolvedValue(KEEP);
+    dal.getActivePlanWithSessions.mockResolvedValue({
+      plan: { ...PLAN, startsOn: '2026-06-01', weeks: 16, raceDate: '2026-09-20' },
+      sessions: ACTIVE.sessions,
+    });
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    // 71 jours après le départ, au 11 août : onzième semaine du plan.
+    expect(journaled()[0]).toMatchObject({ planWeek: 11 });
+  });
+
+  it('ne fait pas échouer la révision quand le journal est en panne', async () => {
+    chatCompletionJson.mockResolvedValue(KEEP);
+    dal.recordPlanReviewDecision.mockRejectedValue(new Error('base indisponible'));
+
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
+
+    // Le journal observe, il ne gouverne pas : le marqueur a avancé, et l'échec
+    // est dit avec son motif.
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
+    expect(errored).toHaveBeenCalledWith(
+      '[plan/review] décision non journalisée — Error : base indisponible',
+    );
+    expect(errored).not.toHaveBeenCalledWith(
+      expect.stringContaining('[plan/review] révision impossible'),
+    );
+
+    // Et aucun délai de garde n'a été posé : la revue suivante repart.
+    await maybeReviewActivePlan(ATHLETE_ID);
+    expect(chatCompletionJson).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -91,10 +91,19 @@ import 'server-only';
  * Chaque étape significative se journalise en `[plan/review]` : déclenchement,
  * décision (avec sa raison), échec. Une révision qui ne dit rien ne serait
  * distinguable ni d'un service en panne, ni d'un seuil jamais atteint.
+ *
+ * Ces lignes-là partent avec le conteneur. Ce qui **reste**, c'est le journal
+ * des décisions (`data/plan-review-decisions.ts`) : une ligne par verdict rendu,
+ * « keep » compris, avec le résumé des entrées qui l'ont produit. C'est ce qui
+ * rend le juge relisible — un « adjust » laissait une proposition derrière lui,
+ * un « keep » ne laissait rien, et rien ne disait donc si le modèle décide la
+ * même chose deux fois sur des situations semblables. Il observe et ne gouverne
+ * rien : une panne d'écriture n'interrompt pas la revue ({@link journalDecision}).
  */
 
 import { todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
+import { recordPlanReviewDecision } from '@/data/plan-review-decisions';
 import {
   getPlanReview,
   getPlanUpdatedAt,
@@ -103,14 +112,18 @@ import {
   type PlanReviewOutcomeDto,
   type PlanReviewSessionDto,
 } from '@/data/plan-review';
-import { depositPlanRevision, toPlanRevisionSessions } from '@/data/plan-revisions';
+import {
+  depositPlanRevision,
+  getPendingPlanRevision,
+  toPlanRevisionSessions,
+} from '@/data/plan-revisions';
 import {
   InvalidPlanError,
   getActivePlanWithSessions,
   type PlanDto,
   type PlanSessionDto,
 } from '@/data/plans';
-import { shiftCivilDate } from '@/lib/dates/civil';
+import { civilDaysBetween, shiftCivilDate } from '@/lib/dates/civil';
 import type { TrainingPaces } from '@/lib/metrics/vdot';
 import {
   planRevisionDirection,
@@ -308,6 +321,33 @@ const REVIEW_SYSTEM_PROMPT = [
 ].join('\n');
 
 /**
+ * Les bandes de TSB, en toutes lettres — **une grille de lecture, pas un
+ * déclencheur**.
+ *
+ * Les chiffres sont ceux dont l'appli glose déjà la valeur à l'écran (`readTsb`,
+ * `(app)/_lib/metric-tone.ts`, bandes usuelles de la méthode Coggan) : le
+ * tableau de bord annonce « fatigue marquée » sous -30, le coach lisait le même
+ * nombre sans savoir où il tombait. Deux lectures divergentes du même chiffre
+ * feraient dire deux choses différentes du même jour.
+ *
+ * **La seconde phrase compte autant que la première.** Un modèle à qui l'on
+ * donne des seuils chiffrés en fait une règle — « TSB sous -30, donc adjust » —
+ * et c'est exactement ce qu'il ne faut pas : le TSB est une valeur *modélisée*
+ * (la différence de deux moyennes exponentielles de charge), à la validité
+ * individuelle modérée, et une bande franchie ne dit rien à elle seule de ce que
+ * l'athlète a dans les jambes. Ce qui garde le dernier mot reste la consigne du
+ * système : un écart isolé n'est pas une raison de rebattre les cartes.
+ *
+ * La ligne ne part **qu'avec une charge calculable** : gloser des bandes à côté
+ * d'un « non calculable » n'apprendrait rien et ferait parler le prompt d'un
+ * chiffre absent.
+ */
+const TSB_BANDS_NOTE = [
+  "Repères de lecture du TSB : au-dessus de +5, l'athlète est fraîche et bien récupérée ; entre -10 et -30, la fatigue est celle que produit normalement un plan en construction ; sous -30, la fatigue est sévère.",
+  "Ces bandes situent un chiffre, elles ne décident de rien : le TSB est une valeur modélisée dont la validité individuelle est modérée, et aucune bande franchie ne justifie à elle seule un « adjust » — ce sont les séances réalisées qui décident.",
+].join('\n');
+
+/**
  * Ce que le bilan ne détaille pas, en une ligne — ou rien s'il détaille tout.
  *
  * La ligne précède les séances détaillées : elle décrit un passé plus ancien,
@@ -344,6 +384,7 @@ export function buildPlanReviewMessages(
     // Même régime qu'une génération : avec une table, l'allure moyenne des
     // dernières sorties sort du contexte (cf. `SnapshotFormatOptions`).
     formatTrainingSnapshot(snapshot, { withRecentPace: paces === null }),
+    ...(snapshot.fitness === null ? [] : [TSB_BANDS_NOTE]),
     '',
     `Décide : « keep » si le plan reste adapté, « adjust » s'il faut recalculer les ${window.weeks} semaines restantes.`,
   ].join('\n');
@@ -553,6 +594,7 @@ async function runReview(context: ReviewContext, athleteId: number): Promise<voi
   if (output.decision === 'keep') {
     await markPlanReviewed(plan.id, review.completedSessionCount, athleteId);
     console.log(`[plan/review] plan ${plan.id} conservé — ${output.reason}`);
+    await journalDecision(context, output, false, athleteId);
     return;
   }
 
@@ -583,10 +625,84 @@ async function runReview(context: ReviewContext, athleteId: number): Promise<voi
       `[plan/review] plan ${plan.id} modifié pendant la révision — abandon ; nouvelle tentative ` +
         `dans ${Math.round(REVIEW_COOLDOWN_MS / 60_000)} min au plus tôt, sur l'état à jour.`,
     );
+    // Le verdict a bien été rendu : il se journalise, sans proposition à lui
+    // rattacher. Un journal qui ne garderait que les décisions abouties dirait
+    // du coach autre chose que ce qu'il a décidé.
+    await journalDecision(context, output, false, athleteId);
     return;
   }
 
-  await proposeReview(context, output, rewrite, athleteId);
+  const deposited = await proposeReview(context, output, rewrite, athleteId);
+  await journalDecision(context, output, deposited, athleteId);
+}
+
+/**
+ * Journalise la décision qui vient d'être rendue — **et ne fait jamais échouer
+ * la révision**.
+ *
+ * Le journal observe, il ne gouverne pas : une insertion refusée ne dit rien du
+ * plan, et la laisser remonter à {@link maybeReviewActivePlan} ferait traiter la
+ * revue comme un échec transitoire — cooldown d'une demi-heure et révision
+ * rejouée au prochain import, pour une ligne de trace. Tout ce que ce chemin
+ * fait, relecture de la proposition comprise, tient donc sous le même filet :
+ * l'échec est journalisé avec son motif, et s'arrête là.
+ *
+ * Le rang de semaine se compte depuis le départ du plan, à la semaine entamée :
+ * le jour du départ est en semaine 1.
+ *
+ * @param deposited la décision a-t-elle abouti à une proposition ? Un « keep »
+ * n'en dépose pas, et un « adjust » peut être abandonné avant le dépôt.
+ */
+async function journalDecision(
+  context: ReviewContext,
+  output: PlanReviewOutput,
+  deposited: boolean,
+  athleteId: number,
+): Promise<void> {
+  const { plan, review, snapshot } = context;
+  const detailedCompleted = review.sessions.filter((session) => session.completed !== null).length;
+
+  try {
+    await recordPlanReviewDecision(
+      {
+        planId: plan.id,
+        verdict: output.decision,
+        reason: output.reason,
+        planWeek: Math.floor(civilDaysBetween(plan.startsOn, snapshot.today) / 7) + 1,
+        // La fenêtre relue, dans son entier : le détail borné à douze séances et
+        // les plus anciennes, que le bilan ne compte que globalement.
+        sessionsCompleted: detailedCompleted + (review.older?.completed ?? 0),
+        sessionsMissed: review.sessions.length - detailedCompleted + (review.older?.missed ?? 0),
+        fitness: snapshot.fitness,
+        revisionId: deposited ? await depositedRevisionId(plan.id, athleteId) : null,
+      },
+      athleteId,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[plan/review] décision non journalisée — ${reason}`);
+  }
+}
+
+/**
+ * L'identifiant de la proposition qui vient d'être déposée — `null` si ce n'est
+ * pas la nôtre qui est en attente.
+ *
+ * Une relecture, et non une valeur rendue par le dépôt : `depositPlanRevision`
+ * rend une **issue**, pas une ligne, et lui faire rendre l'identifiant
+ * changerait le contrat de l'autre service qui dépose (le test chronométré),
+ * lequel n'en a aucun usage. La relecture, elle, est déterministe : il y a au
+ * plus une proposition en attente par athlète (index unique), et le dépôt vient
+ * d'effacer la précédente dans sa propre transaction.
+ *
+ * Le plan est vérifié malgré tout : l'autre service, s'il dépose dans les
+ * millisecondes qui suivent, remplace la proposition en attente par la sienne.
+ * Le journal note alors « aucune proposition » plutôt qu'un identifiant qui
+ * n'est pas le sien — et la proposition, elle, est bien en base.
+ */
+async function depositedRevisionId(planId: number, athleteId: number): Promise<number | null> {
+  const pending = await getPendingPlanRevision(athleteId);
+  return pending !== null && pending.planId === planId ? pending.id : null;
 }
 
 /**
@@ -763,13 +879,16 @@ async function generateReview(context: ReviewContext): Promise<PlanReviewOutput>
  * calendrier intervals.icu. Pousser à la montre un plan que personne n'a accepté
  * publierait une proposition — c'est l'acceptation qui les déclenche
  * (`afterActivePlanChanged`).
+ *
+ * @returns la proposition a-t-elle bien été déposée ? C'est ce que le journal
+ * des décisions rattache au verdict (cf. {@link journalDecision}).
  */
 async function proposeReview(
   context: ReviewContext,
   output: Extract<PlanReviewOutput, { decision: 'adjust' }>,
   rewrite: RemainingPlanRewrite,
   athleteId: number,
-): Promise<void> {
+): Promise<boolean> {
   const { plan, review, window, fromDate, snapshot, upcoming } = context;
   const settings = reviewSettings(output.settings);
   const sessions = toPlanRevisionSessions(
@@ -809,7 +928,7 @@ async function proposeReview(
       `[plan/review] plan ${plan.id} : réévaluation proposée (${before.volumeKm} → ${after.volumeKm} km ` +
         `sur ${window.weeks} semaines) — ${output.reason}`,
     );
-    return;
+    return true;
   }
 
   // Ni l'une ni l'autre n'est une panne, et aucune n'a avancé le marqueur : la
@@ -819,4 +938,5 @@ async function proposeReview(
       ? `[plan/review] plan ${plan.id} : plus le plan actif — proposition abandonnée.`
       : `[plan/review] plan ${plan.id} : une autre proposition vient d'être déposée — abandon.`,
   );
+  return false;
 }
