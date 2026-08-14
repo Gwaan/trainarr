@@ -7,7 +7,6 @@ vi.mock('server-only', () => ({}));
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     parseFitActivity: vi.fn(),
-    getCurrentAthleteId: vi.fn(),
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
     hasActivityStreams: vi.fn(),
@@ -19,10 +18,6 @@ const { mocks } = vi.hoisted(() => ({
 
 vi.mock('./parse', () => ({
   parseFitActivity: mocks.parseFitActivity,
-}));
-
-vi.mock('@/data/athlete', () => ({
-  getCurrentAthleteId: mocks.getCurrentAthleteId,
 }));
 
 vi.mock('@/data/activities', () => ({
@@ -77,10 +72,15 @@ const REPARSED: ParsedFitActivity = {
 
 const BUFFER = Buffer.from('fit');
 
+/**
+ * L'athlète à qui appartient le fichier. Il est **donné** à l'ingestion : elle
+ * ne le déduit plus d'une session, qui n'existe pas dans le service de fond.
+ */
+const ATHLETE_ID = 1;
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.parseFitActivity.mockReturnValue(PARSED);
-  mocks.getCurrentAthleteId.mockResolvedValue(1);
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'created' });
   mocks.saveActivityStreams.mockResolvedValue(undefined);
   mocks.hasActivityStreams.mockResolvedValue(false);
@@ -91,10 +91,10 @@ beforeEach(() => {
 
 describe('ingestFitBuffer', () => {
   it('importe une nouvelle activité et ses séries', async () => {
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'created', activityId: 42 });
 
     expect(mocks.parseFitActivity).toHaveBeenCalledWith(BUFFER);
-    expect(mocks.upsertActivityFromFit).toHaveBeenCalledWith(PARSED, 1);
+    expect(mocks.upsertActivityFromFit).toHaveBeenCalledWith(PARSED, ATHLETE_ID);
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
     // Création : la question « a-t-elle déjà des séries ? » ne se pose même pas.
     expect(mocks.hasActivityStreams).not.toHaveBeenCalled();
@@ -103,7 +103,7 @@ describe('ingestFitBuffer', () => {
   it('rapporte `updated` quand le fichier avait déjà été importé', async () => {
     mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-file' });
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'updated', activityId: 42 });
   });
 
   it('remplace les séries au réimport du même fichier (parseur corrigé)', async () => {
@@ -115,7 +115,7 @@ describe('ingestFitBuffer', () => {
     // Même avec des séries en place : le même fichier, relu, les rafraîchit.
     mocks.hasActivityStreams.mockResolvedValue(true);
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'updated', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'updated', activityId: 42 });
 
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, REPARSED.streams);
   });
@@ -127,7 +127,7 @@ describe('ingestFitBuffer', () => {
     mocks.parseFitActivity.mockReturnValue(REPARSED);
     mocks.hasActivityStreams.mockResolvedValue(true);
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'merged', activityId: 42 });
 
     expect(mocks.hasActivityStreams).toHaveBeenCalledWith(42);
     expect(mocks.saveActivityStreams).not.toHaveBeenCalled();
@@ -137,13 +137,13 @@ describe('ingestFitBuffer', () => {
     mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
     mocks.hasActivityStreams.mockResolvedValue(false);
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'merged', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'merged', activityId: 42 });
 
     expect(mocks.saveActivityStreams).toHaveBeenCalledWith(42, PARSED.streams);
   });
 
   it('rapproche l’activité de sa séance planifiée, après les séries', async () => {
-    await ingestFitBuffer(BUFFER);
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
     expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
     // Les séries d'abord : le rapprochement est un enrichissement de fin de course.
@@ -158,7 +158,7 @@ describe('ingestFitBuffer', () => {
     mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
     mocks.hasActivityStreams.mockResolvedValue(true);
 
-    await ingestFitBuffer(BUFFER);
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
     expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
   });
@@ -169,7 +169,7 @@ describe('ingestFitBuffer', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     mocks.linkActivityToPlannedSession.mockRejectedValue(new Error('base indisponible'));
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'created', activityId: 42 });
 
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('[fit]'));
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('base indisponible'));
@@ -177,7 +177,7 @@ describe('ingestFitBuffer', () => {
   });
 
   it('demande une révision du plan, après le rapprochement', async () => {
-    await ingestFitBuffer(BUFFER);
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
     expect(mocks.maybeReviewActivePlan).toHaveBeenCalledTimes(1);
     // Le rapprochement d'abord : c'est lui qui rend la séance « réalisée », donc
@@ -201,7 +201,7 @@ describe('ingestFitBuffer', () => {
       reviewStarted = true;
     });
 
-    await ingestFitBuffer(BUFFER);
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -215,14 +215,14 @@ describe('ingestFitBuffer', () => {
     // fichier déposé. La promesse ne se résout jamais ici, l'import doit finir.
     mocks.maybeReviewActivePlan.mockReturnValue(new Promise(() => {}));
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'created', activityId: 42 });
   });
 
   it('journalise une révision en échec sans faire échouer l’import', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     mocks.maybeReviewActivePlan.mockRejectedValue(new Error('coach injoignable'));
 
-    await expect(ingestFitBuffer(BUFFER)).resolves.toEqual({ status: 'created', activityId: 42 });
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'created', activityId: 42 });
 
     // Le rejet est traité hors du fil de l'import : il faut laisser passer un
     // tour de boucle pour l'observer.
@@ -234,11 +234,12 @@ describe('ingestFitBuffer', () => {
     logged.mockRestore();
   });
 
-  it('échoue explicitement si aucun athlète n’est enregistré', async () => {
-    mocks.getCurrentAthleteId.mockResolvedValue(null);
+  it('écrit l’activité au compte de l’athlète qu’on lui donne, pas d’un autre', async () => {
+    // Le cloisonnement par compte tient à cette ligne : l'ingestion n'a aucun
+    // moyen de « retrouver » un athlète, elle écrit pour celui qu'on lui nomme.
+    await ingestFitBuffer(BUFFER, 7);
 
-    await expect(ingestFitBuffer(BUFFER)).rejects.toThrowError(/athlète/);
-    expect(mocks.upsertActivityFromFit).not.toHaveBeenCalled();
+    expect(mocks.upsertActivityFromFit).toHaveBeenCalledWith(PARSED, 7);
   });
 
   it('laisse remonter l’erreur de parsing sans rien écrire', async () => {
@@ -247,8 +248,7 @@ describe('ingestFitBuffer', () => {
       throw failure;
     });
 
-    await expect(ingestFitBuffer(BUFFER)).rejects.toBe(failure);
-    expect(mocks.getCurrentAthleteId).not.toHaveBeenCalled();
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).rejects.toBe(failure);
     expect(mocks.upsertActivityFromFit).not.toHaveBeenCalled();
   });
 });

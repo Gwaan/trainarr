@@ -34,33 +34,34 @@ const envSchema = z.object({
   FIT_WATCH_INTERVAL_S: z.coerce.number().int().positive().default(30),
 
   // Rapatriement automatique depuis intervals.icu (cf. src/lib/intervals/).
-  // Le poller ne démarre que si la clé API est renseignée. Tant qu'aucune séance
-  // n'a été rapatriée, il demande tout l'historique (par tranches, sur plusieurs
-  // cycles) ; ensuite seulement la fenêtre glissante de INTERVALS_LOOKBACK_DAYS
-  // jours.
+  // Le service fait un cycle par compte ayant enregistré une clé API. Tant
+  // qu'aucune séance n'a été rapatriée POUR CE COMPTE, il demande tout
+  // l'historique (par tranches, sur plusieurs cycles) ; ensuite seulement la
+  // fenêtre glissante de INTERVALS_LOOKBACK_DAYS jours.
   //
-  // INTERVALS_ATHLETE_ID est **optionnelle** : omise, le poller interroge
-  // l'athlète 0, que l'API résout en « le propriétaire de la clé ». Et son
-  // format n'est volontairement PAS validé ici : une valeur illisible ne doit
-  // désactiver que le poller, jamais empêcher l'application de démarrer — la
-  // normalisation et le diagnostic vivent dans `planPollerActivation`
-  // (src/lib/intervals/poll-plan.ts).
-  INTERVALS_ATHLETE_ID: z.string().min(1).optional(),
-  INTERVALS_API_KEY: z.string().min(1).optional(),
+  // Les identifiants (clé API, identifiant d'athlète intervals.icu) ne sont
+  // PLUS ici : ils appartiennent à l'athlète, chiffrés en base, et se saisissent
+  // dans le profil (cf. src/data/athlete.ts). Une installation sert plusieurs
+  // comptes ; une variable d'environnement, elle, n'en sert qu'un.
+  //
+  // Ne restent donc que les deux cadences, communes à toute l'installation.
   INTERVALS_POLL_INTERVAL_S: z.coerce.number().int().positive().default(60),
   INTERVALS_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
 
   // Secret de signature des sessions et des jetons (better-auth, cf. src/lib/auth/).
   //
-  // **Facultative**, comme INTERVALS_API_KEY : absente, l'authentification est
-  // inopérante (l'écran de connexion le dit, la route /api/auth répond 503) mais
+  // **Facultative** : absente, l'authentification est inopérante
+  // (l'écran de connexion le dit, la route /api/auth répond 503) mais
   // l'application démarre et sert ses pages. Un secret manquant ne doit pas
   // couper une installation entière — le déploiement est automatique au push.
   //
-  // Sa LONGUEUR n'est volontairement pas validée ici, pour la même raison que
-  // le format d'INTERVALS_ATHLETE_ID : un secret trop court doit désactiver la
-  // seule authentification, jamais empêcher le démarrage. Le seuil et son
-  // diagnostic vivent dans `resolveAuthConfig` (src/lib/auth/config.ts).
+  // Sa LONGUEUR n'est volontairement pas validée ici : un secret trop court doit
+  // désactiver la seule authentification, jamais empêcher le démarrage. Le seuil
+  // et son diagnostic vivent dans `resolveAuthConfig` (src/lib/auth/config.ts).
+  //
+  // Il chiffre aussi les secrets stockés (clé API intervals.icu de chaque
+  // athlète, cf. src/lib/crypto/) : le changer les rend illisibles — les comptes
+  // concernés sont alors sautés par le rapatriement, avec leur motif.
   BETTER_AUTH_SECRET: z.string().min(1).optional(),
 
   // Identifiants du point de dépôt WebDAV servi sur /dav (cf. src/lib/fit/dav.ts).

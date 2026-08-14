@@ -6,7 +6,6 @@ import {
   upsertActivityFromFit,
   type FitUpsertOutcome,
 } from '@/data/activities';
-import { getCurrentAthleteId } from '@/data/athlete';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
@@ -122,42 +121,34 @@ function scheduleActivePlanFollowUp(activityId: number): void {
 }
 
 /**
- * Importe le contenu d'un fichier FIT.
+ * Importe le contenu d'un fichier FIT **pour un athlète donné**.
+ *
+ * L'athlète est un **paramètre**, jamais une déduction : c'est l'appelant qui
+ * sait à qui appartient le fichier, et lui seul.
+ *
+ * - l'import manuel (`POST /api/fit/upload`) a une session, donc un athlète ;
+ * - le service de fond n'en a pas — il lit le propriétaire dans le chemin du
+ *   fichier (un dossier par athlète, cf. `./inbox-layout`).
+ *
+ * Cette fonction lisait auparavant « l'athlète courant » elle-même. Depuis que
+ * l'athlète appartient à un compte, cette lecture répond « l'athlète de la
+ * session » — donc rien du tout dans le watcher et le poller, qui tournent sans
+ * requête : chaque fichier partait en `failed/`. Le repli qui aurait « réparé »
+ * ça (le premier athlète venu) est exactement ce que le cloisonnement par compte
+ * interdit.
  *
  * Les séries temporelles suivent {@link shouldRewriteStreams}.
  *
  * @throws {FitParseError} si le fichier est illisible — l'erreur remonte telle
  * quelle à l'appelant (le watcher), qui décide du sort du fichier.
- * @throws {Error} si aucun athlète n'est enregistré (onboarding non fait).
  */
-export async function ingestFitBuffer(buffer: Buffer): Promise<IngestReport> {
+export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promise<IngestReport> {
   const parsed = parseFitActivity(buffer);
 
   // Le parseur ne masque jamais une perte de données : ce qu'il a dû écarter est
   // tracé ici, sinon le rapport d'import laisserait croire à une lecture parfaite.
   for (const warning of parsed.warnings) {
     console.error(`[fit] ${parsed.fileHash.slice(0, 12)} : ${warning}`);
-  }
-
-  /*
-   * TODO(multi-utilisateur) — étape suivante : donner son athlète au service FIT.
-   *
-   * Depuis que l'athlète appartient à un compte, cette lecture répond « l'athlète
-   * de la session en cours ». Elle vaut donc pour l'import manuel
-   * (`POST /api/fit/upload`, qui a bien une requête et une session), mais **pas
-   * pour le watcher ni le poller** : ils tournent dans une boucle de fond, sans
-   * requête, et n'ont plus d'athlète à qui rattacher un fichier — le fichier part
-   * dans `failed/` avec son motif, intact, et sera réingéré une fois cette étape
-   * faite (le service devra recevoir l'athlète explicitement, sans session).
-   *
-   * Signalé et non corrigé ici : rendre « le premier athlète venu » est
-   * exactement ce que le cloisonnement par compte interdit.
-   */
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) {
-    throw new Error(
-      "Aucun athlète enregistré : impossible d'importer un fichier FIT (onboarding requis).",
-    );
   }
 
   const { activityId, outcome } = await upsertActivityFromFit(parsed, athleteId);

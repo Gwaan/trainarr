@@ -31,8 +31,10 @@ vi.mock('node:fs/promises', () => fs);
 
 const { recoverPendingImports } = await import('./recover');
 
+/** L'athlète repris : la reprise ne touche que *son* dossier. */
+const ATHLETE_ID = 7;
 /** Valeur par défaut de `FIT_INBOX_DIR` (aucune variable d'env n'est posée en test). */
-const INBOX = '/data/fit-inbox';
+const INBOX = join('/data/fit-inbox', `athlete-${ATHLETE_ID}`);
 const FAILED = join(INBOX, 'failed');
 const MARKER = join(INBOX, '.backfill-pending');
 
@@ -42,6 +44,7 @@ function enoent(): Error {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fs.mkdir.mockResolvedValue(undefined);
   fs.readdir.mockResolvedValue([]);
   fs.rename.mockResolvedValue(undefined);
   fs.rm.mockResolvedValue(undefined);
@@ -61,7 +64,7 @@ describe('recoverPendingImports', () => {
   it('remet les fichiers de failed/ dans la boîte de dépôt et supprime leurs motifs', async () => {
     fs.readdir.mockResolvedValue(['a.fit', 'a.fit.err.txt', 'b.FIT', 'b.FIT.err.txt']);
 
-    await expect(recoverPendingImports()).resolves.toEqual({
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toEqual({
       requeued: 2,
       backfillReopened: true,
     });
@@ -76,7 +79,7 @@ describe('recoverPendingImports', () => {
   it('rafraîchit la date du fichier remis en file, sinon le watcher le tiendrait pour déjà traité', async () => {
     fs.readdir.mockResolvedValue(['a.fit']);
 
-    await recoverPendingImports();
+    await recoverPendingImports(ATHLETE_ID);
 
     // Le watcher indexe ce qu'il a traité par `nom|taille|mtime`, et `rename`
     // préserve la mtime : sans ce rafraîchissement, le fichier retrouve sa clé
@@ -96,7 +99,7 @@ describe('recoverPendingImports', () => {
     fs.readdir.mockResolvedValue(['a.fit']);
     fs.utimes.mockRejectedValue(new Error('EPERM'));
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 1 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 1 });
     expect(console.error).toHaveBeenCalled();
   });
 
@@ -108,7 +111,7 @@ describe('recoverPendingImports', () => {
       path === join(INBOX, 'run-2026-08-10.fit') ? Promise.resolve({}) : Promise.reject(enoent()),
     );
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 1 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 1 });
 
     expect(fs.rename).toHaveBeenCalledWith(
       join(FAILED, 'run-2026-08-10.fit'),
@@ -129,7 +132,7 @@ describe('recoverPendingImports', () => {
     fs.readdir.mockResolvedValue(['a.fit']);
     fs.stat.mockResolvedValue({});
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 0 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 0 });
 
     expect(fs.rename).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalled();
@@ -138,14 +141,14 @@ describe('recoverPendingImports', () => {
   it('ne touche pas aux fichiers qui ne sont pas des FIT', async () => {
     fs.readdir.mockResolvedValue(['notes.txt', 'orphelin.fit.err.txt', '.backfill-pending']);
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 0 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 0 });
 
     expect(fs.rename).not.toHaveBeenCalled();
     expect(fs.rm).not.toHaveBeenCalled();
   });
 
   it('pose le marqueur de backfill pour rouvrir le rapatriement de l’historique', async () => {
-    const report = await recoverPendingImports();
+    const report = await recoverPendingImports(ATHLETE_ID);
 
     expect(report.backfillReopened).toBe(true);
     expect(fs.writeFile).toHaveBeenCalledWith(MARKER, expect.any(String));
@@ -157,7 +160,7 @@ describe('recoverPendingImports', () => {
       from.endsWith('a.fit') ? Promise.reject(new Error('EACCES')) : Promise.resolve(undefined),
     );
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 1 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 1 });
 
     expect(fs.rm).not.toHaveBeenCalledWith(join(FAILED, 'a.fit.err.txt'), { force: true });
     expect(fs.rm).toHaveBeenCalledWith(join(FAILED, 'b.fit.err.txt'), { force: true });
@@ -167,24 +170,52 @@ describe('recoverPendingImports', () => {
     fs.readdir.mockResolvedValue(['a.fit', 'a.fit.err.txt']);
     fs.rm.mockRejectedValue(new Error('EACCES'));
 
-    await expect(recoverPendingImports()).resolves.toMatchObject({ requeued: 1 });
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toMatchObject({ requeued: 1 });
   });
 
   it('traite failed/ absent comme « rien à reprendre », sans bruit', async () => {
     fs.readdir.mockRejectedValue(enoent());
 
-    await expect(recoverPendingImports()).resolves.toEqual({
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toEqual({
       requeued: 0,
       backfillReopened: true,
     });
     expect(console.error).not.toHaveBeenCalled();
   });
 
+  it('ne sort jamais du dossier de l’athlète repris', async () => {
+    // Un fichier de la racine n'a pas de propriétaire déductible : l'onboarding
+    // d'un compte n'est pas une raison de lui attribuer ce qu'un autre a déposé.
+    fs.readdir.mockResolvedValue(['a.fit', 'a.fit.err.txt']);
+
+    await recoverPendingImports(ATHLETE_ID);
+
+    // Tous les chemins que la reprise a touchés — source *et* destination des
+    // renommages, qui sont les seuls appels à deux chemins.
+    const touched = [
+      ...[...fs.readdir.mock.calls, ...fs.rm.mock.calls, ...fs.utimes.mock.calls, ...fs.writeFile.mock.calls].map(
+        (call) => call[0],
+      ),
+      ...fs.rename.mock.calls.flatMap((call) => [call[0], call[1]]),
+    ].filter((path) => typeof path === 'string');
+
+    expect(touched.length).toBeGreaterThan(0);
+    for (const path of touched) {
+      expect(path.startsWith(`${INBOX}/`)).toBe(true);
+    }
+  });
+
+  it('crée le dossier de l’athlète : sans lui, le marqueur n’aurait où s’écrire', async () => {
+    await recoverPendingImports(ATHLETE_ID);
+
+    expect(fs.mkdir).toHaveBeenCalledWith(INBOX, { recursive: true });
+  });
+
   it('rend un rapport à zéro quand la boîte de dépôt est inaccessible, sans jamais lever', async () => {
     fs.readdir.mockRejectedValue(new Error('EACCES: permission denied'));
     fs.writeFile.mockRejectedValue(new Error('EACCES: permission denied'));
 
-    await expect(recoverPendingImports()).resolves.toEqual({
+    await expect(recoverPendingImports(ATHLETE_ID)).resolves.toEqual({
       requeued: 0,
       backfillReopened: false,
     });

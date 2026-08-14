@@ -61,6 +61,14 @@ export type FitUploadResponse = z.infer<typeof fitUploadResponseSchema>;
  */
 export const UNEXPECTED_ERROR_MESSAGE = 'Import impossible — réessaie plus tard.';
 
+/**
+ * Message affiché quand la session n'a pas d'athlète : une activité appartient à
+ * un athlète, il n'y en a pas à qui rattacher celle-ci. Dit explicitement plutôt
+ * que rangé sous l'erreur générique — la cause est actionnable en un clic.
+ */
+export const NO_ATHLETE_MESSAGE =
+  'Aucun profil athlète : connecte-toi et renseigne ton profil avant d’importer.';
+
 export type FitFileCheck = { ok: true } | { ok: false; error: string };
 
 /**

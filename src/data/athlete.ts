@@ -1,10 +1,11 @@
 import 'server-only';
 
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 
 import { decryptStoredSecret, encryptStoredSecret } from '@/lib/crypto/app-secret';
 import { SecretDecryptionError, SecretKeyUnavailableError } from '@/lib/crypto/secret-box';
 import { isCivilDate, toCivilDate } from '@/lib/dates/civil';
+import type { IntervalsAccount } from '@/lib/intervals/poll-plan';
 
 /**
  * Réexport : la validation d'une date civile vit désormais dans
@@ -502,6 +503,77 @@ export async function getIntervalsCredentials(): Promise<{
     intervalsAthleteId: row.intervalsAthleteId,
     apiKey: decryptStoredSecret(row.encrypted),
   };
+}
+
+/**
+ * Tous les comptes qui ont enregistré une clé API intervals.icu, **sans passer
+ * par une session**.
+ *
+ * C'est la seule lecture du DAL destinée au service de fond : le watcher et le
+ * poller tournent dans le process du serveur mais hors requête, il n'y a donc
+ * ni cookie, ni session, ni « athlète courant » — et il ne peut pas y en avoir.
+ * L'appelant ne demande pas « qui est connecté ? » mais « quels comptes ont
+ * quelque chose à rapatrier ? », ce qui est une question légitime pour une
+ * boucle de fond et pour elle seule.
+ *
+ * **À n'appeler que depuis le service de fond.** Aucun chemin servant une
+ * requête n'a de raison de lire les identifiants d'un autre compte que celui de
+ * sa session ({@link getIntervalsCredentials}), et rien de ce que rend cette
+ * fonction — la clé en clair, au premier chef — ne doit franchir la frontière
+ * client.
+ *
+ * Une clé qui ne se déchiffre plus n'est **pas** silencieusement omise : elle
+ * ressort en `unreadable` avec son motif, à charge du service de sauter ce
+ * compte en le disant. L'omettre ferait passer une clé perdue pour une clé
+ * jamais saisie, et le rapatriement s'arrêterait sans que rien ne l'explique.
+ */
+export async function listIntervalsAccounts(): Promise<IntervalsAccount[]> {
+  const rows = await db
+    .select({
+      id: athlete.id,
+      intervalsAthleteId: athlete.intervalsAthleteId,
+      encrypted: athlete.intervalsApiKeyEncrypted,
+    })
+    .from(athlete)
+    .where(isNotNull(athlete.intervalsApiKeyEncrypted))
+    .orderBy(athlete.id);
+
+  return rows.map((row) => toIntervalsAccount(row.id, row.intervalsAthleteId, row.encrypted));
+}
+
+function toIntervalsAccount(
+  athleteId: number,
+  intervalsAthleteId: string | null,
+  encrypted: string | null,
+): IntervalsAccount {
+  // `WHERE intervals_api_key_encrypted IS NOT NULL` l'exclut déjà ; le typage,
+  // lui, ne le sait pas — et un compte sans clé n'est pas à rapatrier.
+  if (encrypted === null) {
+    return { athleteId, status: 'unreadable', reason: 'aucune clé API intervals.icu enregistrée' };
+  }
+
+  try {
+    return { athleteId, status: 'ready', intervalsAthleteId, apiKey: decryptStoredSecret(encrypted) };
+  } catch (error) {
+    // Mêmes deux cas que `apiKeyState` : un état de la donnée, pas une panne.
+    // Le motif ne cite évidemment ni la clé, ni l'enveloppe chiffrée.
+    if (error instanceof SecretDecryptionError) {
+      return {
+        athleteId,
+        status: 'unreadable',
+        reason:
+          'clé API intervals.icu illisible (BETTER_AUTH_SECRET a changé) — la ressaisir dans les réglages',
+      };
+    }
+    if (error instanceof SecretKeyUnavailableError) {
+      return {
+        athleteId,
+        status: 'unreadable',
+        reason: 'clé API intervals.icu indéchiffrable — BETTER_AUTH_SECRET absent ou trop court',
+      };
+    }
+    throw error;
+  }
 }
 
 /**

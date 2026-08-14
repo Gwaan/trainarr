@@ -145,7 +145,7 @@ export class IntervalsApiError extends Error {
 export class IntervalsAuthError extends IntervalsApiError {
   constructor(status: number) {
     super(
-      `intervals.icu a refusé l'authentification (HTTP ${status}) — vérifier INTERVALS_ATHLETE_ID et INTERVALS_API_KEY.`,
+      `intervals.icu a refusé l'authentification (HTTP ${status}) — vérifier la clé API et l'identifiant d'athlète enregistrés au profil.`,
       status,
     );
     this.name = 'IntervalsAuthError';

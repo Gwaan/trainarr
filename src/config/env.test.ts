@@ -21,9 +21,6 @@ describe('parseEnv — cas nominal', () => {
     expect(env.WEBDAV_PASSWORD).toBeUndefined();
     // Sans secret, l'authentification est inopérante — mais l'appli démarre.
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
-    // Sans identifiant d'athlète ni clé, le poller intervals.icu reste inactif.
-    expect(env.INTERVALS_ATHLETE_ID).toBeUndefined();
-    expect(env.INTERVALS_API_KEY).toBeUndefined();
     // Une minute : c'est la latence typique entre une séance synchronisée sur
     // intervals.icu et son apparition dans Trainarr.
     expect(env.INTERVALS_POLL_INTERVAL_S).toBe(60);
@@ -33,20 +30,23 @@ describe('parseEnv — cas nominal', () => {
     expect(env.FIT_WATCH_INTERVAL_S).toBe(30);
   });
 
-  it("ne juge pas le format de l'identifiant d'athlète intervals.icu", () => {
-    // Volontaire : la valeur est passée telle quelle, `planPollerActivation` la
-    // normalise. Une variable mal recopiée doit désactiver le poller seul, pas
-    // empêcher l'application entière de démarrer.
-    for (const raw of ['i123456', '123456', 'pas-un-identifiant']) {
-      expect(
-        parseEnv({ DATABASE_URL: VALID_DATABASE_URL, INTERVALS_ATHLETE_ID: raw })
-          .INTERVALS_ATHLETE_ID,
-      ).toBe(raw);
-    }
+  it("n'expose plus les identifiants intervals.icu, devenus propriété de l'athlète", () => {
+    // Ils sont en base, chiffrés, et se saisissent dans le profil : une
+    // installation sert plusieurs comptes, une variable d'environnement n'en
+    // sert qu'un. Fournies quand même, elles sont ignorées comme n'importe
+    // quelle variable hors schéma.
+    const env = parseEnv({
+      DATABASE_URL: VALID_DATABASE_URL,
+      INTERVALS_API_KEY: 'ne-doit-pas-etre-lue',
+      INTERVALS_ATHLETE_ID: 'i123456',
+    });
+
+    expect(Object.keys(env)).not.toContain('INTERVALS_API_KEY');
+    expect(Object.keys(env)).not.toContain('INTERVALS_ATHLETE_ID');
   });
 
   it('ne juge pas la longueur du secret better-auth', () => {
-    // Même parti pris que pour INTERVALS_ATHLETE_ID : un secret trop court doit
+    // Parti pris constant dans ce module : un secret trop court doit
     // désactiver la seule authentification (c'est `planAuthActivation` qui le
     // refuse, avec son diagnostic), jamais empêcher l'application de démarrer.
     expect(

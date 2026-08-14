@@ -17,6 +17,7 @@ import {
   getIntervalsCredentials,
   getIntervalsSettings,
   hasAthlete,
+  listIntervalsAccounts,
   saveIntervalsSettings,
   toAthleteProfileDto,
   updateAthleteProfile,
@@ -63,12 +64,22 @@ vi.mock('./db/client', () => {
     where: () => SelectChain;
     orderBy: () => SelectChain;
     limit: () => Promise<unknown[]>;
+    /**
+     * Toute requête n'a pas de `LIMIT` : `listIntervalsAccounts` rend *tous* les
+     * comptes. La chaîne est donc awaitable telle quelle, comme celle de Drizzle.
+     */
+    then: <T>(
+      resolve: (rows: unknown[]) => T,
+      reject: (error: unknown) => unknown,
+    ) => Promise<T | unknown>;
   };
+  const rows = () => Promise.resolve(queryState.selects.shift() ?? []);
   const selectChain: SelectChain = {
     from: () => selectChain,
     where: () => selectChain,
     orderBy: () => selectChain,
-    limit: () => Promise.resolve(queryState.selects.shift() ?? []),
+    limit: rows,
+    then: (resolve, reject) => rows().then(resolve, reject),
   };
 
   return {
@@ -682,6 +693,60 @@ describe('identifiants intervals.icu', () => {
       withoutAthlete();
 
       await expect(getIntervalsSettings()).resolves.toBeNull();
+    });
+  });
+
+  describe('listIntervalsAccounts', () => {
+    it('rend en clair les identifiants de chaque compte qui a une clé', async () => {
+      const encrypted = await storedEnvelope();
+      // Aucune session, et c'est le sujet : le service de fond tourne hors
+      // requête. C'est précisément ce qui avait cassé l'import.
+      withoutSession();
+      queryState.selects.push([
+        { id: 1, intervalsAthleteId: 'i123456', encrypted },
+        { id: 4, intervalsAthleteId: null, encrypted },
+      ]);
+
+      await expect(listIntervalsAccounts()).resolves.toEqual([
+        { athleteId: 1, status: 'ready', intervalsAthleteId: 'i123456', apiKey: API_KEY },
+        { athleteId: 4, status: 'ready', intervalsAthleteId: null, apiKey: API_KEY },
+      ]);
+    });
+
+    it('ne filtre que sur la présence d’une clé, jamais sur une session', async () => {
+      withoutSession();
+      queryState.selects.push([]);
+
+      await expect(listIntervalsAccounts()).resolves.toEqual([]);
+      expect(getSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('rend « illisible » le compte dont la clé ne se déchiffre plus, sans omettre les autres', async () => {
+      const encrypted = await storedEnvelope();
+      const foreign = 'v1:' + Buffer.from('enveloppe-d-une-autre-installation').toString('base64');
+      queryState.selects.push([
+        { id: 1, intervalsAthleteId: null, encrypted: foreign },
+        { id: 2, intervalsAthleteId: null, encrypted },
+      ]);
+
+      const accounts = await listIntervalsAccounts();
+
+      expect(accounts[0]).toMatchObject({ athleteId: 1, status: 'unreadable' });
+      expect(accounts[1]).toMatchObject({ athleteId: 2, status: 'ready', apiKey: API_KEY });
+      // Le motif part dans les journaux du service : il ne porte rien de secret.
+      const reason = accounts[0]?.status === 'unreadable' ? accounts[0].reason : '';
+      expect(reason).not.toContain(foreign);
+      expect(reason).not.toContain(API_KEY);
+    });
+
+    it('dit « illisible » quand l’installation n’a plus de secret, plutôt que de lever', async () => {
+      const encrypted = await storedEnvelope();
+      resolveAuthConfigMock.mockReturnValue({ status: 'disabled', reason: 'missing-secret' });
+      queryState.selects.push([{ id: 1, intervalsAthleteId: null, encrypted }]);
+
+      await expect(listIntervalsAccounts()).resolves.toMatchObject([
+        { athleteId: 1, status: 'unreadable' },
+      ]);
     });
   });
 

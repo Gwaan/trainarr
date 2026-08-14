@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { resetEnvCache } from '@/config/env';
 import type { PlanDto, PlanSessionDto } from '@/data/plans';
+import { SecretDecryptionError } from '@/lib/crypto/secret-box';
 
 import type { IntervalsEvent } from './client';
 import {
@@ -29,7 +29,11 @@ const { api } = vi.hoisted(() => ({
   },
 }));
 const { dal } = vi.hoisted(() => ({
-  dal: { getActivePlanWithSessions: vi.fn(), getAthleteProfile: vi.fn() },
+  dal: {
+    getActivePlanWithSessions: vi.fn(),
+    getAthleteProfile: vi.fn(),
+    getIntervalsCredentials: vi.fn(),
+  },
 }));
 
 vi.mock('./client', () => api);
@@ -40,11 +44,16 @@ vi.mock('@/data/plans', async () => {
   return { ...actual, getActivePlanWithSessions: dal.getActivePlanWithSessions };
 });
 vi.mock('@/data/athlete', async () => {
-  // Même principe : `todayCivilDate` est pure et reste le vrai code, seule la
-  // lecture du profil (la FC max qui traduit les zones en battements) est
-  // remplacée.
+  // Même principe : `todayCivilDate` est pure et reste le vrai code, seules les
+  // lectures qui touchent la base sont remplacées — le profil (la FC max qui
+  // traduit les zones en battements) et les identifiants intervals.icu, qui
+  // appartiennent désormais à l'athlète et non à l'environnement.
   const actual = await vi.importActual<typeof import('@/data/athlete')>('@/data/athlete');
-  return { ...actual, getAthleteProfile: dal.getAthleteProfile };
+  return {
+    ...actual,
+    getAthleteProfile: dal.getAthleteProfile,
+    getIntervalsCredentials: dal.getIntervalsCredentials,
+  };
 });
 
 const API_KEY = 'cle-api-de-test';
@@ -109,9 +118,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
 
-  resetEnvCache();
-  vi.stubEnv('INTERVALS_API_KEY', API_KEY);
-  resetEnvCache();
+  dal.getIntervalsCredentials.mockResolvedValue({ intervalsAthleteId: null, apiKey: API_KEY });
 
   api.listWorkoutEvents.mockResolvedValue([]);
   api.createWorkoutEvents.mockImplementation(
@@ -142,8 +149,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.unstubAllEnvs();
-  resetEnvCache();
   vi.restoreAllMocks();
 });
 
@@ -566,19 +571,46 @@ describe('planCalendarReplacement', () => {
 });
 
 describe('syncPlanToIntervals', () => {
-  it("ne tente rien sans clé API, et le dit", async () => {
-    vi.stubEnv('INTERVALS_API_KEY', '');
-    resetEnvCache();
+  it("ne tente rien sans clé API enregistrée, et le dit", async () => {
+    dal.getIntervalsCredentials.mockResolvedValue(null);
 
     await expect(syncPlanToIntervals()).resolves.toEqual({
       status: 'unconfigured',
-      reason: 'INTERVALS_API_KEY manquante',
+      reason: 'aucune clé API intervals.icu enregistrée',
     });
     expect(api.listWorkoutEvents).not.toHaveBeenCalled();
     expect(dal.getActivePlanWithSessions).not.toHaveBeenCalled();
   });
 
-  it("interroge l'athlète 0 quand aucun identifiant n'est configuré", async () => {
+  it('traite une clé devenue illisible comme une configuration à refaire', async () => {
+    // Le DAL lève plutôt que de faire passer une clé perdue pour une clé
+    // absente ; ici, ça reste une configuration à refaire, pas une panne — et le
+    // motif remonte jusqu'à l'athlète, qui n'a qu'à la ressaisir.
+    dal.getIntervalsCredentials.mockRejectedValue(
+      new SecretDecryptionError('malformed'),
+    );
+
+    const report = await syncPlanToIntervals();
+
+    expect(report.status).toBe('unconfigured');
+    expect(report.status === 'unconfigured' && report.reason).toContain('illisible');
+    expect(api.listWorkoutEvents).not.toHaveBeenCalled();
+  });
+
+  it("utilise l'identifiant intervals.icu enregistré par l'athlète", async () => {
+    dal.getIntervalsCredentials.mockResolvedValue({
+      intervalsAthleteId: '123456',
+      apiKey: API_KEY,
+    });
+
+    await syncPlanToIntervals();
+
+    expect(api.listWorkoutEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ athleteId: 'i123456', apiKey: API_KEY }),
+    );
+  });
+
+  it("interroge l'athlète 0 quand le compte n'a pas d'identifiant enregistré", async () => {
     await syncPlanToIntervals();
 
     expect(api.listWorkoutEvents).toHaveBeenCalledWith(
@@ -929,12 +961,13 @@ describe('syncPlanToIntervalsSafely', () => {
 
   it("dit pourquoi rien n'est parti quand la synchronisation n'est pas configurée", async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.stubEnv('INTERVALS_API_KEY', '');
-    resetEnvCache();
+    dal.getIntervalsCredentials.mockResolvedValue(null);
 
     await syncPlanToIntervalsSafely('plan 3');
 
-    expect(logged).toHaveBeenCalledWith(expect.stringContaining('INTERVALS_API_KEY manquante'));
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining('aucune clé API intervals.icu enregistrée'),
+    );
   });
 
   it('se tait quand le calendrier était déjà à jour', async () => {
@@ -1010,12 +1043,11 @@ describe('resyncPlanToIntervalsOnDemand', () => {
 
   it("dit la non-configuration plutôt que de se taire", async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.stubEnv('INTERVALS_API_KEY', '');
-    resetEnvCache();
+    dal.getIntervalsCredentials.mockResolvedValue(null);
 
     await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({
       status: 'unconfigured',
-      reason: 'INTERVALS_API_KEY manquante',
+      reason: 'aucune clé API intervals.icu enregistrée',
     });
   });
 });

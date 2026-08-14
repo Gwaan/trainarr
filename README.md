@@ -70,36 +70,37 @@ Trainarr peut y récupérer les fichiers d'activité **originaux** et les dépos
 lui-même dans la boîte d'import. C'est un filet : une séance que l'envoi WebDAV a
 manquée arrive quand même.
 
-Configuration, une fois :
+Configuration, une fois **par compte** :
 
 1. Créer un compte sur intervals.icu et y connecter HealthFit (réglage
    « intervals.icu » dans l'app iPhone, qui envoie chaque séance après l'export).
 2. Dans intervals.icu, **Settings → Developer Settings**, générer une clé API.
-   C'est un secret : elle ne va que dans `.env.local` (dev) ou `.env` (Docker),
-   jamais dans le repo.
-3. Renseigner `INTERVALS_API_KEY`, puis redémarrer l'application. **C'est tout** :
-   l'identifiant d'athlète est facultatif.
+3. La saisir dans Trainarr, **Profil → intervals.icu**. Elle est stockée
+   chiffrée en base (AES-256-GCM, clé dérivée de `BETTER_AUTH_SECRET`) et n'est
+   plus jamais réaffichée. Le cycle suivant la prend en compte, sans
+   redémarrage. **C'est tout** : l'identifiant d'athlète est facultatif.
+
+La clé n'est **pas** une variable d'environnement : une installation sert
+plusieurs comptes, et chacun rapatrie avec la sienne, dans son propre dossier de
+dépôt. `INTERVALS_API_KEY` et `INTERVALS_ATHLETE_ID` ne sont plus lues.
 
 | Variable | Rôle | Défaut |
 |---|---|---|
-| `INTERVALS_API_KEY` | Clé API personnelle — **seule variable requise** | — |
-| `INTERVALS_ATHLETE_ID` | Identifiant d'athlète, si l'on veut en viser un autre que soi | le propriétaire de la clé |
 | `INTERVALS_POLL_INTERVAL_S` | Intervalle entre deux cycles, en secondes | `60` |
 | `INTERVALS_LOOKBACK_DAYS` | Profondeur de la fenêtre glissante, en jours | `30` |
 
-Sans `INTERVALS_ATHLETE_ID`, l'API est interrogée sur l'athlète `0`, que
-intervals.icu résout en « celui à qui appartient la clé ». Si la variable est
-renseignée, les deux graphies sont acceptées (`i123456` comme `123456`) ; une
-valeur illisible désactive **le poller seul**, en disant laquelle et pourquoi.
+Sans identifiant d'athlète, l'API est interrogée sur l'athlète `0`, que
+intervals.icu résout en « celui à qui appartient la clé ». S'il est renseigné,
+les deux graphies sont acceptées (`i123456` comme `123456`) ; une valeur
+illisible écarte **ce compte seul**, en disant pourquoi — les autres continuent
+d'être rapatriés.
 
-Tant que `INTERVALS_API_KEY` n'est pas renseignée, le rapatriement reste inactif —
-l'appli le signale au démarrage et le reste de l'import fonctionne normalement.
-
-Au démarrage, une ligne dit dans quel état on est :
+Au démarrage, une ligne dit dans quel état on est, une seconde dit ce que les
+comptes donnent :
 
 ```
-[fit] service FIT démarré — inbox: /data/fit-inbox (scan toutes les 30 s), poll intervals.icu: actif (60 s, athlète 0, par tranches de 50)
-[fit] service FIT démarré — inbox: /data/fit-inbox (scan toutes les 30 s), poll intervals.icu: inactif (INTERVALS_API_KEY manquante)
+[fit] service FIT démarré — inbox: /data/fit-inbox (un dossier par athlète, scan toutes les 30 s), poll intervals.icu: toutes les 60 s par compte configuré, fenêtre 30 j, par tranches de 50
+[fit/intervals] aucun compte n'a de clé API intervals.icu enregistrée — rien à rapatrier pour l'instant (Profil → intervals.icu).
 ```
 
 Le premier cycle du poller annonce toujours son résultat (`premier cycle
@@ -107,13 +108,14 @@ Le premier cycle du poller annonce toujours son résultat (`premier cycle
 ensuite, seuls les cycles qui trouvent du travail ou échouent parlent.
 
 Une activité déjà rapatriée n'est jamais retéléchargée : le fichier déposé
-s'appelle `intervals-<id>.fit`, et sa présence dans la boîte, dans `processed/`
-ou dans `failed/` suffit à le savoir. Une séance saisie à la main sur
-intervals.icu n'a pas de fichier : c'est noté une fois, puis on passe.
+s'appelle `intervals-<id>.fit`, et sa présence dans le dossier du compte
+(`athlete-<id>/`), dans son `processed/` ou son `failed/` suffit à le savoir. Une
+séance saisie à la main sur intervals.icu n'a pas de fichier : c'est noté une
+fois, puis on passe.
 
-**Le premier démarrage rapatrie tout l'historique.** Tant qu'aucune séance n'a
-été récupérée, le poller demande l'intégralité des activités du compte plutôt que
-les 30 derniers jours, et les télécharge par tranches de 50 par cycle — plusieurs
+**Un compte neuf rapatrie tout son historique.** Tant qu'aucune séance n'a été
+récupérée **pour lui**, le poller demande l'intégralité des activités du compte
+plutôt que les 30 derniers jours, et les télécharge par tranches de 50 par cycle — plusieurs
 centaines de séances s'étalent donc sur quelques minutes, tranche par tranche,
 sans marteler l'API (les journaux annoncent `backfill : 50 rapatriés, reste ~N`).
 Une fois l'historique en place, chaque cycle se limite à la fenêtre glissante de

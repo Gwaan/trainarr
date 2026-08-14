@@ -15,6 +15,7 @@ vi.mock('server-only', () => ({}));
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     hasAthlete: vi.fn(),
+    getCurrentAthleteId: vi.fn(),
     createAthlete: vi.fn(),
     updateAthleteProfile: vi.fn(),
     recoverPendingImports: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock('@/data/athlete', async (importOriginal) => ({
   // la validation de l'action doit rester alignée sur celle du DAL.
   ...(await importOriginal<typeof import('@/data/athlete')>()),
   hasAthlete: mocks.hasAthlete,
+  getCurrentAthleteId: mocks.getCurrentAthleteId,
   createAthlete: mocks.createAthlete,
   updateAthleteProfile: mocks.updateAthleteProfile,
 }));
@@ -57,6 +59,7 @@ function form(overrides: Record<string, string> = {}): FormData {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.hasAthlete.mockResolvedValue(false);
+  mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.createAthlete.mockResolvedValue(undefined);
   mocks.updateAthleteProfile.mockResolvedValue(undefined);
   mocks.recoverPendingImports.mockResolvedValue({ requeued: 0, backfillReopened: true });
@@ -169,7 +172,9 @@ describe('saveProfileAction — onboarding', () => {
     const state = await saveProfileAction(IDLE, form());
 
     expect(mocks.createAthlete).toHaveBeenCalledTimes(1);
-    expect(mocks.recoverPendingImports).toHaveBeenCalledTimes(1);
+    // La reprise vise le dossier de l'athlète qui vient de naître : elle ne
+    // ramasse jamais ce qui traîne à la racine de la boîte de dépôt.
+    expect(mocks.recoverPendingImports).toHaveBeenCalledWith(7);
     expect(state).toEqual({
       status: 'success',
       message: 'Profil créé — 31 imports relancés, historique en cours de rapatriement.',
@@ -183,6 +188,17 @@ describe('saveProfileAction — onboarding', () => {
     const state = await saveProfileAction(IDLE, form());
 
     expect(state.message).toBe('Profil créé — 1 import relancé.');
+  });
+
+  it('ne reprend rien quand l’athlète créé reste introuvable', async () => {
+    // Cas de bord : la création a réussi mais la relecture ne rend rien (base
+    // coupée entre les deux). Reprendre « pour personne » n'a aucun sens.
+    mocks.getCurrentAthleteId.mockResolvedValue(null);
+
+    const state = await saveProfileAction(IDLE, form());
+
+    expect(mocks.recoverPendingImports).not.toHaveBeenCalled();
+    expect(state).toEqual({ status: 'success', message: 'Profil créé.' });
   });
 
   it("reste un succès quand la reprise n'a rien pu faire", async () => {

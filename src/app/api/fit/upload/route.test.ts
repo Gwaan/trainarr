@@ -6,8 +6,12 @@ import { MAX_FIT_UPLOAD_BYTES, fitUploadResponseSchema } from '../_lib/upload-co
 // La route importe l'ingestion, qui est `server-only` et parle au DAL.
 vi.mock('server-only', () => ({}));
 
-const { ingest } = vi.hoisted(() => ({ ingest: vi.fn() }));
+const { ingest, getCurrentAthleteId } = vi.hoisted(() => ({
+  ingest: vi.fn(),
+  getCurrentAthleteId: vi.fn(),
+}));
 vi.mock('@/lib/fit/ingest', () => ({ ingestFitBuffer: ingest }));
+vi.mock('@/data/athlete', () => ({ getCurrentAthleteId }));
 
 const { POST } = await import('./route');
 
@@ -28,6 +32,7 @@ function uploadRequest(announcedBytes: number): NextRequest {
 beforeEach(() => {
   vi.clearAllMocks();
   ingest.mockResolvedValue({ status: 'created', activityId: 42 });
+  getCurrentAthleteId.mockResolvedValue(7);
 });
 
 describe('POST /api/fit/upload — borne de taille', () => {
@@ -57,5 +62,27 @@ describe('POST /api/fit/upload — borne de taille', () => {
 
     expect(response.status).toBe(200);
     expect(ingest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /api/fit/upload — propriétaire de l’import', () => {
+  it('rattache les activités à l’athlète de la session', async () => {
+    // C'est cette route, et elle seule, qui sait à qui appartiennent ces
+    // fichiers : elle a une session. L'ingestion, elle, ne devine plus rien.
+    await POST(uploadRequest(4_096));
+
+    expect(ingest).toHaveBeenCalledWith(expect.any(Buffer), 7);
+  });
+
+  it('n’importe rien quand la session n’a pas d’athlète, et le dit', async () => {
+    getCurrentAthleteId.mockResolvedValue(null);
+
+    const response = await POST(uploadRequest(4_096));
+    const parsed = fitUploadResponseSchema.safeParse(await response.json());
+
+    expect(response.status).toBe(409);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.results[0]).toMatchObject({ name: 'sortie.fit', ok: false });
   });
 });

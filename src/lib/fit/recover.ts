@@ -3,14 +3,19 @@ import 'server-only';
 /**
  * Reprise des imports en attente, au moment de l'onboarding.
  *
- * Tant qu'aucun athlète n'est enregistré, l'ingestion refuse chaque fichier
- * (`ingestFitBuffer` a besoin d'une ligne athlète à qui rattacher l'activité) :
- * le watcher les range dans `failed/` avec leur motif. Ils sont intacts, et
- * seule la cause de l'échec a disparu — les remettre dans la boîte de dépôt les
- * fait ré-ingérer au scan suivant, sans rien retélécharger — à deux conditions,
- * toutes deux traitées ici : que la remise en file n'écrase pas un homonyme déjà
- * en attente, et que la date de modification du fichier change (le watcher
- * identifie ce qu'il a déjà traité par `nom|taille|mtime`).
+ * Tant que le compte n'a pas d'athlète, l'ingestion refuse chaque fichier de son
+ * dossier (une activité appartient à un athlète) : le watcher les range dans
+ * `failed/` avec leur motif. Ils sont intacts, et seule la cause de l'échec a
+ * disparu — les remettre dans le dossier de dépôt les fait ré-ingérer au scan
+ * suivant, sans rien retélécharger — à deux conditions, toutes deux traitées
+ * ici : que la remise en file n'écrase pas un homonyme déjà en attente, et que
+ * la date de modification du fichier change (le watcher identifie ce qu'il a
+ * déjà traité par `nom|taille|mtime`).
+ *
+ * **Tout se passe dans le dossier de cet athlète** (`athlete-<id>/`), jamais à
+ * la racine de la boîte : un fichier de la racine n'a pas de propriétaire
+ * déductible, et l'onboarding d'un compte n'est pas une raison de lui attribuer
+ * ce que quelqu'un d'autre a peut-être déposé.
  *
  * Le marqueur de backfill est reposé dans la foulée : des fichiers
  * `intervals-*.fit` existent déjà (dans `failed/`), ce qui referme la fenêtre
@@ -23,13 +28,14 @@ import 'server-only';
  * erreur est donc journalisée, jamais propagée.
  */
 
-import { readdir, rename, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { env } from '@/config/env';
 
 import { nameWithSuffix } from './dav';
-import { FAILED_DIR, setBackfillMarker } from './service';
+import { athleteInboxDir, FAILED_DIR } from './inbox-layout';
+import { setBackfillMarker } from './service';
 import { isFitFile } from './watch-plan';
 
 /**
@@ -98,7 +104,8 @@ async function freeTargetName(inboxDir: string, name: string): Promise<string | 
 }
 
 /**
- * Renvoie les `.fit` de `failed/` dans la boîte de dépôt, avec leur `.err.txt`.
+ * Renvoie les `.fit` de `failed/` dans le dossier de dépôt de l'athlète, avec
+ * leur `.err.txt`.
  *
  * Un fichier récalcitrant (droits, disque plein) n'interrompt pas les autres :
  * il reste dans `failed/`, où il est visible, et l'échec est journalisé.
@@ -170,24 +177,31 @@ async function requeueFailedFiles(inboxDir: string): Promise<number> {
 }
 
 /**
- * Remet en file tout ce qui attendait l'onboarding, et rouvre le rapatriement de
- * l'historique.
+ * Remet en file tout ce qui attendait l'onboarding **de cet athlète**, et rouvre
+ * son rapatriement d'historique.
  *
- * Ne lève jamais : une inbox inaccessible rend un rapport à zéro et le
+ * L'athlète est un paramètre, jamais une déduction : l'appelant (la Server
+ * Action d'onboarding) vient de le créer, il sait lequel c'est.
+ *
+ * Ne lève jamais : un dossier inaccessible rend un rapport à zéro et le
  * journalise.
  */
-export async function recoverPendingImports(): Promise<RecoveryReport> {
-  let inboxDir: string;
+export async function recoverPendingImports(athleteId: number): Promise<RecoveryReport> {
+  let athleteDir: string;
   try {
-    inboxDir = env.FIT_INBOX_DIR;
+    athleteDir = athleteInboxDir(env.FIT_INBOX_DIR, athleteId);
   } catch (error) {
     logError(`reprise impossible — configuration illisible : ${errorMessage(error)}.`);
     return NOTHING_RECOVERED;
   }
 
   try {
-    const requeued = await requeueFailedFiles(inboxDir);
-    const backfillReopened = await setBackfillMarker(inboxDir, true, Date.now());
+    // Le dossier de l'athlète n'existe pas encore si rien n'a jamais été déposé
+    // pour lui : sans ce `mkdir`, le marqueur n'aurait nulle part où s'écrire.
+    await mkdir(athleteDir, { recursive: true });
+
+    const requeued = await requeueFailedFiles(athleteDir);
+    const backfillReopened = await setBackfillMarker(athleteDir, true, Date.now());
 
     log(
       `reprise après onboarding : ${requeued} fichier(s) remis en file, rapatriement de l'historique ${backfillReopened ? 'rouvert' : 'non rouvert (marqueur non posé)'}.`,

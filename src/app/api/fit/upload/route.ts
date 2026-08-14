@@ -1,10 +1,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import { getCurrentAthleteId } from '@/data/athlete';
 import { ingestFitBuffer } from '@/lib/fit/ingest';
 import { FitParseError } from '@/lib/fit/parse';
 
 import {
   FIT_UPLOAD_FIELD,
+  NO_ATHLETE_MESSAGE,
   UNEXPECTED_ERROR_MESSAGE,
   UPLOAD_TOO_LARGE_MESSAGE,
   checkFitFile,
@@ -50,6 +52,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ results: [] }, { status: 400 });
   }
 
+  // Le propriétaire des activités importées, résolu **une fois** pour tout
+  // l'envoi : c'est cette route qui sait à qui appartiennent ces fichiers (elle
+  // a une session), et c'est elle qui le dit à l'ingestion. Sans athlète, rien
+  // n'est lu ni écrit — une activité appartient à quelqu'un.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) {
+    return NextResponse.json(
+      { results: files.map((file) => ({ name: displayFileName(file.name), ok: false as const, error: NO_ATHLETE_MESSAGE })) },
+      { status: 409 },
+    );
+  }
+
   const results: FitUploadResult[] = [];
 
   // Séquentiel : chaque fichier est chargé entier en mémoire et écrit en base,
@@ -64,7 +78,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     try {
-      const report = await ingestFitBuffer(Buffer.from(await file.arrayBuffer()));
+      const report = await ingestFitBuffer(Buffer.from(await file.arrayBuffer()), athleteId);
       results.push({ name, ok: true, status: report.status });
     } catch (error) {
       if (error instanceof FitParseError) {

@@ -8,9 +8,11 @@ import {
   isSafeActivityId,
   MAX_DOWNLOADS_PER_CYCLE,
   MAX_SLEEP_MS,
+  mergeRetryAfterS,
   nextPollDelayMs,
   normalizeAthleteId,
   OWNER_ATHLETE_ID,
+  planAccountsToPoll,
   planPoll,
   planPollerActivation,
   planPollWindow,
@@ -18,6 +20,7 @@ import {
   purgeExpiredWithoutFile,
   shouldLogOnce,
   WITHOUT_FILE_TTL_MS,
+  type IntervalsAccount,
   type PollCandidate,
   type PollCycleOutcome,
 } from './poll-plan';
@@ -336,9 +339,9 @@ describe('normalizeAthleteId', () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toContain('INTERVALS_ATHLETE_ID');
-    // La valeur fautive est échappée : elle vient d'un fichier de configuration
-    // et part dans les journaux.
+    expect(result.reason).toContain('identifiant intervals.icu illisible');
+    // La valeur fautive est échappée : elle vient d'une saisie et part dans les
+    // journaux.
     expect(result.reason).toContain('"https://intervals.icu/athlete/i123456"');
   });
 });
@@ -366,19 +369,93 @@ describe('planPollerActivation', () => {
 
     expect(activation.active).toBe(false);
     if (activation.active) return;
-    expect(activation.reason).toBe('INTERVALS_API_KEY manquante');
+    expect(activation.reason).toBe('aucune clé API intervals.icu enregistrée');
   });
 
   it('traite une clé vide comme absente', () => {
     expect(planPollerActivation({ athleteId: 'i1', apiKey: '   ' }).active).toBe(false);
   });
 
-  it("désactive le poller seul quand l'identifiant est illisible", () => {
+  it("écarte ce compte seul quand l'identifiant est illisible", () => {
     const activation = planPollerActivation({ athleteId: 'athlète-de-gwen', apiKey: 'cle' });
 
     expect(activation.active).toBe(false);
     if (activation.active) return;
-    expect(activation.reason).toContain('INTERVALS_ATHLETE_ID');
+    expect(activation.reason).toContain('identifiant intervals.icu illisible');
+    // Le motif part dans les journaux : la clé n'y figure jamais.
+    expect(activation.reason).not.toContain('cle');
+  });
+});
+
+describe('planAccountsToPoll', () => {
+  const API_KEY = 'cle-api-secrete';
+
+  function ready(athleteId: number, intervalsAthleteId: string | null = null): IntervalsAccount {
+    return { athleteId, status: 'ready', intervalsAthleteId, apiKey: API_KEY };
+  }
+
+  it('rend un compte prêt avec ses deux identifiants normalisés', () => {
+    expect(planAccountsToPoll([ready(3, '123456')])).toEqual({
+      accounts: [{ athleteId: 3, intervalsAthleteId: 'i123456', apiKey: API_KEY }],
+      skipped: [],
+    });
+  });
+
+  it("interroge l'athlète 0 quand le compte n'a pas d'identifiant intervals.icu", () => {
+    expect(planAccountsToPoll([ready(1)]).accounts).toEqual([
+      { athleteId: 1, intervalsAthleteId: OWNER_ATHLETE_ID, apiKey: API_KEY },
+    ]);
+  });
+
+  it('saute la clé illisible et poursuit avec les autres comptes', () => {
+    // C'est toute la raison d'être de cette fonction : le secret d'installation
+    // a changé pour l'un, les autres n'ont pas à s'arrêter de rapatrier.
+    const plan = planAccountsToPoll([
+      { athleteId: 1, status: 'unreadable', reason: 'clé API intervals.icu illisible' },
+      ready(2, 'i222'),
+    ]);
+
+    expect(plan.accounts).toEqual([{ athleteId: 2, intervalsAthleteId: 'i222', apiKey: API_KEY }]);
+    expect(plan.skipped).toEqual([{ athleteId: 1, reason: 'clé API intervals.icu illisible' }]);
+  });
+
+  it("saute le compte dont l'identifiant intervals.icu est illisible, avec son motif", () => {
+    const plan = planAccountsToPoll([ready(4, 'athlète-de-gwen'), ready(5)]);
+
+    expect(plan.accounts.map((account) => account.athleteId)).toEqual([5]);
+    expect(plan.skipped[0]?.athleteId).toBe(4);
+    expect(plan.skipped[0]?.reason).toContain('identifiant intervals.icu illisible');
+  });
+
+  it('ne laisse aucune clé dans un motif de saut', () => {
+    const plan = planAccountsToPoll([
+      ready(1, 'pas-un-identifiant'),
+      { athleteId: 2, status: 'unreadable', reason: 'clé API intervals.icu illisible' },
+      { athleteId: 3, status: 'ready', intervalsAthleteId: null, apiKey: '   ' },
+    ]);
+
+    expect(plan.accounts).toEqual([]);
+    expect(plan.skipped).toHaveLength(3);
+    for (const skipped of plan.skipped) {
+      expect(skipped.reason).not.toContain(API_KEY);
+    }
+  });
+
+  it('ne rend rien quand aucun compte n’a de clé — ce n’est pas une panne', () => {
+    expect(planAccountsToPoll([])).toEqual({ accounts: [], skipped: [] });
+  });
+});
+
+describe('mergeRetryAfterS', () => {
+  it('retient le délai le plus long demandé', () => {
+    // Les comptes partagent le même hôte : un quota atteint sur l'un est une
+    // demande de patience adressée au service entier.
+    expect(mergeRetryAfterS([null, 30, 120, null])).toBe(120);
+  });
+
+  it('ne demande rien quand personne n’a rien demandé', () => {
+    expect(mergeRetryAfterS([])).toBeNull();
+    expect(mergeRetryAfterS([null, null])).toBeNull();
   });
 });
 

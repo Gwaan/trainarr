@@ -6,21 +6,39 @@ import 'server-only';
  * ## Ce que fait le service
  *
  * - **Surveillance du dossier** — toutes les `FIT_WATCH_INTERVAL_S` secondes, il
- *   liste `FIT_INBOX_DIR`, importe les fichiers `.fit` dont l'upload est
- *   terminé, puis les range dans `processed/` ou `failed/`.
- * - **Rapatriement intervals.icu** — quand une clé API est configurée, une
- *   seconde boucle indépendante récupère les fichiers d'activité déposés là par
- *   HealthFit et les dépose dans la même boîte d'import. La séparation est
- *   stricte : le poller parle au réseau et écrit des fichiers, il ne parse ni
- *   n'ingère rien ; le watcher parle à la base. Les deux ne se croisent que par
- *   le répertoire. Tant qu'aucune séance n'a été rapatriée, cette boucle demande
- *   tout l'historique plutôt que la fenêtre glissante — par tranches, sur
- *   plusieurs cycles (cf. `planPollWindow` et `MAX_DOWNLOADS_PER_CYCLE`).
+ *   parcourt les dossiers d'athlète de `FIT_INBOX_DIR`, importe les fichiers
+ *   `.fit` dont l'upload est terminé, puis les range dans `processed/` ou
+ *   `failed/` **du dossier concerné**.
+ * - **Rapatriement intervals.icu** — une seconde boucle indépendante fait un
+ *   cycle **par compte ayant enregistré une clé API**, avec les identifiants de
+ *   ce compte, et dépose ce qu'elle récupère dans le dossier de cet athlète. La
+ *   séparation est stricte : le poller parle au réseau et écrit des fichiers, il
+ *   ne parse ni n'ingère rien ; le watcher parle à la base. Les deux ne se
+ *   croisent que par le répertoire. Tant qu'aucune séance n'a été rapatriée
+ *   **pour ce compte**, la boucle demande tout l'historique plutôt que la
+ *   fenêtre glissante — par tranches, sur plusieurs cycles (cf. `planPollWindow`
+ *   et `MAX_DOWNLOADS_PER_CYCLE`).
  *
- * Scan par intervalle plutôt qu'inotify, volontairement : le dépôt se fait par
- * WebDAV sur un volume Docker (et, à terme, possiblement un partage réseau) où
- * les événements inotify ne sont pas fiables, et cela évite une dépendance de
- * plus pour surveiller un répertoire qui reçoit quelques fichiers par semaine.
+ * Scan par intervalle plutôt qu'inotify, volontairement : le dépôt se fait sur un
+ * volume Docker (et, à terme, possiblement un partage réseau) où les événements
+ * inotify ne sont pas fiables, et cela évite une dépendance de plus pour
+ * surveiller un répertoire qui reçoit quelques fichiers par semaine.
+ *
+ * ## À qui appartient un fichier
+ *
+ * **Au dossier où il se trouve, et à personne d'autre** (cf. `./inbox-layout`).
+ * L'ingestion reçoit son athlète en paramètre : elle ne le déduit plus d'une
+ * session, qui n'existe pas ici — c'est ce qui avait cassé le service quand
+ * l'athlète est devenu la propriété d'un compte, chaque fichier partant en
+ * `failed/` faute de propriétaire.
+ *
+ * **Les fichiers restés à la racine de la boîte n'ont pas de propriétaire
+ * déductible** : dépôts antérieurs à ce cloisonnement, ou dépôts WebDAV — dont
+ * l'authentification Basic est celle de l'installation, pas celle d'un compte.
+ * Le watcher les signale (une fois chacun) et les laisse strictement où ils
+ * sont. Les attribuer « au premier athlète venu » est exactement ce que le
+ * cloisonnement par compte interdit ; les réimporter depuis la page « Activités »
+ * les rattache au compte connecté, en une manipulation et sans ambiguïté.
  *
  * ## Où il tourne
  *
@@ -50,8 +68,21 @@ import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'n
 import { basename, join } from 'node:path';
 
 import { env } from '@/config/env';
+import { listIntervalsAccounts } from '@/data/athlete';
 import { ingestFitBuffer, type IngestReport } from '@/lib/fit/ingest';
-import { ORPHAN_PART_MAX_AGE_MS, planScan, type ScannedFile } from '@/lib/fit/watch-plan';
+import {
+  athleteDirName,
+  athleteInboxDir,
+  FAILED_DIR,
+  parseAthleteDirName,
+  PROCESSED_DIR,
+} from '@/lib/fit/inbox-layout';
+import {
+  isFitFile,
+  ORPHAN_PART_MAX_AGE_MS,
+  planScan,
+  type ScannedFile,
+} from '@/lib/fit/watch-plan';
 import { downloadFitFile, listRecentActivities } from '@/lib/intervals/client';
 import { depositInInbox } from '@/lib/intervals/inbox';
 import { classifyPollError, type PollErrorReport } from '@/lib/intervals/poll-errors';
@@ -59,22 +90,20 @@ import {
   downloadSpacingMs,
   MAX_DOWNLOADS_PER_CYCLE,
   MAX_SLEEP_MS,
+  mergeRetryAfterS,
   nextPollDelayMs,
+  planAccountsToPoll,
   planPoll,
-  planPollerActivation,
   planPollWindow,
   pollCycleSummary,
   purgeExpiredWithoutFile,
   shouldLogOnce,
   WITHOUT_FILE_TTL_MS,
+  type PollableAccount,
   type PollCycleOutcome,
   type PollPlan,
   type PollWindow,
 } from '@/lib/intervals/poll-plan';
-
-const PROCESSED_DIR = 'processed';
-/** Archive des fichiers dont l'import a échoué — cf. `recoverPendingImports`. */
-export const FAILED_DIR = 'failed';
 
 /**
  * Délai avant de relancer une boucle tombée sur une erreur qu'aucun de ses
@@ -184,46 +213,40 @@ function createStopControls(): StopControls {
  * Configuration.
  */
 
+/** Les identifiants d'un compte, tels qu'un cycle de rapatriement les consomme. */
 type IntervalsSettings = {
+  /** Identifiant côté intervals.icu (`i123456`, ou `0` pour le porteur de la clé). */
   athleteId: string;
   apiKey: string;
-  pollIntervalS: number;
   lookbackDays: number;
 };
 
 type ServiceConfig = {
   inboxDir: string;
   watchIntervalS: number;
-  /** `null` quand le poller ne démarre pas — {@link pollerInactiveReason} dit pourquoi. */
-  intervals: IntervalsSettings | null;
-  pollerInactiveReason: string | null;
+  /** Cadence des cycles de rapatriement — réglage global, commun à tous les comptes. */
+  pollIntervalS: number;
+  /** Profondeur de la fenêtre glissante — global lui aussi. */
+  lookbackDays: number;
 };
 
 /**
  * La configuration du service, telle que `src/config/env.ts` la valide.
  *
- * Une clé absente ou un identifiant d'athlète illisible ne lève pas : le poller
- * seul est désactivé, avec son motif. Ce qui peut lever ici, c'est l'accès à
- * `env` lui-même (DATABASE_URL manquante, par exemple) — l'appelant l'attrape.
+ * Il n'y a plus d'identifiants intervals.icu ici : ils appartiennent à
+ * l'athlète, en base, et sont relus à chaque cycle (cf. {@link pollLoop}).
+ * L'environnement ne porte plus que ce qui est commun à toute l'installation —
+ * l'emplacement de la boîte de dépôt et les deux cadences.
+ *
+ * Ce qui peut lever ici, c'est l'accès à `env` lui-même (DATABASE_URL manquante,
+ * par exemple) — l'appelant l'attrape.
  */
 function readServiceConfig(): ServiceConfig {
-  const activation = planPollerActivation({
-    athleteId: env.INTERVALS_ATHLETE_ID,
-    apiKey: env.INTERVALS_API_KEY,
-  });
-
   return {
     inboxDir: env.FIT_INBOX_DIR,
     watchIntervalS: env.FIT_WATCH_INTERVAL_S,
-    intervals: activation.active
-      ? {
-          athleteId: activation.athleteId,
-          apiKey: activation.apiKey,
-          pollIntervalS: env.INTERVALS_POLL_INTERVAL_S,
-          lookbackDays: env.INTERVALS_LOOKBACK_DAYS,
-        }
-      : null,
-    pollerInactiveReason: activation.active ? null : activation.reason,
+    pollIntervalS: env.INTERVALS_POLL_INTERVAL_S,
+    lookbackDays: env.INTERVALS_LOOKBACK_DAYS,
   };
 }
 
@@ -232,35 +255,72 @@ function readServiceConfig(): ServiceConfig {
  */
 
 /**
- * Les fichiers réguliers du dossier, avec leur taille et leur date de
- * modification. Les sous-dossiers (`processed/`, `failed/`) sont ignorés.
+ * Les fichiers réguliers du dossier d'un athlète, avec leur taille et leur date
+ * de modification. Les sous-dossiers (`processed/`, `failed/`) sont ignorés.
  */
-async function scanInbox(inboxDir: string): Promise<ScannedFile[]> {
-  const entries = await readdir(inboxDir, { withFileTypes: true });
+async function scanAthleteDir(athleteDir: string): Promise<ScannedFile[]> {
+  const entries = await readdir(athleteDir, { withFileTypes: true });
 
   const files: ScannedFile[] = [];
   for (const entry of entries) {
     if (!entry.isFile()) continue;
-    const stats = await stat(join(inboxDir, entry.name));
+    const stats = await stat(join(athleteDir, entry.name));
     files.push({ name: entry.name, sizeBytes: stats.size, mtimeMs: stats.mtimeMs });
   }
   return files;
 }
 
+/** Ce que la racine de la boîte de dépôt contient : des dossiers d'athlète, et parfois des orphelins. */
+type InboxRoot = {
+  /** Dossiers d'athlète, triés par identifiant pour un journal stable d'un tour à l'autre. */
+  athletes: { athleteId: number; dir: string }[];
+  /**
+   * Fichiers `.fit` restés à la racine. Ils n'ont **pas** de propriétaire
+   * déductible : ni le nom, ni le contenu d'un FIT ne désignent un compte.
+   */
+  strays: string[];
+};
+
 /**
- * Tous les noms de fichiers présents dans la boîte de dépôt et ses deux
+ * Ce que la racine porte, à ce tour de scan.
+ *
+ * Tout ce qui n'est ni un dossier d'athlète ni un `.fit` de racine est ignoré
+ * sans un mot : les anciens `processed/` et `failed/` de la racine sont des
+ * archives d'avant le cloisonnement, elles ne demandent rien à personne.
+ */
+async function scanInboxRoot(inboxDir: string): Promise<InboxRoot> {
+  const entries = await readdir(inboxDir, { withFileTypes: true });
+
+  const athletes: InboxRoot['athletes'] = [];
+  const strays: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      const athleteId = parseAthleteDirName(entry.name);
+      if (athleteId !== null) athletes.push({ athleteId, dir: join(inboxDir, entry.name) });
+      continue;
+    }
+    if (entry.isFile() && isFitFile(entry.name)) strays.push(entry.name);
+  }
+
+  athletes.sort((a, b) => a.athleteId - b.athleteId);
+  return { athletes, strays };
+}
+
+/**
+ * Tous les noms de fichiers présents dans le dossier de l'athlète et ses deux
  * archives.
  *
- * C'est la mémoire du rapatriement : un fichier `intervals-<id>.fit` vu ici,
- * qu'il attende son tour, qu'il ait été ingéré ou qu'il ait échoué, signifie que
- * l'activité a déjà été téléchargée. Rien à stocker ailleurs, et l'état survit
- * aux redémarrages.
+ * C'est la mémoire du rapatriement **de ce compte** : un fichier
+ * `intervals-<id>.fit` vu ici, qu'il attende son tour, qu'il ait été ingéré ou
+ * qu'il ait échoué, signifie que l'activité a déjà été téléchargée pour lui.
+ * Rien à stocker ailleurs, et l'état survit aux redémarrages.
  *
  * Un dossier illisible ou absent (`processed/` n'existe qu'après le premier
  * rangement) est simplement sauté : au pire une activité est retéléchargée, et
  * l'empreinte SHA-256 en base la ramène sur la même ligne.
  */
-async function listExistingNames(inboxDir: string): Promise<Set<string>> {
+async function listExistingNames(athleteDir: string): Promise<Set<string>> {
   const names = new Set<string>();
 
   for (const subdir of ['', PROCESSED_DIR, FAILED_DIR]) {
@@ -271,7 +331,7 @@ async function listExistingNames(inboxDir: string): Promise<Set<string>> {
       // les sources (src/, scripts/, README…) dans `.next/standalone` — vérifié.
       // Le chemin est un répertoire de données à l'exécution, il n'a rien à voir
       // avec les modules à embarquer.
-      entries = await readdir(join(/* turbopackIgnore: true */ inboxDir, subdir));
+      entries = await readdir(join(/* turbopackIgnore: true */ athleteDir, subdir));
     } catch {
       continue;
     }
@@ -282,23 +342,32 @@ async function listExistingNames(inboxDir: string): Promise<Set<string>> {
 }
 
 /**
- * Range le fichier dans `processed/` ou `failed/`, avec le motif de l'échec dans
- * un `.err.txt` à côté le cas échéant.
+ * Le fichier tel qu'il apparaît dans les journaux : `athlete-3/sortie.fit`. Le
+ * dossier fait partie de l'identité du fichier — c'est lui qui porte son
+ * propriétaire.
+ */
+function fileLabel(athleteDir: string, name: string): string {
+  return `${basename(athleteDir)}/${name}`;
+}
+
+/**
+ * Range le fichier dans `processed/` ou `failed/` **du dossier de l'athlète**,
+ * avec le motif de l'échec dans un `.err.txt` à côté le cas échéant.
  *
  * Ne propage rien : le sort du fichier est secondaire, l'import a déjà eu lieu (ou
  * non) et l'appelant l'a déjà journalisé. `rename` écrase une éventuelle homonyme,
  * ces deux dossiers étant des archives de service — l'activité, elle, vit en base.
  */
 async function archive(
-  inboxDir: string,
+  athleteDir: string,
   subdir: string,
   name: string,
   failure: string | null,
 ): Promise<void> {
-  const destination = join(inboxDir, subdir);
+  const destination = join(athleteDir, subdir);
   try {
     await mkdir(destination, { recursive: true });
-    await rename(join(inboxDir, name), join(destination, name));
+    await rename(join(athleteDir, name), join(destination, name));
     if (failure !== null) {
       await writeFile(
         join(destination, `${basename(name)}.err.txt`),
@@ -307,24 +376,28 @@ async function archive(
       );
     }
   } catch (error) {
-    logError(`${name} → impossible de le ranger dans ${subdir}/ : ${errorMessage(error)}`);
+    logError(
+      `${fileLabel(athleteDir, name)} → impossible de le ranger dans ${subdir}/ : ${errorMessage(error)}`,
+    );
   }
 }
 
 /**
- * Supprime un temporaire de réception abandonné par un envoi WebDAV interrompu.
+ * Supprime un temporaire de réception abandonné par un dépôt interrompu.
  *
  * Ne propage rien : un `.part` récalcitrant ne doit pas empêcher le scan
  * d'ingérer les fichiers du même tour. Il sera reproposé au tour suivant.
  */
-async function removeOrphanPart(inboxDir: string, name: string): Promise<void> {
+async function removeOrphanPart(athleteDir: string, name: string): Promise<void> {
   try {
-    await rm(join(inboxDir, name), { force: true });
+    await rm(join(athleteDir, name), { force: true });
     log(
-      `${name} → temporaire abandonné supprimé (immobile depuis plus de ${ORPHAN_PART_MAX_AGE_MS / 60_000} minutes).`,
+      `${fileLabel(athleteDir, name)} → temporaire abandonné supprimé (immobile depuis plus de ${ORPHAN_PART_MAX_AGE_MS / 60_000} minutes).`,
     );
   } catch (error) {
-    logError(`${name} → suppression du temporaire abandonné impossible : ${errorMessage(error)}`);
+    logError(
+      `${fileLabel(athleteDir, name)} → suppression du temporaire abandonné impossible : ${errorMessage(error)}`,
+    );
   }
 }
 
@@ -346,72 +419,138 @@ const INGEST_STATUS_LABELS = {
   merged: 'même séance qu’une activité existante, complétée',
 } as const satisfies Record<IngestReport['status'], string>;
 
-/** Importe un fichier puis le range. Ne relance jamais : un fichier fautif ne doit pas tuer le service. */
-async function handleFile(inboxDir: string, name: string): Promise<void> {
+/**
+ * Importe un fichier **pour l'athlète de son dossier**, puis le range. Ne relance
+ * jamais : un fichier fautif ne doit pas tuer le service.
+ */
+async function handleFile(athleteDir: string, athleteId: number, name: string): Promise<void> {
+  const label = fileLabel(athleteDir, name);
+
   let report: IngestReport;
   try {
-    report = await ingestFitBuffer(await readFile(join(inboxDir, name)));
+    report = await ingestFitBuffer(await readFile(join(athleteDir, name)), athleteId);
   } catch (error) {
-    // Parsing impossible, base injoignable, athlète absent : dans tous les cas le
-    // fichier part dans failed/ avec son motif, à charge d'un humain d'y revenir.
+    // Parsing impossible, base injoignable, athlète supprimé : dans tous les cas
+    // le fichier part dans failed/ avec son motif, à charge d'un humain d'y revenir.
     const message = errorMessage(error);
-    logError(`${name} → échec : ${message}`);
-    await archive(inboxDir, FAILED_DIR, name, message);
+    logError(`${label} → échec : ${message}`);
+    await archive(athleteDir, FAILED_DIR, name, message);
     return;
   }
 
-  log(`${name} → ${INGEST_STATUS_LABELS[report.status]} (activité ${report.activityId})`);
-  await archive(inboxDir, PROCESSED_DIR, name, null);
+  log(`${label} → ${INGEST_STATUS_LABELS[report.status]} (activité ${report.activityId})`);
+  await archive(athleteDir, PROCESSED_DIR, name, null);
 }
 
-async function watchLoop(config: ServiceConfig, controls: StopControls): Promise<void> {
+/** Ce qu'un scan retient d'un tour à l'autre, pour un dossier d'athlète. */
+type WatchMemory = {
   /** Tailles du scan précédent — la stabilité se juge d'un tour à l'autre. */
-  let sizes: ReadonlyMap<string, number> = new Map();
+  sizes: ReadonlyMap<string, number>;
   /**
    * Fichiers déjà traités par ce processus, y compris ceux qu'on n'a pas pu
    * déplacer. Réduit à chaque scan aux fichiers encore présents (cf. `planScan`).
    */
-  let handled = new Set<string>();
+  handled: Set<string>;
+};
+
+/** Un tour de scan sur le dossier d'un athlète : ingestions, refus, temporaires abandonnés. */
+async function scanAthleteInbox(
+  athlete: { athleteId: number; dir: string },
+  memory: WatchMemory,
+  controls: StopControls,
+): Promise<void> {
+  const plan = planScan(await scanAthleteDir(athlete.dir), {
+    sizes: memory.sizes,
+    handled: memory.handled,
+    now: Date.now(),
+  });
+  memory.sizes = plan.sizes;
+  memory.handled = plan.handled;
+
+  // Reliquats de dépôts interrompus : ils réservent un nom que plus personne ne
+  // viendra écrire.
+  for (const name of plan.orphanParts) {
+    if (controls.stopping) return;
+    await removeOrphanPart(athlete.dir, name);
+  }
+
+  // Hors gabarit : archivés sans jamais être ouverts — c'est tout l'objet du
+  // contrôle de taille, un fichier démesuré ne doit pas entrer en mémoire.
+  for (const { name, key, reason } of plan.toReject) {
+    if (controls.stopping) return;
+    memory.handled.add(key);
+    logError(`${fileLabel(athlete.dir, name)} → refusé : ${reason}`);
+    await archive(athlete.dir, FAILED_DIR, name, reason);
+  }
+
+  for (const [index, { name, key }] of plan.toIngest.entries()) {
+    if (controls.stopping) return;
+    // Le parsing FIT est synchrone (hash + décodage) et tourne dans la boucle
+    // d'événements du serveur HTTP : entre deux fichiers, on rend la main un
+    // tour pour que les requêtes en attente soient servies. Sans ça, un backfill
+    // de 50 fichiers gèlerait l'interface plusieurs secondes.
+    if (index > 0) await controls.sleep(0);
+    memory.handled.add(key);
+    await handleFile(athlete.dir, athlete.athleteId, name);
+  }
+}
+
+/**
+ * Signale les fichiers restés à la racine, **une fois chacun**.
+ *
+ * Ils n'ont pas de propriétaire : rien dans un FIT ne désigne un compte, et les
+ * deux façons d'en déposer un à la racine (dépôt WebDAV, dépôt antérieur au
+ * cloisonnement) sont anonymes par construction. Ils ne sont donc ni importés,
+ * ni déplacés, ni supprimés — mais le silence en ferait des séances perdues sans
+ * trace, ce qui serait pire que tout.
+ */
+function reportStrayFiles(strays: readonly string[], reported: Set<string>): void {
+  const fresh = strays.filter((name) => shouldLogOnce(reported, name));
+  if (fresh.length === 0) return;
+
+  logError(
+    `${fresh.length} fichier(s) à la racine de l'inbox sans propriétaire (${fresh.slice(0, 5).join(', ')}${fresh.length > 5 ? ', …' : ''}) : ils ne sont pas importés — un fichier appartient au compte dont il porte le dossier. Les réimporter depuis la page « Activités ».`,
+  );
+}
+
+async function watchLoop(config: ServiceConfig, controls: StopControls): Promise<void> {
+  /** Mémoire de scan, par athlète : deux dossiers ne partagent ni tailles ni fichiers traités. */
+  const memories = new Map<number, WatchMemory>();
+  /** Fichiers de racine déjà signalés — une ligne par fichier, pas une par scan. */
+  const reportedStrays = new Set<string>();
 
   while (!controls.stopping) {
     try {
-      const plan = planScan(await scanInbox(config.inboxDir), {
-        sizes,
-        handled,
-        now: Date.now(),
-      });
-      sizes = plan.sizes;
-      handled = plan.handled;
+      const root = await scanInboxRoot(config.inboxDir);
+      reportStrayFiles(root.strays, reportedStrays);
 
-      // Reliquats d'envois interrompus : ils réservent un nom que plus personne
-      // ne viendra écrire, et que le dépôt WebDAV refuse donc de réutiliser.
-      for (const name of plan.orphanParts) {
-        if (controls.stopping) break;
-        await removeOrphanPart(config.inboxDir, name);
+      // Un dossier disparu emporte sa mémoire : sur un service qui tourne des
+      // mois, la garder ne servirait qu'à la faire grossir.
+      const present = new Set(root.athletes.map((athlete) => athlete.athleteId));
+      for (const athleteId of memories.keys()) {
+        if (!present.has(athleteId)) memories.delete(athleteId);
       }
 
-      // Hors gabarit : archivés sans jamais être ouverts — c'est tout l'objet du
-      // contrôle de taille, un fichier démesuré ne doit pas entrer en mémoire.
-      for (const { name, key, reason } of plan.toReject) {
+      for (const athlete of root.athletes) {
         if (controls.stopping) break;
-        handled.add(key);
-        logError(`${name} → refusé : ${reason}`);
-        await archive(config.inboxDir, FAILED_DIR, name, reason);
-      }
-
-      for (const [index, { name, key }] of plan.toIngest.entries()) {
-        if (controls.stopping) break;
-        // Le parsing FIT est synchrone (hash + décodage) et tourne dans la
-        // boucle d'événements du serveur HTTP : entre deux fichiers, on rend la
-        // main un tour pour que les requêtes en attente soient servies. Sans ça,
-        // un backfill de 50 fichiers gèlerait l'interface plusieurs secondes.
-        if (index > 0) await controls.sleep(0);
-        handled.add(key);
-        await handleFile(config.inboxDir, name);
+        let memory = memories.get(athlete.athleteId);
+        if (memory === undefined) {
+          memory = { sizes: new Map(), handled: new Set() };
+          memories.set(athlete.athleteId, memory);
+        }
+        try {
+          await scanAthleteInbox(athlete, memory, controls);
+        } catch (error) {
+          // Le dossier d'un athlète illisible n'empêche pas de servir les
+          // autres : chacun est indépendant, et le tour suivant réessaiera.
+          if (!controls.stopping) {
+            logError(`${basename(athlete.dir)} : scan impossible — ${errorMessage(error)}`);
+          }
+        }
       }
     } catch (error) {
-      // Répertoire momentanément illisible (montage NFS, volume non monté) :
-      // on le signale et on retentera au tour suivant plutôt que de sortir.
+      // Racine momentanément illisible (montage NFS, volume non monté) : on le
+      // signale et on retentera au tour suivant plutôt que de sortir.
       if (!controls.stopping) logError(`scan impossible : ${errorMessage(error)}`);
     }
 
@@ -453,16 +592,18 @@ type PollMemory = {
 };
 
 /**
- * Marqueur « backfill en cours », posé dans l'inbox : créé quand une fenêtre
- * historique s'ouvre, supprimé quand un cycle se termine sans reliquat. L'état
- * vit dans le système de fichiers, comme la déduplication — il survit aux
- * redémarrages. Sans extension `.fit` ni suffixe `.part`, le watcher l'ignore.
+ * Marqueur « backfill en cours », posé dans le dossier de l'athlète : créé quand
+ * une fenêtre historique s'ouvre, supprimé quand un cycle se termine sans
+ * reliquat. L'état vit dans le système de fichiers, comme la déduplication — il
+ * survit aux redémarrages. Sans extension `.fit` ni suffixe `.part`, le watcher
+ * l'ignore. Par athlète, comme tout le reste de cet état : le backfill d'un
+ * compte ne dit rien de celui d'un autre.
  */
 export const BACKFILL_MARKER = '.backfill-pending';
 
-async function backfillMarkerExists(inboxDir: string): Promise<boolean> {
+async function backfillMarkerExists(athleteDir: string): Promise<boolean> {
   try {
-    await access(join(inboxDir, BACKFILL_MARKER));
+    await access(join(athleteDir, BACKFILL_MARKER));
     return true;
   } catch {
     return false;
@@ -480,15 +621,15 @@ async function backfillMarkerExists(inboxDir: string): Promise<boolean> {
  * tout l'historique alors que des fichiers ont déjà été rapatriés.
  */
 export async function setBackfillMarker(
-  inboxDir: string,
+  athleteDir: string,
   present: boolean,
   now: number,
 ): Promise<boolean> {
   try {
     if (present) {
-      await writeFile(join(inboxDir, BACKFILL_MARKER), `${new Date(now).toISOString()}\n`);
+      await writeFile(join(athleteDir, BACKFILL_MARKER), `${new Date(now).toISOString()}\n`);
     } else {
-      await rm(join(inboxDir, BACKFILL_MARKER), { force: true });
+      await rm(join(athleteDir, BACKFILL_MARKER), { force: true });
     }
     return true;
   } catch (error) {
@@ -515,11 +656,15 @@ function reportPollError(
 }
 
 /**
- * Un cycle : choisir la fenêtre, lister les activités, télécharger celles qui
- * manquent, les déposer dans la boîte d'import.
+ * Un cycle **pour un compte** : choisir la fenêtre, lister les activités,
+ * télécharger celles qui manquent, les déposer dans le dossier de cet athlète.
+ *
+ * `athleteDir` n'est pas un détail de rangement : c'est lui qui dit au watcher à
+ * qui appartiennent les fichiers déposés ici, longtemps après, et à travers un
+ * éventuel redémarrage.
  */
 async function pollOnce(
-  inboxDir: string,
+  athleteDir: string,
   settings: IntervalsSettings,
   memory: PollMemory,
   controls: StopControls,
@@ -534,19 +679,19 @@ async function pollOnce(
     // Les fichiers déjà là servent deux fois : ils décident de la fenêtre (aucun
     // rapatriement encore fait = on demande tout l'historique) puis de ce qu'il
     // reste à télécharger.
-    const existingNames = await listExistingNames(inboxDir);
+    const existingNames = await listExistingNames(athleteDir);
     pollWindow = planPollWindow({
       existingNames,
       // Le marqueur sur disque prolonge la mémoire du process : un backfill
       // interrompu par un redémarrage reprend au lieu d'abandonner son reliquat.
-      unfinished: memory.unfinished || (await backfillMarkerExists(inboxDir)),
+      unfinished: memory.unfinished || (await backfillMarkerExists(athleteDir)),
       lookbackDays: settings.lookbackDays,
       now,
     });
     if (pollWindow.backfill) {
       // Posé avant les téléchargements : un crash en plein cycle le laisse en
       // place, c'est exactement son rôle. Contenu = date, purement informatif.
-      await setBackfillMarker(inboxDir, true, now);
+      await setBackfillMarker(athleteDir, true, now);
     }
     const activities = await listRecentActivities({
       athleteId: settings.athleteId,
@@ -644,7 +789,7 @@ async function pollOnce(
     }
 
     try {
-      await depositInInbox({ inboxDir, fileName, data });
+      await depositInInbox({ inboxDir: athleteDir, fileName, data });
       deposited += 1;
       settled += 1;
       pollLog(`activité ${activityId} → ${fileName} déposé (${data.byteLength} octets).`);
@@ -658,7 +803,7 @@ async function pollOnce(
   // Fin de backfill : cycle historique terminé sans reliquat (et sans arrêt en
   // cours, qui laisserait du travail identifié non fait) → le marqueur tombe.
   if (pollWindow.backfill && !memory.unfinished && !controls.stopping) {
-    await setBackfillMarker(inboxDir, false, now);
+    await setBackfillMarker(athleteDir, false, now);
   }
 
   return outcome(null);
@@ -666,8 +811,18 @@ async function pollOnce(
 
 /** État du poller entre deux cycles ET entre deux relances de la boucle. */
 type PollLoopState = {
-  memory: PollMemory;
-  cycleNumber: number;
+  /**
+   * Mémoire par athlète. Un compte neuf part avec la sienne, vierge — c'est ce
+   * qui lui vaut son propre backfill complet, sans rien devoir à l'historique
+   * déjà rapatrié par un autre.
+   */
+  memories: Map<number, PollMemory>;
+  /** Numéro du dernier cycle de chaque compte : le premier parle toujours. */
+  cycleNumbers: Map<number, number>;
+  /** Comptes sautés déjà signalés (`<athlète>|<motif>`) — une ligne, pas une par cycle. */
+  loggedSkips: Set<string>;
+  /** « Aucun compte configuré » a déjà été dit ; il se redira si ça change. */
+  announcedNoAccounts: boolean;
 };
 
 /**
@@ -678,40 +833,139 @@ type PollLoopState = {
  */
 function initialPollLoopState(): PollLoopState {
   return {
-    memory: {
-      withoutFile: new Map(),
-      loggedInvalidIds: new Set(),
-      loggedWithoutFile: new Set(),
-      unfinished: false,
-    },
-    cycleNumber: 0,
+    memories: new Map(),
+    cycleNumbers: new Map(),
+    loggedSkips: new Set(),
+    announcedNoAccounts: false,
   };
 }
 
+function initialPollMemory(): PollMemory {
+  return {
+    withoutFile: new Map(),
+    loggedInvalidIds: new Set(),
+    loggedWithoutFile: new Set(),
+    unfinished: false,
+  };
+}
+
+/**
+ * Un cycle pour un compte, journal compris. Rend le délai que l'API a demandé,
+ * s'il en a demandé un.
+ *
+ * Le dossier de l'athlète est créé au besoin : c'est ici, et nulle part
+ * ailleurs, qu'un compte fraîchement configuré obtient sa boîte.
+ */
+async function pollAccount(
+  config: ServiceConfig,
+  account: PollableAccount,
+  controls: StopControls,
+  state: PollLoopState,
+): Promise<number | null> {
+  const athleteDir = athleteInboxDir(config.inboxDir, account.athleteId);
+  try {
+    await mkdir(athleteDir, { recursive: true });
+  } catch (error) {
+    pollLogError(
+      `${athleteDirName(account.athleteId)} : dossier inaccessible — ${errorMessage(error)}`,
+    );
+    return null;
+  }
+
+  let memory = state.memories.get(account.athleteId);
+  if (memory === undefined) {
+    memory = initialPollMemory();
+    state.memories.set(account.athleteId, memory);
+  }
+
+  const cycleNumber = (state.cycleNumbers.get(account.athleteId) ?? 0) + 1;
+  state.cycleNumbers.set(account.athleteId, cycleNumber);
+
+  const outcome = await pollOnce(
+    athleteDir,
+    {
+      athleteId: account.intervalsAthleteId,
+      apiKey: account.apiKey,
+      lookbackDays: config.lookbackDays,
+    },
+    memory,
+    controls,
+  );
+  if (controls.stopping) return null;
+
+  // Un cycle qui trouve du travail ou échoue laisse toujours une trace ; un
+  // cycle vide se tait, sauf le premier de ce compte — c'est lui qui répond à
+  // « est-ce que ça marche ? » après un démarrage ou après une première clé.
+  const summary = pollCycleSummary(cycleNumber, outcome);
+  if (summary !== null) pollLog(`${athleteDirName(account.athleteId)} : ${summary}`);
+
+  return outcome.retryAfterS;
+}
+
+/**
+ * La boucle de rapatriement : un tour = un cycle **par compte configuré**.
+ *
+ * Les identifiants sont relus à chaque tour, en base : une clé saisie dans les
+ * réglages est prise en compte au tour suivant, sans redémarrage. Aucun compte
+ * n'en fait échouer un autre — ni une clé illisible, ni un dossier
+ * inaccessible, ni une API qui refuse.
+ */
 async function pollLoop(
-  inboxDir: string,
-  settings: IntervalsSettings,
+  config: ServiceConfig,
   controls: StopControls,
   state: PollLoopState,
 ): Promise<void> {
-  const { memory } = state;
-
   while (!controls.stopping) {
-    state.cycleNumber += 1;
-    const cycleNumber = state.cycleNumber;
-    const outcome = await pollOnce(inboxDir, settings, memory, controls);
+    let accounts: PollableAccount[] = [];
+    /**
+     * La liste a bien été lue. Distinct de « elle est vide » : une base
+     * injoignable ne dit **rien** des comptes configurés, et l'annoncer comme
+     * une absence ferait passer une panne pour un service au repos.
+     */
+    let listed = false;
+
+    try {
+      const plan = planAccountsToPoll(await listIntervalsAccounts());
+      accounts = plan.accounts;
+      listed = true;
+
+      // Une clé devenue illisible (secret d'installation changé) saute ce compte
+      // et lui seul, en le disant — jamais en silence, jamais avec sa valeur.
+      for (const skipped of plan.skipped) {
+        if (!shouldLogOnce(state.loggedSkips, `${skipped.athleteId}|${skipped.reason}`)) continue;
+        pollLogError(`${athleteDirName(skipped.athleteId)} : compte sauté — ${skipped.reason}.`);
+      }
+    } catch (error) {
+      // Base injoignable : on ne sait pas quels comptes rapatrier, on le dit et
+      // on réessaiera. Ce n'est pas une raison d'arrêter la boucle.
+      if (!controls.stopping) pollLogError(`comptes illisibles — ${errorMessage(error)}`);
+    }
+
+    if (listed && accounts.length === 0) {
+      // Pas une panne : une installation neuve n'a encore rien configuré. Une
+      // ligne, une seule, et le service attend.
+      if (!state.announcedNoAccounts) {
+        state.announcedNoAccounts = true;
+        pollLog(
+          'aucun compte n’a de clé API intervals.icu enregistrée — rien à rapatrier pour l’instant (Profil → intervals.icu).',
+        );
+      }
+    } else if (accounts.length > 0) {
+      state.announcedNoAccounts = false;
+    }
+
+    const retryAfters: (number | null)[] = [];
+    for (const account of accounts) {
+      if (controls.stopping) break;
+      retryAfters.push(await pollAccount(config, account, controls, state));
+    }
+
     if (controls.stopping) break;
-
-    // Un cycle qui trouve du travail ou échoue laisse toujours une trace ; un
-    // cycle vide se tait, sauf le premier — c'est lui qui répond à « est-ce que
-    // ça marche ? » après un démarrage.
-    const summary = pollCycleSummary(cycleNumber, outcome);
-    if (summary !== null) pollLog(summary);
-
     // Jamais de rafale : on attend au minimum l'intervalle de cycle, davantage si
     // l'API a demandé plus par `Retry-After` — et jamais au-delà du plafond, un
-    // `Retry-After` daté de 2099 ferait déborder `setTimeout`.
-    await controls.sleep(nextPollDelayMs(outcome.retryAfterS, settings.pollIntervalS));
+    // `Retry-After` daté de 2099 ferait déborder `setTimeout`. Le délai le plus
+    // long demandé vaut pour tous : les comptes partagent le même hôte.
+    await controls.sleep(nextPollDelayMs(mergeRetryAfterS(retryAfters), config.pollIntervalS));
   }
 }
 
@@ -747,14 +1001,16 @@ async function runForever(
   }
 }
 
-/** Une ligne, au démarrage, qui répond à « est-ce que ça tourne ? ». */
+/**
+ * Une ligne, au démarrage, qui répond à « est-ce que ça tourne ? ».
+ *
+ * Elle ne dit plus si le poller est actif : ça ne dépend plus de la
+ * configuration du serveur mais des comptes, relus à chaque cycle. C'est le
+ * premier tour de {@link pollLoop} qui l'annonce — « aucun compte configuré » ou
+ * le compte rendu de son premier cycle.
+ */
 function startupLine(config: ServiceConfig): string {
-  const poller =
-    config.intervals === null
-      ? `inactif (${config.pollerInactiveReason ?? 'raison inconnue'})`
-      : `actif (${config.intervals.pollIntervalS} s, athlète ${config.intervals.athleteId}, fenêtre ${config.intervals.lookbackDays} j, par tranches de ${MAX_DOWNLOADS_PER_CYCLE})`;
-
-  return `service FIT démarré — inbox: ${config.inboxDir} (scan toutes les ${config.watchIntervalS} s), poll intervals.icu: ${poller}`;
+  return `service FIT démarré — inbox: ${config.inboxDir} (un dossier par athlète, scan toutes les ${config.watchIntervalS} s), poll intervals.icu: toutes les ${config.pollIntervalS} s par compte configuré, fenêtre ${config.lookbackDays} j, par tranches de ${MAX_DOWNLOADS_PER_CYCLE}`;
 }
 
 async function run(controls: StopControls): Promise<void> {
@@ -779,18 +1035,15 @@ async function run(controls: StopControls): Promise<void> {
 
   log(startupLine(config));
 
-  const intervals = config.intervals;
   // L'état du poller survit aux relances de `runForever` — cf. `initialPollLoopState`.
   const pollState = initialPollLoopState();
   await Promise.all([
     runForever('surveillance du dossier', () => watchLoop(config, controls), controls),
-    intervals === null
-      ? Promise.resolve()
-      : runForever(
-          'rapatriement intervals.icu',
-          () => pollLoop(config.inboxDir, intervals, controls, pollState),
-          controls,
-        ),
+    runForever(
+      'rapatriement intervals.icu',
+      () => pollLoop(config, controls, pollState),
+      controls,
+    ),
   ]);
 
   log('service FIT arrêté.');

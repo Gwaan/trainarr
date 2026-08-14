@@ -21,7 +21,8 @@ Ce qu'implique cette cohabitation, et qui n'est pas négociable :
 - **Rien de l'import ne peut emporter le serveur HTTP.** Chaque boucle est
   enrobée d'un dernier recours qui journalise et relance après délai ; une
   configuration illisible ou une inbox inaccessible désactive le service en le
-  disant, l'appli continue de servir.
+  disant, l'appli continue de servir. Un compte, un dossier ou une clé en défaut
+  n'arrête jamais que lui-même.
 - La configuration vient de `src/config/env.ts` comme le reste de
   l'application — aucun chargement de `.env` par un script, aucune lecture de
   `process.env` hors `src/config/`. **Une exception, documentée** :
@@ -35,6 +36,39 @@ Ce qu'implique cette cohabitation, et qui n'est pas négociable :
   annule les appels en vol sans attendre. La sûreté vient d'ailleurs (`.part` +
   renommage atomique, empreinte SHA-256), pas d'une fermeture propre.
 
+## À qui appartient un fichier : un dossier par athlète
+
+Une activité appartient à un athlète, qui appartient à un compte. **L'ingestion
+reçoit donc son athlète en paramètre** (`ingestFitBuffer(buffer, athleteId)`) :
+elle ne le déduit plus d'une session — le watcher et le poller tournent hors
+requête, il n'y en a pas. Il n'existe **aucun repli** « le premier athlète venu »,
+nulle part : c'est exactement ce que le cloisonnement par compte interdit.
+
+Entre le poller (qui écrit) et le watcher (qui ingère, plus tard, éventuellement
+après un redémarrage), l'appartenance est portée par **le système de fichiers** —
+aucune mémoire de process ne survit à un `docker restart`, un chemin si :
+
+```
+FIT_INBOX_DIR/
+├── athlete-1/            ← en attente d'ingestion
+│   ├── processed/
+│   ├── failed/           ← + .err.txt, et .backfill-pending
+└── athlete-2/…
+```
+
+Les décisions de nommage vivent dans `src/lib/fit/inbox-layout.ts` (pur, testé).
+`parseAthleteDirName` est **strictement canonique** — `athlete-007` est refusé
+plutôt que ramené à 7 : deux dossiers pour un même athlète, c'est un backfill
+sans fin et une déduplication aveugle à son jumeau.
+
+**Les fichiers restés à la racine n'ont pas de propriétaire déductible** : rien
+dans un FIT ne désigne un compte, et l'authentification du dépôt WebDAV est celle
+de l'installation, pas celle d'un compte. Le watcher les **signale une fois
+chacun** et ne les touche pas — ni import, ni déplacement, ni suppression. Les
+réimporter depuis la page « Activités » les rattache au compte connecté, sans
+ambiguïté. Attribuer ces fichiers à un compte « au hasard » serait le seul vrai
+bug possible ici.
+
 ## Canal d'import
 
 Le fichier FIT est le **seul** format d'entrée des données d'entraînement : quelle
@@ -43,15 +77,25 @@ que soit la route empruntée, tout finit dans la même boîte de dépôt
 
 - **Chemin nominal** : HealthFit (iPhone) exporte automatiquement chaque séance
   vers le point WebDAV `/dav` servi par l'appli (`src/lib/fit/dav.ts`) ; les
-  fichiers atterrissent dans la boîte de dépôt (`FIT_INBOX_DIR`, volume partagé).
+  fichiers atterrissent à la **racine** de la boîte de dépôt — le dépôt est plat
+  (`MKCOL` ne crée rien) et son Basic auth n'identifie pas un compte. Ils sont
+  donc signalés et non importés, cf. la section précédente ; c'est la
+  conséquence assumée du cloisonnement par compte, et la suppression du canal
+  WebDAV est une tâche à part.
 - **Chemin intervals.icu** : voir la section dédiée plus bas — même boîte de
-  dépôt, même watcher.
-- **Watcher** (`src/lib/fit/service.ts`) : scanne le dossier à intervalle fixe,
-  n'ingère qu'un fichier dont la taille est stable sur deux passes (sinon
-  l'upload est encore en cours), puis le range dans `processed/` ou `failed/`
-  avec un `.err.txt` explicatif. Aucun fichier n'est supprimé en silence.
+  dépôt, dossier du compte dont la clé a servi.
+- **Watcher** (`src/lib/fit/service.ts`) : parcourt les dossiers d'athlète à
+  intervalle fixe, n'ingère qu'un fichier dont la taille est stable sur deux
+  passes (sinon l'upload est encore en cours), puis le range dans `processed/` ou
+  `failed/` **du même dossier**, avec un `.err.txt` explicatif. Aucun fichier
+  n'est supprimé en silence. Un dossier illisible n'empêche pas de servir les
+  autres.
 - **Import manuel** : `POST /api/fit/upload` depuis la page « Activités », même
-  ingestion, rapport par fichier.
+  ingestion, rapport par fichier. C'est la route qui résout l'athlète (elle a une
+  session) et le passe à l'ingestion ; sans athlète, elle répond 409 et ne lit
+  aucun fichier.
+- **Reprise après onboarding** (`recoverPendingImports(athleteId)`) : remet en
+  file le `failed/` **de cet athlète**, jamais la racine.
 - **Sécurité du dépôt** : `/dav` est exposé sur Internet en écriture. Basic auth
   (`WEBDAV_USERNAME` / `WEBDAV_PASSWORD`) obligatoire — tant que les deux ne sont
   pas renseignés, le point répond 503. Jamais d'état « ouvert sans
@@ -80,16 +124,16 @@ parse rien et ne touche jamais à la base. Le watcher parle à la base. Les deux
 se croisent que par le répertoire — et par le `.part` → rename, qui garantit que
 le watcher ne voit jamais un `.fit` à moitié écrit.
 
-- **Identifiant d'athlète facultatif** : `INTERVALS_API_KEY` suffit. Sans
-  `INTERVALS_ATHLETE_ID`, l'API est interrogée sur l'athlète `0`, raccourci
+- **Identifiant d'athlète facultatif** : la clé API suffit. Sans identifiant
+  enregistré, l'API est interrogée sur l'athlète `0`, raccourci
   officiel pour « le propriétaire de la clé » (cookbook intervals.icu : « Note
   that the athlete id in the path is '0'. This indicates that the athlete ID
-  that the access_token or API key belongs to should be used. »). La variable,
-  si elle est donnée, est normalisée sans indulgence coupable : espaces retirés,
-  préfixe `i` ajouté si oublié, `i0` ramené à `0`. **Un format invalide ne fait
-  jamais échouer le démarrage** — il désactive le poller seul, avec son motif
-  (d'où l'absence de regex dans `src/config/env.ts` : la validation vit dans
-  `planPollerActivation`, qui retourne un résultat au lieu de lever).
+  that the access_token or API key belongs to should be used. »). La valeur
+  saisie, s'il y en a une, est normalisée sans indulgence coupable : espaces
+  retirés, préfixe `i` ajouté si oublié, `i0` ramené à `0`. **Un format invalide
+  ne fait jamais échouer le démarrage** — il écarte ce compte seul, avec son
+  motif (la validation vit dans `planPollerActivation`, qui retourne un résultat
+  au lieu de lever).
 - `client.ts` : appels HTTP, pur, `fetch` injectable. Auth Basic, utilisateur
   littéral `API_KEY`, mot de passe = la clé (Settings → Developer Settings).
   Endpoints utilisés : `GET /api/v1/athlete/{id}/activities?oldest=yyyy-MM-dd`
@@ -138,8 +182,8 @@ le watcher ne voit jamais un `.fit` à moitié écrit.
   ligne d'erreur : c'est une sortie propre.
 - **La clé API ne sort jamais** : ni dans un message d'erreur, ni dans un log,
   ni dans une URL — elle ne vit que dans l'en-tête `Authorization`.
-- Le poller ne démarre que si `INTERVALS_API_KEY` est renseignée ; sinon il le
-  dit au démarrage et se tait.
+- Le rapatriement ne tourne que pour les comptes ayant une clé ; sinon il le dit
+  une fois et attend.
 
 ## Le silence est un bug (incident, corrigé)
 
@@ -158,7 +202,10 @@ absorbée sans log. Trois règles en découlent, à ne pas défaire :
    démarrage, qui annonce toujours son résultat (`pollCycleSummary`). C'est la
    réponse à « est-ce que ça marche ? ».
 3. **Le premier log au boot dit l'état**, pas seulement que le service existe :
-   inbox utilisée, cadence, poller actif ou inactif *et pourquoi*.
+   inbox utilisée et cadences. L'activité du rapatriement, elle, ne dépend plus
+   de la configuration du serveur mais des comptes : c'est le premier tour de la
+   boucle qui l'annonce — « aucun compte configuré », un compte sauté *et
+   pourquoi*, ou le compte rendu du premier cycle de chaque compte.
 
 ## Idempotence
 

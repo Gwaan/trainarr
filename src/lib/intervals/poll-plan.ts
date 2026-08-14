@@ -9,10 +9,14 @@
  * testable sans réseau ni système de fichiers.
  *
  * **L'état de la déduplication, c'est le système de fichiers.** Une activité est
- * « déjà rapatriée » si son fichier existe dans la boîte de dépôt ou dans ses
- * archives (`processed/`, `failed/`) — rien à stocker en base, rien à
+ * « déjà rapatriée » si son fichier existe dans le dossier de l'athlète ou dans
+ * ses archives (`processed/`, `failed/`) — rien à stocker en base, rien à
  * reconstruire après un redémarrage. Et si un double téléchargement passait
  * malgré tout, l'empreinte SHA-256 en base retombe sur la même activité.
+ *
+ * **Cet état est propre à chaque compte**, puisque chaque athlète a son dossier
+ * (cf. `src/lib/fit/inbox-layout.ts`) : un compte neuf déclenche son backfill
+ * complet même si le voisin a déjà rapatrié des années d'historique.
  */
 
 /** Préfixe des fichiers déposés par le poller, qui les distingue des dépôts WebDAV. */
@@ -372,10 +376,10 @@ export type AthleteIdResult =
 
 /**
  * Identifiant d'athlète tel que l'API l'attend, à partir de ce que
- * l'utilisateur a écrit dans son `.env`.
+ * l'utilisatrice a saisi dans ses réglages.
  *
  * Volontairement tolérant : espaces autour de la valeur, préfixe `i` oublié,
- * `0`/`i0` pour désigner le propriétaire de la clé. Une variable mal recopiée
+ * `0`/`i0` pour désigner le propriétaire de la clé. Un identifiant mal recopié
  * est une faute d'inattention, pas une raison de priver l'athlète de son
  * rapatriement — et encore moins d'empêcher l'application de démarrer, d'où un
  * résultat plutôt qu'une exception.
@@ -391,9 +395,9 @@ export function normalizeAthleteId(raw: string | undefined): AthleteIdResult {
 
   return {
     ok: false,
-    // La valeur est échappée : elle vient d'un fichier de configuration et part
-    // dans les journaux.
-    reason: `INTERVALS_ATHLETE_ID illisible (${JSON.stringify(value)}) — attendu i123456, 123456, ou vide pour le propriétaire de la clé`,
+    // La valeur est échappée : elle vient d'une saisie et part dans les
+    // journaux. Ce n'est pas un secret — l'identifiant n'ouvre rien seul.
+    reason: `identifiant intervals.icu illisible (${JSON.stringify(value)}) — attendu i123456, 123456, ou vide pour le propriétaire de la clé`,
   };
 }
 
@@ -404,14 +408,16 @@ export type PollerActivation =
   | { active: false; reason: string };
 
 /**
- * Le poller démarre-t-il, et sinon pourquoi.
+ * Le rapatriement de ce compte peut-il tourner, et sinon pourquoi.
  *
- * Une seule variable est indispensable, la clé API. Un identifiant d'athlète
- * illisible désactive le poller **seul** — l'appli, elle, continue de servir et
- * le dossier d'import continue d'être surveillé.
+ * Un seul réglage est indispensable, la clé API. Un identifiant d'athlète
+ * illisible écarte ce compte **seul** — l'appli continue de servir, le dossier
+ * d'import continue d'être surveillé, et les autres comptes continuent d'être
+ * rapatriés.
  *
  * La clé est rendue avec le résultat plutôt que relue par l'appelant : c'est ce
- * qui lui évite d'avoir à re-prouver au typage qu'elle est bien définie.
+ * qui lui évite d'avoir à re-prouver au typage qu'elle est bien définie. Le
+ * motif, lui, ne la cite jamais.
  */
 export function planPollerActivation(settings: {
   athleteId: string | undefined;
@@ -419,11 +425,119 @@ export function planPollerActivation(settings: {
 }): PollerActivation {
   const apiKey = settings.apiKey?.trim() ?? '';
   if (apiKey === '') {
-    return { active: false, reason: 'INTERVALS_API_KEY manquante' };
+    return { active: false, reason: 'aucune clé API intervals.icu enregistrée' };
   }
 
   const athlete = normalizeAthleteId(settings.athleteId);
   if (!athlete.ok) return { active: false, reason: athlete.reason };
 
   return { active: true, athleteId: athlete.athleteId, apiKey };
+}
+
+/*
+ * Les comptes à rapatrier.
+ *
+ * Les identifiants intervals.icu appartiennent désormais à l'athlète, en base :
+ * le service ne poll plus « le » compte de l'installation, il fait un cycle par
+ * compte qui en a enregistré. Ce qui suit décide, à partir de ce que rend le DAL,
+ * lesquels sont exploitables et pourquoi les autres sont sautés.
+ */
+
+/**
+ * Un compte tel que le DAL le rend (`listIntervalsAccounts` dans
+ * `src/data/athlete.ts`) : soit ses identifiants en clair, soit le constat que
+ * sa clé ne se déchiffre plus.
+ *
+ * Le type vit ici, avec la décision qui le consomme : c'est une donnée de
+ * poll-plan, et un module pur ne doit pas dépendre du DAL.
+ */
+export type IntervalsAccount =
+  | {
+      /** Athlète Trainarr (clé de la table `athlete`) — c'est lui qui nomme le dossier. */
+      athleteId: number;
+      status: 'ready';
+      /** Identifiant côté intervals.icu, tel qu'il a été saisi. */
+      intervalsAthleteId: string | null;
+      apiKey: string;
+    }
+  | {
+      athleteId: number;
+      status: 'unreadable';
+      /** Motif à journaliser tel quel — il ne cite jamais la clé. */
+      reason: string;
+    };
+
+/** Un compte prêt à être rapatrié, ses deux identifiants normalisés. */
+export type PollableAccount = {
+  /** Athlète Trainarr : le dossier dans lequel déposer, le propriétaire des activités. */
+  athleteId: number;
+  /** Identifiant tel que l'API intervals.icu l'attend (`i123456`, ou `0`). */
+  intervalsAthleteId: string;
+  apiKey: string;
+};
+
+/** Un compte écarté de ce cycle, avec son motif. */
+export type SkippedAccount = { athleteId: number; reason: string };
+
+export type AccountsPlan = {
+  accounts: PollableAccount[];
+  /**
+   * Comptes sautés. Remontés plutôt que tus : une clé devenue illisible est
+   * précisément le cas où le silence ferait passer une panne pour un service au
+   * repos.
+   */
+  skipped: SkippedAccount[];
+};
+
+/**
+ * Quels comptes rapatrier à ce cycle.
+ *
+ * Un compte sauté n'en fait sauter aucun autre : c'est tout l'objet de cette
+ * séparation. Aucun motif ne peut porter la clé — ni celui du DAL, ni celui de
+ * {@link planPollerActivation}.
+ */
+export function planAccountsToPoll(accounts: readonly IntervalsAccount[]): AccountsPlan {
+  const plan: AccountsPlan = { accounts: [], skipped: [] };
+
+  for (const account of accounts) {
+    if (account.status === 'unreadable') {
+      plan.skipped.push({ athleteId: account.athleteId, reason: account.reason });
+      continue;
+    }
+
+    const activation = planPollerActivation({
+      athleteId: account.intervalsAthleteId ?? undefined,
+      apiKey: account.apiKey,
+    });
+    if (!activation.active) {
+      plan.skipped.push({ athleteId: account.athleteId, reason: activation.reason });
+      continue;
+    }
+
+    plan.accounts.push({
+      athleteId: account.athleteId,
+      intervalsAthleteId: activation.athleteId,
+      apiKey: activation.apiKey,
+    });
+  }
+
+  return plan;
+}
+
+/**
+ * Le délai le plus long qu'un compte ait demandé à ce tour, `null` si aucun n'a
+ * rien demandé.
+ *
+ * Les comptes partagent le même hôte : un `Retry-After` obtenu sur l'un est une
+ * demande de patience adressée au service entier, pas au seul compte qui l'a
+ * reçue. On retient donc le maximum plutôt que de repartir aussitôt sur le
+ * voisin.
+ */
+export function mergeRetryAfterS(values: readonly (number | null)[]): number | null {
+  let longest: number | null = null;
+  for (const value of values) {
+    if (value === null) continue;
+    if (longest === null || value > longest) longest = value;
+  }
+  return longest;
 }

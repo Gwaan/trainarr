@@ -20,6 +20,7 @@ import {
   AthleteAlreadyExistsError,
   AthleteNotFoundError,
   createAthlete,
+  getCurrentAthleteId,
   hasAthlete,
   InvalidAthleteProfileError,
   isCivilDate,
@@ -203,10 +204,13 @@ export async function saveProfileAction(
   const input: AthleteProfileInput = parsed.data;
 
   let created: boolean;
+  /** L'athlète qui vient de naître : c'est *son* dossier de dépôt qu'on reprend. */
+  let athleteId: number | null = null;
   try {
     created = !(await hasAthlete());
     if (created) {
       await createAthlete(input);
+      athleteId = await getCurrentAthleteId();
     } else {
       await updateAthleteProfile(input);
     }
@@ -216,7 +220,7 @@ export async function saveProfileAction(
 
   // Après la création seulement : rien n'attend une mise à jour de profil. Cette
   // fonction ne lève jamais — l'onboarding est déjà acquis.
-  const recovery = created ? await recoverPendingImports() : null;
+  const recovery = athleteId === null ? null : await recoverPendingImports(athleteId);
 
   revalidatePath('/', 'layout');
   return { status: 'success', message: successMessage(created, recovery) };

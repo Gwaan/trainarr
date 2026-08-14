@@ -89,13 +89,13 @@ import 'server-only';
  * écrit en base reste écrit même si intervals.icu est injoignable.
  */
 
-import { env } from '@/config/env';
-import { getAthleteProfile, todayCivilDate } from '@/data/athlete';
+import { getAthleteProfile, getIntervalsCredentials, todayCivilDate } from '@/data/athlete';
 import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/data/plans';
 // Formateurs de `@/lib/ai/format` : purs, sans `server-only`, et déjà porteurs
 // des conventions françaises du projet (allure `m:ss/km`). Les redéclarer ici
 // ferait diverger la description d'une séance de ce que le coach en écrit.
 import { formatPace } from '@/lib/ai/format';
+import { SecretDecryptionError, SecretKeyUnavailableError } from '@/lib/crypto/secret-box';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import { canPrescribeHeartRate } from '@/lib/metrics/hr-targets';
 import { stepsToIntervalsSyntax, type HrReference } from '@/lib/plan-steps/intervals-syntax';
@@ -404,6 +404,34 @@ async function readIntervalsMaxHr(credentials: {
 }
 
 /**
+ * Les identifiants enregistrés, ou le constat que la clé ne se déchiffre plus.
+ *
+ * `getIntervalsCredentials` **lève** quand la clé est illisible, plutôt que de
+ * la faire passer pour absente. C'est la bonne conduite pour le DAL et la
+ * mauvaise pour ici : une clé perdue n'est pas une panne de synchronisation,
+ * c'est une configuration à refaire — donc un `unconfigured` avec son motif, que
+ * la resynchronisation manuelle réaffiche à l'athlète.
+ */
+async function readCredentials(): Promise<
+  | { status: 'ready'; intervalsAthleteId: string | null; apiKey: string }
+  | { status: 'unreadable'; reason: string }
+  | null
+> {
+  try {
+    const credentials = await getIntervalsCredentials();
+    return credentials === null ? null : { status: 'ready', ...credentials };
+  } catch (error) {
+    if (error instanceof SecretDecryptionError || error instanceof SecretKeyUnavailableError) {
+      return {
+        status: 'unreadable',
+        reason: 'clé API intervals.icu illisible — la ressaisir dans le profil',
+      };
+    }
+    throw error;
+  }
+}
+
+/**
  * Aligne le calendrier intervals.icu sur le plan actif de l'athlète.
  *
  * Sans plan actif — archivage — le plan voulu est vide : toutes les séances
@@ -413,11 +441,21 @@ async function readIntervalsMaxHr(credentials: {
  * pas. Les appelants applicatifs passent par {@link syncPlanToIntervalsSafely}.
  */
 export async function syncPlanToIntervals(): Promise<PushReport> {
-  // Même configuration que le poller : la clé API suffit, l'identifiant
-  // d'athlète est facultatif (`0` = le porteur de la clé).
+  // Mêmes identifiants que le poller, et à la même source : ceux de l'athlète,
+  // en base. La clé API suffit, l'identifiant d'athlète est facultatif
+  // (`0` = le porteur de la clé).
+  //
+  // Cette lecture-ci passe par la session, comme le plan et le profil lus
+  // ci-dessous : la synchronisation pousse le calendrier de l'athlète connecté.
+  const stored = await readCredentials();
+  if (stored === null) {
+    return { status: 'unconfigured', reason: 'aucune clé API intervals.icu enregistrée' };
+  }
+  if (stored.status === 'unreadable') return { status: 'unconfigured', reason: stored.reason };
+
   const activation = planPollerActivation({
-    athleteId: env.INTERVALS_ATHLETE_ID,
-    apiKey: env.INTERVALS_API_KEY,
+    athleteId: stored.intervalsAthleteId ?? undefined,
+    apiKey: stored.apiKey,
   });
   if (!activation.active) return { status: 'unconfigured', reason: activation.reason };
 
