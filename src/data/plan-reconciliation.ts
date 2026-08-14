@@ -4,7 +4,6 @@ import { and, eq, gte, isNotNull, isNull, lte, or } from 'drizzle-orm';
 
 import { civilDateToMs, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 
-import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans } from './db/schema';
 import { isRunning } from './training-metrics';
@@ -254,12 +253,16 @@ export async function linkActivityToPlannedSession(activityId: number): Promise<
  * Les séances à venir sont volontairement hors périmètre : rien ne peut encore
  * les avoir réalisées.
  *
+ * **L'athlète est un paramètre**, jamais une déduction. Cette fonction a deux
+ * mondes d'appel : une Server Action (adoption, ajustement — l'appelant lit
+ * l'athlète de la session) et le suivi de plan déclenché par une ingestion de
+ * fond, qui n'a pas de requête et donc pas de session. Lire « l'athlète
+ * courant » ici rendait `null` dans le second cas, et le rapprochement ne
+ * posait aucun lien — sans le moindre échec visible.
+ *
  * @returns le nombre de liens posés.
  */
-export async function reconcilePlanSessions(planId: number): Promise<number> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return 0;
-
+export async function reconcilePlanSessions(planId: number, athleteId: number): Promise<number> {
   const today = toCivilDate(new Date());
 
   // Le filtre par athlète, en plus du plan, porte l'anti-IDOR : un identifiant

@@ -814,23 +814,17 @@ describe('toPlanSessionDto', () => {
 });
 
 describe('getActivePlanWithSessions', () => {
-  it('retourne null tant que l’onboarding n’a pas eu lieu', async () => {
-    dbState.rows = { athlete: [] };
-
-    await expect(getActivePlanWithSessions()).resolves.toBeNull();
-  });
-
   it('retourne null quand aucun plan actif n’existe', async () => {
     dbState.rows.plans = [];
 
-    await expect(getActivePlanWithSessions()).resolves.toBeNull();
+    await expect(getActivePlanWithSessions(1)).resolves.toBeNull();
   });
 
   it('retourne le plan et ses séances en DTOs', async () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.rows.planned_sessions = [SESSION_ROW];
 
-    const result = await getActivePlanWithSessions();
+    const result = await getActivePlanWithSessions(1);
 
     expect(Object.keys(result?.plan ?? {}).sort()).toEqual(PLAN_DTO_KEYS);
     expect(result?.sessions).toHaveLength(1);
@@ -840,7 +834,7 @@ describe('getActivePlanWithSessions', () => {
   it('ne lit que le plan actif de l’athlète', async () => {
     dbState.rows.plans = [PLAN_ROW];
 
-    await getActivePlanWithSessions();
+    await getActivePlanWithSessions(1);
 
     const where = renderWhere(dbState.selects.find((query) => query.table === 'plans')?.where);
     // `'active'` est dans le `WHERE`, donc une proposition en attente ne sort
@@ -851,23 +845,17 @@ describe('getActivePlanWithSessions', () => {
 });
 
 describe('getDraftPlanWithSessions', () => {
-  it('retourne null tant que l’onboarding n’a pas eu lieu', async () => {
-    dbState.rows = { athlete: [] };
-
-    await expect(getDraftPlanWithSessions()).resolves.toBeNull();
-  });
-
   it('retourne null quand aucune proposition n’attend', async () => {
     dbState.rows.plans = [];
 
-    await expect(getDraftPlanWithSessions()).resolves.toBeNull();
+    await expect(getDraftPlanWithSessions(1)).resolves.toBeNull();
   });
 
   it('ne lit que le brouillon de l’athlète, en DTOs', async () => {
     dbState.rows.plans = [{ ...PLAN_ROW, status: 'draft' }];
     dbState.rows.planned_sessions = [SESSION_ROW];
 
-    const result = await getDraftPlanWithSessions();
+    const result = await getDraftPlanWithSessions(1);
 
     const where = renderWhere(dbState.selects.find((query) => query.table === 'plans')?.where);
     expect(where.params).toEqual([1, 'draft']);
@@ -879,7 +867,7 @@ describe('getDraftPlanWithSessions', () => {
   it('sert le brouillon le plus récent, jamais celui que le hasard désigne', async () => {
     dbState.rows.plans = [{ ...PLAN_ROW, status: 'draft' }];
 
-    await getDraftPlanWithSessions();
+    await getDraftPlanWithSessions(1);
 
     // Ceinture derrière l'index partiel `plans_draft_per_athlete` : un `LIMIT 1`
     // sans ordre rendrait n'importe laquelle des lignes si la contrainte venait
@@ -1269,7 +1257,7 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [{ id: 3 }];
 
-    await applyPlanUpdate(3, UPDATE);
+    await applyPlanUpdate(3, UPDATE, 1);
 
     expect(dbState.transactions).toBe(1);
     expect(dbState.deletes).toHaveLength(1);
@@ -1290,7 +1278,7 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [{ id: 3 }];
 
-    await applyPlanUpdate(3, UPDATE);
+    await applyPlanUpdate(3, UPDATE, 1);
 
     const where = renderWhere(dbState.deletes[0]?.where);
     expect(where.params).toEqual([3, '2026-08-15']);
@@ -1302,7 +1290,7 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [{ id: 3 }];
 
-    await applyPlanUpdate(3, UPDATE);
+    await applyPlanUpdate(3, UPDATE, 1);
 
     const where = renderWhere(dbState.selects.find((query) => query.table === 'plans')?.where);
     expect(where.params).toEqual([3, 1, 'active']);
@@ -1312,7 +1300,7 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [{ id: 3 }];
 
-    await applyPlanUpdate(3, { ...UPDATE, settings: { weeklyTimeMinutes: null, summary: null } });
+    await applyPlanUpdate(3, { ...UPDATE, settings: { weeklyTimeMinutes: null, summary: null } }, 1);
 
     expect(dbState.updates[0]?.values).toMatchObject({ weeklyTimeMinutes: null, summary: null });
   });
@@ -1321,7 +1309,7 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [{ id: 3 }];
 
-    await applyPlanUpdate(3, { ...UPDATE, sessions: [] });
+    await applyPlanUpdate(3, { ...UPDATE, sessions: [] }, 1);
 
     expect(dbState.deletes).toHaveLength(1);
     expect(dbState.inserts).toEqual([]);
@@ -1330,7 +1318,7 @@ describe('applyPlanUpdate', () => {
   it('refuse un plan qui n’est pas celui, actif, de l’athlète', async () => {
     dbState.rows.plans = [];
 
-    await expect(applyPlanUpdate(3, UPDATE)).rejects.toBeInstanceOf(PlanNotFoundError);
+    await expect(applyPlanUpdate(3, UPDATE, 1)).rejects.toBeInstanceOf(PlanNotFoundError);
     expect(dbState.deletes).toEqual([]);
     expect(dbState.inserts).toEqual([]);
     expect(dbState.updates).toEqual([]);
@@ -1340,14 +1328,14 @@ describe('applyPlanUpdate', () => {
     dbState.rows.plans = [PLAN_ROW];
     dbState.returning.plans = [];
 
-    await expect(applyPlanUpdate(3, UPDATE)).rejects.toBeInstanceOf(PlanNotFoundError);
+    await expect(applyPlanUpdate(3, UPDATE, 1)).rejects.toBeInstanceOf(PlanNotFoundError);
   });
 
   it('valide les bornes des réglages avant d’ouvrir la transaction', async () => {
     dbState.rows.plans = [PLAN_ROW];
 
     await expect(
-      applyPlanUpdate(3, { ...UPDATE, settings: { sessionsPerWeek: 0 } }),
+      applyPlanUpdate(3, { ...UPDATE, settings: { sessionsPerWeek: 0 } }, 1),
     ).rejects.toBeInstanceOf(InvalidPlanError);
     // Aucune séance supprimée : un patch aberrant ne doit rien entamer.
     expect(dbState.transactions).toBe(0);
@@ -1356,7 +1344,7 @@ describe('applyPlanUpdate', () => {
 
   it('refuse une date de reprise malformée avant toute lecture', async () => {
     await expect(
-      applyPlanUpdate(3, { ...UPDATE, fromDate: '15/08/2026' }),
+      applyPlanUpdate(3, { ...UPDATE, fromDate: '15/08/2026' }, 1),
     ).rejects.toBeInstanceOf(InvalidPlanError);
     expect(dbState.transactions).toBe(0);
   });
@@ -1366,16 +1354,18 @@ describe('applyPlanUpdate', () => {
     dbState.returning.plans = [{ id: 3 }];
 
     await expect(
-      applyPlanUpdate(3, {
-        ...UPDATE,
-        sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-08-14' }],
-      }),
+      applyPlanUpdate(
+        3,
+        { ...UPDATE, sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-08-14' }] },
+        1,
+      ),
     ).rejects.toBeInstanceOf(InvalidPlanError);
     await expect(
-      applyPlanUpdate(3, {
-        ...UPDATE,
-        sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-10-05' }],
-      }),
+      applyPlanUpdate(
+        3,
+        { ...UPDATE, sessions: [{ ...SESSION_INPUT, scheduledOn: '2026-10-05' }] },
+        1,
+      ),
     ).rejects.toBeInstanceOf(InvalidPlanError);
     expect(dbState.deletes).toEqual([]);
   });

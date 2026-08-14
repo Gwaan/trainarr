@@ -393,9 +393,9 @@ describe('toComparableActivityDto', () => {
 
 describe('getTrainingSnapshot', () => {
   it("rend un instantané entièrement vide tant qu'aucun athlète n'existe", async () => {
-    withoutSession();
-
-    const snapshot = await getTrainingSnapshot();
+    // Le snapshot ne résout plus l'athlète : il le reçoit, et `null` est l'état
+    // « pas encore d'athlète » que la couche appelante lui transmet.
+    const snapshot = await getTrainingSnapshot(null);
 
     expect(snapshot).toEqual({
       today: '2026-08-11',
@@ -417,7 +417,7 @@ describe('getTrainingSnapshot', () => {
       ],
     };
 
-    const snapshot = await getTrainingSnapshot();
+    const snapshot = await getTrainingSnapshot(1);
 
     expect(snapshot.today).toBe('2026-08-11');
     expect(snapshot.profile.ageYears).toBe(36);
@@ -434,7 +434,7 @@ describe('getTrainingSnapshot', () => {
       activities: [run({ startedAt: new Date('2026-08-10T06:00:00.000Z') })],
     };
 
-    const snapshot = await getTrainingSnapshot();
+    const snapshot = await getTrainingSnapshot(1);
 
     expect(snapshot.fitness).toBeNull();
     expect(snapshot.profile.sex).toBeUndefined();
@@ -600,8 +600,30 @@ describe('buildUpcomingSessions', () => {
 });
 
 describe('getPlanContext', () => {
+  // Lecture de **requête** (le chat) : c'est elle qui résout l'athlète de la
+  // session, et le passe à la lecture du plan.
+  beforeEach(() => {
+    dbState.rows.athlete = [ATHLETE_ROW];
+  });
+
   it("dit qu'il n'y a pas de plan plutôt que de rendre un contexte vide", async () => {
     expect(await getPlanContext()).toEqual({ hasPlan: false });
+  });
+
+  it("ne lit aucun plan tant qu'aucun athlète n'est enregistré", async () => {
+    withoutSession();
+    plansDal.getActivePlanWithSessions.mockClear();
+
+    expect(await getPlanContext()).toEqual({ hasPlan: false });
+    expect(plansDal.getActivePlanWithSessions).not.toHaveBeenCalled();
+  });
+
+  it("lit le plan sous l'athlète de la session", async () => {
+    plansDal.getActivePlanWithSessions.mockClear();
+
+    await getPlanContext();
+
+    expect(plansDal.getActivePlanWithSessions).toHaveBeenCalledWith(1);
   });
 
   it("assemble l'objectif, l'échéance et les séances de la fenêtre", async () => {

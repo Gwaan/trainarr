@@ -31,9 +31,16 @@ const { mocks } = vi.hoisted(() => ({
     resyncPlanToIntervalsOnDemand: vi.fn(),
     /** `after` exige un contexte de requête Next : le doublon exécute tout de suite. */
     scheduleAfter: vi.fn(),
+    /** Les actions servent une requête : c'est là que l'athlète se résout. */
+    getCurrentAthleteId: vi.fn(),
   },
 }));
 
+vi.mock('@/data/athlete', async (importOriginal) => ({
+  // `todayCivilDate` et les bornes de validation restent le vrai code.
+  ...(await importOriginal<typeof import('@/data/athlete')>()),
+  getCurrentAthleteId: mocks.getCurrentAthleteId,
+}));
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock('next/server', () => ({ after: mocks.scheduleAfter }));
 vi.mock('@/lib/intervals/push-plan', () => ({
@@ -94,6 +101,7 @@ beforeEach(() => {
   // `clearAllMocks` efface les appels, pas les implémentations : les doublons
   // qui lèvent (revalidation, `after`) doivent être remis à neuf explicitement.
   mocks.revalidatePath.mockImplementation(() => {});
+  mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.generatePlan.mockResolvedValue(undefined);
   mocks.acceptDraftPlan.mockResolvedValue({ id: 9 });
   mocks.discardDraftPlan.mockResolvedValue(undefined);
@@ -446,10 +454,10 @@ describe('acceptPlanAction', () => {
     // Le rapprochement conditionne ce que la page re-rendue affiche : une
     // proposition adoptée quelques jours après sa génération porte des séances
     // déjà courues.
-    expect(mocks.reconcilePlanSessions).toHaveBeenCalledWith(9);
+    expect(mocks.reconcilePlanSessions).toHaveBeenCalledWith(9, 7);
     // La synchronisation, elle, part hors du fil de la requête.
     expect(mocks.scheduleAfter).toHaveBeenCalledTimes(1);
-    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('plan 9');
+    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('plan 9', 7);
     // La séance du jour du tableau de bord vient de changer.
     expect(mocks.revalidatePath).toHaveBeenCalledWith('/plan');
     expect(mocks.revalidatePath).toHaveBeenCalledWith('/');

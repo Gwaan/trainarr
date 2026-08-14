@@ -5,7 +5,7 @@ import { connection } from "next/server";
 import { AiSuspendedPanel, type SuspendedAiFeature } from "@/components/ai-suspended-panel";
 import { PageHeader } from "@/components/page-header";
 import { Panel } from "@/components/panel";
-import { getAthleteProfile } from "@/data/athlete";
+import { getAthleteProfile, getCurrentAthleteId } from "@/data/athlete";
 import { getCalendarRange } from "@/data/calendar";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
@@ -85,9 +85,14 @@ async function PlanContent({ searchParams }: PageProps) {
   const month = parseMonthParam(params[MONTH_PARAM], currentMonth);
   const range = monthGridRange(month);
 
+  // Les plans se lisent sous un athlète **donné** : la page est une requête,
+  // elle le lit donc de la session et le passe. Pas d'athlète (onboarding non
+  // fait) : ni plan actif, ni proposition — comme avant.
+  const athleteId = await getCurrentAthleteId();
+
   const [active, draft, availability, profile, calendar] = await Promise.all([
-    getActivePlanWithSessions(),
-    getDraftPlanWithSessions(),
+    athleteId === null ? null : getActivePlanWithSessions(athleteId),
+    athleteId === null ? null : getDraftPlanWithSessions(athleteId),
     getAiAvailability(),
     getAthleteProfile(),
     getCalendarRange(range.from, range.to),

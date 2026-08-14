@@ -41,6 +41,8 @@ const { dal } = vi.hoisted(() => ({
     getActivePlanWithSessions: vi.fn(),
     applyPlanUpdate: vi.fn(),
     reconcilePlanSessions: vi.fn(),
+    /** Génération et ajustement servent une requête : l'athlète vient de la session. */
+    getCurrentAthleteId: vi.fn(),
   },
 }));
 
@@ -87,6 +89,12 @@ vi.mock('./client', () => ({ chatCompletionJson }));
 vi.mock('next/server', () => ({ after: scheduleAfter }));
 vi.mock('@/lib/intervals/push-plan', () => ({ syncPlanToIntervalsSafely }));
 vi.mock('./availability', () => ({ requireAi }));
+vi.mock('@/data/athlete', async () => {
+  // `todayCivilDate` et `isCivilDate` sont pures et restent le vrai code : la
+  // fenêtre du plan en dépend.
+  const actual = await vi.importActual<typeof import('@/data/athlete')>('@/data/athlete');
+  return { ...actual, getCurrentAthleteId: dal.getCurrentAthleteId };
+});
 vi.mock('@/data/coach-context', () => ({ getTrainingSnapshot: dal.getTrainingSnapshot }));
 vi.mock('@/data/plan-reconciliation', () => ({
   reconcilePlanSessions: dal.reconcilePlanSessions,
@@ -355,6 +363,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
   requireAi.mockResolvedValue(undefined);
+  dal.getCurrentAthleteId.mockResolvedValue(7);
   dal.getTrainingSnapshot.mockResolvedValue(SNAPSHOT);
   dal.createDraftPlanWithSessions.mockResolvedValue(DRAFT);
   dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
@@ -1428,10 +1437,24 @@ describe('updatePlanFromInstruction', () => {
 
     await updatePlanFromInstruction('rien de spécial');
 
-    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(ACTIVE_PLAN.id);
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE_PLAN.id}`);
+    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(ACTIVE_PLAN.id, 7);
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE_PLAN.id}`, 7);
     // Différée : un ajustement rend la main dès que la base est écrite.
     expect(scheduleAfter).toHaveBeenCalledTimes(1);
+  });
+
+  it('attend la synchronisation quand il n’y a pas de requête à ne pas retarder', async () => {
+    coachAdjusts();
+    // `after()` hors contexte de requête **lève** (E468) : sans rattrapage,
+    // l'échec remonterait après une écriture déjà committée.
+    scheduleAfter.mockImplementation(() => {
+      throw new Error('`after` was called outside a request scope.');
+    });
+
+    await expect(updatePlanFromInstruction('rien de spécial')).resolves.toBe(ACTIVE_PLAN);
+
+    // Repli : la synchronisation est menée ici même, et le basculement se dit.
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(`plan ${ACTIVE_PLAN.id}`, 7);
   });
 
   it('ajuste quand même le plan si le rapprochement échoue', async () => {

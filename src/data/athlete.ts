@@ -333,23 +333,42 @@ async function claimOrphanAthlete(userId: string): Promise<number | null> {
 }
 
 /**
- * La ligne complète de l'athlète du compte connecté, `null` s'il n'y en a pas.
+ * La ligne complète d'un athlète **désigné**, `null` s'il n'existe pas.
+ *
+ * C'est la lecture primitive : {@link getCurrentAthlete} n'est qu'elle,
+ * précédée de la résolution de session. Les chemins qui tournent **hors
+ * requête** (ingestion d'un fichier FIT, et tout ce qu'elle déclenche) reçoivent
+ * leur athlète en paramètre et passent donc directement par ici — il n'y a pas
+ * de session à interroger, et il ne peut pas y en avoir.
  *
  * **Usage serveur uniquement** : elle porte l'identifiant interne et les
  * identifiants intervals.icu, elle ne franchit pas la frontière client — c'est
- * {@link getAthleteProfile} qui rend le DTO.
+ * {@link getAthleteProfileById} qui rend le DTO.
+ */
+export async function getAthleteById(athleteId: number): Promise<Athlete | null> {
+  const rows = await db.select().from(athlete).where(eq(athlete.id, athleteId)).limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * La ligne complète de l'athlète du compte connecté, `null` s'il n'y en a pas.
  *
  * Elle existe pour les lectures qui ont besoin du profil *et* de son
- * identifiant dans la foulée (tableau de bord, progression, contexte du coach) :
- * elles lisaient la table en direct, `ORDER BY id LIMIT 1` — soit exactement le
- * « premier athlète venu » que le cloisonnement par compte interdit.
+ * identifiant dans la foulée (tableau de bord, progression) : elles lisaient la
+ * table en direct, `ORDER BY id LIMIT 1` — soit exactement le « premier athlète
+ * venu » que le cloisonnement par compte interdit.
  */
 export async function getCurrentAthlete(): Promise<Athlete | null> {
   const id = await getCurrentAthleteId();
-  if (id === null) return null;
+  return id === null ? null : getAthleteById(id);
+}
 
-  const rows = await db.select().from(athlete).where(eq(athlete.id, id)).limit(1);
-  return rows[0] ?? null;
+/** Profil d'un athlète **désigné**, `null` s'il n'existe pas. */
+export async function getAthleteProfileById(
+  athleteId: number,
+): Promise<AthleteProfileDto | null> {
+  const row = await getAthleteById(athleteId);
+  return row ? toAthleteProfileDto(row) : null;
 }
 
 /**
@@ -357,8 +376,8 @@ export async function getCurrentAthlete(): Promise<Athlete | null> {
  * eu lieu — ou qu'il n'y a personne de connecté.
  */
 export async function getAthleteProfile(): Promise<AthleteProfileDto | null> {
-  const row = await getCurrentAthlete();
-  return row ? toAthleteProfileDto(row) : null;
+  const id = await getCurrentAthleteId();
+  return id === null ? null : getAthleteProfileById(id);
 }
 
 /** `true` dès que le compte connecté a un athlète — ce qui décide entre onboarding et édition. */
@@ -467,33 +486,39 @@ function apiKeyState(encrypted: string | null): IntervalsApiKeyState {
   }
 }
 
+/** Ce qu'un appel sortant a besoin de savoir pour parler à intervals.icu. */
+export type IntervalsCredentials = {
+  intervalsAthleteId: string | null;
+  apiKey: string;
+};
+
 /**
- * Les identifiants intervals.icu **en clair**, pour un appel sortant depuis le
- * serveur. `null` si le compte n'a pas d'athlète ou qu'aucune clé n'est
- * enregistrée.
+ * Les identifiants intervals.icu **en clair** d'un athlète **désigné**, pour un
+ * appel sortant depuis le serveur. `null` si aucune clé n'est enregistrée.
  *
  * Le seul point du code où la clé existe en clair — elle ne doit jamais être
  * retournée par une Server Action, ni entrer dans une prop de composant.
+ *
+ * Comme {@link getAthleteById}, c'est la lecture primitive : la publication du
+ * calendrier tourne aussi bien dans une requête (l'athlète vient de la session)
+ * que derrière une ingestion de fond (l'athlète vient du chemin du fichier), et
+ * les deux passent par ici avec leur athlète en paramètre.
  *
  * @throws {SecretDecryptionError} si la clé enregistrée ne se déchiffre plus
  * (« clé illisible, à ressaisir ») — jamais un `null` silencieux, qui ferait
  * passer une clé perdue pour une clé absente.
  * @throws {SecretKeyUnavailableError} si l'installation n'a pas de secret.
  */
-export async function getIntervalsCredentials(): Promise<{
-  intervalsAthleteId: string | null;
-  apiKey: string;
-} | null> {
-  const id = await getCurrentAthleteId();
-  if (id === null) return null;
-
+export async function getIntervalsCredentialsById(
+  athleteId: number,
+): Promise<IntervalsCredentials | null> {
   const rows = await db
     .select({
       intervalsAthleteId: athlete.intervalsAthleteId,
       encrypted: athlete.intervalsApiKeyEncrypted,
     })
     .from(athlete)
-    .where(eq(athlete.id, id))
+    .where(eq(athlete.id, athleteId))
     .limit(1);
 
   const row = rows[0];
@@ -504,6 +529,7 @@ export async function getIntervalsCredentials(): Promise<{
     apiKey: decryptStoredSecret(row.encrypted),
   };
 }
+
 
 /**
  * Tous les comptes qui ont enregistré une clé API intervals.icu, **sans passer
@@ -518,7 +544,7 @@ export async function getIntervalsCredentials(): Promise<{
  *
  * **À n'appeler que depuis le service de fond.** Aucun chemin servant une
  * requête n'a de raison de lire les identifiants d'un autre compte que celui de
- * sa session ({@link getIntervalsCredentials}), et rien de ce que rend cette
+ * sa session ({@link getIntervalsCredentialsById}), et rien de ce que rend cette
  * fonction — la clé en clair, au premier chef — ne doit franchir la frontière
  * client.
  *

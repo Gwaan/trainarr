@@ -21,9 +21,17 @@ const { mocks } = vi.hoisted(() => ({
     syncPlanToIntervalsSafely: vi.fn(),
     /** `after` exige un contexte de requête Next : le doublon exécute tout de suite. */
     scheduleAfter: vi.fn(),
+    /** L'action sert une requête : c'est elle qui résout l'athlète de la session. */
+    getCurrentAthleteId: vi.fn(),
   },
 }));
 
+vi.mock('@/data/athlete', async (importOriginal) => ({
+  // `todayCivilDate` est pure et reste le vrai code : c'est elle qui décide si
+  // la destination est passée.
+  ...(await importOriginal<typeof import('@/data/athlete')>()),
+  getCurrentAthleteId: mocks.getCurrentAthleteId,
+}));
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock('next/server', () => ({ after: mocks.scheduleAfter }));
 vi.mock('@/lib/intervals/push-plan', () => ({
@@ -113,6 +121,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
   mocks.revalidatePath.mockImplementation(() => {});
+  mocks.getCurrentAthleteId.mockResolvedValue(7);
   mocks.getActivePlanWithSessions.mockResolvedValue(planWithSessions());
   mocks.rescheduleSession.mockResolvedValue(undefined);
   mocks.scheduleAfter.mockImplementation((run: () => void) => {
@@ -170,7 +179,7 @@ describe('moveSessionAction — verdict des règles', () => {
 
     expect(state).toEqual({ status: 'success', message: 'Séance déplacée.' });
     expect(mocks.rescheduleSession).toHaveBeenCalledWith(3, 7, '2026-08-19');
-    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('déplacement de séance');
+    expect(mocks.syncPlanToIntervalsSafely).toHaveBeenCalledWith('déplacement de séance', 7);
     expect(mocks.revalidatePath.mock.calls.map(([path]) => path)).toEqual(['/plan', '/']);
   });
 

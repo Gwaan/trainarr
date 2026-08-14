@@ -66,6 +66,12 @@ vi.mock('./plan-service', async () => {
   return { ...actual, rewriteRemainingPlan };
 });
 
+/**
+ * L'athlète du fichier importé. Il est **donné** au service comme à l'ingestion :
+ * le watcher FIT tourne hors requête, il n'y a pas de session à interroger.
+ */
+const ATHLETE_ID = 7;
+
 const SNAPSHOT: TrainingSnapshotDto = {
   today: '2026-09-16',
   profile: { ageYears: 36, sex: 'female', maxHrBpm: 184, restingHrBpm: 48, weightKg: 62 },
@@ -197,7 +203,7 @@ describe('maybeApplyFitnessTest — déclenchement', () => {
   it('ne fait rien quand l’activité ne réalise pas un test', async () => {
     dal.getFitnessTestCandidate.mockResolvedValue(null);
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest).not.toHaveBeenCalled();
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
@@ -208,7 +214,7 @@ describe('maybeApplyFitnessTest — déclenchement', () => {
   it('ne lève jamais, et journalise ce qui a échoué', async () => {
     dal.getFitnessTestCandidate.mockRejectedValue(new Error('base indisponible'));
 
-    await expect(maybeApplyFitnessTest(42)).resolves.toBeUndefined();
+    await expect(maybeApplyFitnessTest(42, ATHLETE_ID)).resolves.toBeUndefined();
 
     expect(errored.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
       'base indisponible',
@@ -218,8 +224,8 @@ describe('maybeApplyFitnessTest — déclenchement', () => {
   it('libère son verrou même après un échec', async () => {
     dal.getFitnessTestCandidate.mockRejectedValueOnce(new Error('base indisponible'));
 
-    await maybeApplyFitnessTest(42);
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
   });
@@ -229,7 +235,7 @@ describe('maybeApplyFitnessTest — déclenchement', () => {
       candidate({ referenceDistanceM: 5_000, referenceTimeS: 60 }),
     );
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest).not.toHaveBeenCalled();
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
@@ -250,7 +256,7 @@ describe('maybeApplyFitnessTest — un test ne s’évalue qu’une fois', () =>
       candidate({ referenceTimeS: 1_540, referenceUpdatedOn: '2026-09-16' }),
     );
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest).not.toHaveBeenCalled();
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
@@ -264,7 +270,7 @@ describe('maybeApplyFitnessTest — un test ne s’évalue qu’une fois', () =>
       candidate({ testedOn: '2026-08-19', referenceUpdatedOn: '2026-09-16' }),
     );
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest).not.toHaveBeenCalled();
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
@@ -275,7 +281,7 @@ describe('maybeApplyFitnessTest — un test ne s’évalue qu’une fois', () =>
       candidate({ testedOn: '2026-10-21', referenceUpdatedOn: '2026-09-16' }),
     );
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
   });
@@ -285,19 +291,22 @@ describe('maybeApplyFitnessTest — chaque verdict laisse une trace', () => {
   it('écrit une note et ne touche à rien quand l’effort n’était pas maximal', async () => {
     dal.getFitnessTestCandidate.mockResolvedValue(candidate({ activityMaxHrBpm: 160 }));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     const record = dal.recordFitnessTest.mock.calls[0][1];
     expect(record.note).toContain('chrono non retenu');
     // Le chrono de référence ne bouge pas : `reference` reste absent.
     expect(record.reference).toBeUndefined();
+    // Et la note s'écrit sous l'athlète reçu : sans lui, l'`UPDATE` ne touchait
+    // aucune ligne et le verdict se perdait.
+    expect(dal.recordFitnessTest.mock.calls[0][2]).toBe(ATHLETE_ID);
   });
 
   it('écrit une note quand le test n’est pas meilleur, sans rien dégrader', async () => {
     dal.getFitnessTestCandidate.mockResolvedValue(candidate({ bestFiveKTimeS: 29 * 60 }));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.recordFitnessTest.mock.calls[0][1].reference).toBeUndefined();
@@ -307,7 +316,7 @@ describe('maybeApplyFitnessTest — chaque verdict laisse une trace', () => {
   it('écrit une note quand la cadence de Daniels n’est pas respectée', async () => {
     dal.getFitnessTestCandidate.mockResolvedValue(candidate({ testedOn: '2026-08-24' }));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest.mock.calls[0][1].note).toContain('quatre semaines');
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
@@ -316,7 +325,7 @@ describe('maybeApplyFitnessTest — chaque verdict laisse une trace', () => {
   it('écrit une note quand la séance ne porte aucun 5 km mesurable', async () => {
     dal.getFitnessTestCandidate.mockResolvedValue(candidate({ bestFiveKTimeS: null }));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest.mock.calls[0][1].note).toContain('chrono non retenu');
   });
@@ -324,7 +333,7 @@ describe('maybeApplyFitnessTest — chaque verdict laisse une trace', () => {
 
 describe('maybeApplyFitnessTest — un test qui progresse', () => {
   it('écrit le chrono, sa date et les séances dans la même transaction', async () => {
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
     const settings = writtenSettings();
@@ -342,28 +351,40 @@ describe('maybeApplyFitnessTest — un test qui progresse', () => {
     dal.todayCivilDate.mockReturnValue('2026-09-19');
     dal.getFitnessTestCandidate.mockResolvedValue(candidate({ testedOn: '2026-09-16' }));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(writtenSettings().referenceUpdatedOn).toBe('2026-09-16');
   });
 
   it('reprend la réécriture demain, jamais sur la séance du jour', async () => {
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate.mock.calls[0][1].fromDate).toBe('2026-09-17');
   });
 
   it('rapproche les séances et synchronise le calendrier ensuite', async () => {
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
-    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(3);
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalled();
+    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(3, ATHLETE_ID);
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith(expect.any(String), ATHLETE_ID);
+  });
+
+  it('passe l’athlète reçu à chaque appel du DAL, sans jamais le déduire', async () => {
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    // La chaîne complète d'un test qui améliore le chrono : chacun de ces
+    // appels lisait « l'athlète courant » et ne rendait rien dans le watcher.
+    expect(dal.getFitnessTestCandidate).toHaveBeenCalledWith(42, ATHLETE_ID);
+    expect(dal.getActivePlanWithSessions).toHaveBeenCalledWith(ATHLETE_ID);
+    expect(dal.getTrainingSnapshot).toHaveBeenCalledWith(ATHLETE_ID);
+    expect(dal.getPlanUpdatedAt).toHaveBeenCalledWith(3, ATHLETE_ID);
+    expect(dal.applyPlanUpdate).toHaveBeenCalledWith(3, expect.anything(), ATHLETE_ID);
   });
 
   it('n’écrit rien quand le plan n’est plus le plan actif', async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(null);
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.recordFitnessTest).not.toHaveBeenCalled();
@@ -378,7 +399,7 @@ describe('maybeApplyFitnessTest — un test qui progresse', () => {
       plan: { ...PLAN, weeks: 5 },
     });
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.recordFitnessTest.mock.calls[0][1].reference).toEqual({
@@ -391,7 +412,7 @@ describe('maybeApplyFitnessTest — un test qui progresse', () => {
   it('enregistre le chrono seul quand la reconstruction échoue', async () => {
     rewriteRemainingPlan.mockRejectedValue(new InvalidPlanError('weeks', 'fenêtre invalide'));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.recordFitnessTest.mock.calls[0][1].reference).toEqual({
@@ -406,7 +427,7 @@ describe('maybeApplyFitnessTest — un test qui progresse', () => {
   it('enregistre le chrono seul quand l’écriture du plan échoue', async () => {
     dal.applyPlanUpdate.mockRejectedValue(new Error('base indisponible'));
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest.mock.calls[0][1].reference).toEqual({
       timeS: 25 * 60 + 40,
@@ -431,7 +452,7 @@ describe('maybeApplyFitnessTest — contrôle de fraîcheur', () => {
       .mockResolvedValueOnce(PLAN_UPDATED_AT)
       .mockResolvedValueOnce('2026-09-16T18:04:00.000Z');
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(logs()).toContain('modifié pendant la reconstruction');
@@ -442,7 +463,7 @@ describe('maybeApplyFitnessTest — contrôle de fraîcheur', () => {
       .mockResolvedValueOnce(PLAN_UPDATED_AT)
       .mockResolvedValueOnce('2026-09-16T18:04:00.000Z');
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest).toHaveBeenCalledTimes(1);
     const record = dal.recordFitnessTest.mock.calls[0][1];
@@ -466,7 +487,7 @@ describe('maybeApplyFitnessTest — contrôle de fraîcheur', () => {
       return PLAN_UPDATED_AT;
     });
 
-    await maybeApplyFitnessTest(42);
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     // Une lecture avant, une après : placer la seconde avant la reconstruction
     // rouvrirait exactement la fenêtre que ce contrôle ferme.

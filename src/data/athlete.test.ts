@@ -14,7 +14,7 @@ import {
   createAthlete,
   getAthleteProfile,
   getCurrentAthleteId,
-  getIntervalsCredentials,
+  getIntervalsCredentialsById,
   getIntervalsSettings,
   hasAthlete,
   listIntervalsAccounts,
@@ -750,38 +750,37 @@ describe('identifiants intervals.icu', () => {
     });
   });
 
-  describe('getIntervalsCredentials', () => {
+  // Lecture **par identifiant** : aucune session n'est interrogée, donc aucune
+  // lecture préalable de l'athlète — la file ne sert que la ligne d'identifiants.
+  describe('getIntervalsCredentialsById', () => {
     it('rend la clé en clair pour un appel sortant depuis le serveur', async () => {
       const encrypted = await storedEnvelope();
-      withOwnedAthlete();
       queryState.selects.push([{ intervalsAthleteId: 'i123456', encrypted }]);
 
-      await expect(getIntervalsCredentials()).resolves.toEqual({
+      await expect(getIntervalsCredentialsById(1)).resolves.toEqual({
         intervalsAthleteId: 'i123456',
         apiKey: API_KEY,
       });
     });
 
     it('rend null quand aucune clé n’est enregistrée', async () => {
-      withOwnedAthlete();
       queryState.selects.push([{ intervalsAthleteId: 'i123456', encrypted: null }]);
 
-      await expect(getIntervalsCredentials()).resolves.toBeNull();
+      await expect(getIntervalsCredentialsById(1)).resolves.toBeNull();
     });
 
     it('lève une erreur typée quand la clé ne se déchiffre plus, au lieu de la taire', async () => {
       const encrypted = await storedEnvelope();
       resolveAuthConfigMock.mockReturnValue({ status: 'ready', secret: 'y'.repeat(44) });
-      withOwnedAthlete();
       queryState.selects.push([{ intervalsAthleteId: 'i123456', encrypted }]);
 
-      await expect(getIntervalsCredentials()).rejects.toBeInstanceOf(SecretDecryptionError);
+      await expect(getIntervalsCredentialsById(1)).rejects.toBeInstanceOf(SecretDecryptionError);
     });
 
-    it("rend null quand le compte n'a pas d'athlète", async () => {
-      withoutAthlete();
+    it("rend null quand l'athlète désigné n'existe pas", async () => {
+      queryState.selects.push([]);
 
-      await expect(getIntervalsCredentials()).resolves.toBeNull();
+      await expect(getIntervalsCredentialsById(99)).resolves.toBeNull();
     });
   });
 });

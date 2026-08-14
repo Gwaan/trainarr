@@ -227,11 +227,17 @@ function logs(): string {
   return logged.mock.calls.map((call) => String(call[0])).join('\n');
 }
 
+/**
+ * L'athlète du fichier importé. Il est **donné** au service comme à l'ingestion :
+ * le watcher FIT tourne hors requête, il n'y a pas de session à interroger.
+ */
+const ATHLETE_ID = 7;
+
 describe('maybeReviewActivePlan — déclenchement', () => {
   it('ne fait rien sous le seuil de séances réalisées', async () => {
     dal.getPlanReview.mockResolvedValue({ ...REVIEW, completedSessionCount: 3 });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(chatCompletionJson).not.toHaveBeenCalled();
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
@@ -247,7 +253,7 @@ describe('maybeReviewActivePlan — déclenchement', () => {
       reviewedSessionCount: 3,
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(chatCompletionJson).not.toHaveBeenCalled();
   });
@@ -255,7 +261,7 @@ describe('maybeReviewActivePlan — déclenchement', () => {
   it('révise dès le seuil atteint', async () => {
     chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(REVIEW.completedSessionCount).toBe(REVIEW_EVERY_SESSIONS);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
@@ -263,10 +269,22 @@ describe('maybeReviewActivePlan — déclenchement', () => {
     expect(logs()).toContain('[plan/review] déclenchée sur le plan 3');
   });
 
+  it('passe l’athlète reçu à chaque lecture du DAL, sans jamais le déduire', async () => {
+    chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
+
+    await maybeReviewActivePlan(ATHLETE_ID);
+
+    // Ces trois-là lisaient « l'athlète courant » : hors requête, elles
+    // rendaient `null` et la révision s'arrêtait avant même de commencer.
+    expect(dal.getActivePlanWithSessions).toHaveBeenCalledWith(ATHLETE_ID);
+    expect(dal.getPlanReview).toHaveBeenCalledWith(3, ATHLETE_ID);
+    expect(dal.getTrainingSnapshot).toHaveBeenCalledWith(ATHLETE_ID);
+  });
+
   it('ne fait rien, et ne lit rien, quand le coach n’est pas configuré', async () => {
     getAiAvailability.mockResolvedValue({ available: false, reason: 'unconfigured' });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.getActivePlanWithSessions).not.toHaveBeenCalled();
     expect(chatCompletionJson).not.toHaveBeenCalled();
@@ -276,7 +294,7 @@ describe('maybeReviewActivePlan — déclenchement', () => {
   it('ne fait rien sans plan actif', async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(null);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.getPlanReview).not.toHaveBeenCalled();
     expect(chatCompletionJson).not.toHaveBeenCalled();
@@ -292,12 +310,12 @@ describe('maybeReviewActivePlan — déclenchement', () => {
       }),
     );
 
-    const first = maybeReviewActivePlan();
+    const first = maybeReviewActivePlan(ATHLETE_ID);
     // La première révision doit avoir atteint le modèle : c'est là qu'elle
     // s'installe pour des minutes, et donc là que le verrou compte.
     await vi.waitFor(() => expect(chatCompletionJson).toHaveBeenCalledTimes(1));
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
     expect(logs()).toContain('déjà en cours');
@@ -307,7 +325,7 @@ describe('maybeReviewActivePlan — déclenchement', () => {
 
     // Le verrou est rendu : la révision suivante repart normalement.
     chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Toujours bon.' });
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
   });
 });
@@ -318,7 +336,7 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
   });
 
   it('met le prévu en regard du couru, et nomme les séances manquées', async () => {
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
     expect(user).toContain(
@@ -335,7 +353,7 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
       older: { count: 23, completed: 18, missed: 5 },
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
     expect(user).toContain(
@@ -348,7 +366,7 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
   });
 
   it('joint la suite du plan et l’état de forme', async () => {
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const user = chatCompletionJson.mock.calls[0][0].messages[1].content;
     // Les séances restantes, celle déjà réalisée exclue.
@@ -358,7 +376,7 @@ describe('maybeReviewActivePlan — bilan envoyé au modèle', () => {
   });
 
   it('impose « ne rien changer » comme réponse par défaut', async () => {
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const system = chatCompletionJson.mock.calls[0][0].messages[0].content;
     expect(system).toContain("C'est la réponse par défaut");
@@ -377,10 +395,10 @@ describe('maybeReviewActivePlan — décision', () => {
       reason: 'Les quatre séances sont dans les cibles, la charge reste soutenable.',
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(logs()).toContain(
       '[plan/review] plan 3 conservé — Les quatre séances sont dans les cibles, la charge reste soutenable.',
     );
@@ -392,7 +410,7 @@ describe('maybeReviewActivePlan — décision', () => {
       reason: 'Deux séances manquées et un TSB très négatif : la semaine suivante est allégée.',
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
     const [planId, update] = dal.applyPlanUpdate.mock.calls[0];
@@ -413,10 +431,10 @@ describe('maybeReviewActivePlan — décision', () => {
     });
 
     // Les deux effets de bord d'un plan que l'athlète suit.
-    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(3);
+    expect(dal.reconcilePlanSessions).toHaveBeenCalledWith(3, ATHLETE_ID);
     expect(syncPlanToIntervalsSafely).toHaveBeenCalled();
 
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(logs()).toContain('[plan/review] plan 3 ajusté — Deux séances manquées');
   });
 
@@ -426,12 +444,12 @@ describe('maybeReviewActivePlan — décision', () => {
     // Le déclencheur nominal est le watcher : `after` y lève. Une révision qui
     // s'en servirait perdrait le marqueur — et réécrirait le plan à chaque
     // fichier importé, en boucle.
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     expect(scheduleAfter).not.toHaveBeenCalled();
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
-    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith('révision du plan');
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
+    expect(syncPlanToIntervalsSafely).toHaveBeenCalledWith('révision du plan', ATHLETE_ID);
   });
 
   it('avance quand même le marqueur quand un effet de bord échoue', async () => {
@@ -439,10 +457,10 @@ describe('maybeReviewActivePlan — décision', () => {
     dal.reconcilePlanSessions.mockRejectedValue(new Error('base indisponible'));
     syncPlanToIntervalsSafely.mockRejectedValue(new Error('intervals.icu injoignable'));
 
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     // Le plan est écrit : la révision a eu lieu, elle ne doit pas être rejouée.
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(errored).toHaveBeenCalledWith(
       expect.stringContaining('rapprochement des séances du plan 3 impossible'),
       expect.anything(),
@@ -456,7 +474,7 @@ describe('maybeReviewActivePlan — décision', () => {
       settings: { sessionsPerWeek: 4 },
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const [, update] = dal.applyPlanUpdate.mock.calls[0];
     expect(update.settings.sessionsPerWeek).toBe(4);
@@ -469,7 +487,7 @@ describe('maybeReviewActivePlan — décision', () => {
     chatCompletionJson.mockRejectedValue(new Error('coach injoignable'));
 
     // Fire-and-forget : l'appelant ne doit jamais voir passer l'erreur.
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
@@ -483,7 +501,7 @@ describe('maybeReviewActivePlan — décision', () => {
     chatCompletionJson.mockResolvedValue(ADJUST);
     dal.applyPlanUpdate.mockRejectedValue(new Error('base indisponible'));
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
     expect(errored).toHaveBeenCalledWith(expect.stringContaining('base indisponible'));
@@ -506,7 +524,7 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
   it('tient le budget du plan dans les semaines qu’elle recalcule', async () => {
     chatCompletionJson.mockResolvedValue(ADJUST);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const byWeek = new Map<string, number>();
     for (const session of updatedSessions()) {
@@ -530,7 +548,7 @@ describe('maybeReviewActivePlan — budget temps hebdomadaire', () => {
       settings: { weeklyTimeMinutes: null, sessionsPerWeek: 2 },
     });
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const { settings } = dal.applyPlanUpdate.mock.calls[0][1];
     // Le budget seul est écarté : réduire le nombre de séances est exactement ce
@@ -559,7 +577,7 @@ describe('maybeReviewActivePlan — allures imposées', () => {
   it('retire du contexte l’ancre parasite quand une table existe', async () => {
     chatCompletionJson.mockResolvedValue(KEEP);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     // L'allure moyenne des dernières sorties égarait le modèle : elle sort du
     // contexte dès qu'une table existe.
@@ -570,7 +588,7 @@ describe('maybeReviewActivePlan — allures imposées', () => {
   it('pose les allures de la table sur les semaines recalculées', async () => {
     chatCompletionJson.mockResolvedValue(ADJUST);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     const sessions = updatedSessions();
     // Endurance au milieu de [E] (5:56–6:32/km) …
@@ -584,17 +602,17 @@ describe('maybeReviewActivePlan — allures imposées', () => {
   it('ne touche à rien quand la révision conserve le plan', async () => {
     chatCompletionJson.mockResolvedValue(KEEP);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
   });
 
   it('dérive les mesures sans rien prescrire quand le plan ne porte pas de chrono', async () => {
     dal.getActivePlanWithSessions.mockResolvedValue(ACTIVE);
     chatCompletionJson.mockResolvedValue(ADJUST);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     // Les volumes sont écrits par l'appli dans les deux régimes ; sans table, la
     // seule chose qui manque est la prescription d'allure.
@@ -615,7 +633,7 @@ describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
     // génération : c'est lui qui fait foi, pas ce que le modèle vient d'écrire.
     dal.getPlanUpdatedAt.mockResolvedValue('2026-08-11T09:30:00.000Z');
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     // Marqueur intact : la révision reste due, sur l'état à jour.
@@ -630,10 +648,10 @@ describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
     // pour un travail qu'on vient de jeter.
     dal.getPlanUpdatedAt.mockResolvedValue('2026-08-11T09:30:00.000Z');
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     const callsAfterAbandon = chatCompletionJson.mock.calls.length;
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(chatCompletionJson.mock.calls.length).toBe(callsAfterAbandon);
     expect(logs()).toContain('[plan/review] déclenchement ignoré : échec récent');
@@ -642,7 +660,7 @@ describe('maybeReviewActivePlan — plan modifié pendant la révision', () => {
   it('abandonne aussi quand le plan n’est plus actif', async () => {
     dal.getPlanUpdatedAt.mockResolvedValue(null);
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
   });
@@ -652,12 +670,12 @@ describe('maybeReviewActivePlan — échecs', () => {
   it('avance le marqueur quand la sortie du modèle reste inexploitable', async () => {
     chatCompletionJson.mockRejectedValue(new AiInvalidOutputError('JSON illisible'));
 
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     // Trois tentatives, puis abandon : redemander la même chose au même modèle
     // donnerait la même sortie, et le seuil resterait franchi pour toujours.
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(errored).toHaveBeenCalledWith(
       expect.stringContaining(
         '[plan/review] révision abandonnée (sortie du modèle inexploitable) — prochaine tentative au palier suivant (4 séances)',
@@ -671,15 +689,15 @@ describe('maybeReviewActivePlan — échecs', () => {
       new InvalidPlanError('sessions', 'Séance hors de la fenêtre du plan.'),
     );
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
   });
 
   it('impose un délai de garde après un échec transitoire', async () => {
     chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
     expect(errored).toHaveBeenCalledWith(
@@ -688,15 +706,15 @@ describe('maybeReviewActivePlan — échecs', () => {
 
     // Les fichiers suivants du même backfill ne relancent rien.
     chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
     expect(logs()).toContain('[plan/review] déclenchement ignoré : échec récent');
 
     // Le délai passé, la révision reste due et repart.
     vi.setSystemTime(new Date(Date.now() + REVIEW_COOLDOWN_MS + 1));
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
   });
 
   /**
@@ -708,7 +726,7 @@ describe('maybeReviewActivePlan — échecs', () => {
    */
   it('partage verrou et délai de garde entre deux instances du module', async () => {
     chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
 
     vi.resetModules();
@@ -716,12 +734,12 @@ describe('maybeReviewActivePlan — échecs', () => {
 
     // La seconde instance voit le cooldown posé par la première.
     chatCompletionJson.mockResolvedValue({ decision: 'keep', reason: 'Le plan tient.' });
-    await reloaded.maybeReviewActivePlan();
+    await reloaded.maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(1);
 
     // Et le lever depuis l'une le lève pour l'autre.
     reloaded.resetReviewState();
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
     expect(chatCompletionJson).toHaveBeenCalledTimes(2);
   });
 });
@@ -731,10 +749,10 @@ describe('maybeReviewActivePlan — plan arrivé à son terme', () => {
     // Plan de 2 semaines démarré le 10 août : au 20 septembre, il est fini.
     vi.setSystemTime(new Date('2026-09-20T09:00:00.000Z'));
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(chatCompletionJson).not.toHaveBeenCalled();
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(logs()).toContain('[plan/review] plan 3 arrivé à son terme, rien à réviser');
     expect(errored).not.toHaveBeenCalled();
   });
@@ -833,7 +851,7 @@ describe('maybeReviewActivePlan — fenêtre longue', () => {
   it('conserve la position dans la périodisation : pas de retour en phase de base', async () => {
     coachAdjustsLongPlan();
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     // Quatre créneaux de qualité sur les six semaines restantes : trois de
     // spécificité, un d'affûtage. Une périodisation recalculée sur la seule
@@ -851,7 +869,7 @@ describe('maybeReviewActivePlan — fenêtre longue', () => {
   it('ne réécrit aucune journée déjà écoulée', async () => {
     coachAdjustsLongPlan();
 
-    await maybeReviewActivePlan();
+    await maybeReviewActivePlan(ATHLETE_ID);
 
     expect(updatedSessions().every((session) => session.scheduledOn >= '2026-08-12')).toBe(true);
   });
@@ -862,14 +880,14 @@ describe('maybeReviewActivePlan — fenêtre longue', () => {
       throw new AiUnavailableError('unreachable');
     });
 
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     // Le plan est écrit malgré tout, complet et mesuré : un créneau qui échoue
     // se replie sur un déroulé déterministe.
     expect(dal.applyPlanUpdate).toHaveBeenCalledTimes(1);
     expect(updatedSessions().every((session) => session.volumeM !== null)).toBe(true);
     expect(updatedSessions().map((session) => session.kind)).not.toContain('Répétitions');
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
   });
 
   it('n’écrit rien et retentera quand le verdict lui-même n’arrive pas', async () => {
@@ -878,7 +896,7 @@ describe('maybeReviewActivePlan — fenêtre longue', () => {
     // un plan que personne n'a jugé.
     chatCompletionJson.mockRejectedValue(new AiUnavailableError('unreachable'));
 
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
     expect(dal.markPlanReviewed).not.toHaveBeenCalled();
@@ -901,10 +919,10 @@ describe('maybeReviewActivePlan — fenêtre longue', () => {
     });
     chatCompletionJson.mockResolvedValue(ADJUST);
 
-    await expect(maybeReviewActivePlan()).resolves.toBeUndefined();
+    await expect(maybeReviewActivePlan(ATHLETE_ID)).resolves.toBeUndefined();
 
     expect(dal.applyPlanUpdate).not.toHaveBeenCalled();
-    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4);
+    expect(dal.markPlanReviewed).toHaveBeenCalledWith(3, 4, ATHLETE_ID);
     expect(errored).toHaveBeenCalledWith(
       expect.stringContaining('[plan/review] révision abandonnée'),
     );

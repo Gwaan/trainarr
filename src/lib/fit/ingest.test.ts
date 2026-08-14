@@ -205,8 +205,23 @@ describe('ingestFitBuffer', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42);
+    expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(reviewStarted).toBe(true);
+  });
+
+  /*
+   * Le bug de production : l'athlète s'arrêtait à l'ingestion. Tout ce qu'elle
+   * déclenche le déduisait d'une session — inexistante dans le watcher — et ne
+   * faisait donc rien, sans le moindre échec visible.
+   */
+  it('passe l’athlète du fichier à tout ce que l’import déclenche', async () => {
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42);
+    expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42, ATHLETE_ID);
+    expect(mocks.maybeReviewActivePlan).toHaveBeenCalledWith(ATHLETE_ID);
   });
 
   it('n’attend jamais la révision du plan', async () => {

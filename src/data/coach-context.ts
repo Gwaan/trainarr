@@ -7,7 +7,12 @@ import { computeLoadSeries, computeTrimp } from '@/lib/metrics';
 import type { PlanIntent } from '@/lib/plan-skeleton/intent';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
-import { getCurrentAthlete, todayCivilDate } from './athlete';
+import {
+  getAthleteById,
+  getCurrentAthlete,
+  getCurrentAthleteId,
+  todayCivilDate,
+} from './athlete';
 import { db } from './db/client';
 import { activities, type Activity, type Athlete, type AthleteSex } from './db/schema';
 import { getActivePlanWithSessions, planEndExclusive, type PlanSessionDto } from './plans';
@@ -426,11 +431,19 @@ function emptySnapshot(today: string): TrainingSnapshotDto {
  * Une seule lecture de l'historique, comme le tableau de bord : la CTL est une
  * moyenne mobile sur 42 jours, elle a besoin de tout l'historique, et une ligne
  * d'activité est légère (les séries temporelles vivent dans une autre table).
+ *
+ * **L'athlète est un paramètre**, et il peut valoir `null` : c'est l'état
+ * « pas encore d'athlète », que le snapshot modélise déjà (rien n'est inventé,
+ * tout est absent). Les appelants de requête passent celui de leur session ;
+ * ceux du suivi de plan, déclenché hors requête par une ingestion, passent
+ * l'athlète du fichier importé — il n'est alors jamais `null`.
  */
-export async function getTrainingSnapshot(): Promise<TrainingSnapshotDto> {
+export async function getTrainingSnapshot(
+  athleteId: number | null,
+): Promise<TrainingSnapshotDto> {
   const today = todayCivilDate();
 
-  const profile = await getCurrentAthlete();
+  const profile = athleteId === null ? null : await getAthleteById(athleteId);
   if (!profile) return emptySnapshot(today);
 
   const rows = await db
@@ -469,7 +482,12 @@ export async function getTrainingSnapshot(): Promise<TrainingSnapshotDto> {
  * d'athlète) : c'est une réponse, pas un trou.
  */
 export async function getPlanContext(): Promise<PlanContextDto> {
-  const active = await getActivePlanWithSessions();
+  // Lecture de **requête** uniquement (le chat du coach) : l'athlète vient donc
+  // de la session, et c'est ici qu'il se résout.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { hasPlan: false };
+
+  const active = await getActivePlanWithSessions(athleteId);
   if (active === null) return { hasPlan: false };
 
   const { plan, sessions } = active;
@@ -510,6 +528,8 @@ export async function getComparableActivities(
 ): Promise<ComparableActivityDto[]> {
   if (limit <= 0) return [];
 
+  // Lecture de **requête** uniquement (le feedback d'activité) : l'athlète vient
+  // de la session.
   const profile = await getCurrentAthlete();
   if (!profile) return [];
 

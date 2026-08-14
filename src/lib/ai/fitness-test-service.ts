@@ -146,8 +146,16 @@ function thresholdPaceSecPerKm(distanceM: number, timeS: number): number | null 
  * pipeline d'import qui la déclenche, en oubliant sa promesse. No-op silencieux
  * quand l'activité ne réalise pas un test — c'est le cas de tous les imports
  * sauf une poignée par plan.
+ *
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui la déclenche
+ * (`ingestFitBuffer`) : ce service tourne dans le watcher FIT, hors requête. Il
+ * n'y a pas de session à interroger — et tout ce qu'il appelle le reçoit à son
+ * tour, jusqu'à la publication du calendrier.
  */
-export async function maybeApplyFitnessTest(activityId: number): Promise<void> {
+export async function maybeApplyFitnessTest(
+  activityId: number,
+  athleteId: number,
+): Promise<void> {
   const state = fitnessTestState();
   if (state.running) {
     console.log('[plan/test] déclenchement ignoré : un test est déjà en cours de traitement.');
@@ -156,7 +164,7 @@ export async function maybeApplyFitnessTest(activityId: number): Promise<void> {
 
   state.running = true;
   try {
-    await applyFitnessTest(activityId);
+    await applyFitnessTest(activityId, athleteId);
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(`[plan/test] activité ${activityId} : traitement du test impossible — ${reason}`);
@@ -166,8 +174,8 @@ export async function maybeApplyFitnessTest(activityId: number): Promise<void> {
 }
 
 /** Le corps de {@link maybeApplyFitnessTest}, une fois le verrou pris. */
-async function applyFitnessTest(activityId: number): Promise<void> {
-  const candidate = await getFitnessTestCandidate(activityId);
+async function applyFitnessTest(activityId: number, athleteId: number): Promise<void> {
+  const candidate = await getFitnessTestCandidate(activityId, athleteId);
   if (candidate === null) return;
 
   // Un test que la référence en vigueur a **déjà** pris en compte ne se rejoue
@@ -242,9 +250,11 @@ async function applyFitnessTest(activityId: number): Promise<void> {
   );
 
   if (verdict.outcome !== 'improved') {
-    await recordFitnessTest(candidate.planId, {
-      note: fitnessTestNote(verdict, candidate.testedOn, null),
-    });
+    await recordFitnessTest(
+      candidate.planId,
+      { note: fitnessTestNote(verdict, candidate.testedOn, null) },
+      athleteId,
+    );
     return;
   }
 
@@ -253,7 +263,7 @@ async function applyFitnessTest(activityId: number): Promise<void> {
     candidate.referenceTimeS,
     verdict.timeS,
   );
-  await applyImprovedTest(candidate.planId, verdict, candidate.testedOn, paceChange);
+  await applyImprovedTest(candidate.planId, verdict, candidate.testedOn, paceChange, athleteId);
 }
 
 /** L'allure de seuil avant et après, `null` quand l'une des deux n'est pas calculable. */
@@ -293,6 +303,7 @@ async function applyImprovedTest(
   verdict: Extract<FitnessTestVerdict, { outcome: 'improved' }>,
   testedOn: string,
   paceChange: { fromSecPerKm: number; toSecPerKm: number } | null,
+  athleteId: number,
 ): Promise<void> {
   const note = fitnessTestNote(verdict, testedOn, paceChange);
   const timeS = Math.round(verdict.timeS);
@@ -304,7 +315,7 @@ async function applyImprovedTest(
   // plan — et le rejetterait pour une raison qui n'a rien de physiologique.
   const reference = { timeS, updatedOn: testedOn };
 
-  const active = await getActivePlanWithSessions();
+  const active = await getActivePlanWithSessions(athleteId);
   if (active === null || active.plan.id !== planId) {
     console.log(`[plan/test] plan ${planId} : plus le plan actif — chrono non écrit.`);
     return;
@@ -312,7 +323,7 @@ async function applyImprovedTest(
 
   // L'état du plan avant les minutes de reconstruction, pour le contrôle de
   // fraîcheur qui suit.
-  const updatedAtBefore = await getPlanUpdatedAt(planId);
+  const updatedAtBefore = await getPlanUpdatedAt(planId, athleteId);
 
   // La même reprise que partout ailleurs : demain. La séance du jour est en
   // cours ou déjà faite — et celle d'aujourd'hui, ici, c'est le test lui-même.
@@ -330,7 +341,7 @@ async function applyImprovedTest(
     console.log(
       `[plan/test] plan ${planId} : plus une semaine à recalculer — chrono enregistré seul.`,
     );
-    await recordFitnessTest(planId, { note, reference });
+    await recordFitnessTest(planId, { note, reference }, athleteId);
     return;
   }
 
@@ -339,7 +350,7 @@ async function applyImprovedTest(
     rewrite = await rewriteRemainingPlan({
       plan: updated,
       window: remaining,
-      snapshot: await getTrainingSnapshot(),
+      snapshot: await getTrainingSnapshot(athleteId),
       plannedWeeklyKm: planWeeklyVolumeKm(active.sessions),
     });
   } catch (error) {
@@ -348,7 +359,7 @@ async function applyImprovedTest(
       `[plan/test] plan ${planId} : reconstruction impossible — ${reason} ; ` +
         `chrono enregistré seul, la révision recalculera les semaines restantes.`,
     );
-    await recordFitnessTest(planId, { note, reference });
+    await recordFitnessTest(planId, { note, reference }, athleteId);
     return;
   }
 
@@ -366,34 +377,38 @@ async function applyImprovedTest(
   // l'activité, et c'est un fait mesuré qui ne se perd pas parce qu'une révision
   // est passée entre-temps. Seules les séances calculées dessus sont jetées ; la
   // révision suivante les recalculera à partir du plan à jour.
-  const updatedAtAfter = await getPlanUpdatedAt(planId);
+  const updatedAtAfter = await getPlanUpdatedAt(planId, athleteId);
   if (updatedAtAfter !== updatedAtBefore) {
     console.log(
       `[plan/test] plan ${planId} modifié pendant la reconstruction — séances abandonnées ; ` +
         `chrono enregistré seul, la révision recalculera les semaines restantes.`,
     );
-    await recordFitnessTest(planId, { note, reference });
+    await recordFitnessTest(planId, { note, reference }, athleteId);
     return;
   }
 
   try {
-    await applyPlanUpdate(planId, {
-      fromDate,
-      sessions: mapPlanWeeksToSessions(rewrite.weeks, remaining.firstWeekStart),
-      settings: {
-        referenceDistance: '5k',
-        referenceTimeS: timeS,
-        referenceUpdatedOn: testedOn,
-        lastTestNote: note,
+    await applyPlanUpdate(
+      planId,
+      {
+        fromDate,
+        sessions: mapPlanWeeksToSessions(rewrite.weeks, remaining.firstWeekStart),
+        settings: {
+          referenceDistance: '5k',
+          referenceTimeS: timeS,
+          referenceUpdatedOn: testedOn,
+          lastTestNote: note,
+        },
       },
-    });
+      athleteId,
+    );
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(
       `[plan/test] plan ${planId} : écriture du plan impossible — ${reason} ; ` +
         `chrono enregistré seul, la révision recalculera les semaines restantes.`,
     );
-    await recordFitnessTest(planId, { note, reference });
+    await recordFitnessTest(planId, { note, reference }, athleteId);
     return;
   }
 
@@ -402,7 +417,7 @@ async function applyImprovedTest(
       `(VDOT ${verdict.vdot.toFixed(1)}, +${verdict.gain.toFixed(1)}) et fin du plan réécrite.`,
   );
 
-  await applyTestEffects(planId);
+  await applyTestEffects(planId, athleteId);
 }
 
 /**
@@ -411,15 +426,15 @@ async function applyImprovedTest(
  * (`review-service.ts`), y compris l'attente de la synchronisation : le
  * déclencheur est le watcher FIT, qui tourne hors contexte de requête.
  */
-async function applyTestEffects(planId: number): Promise<void> {
+async function applyTestEffects(planId: number, athleteId: number): Promise<void> {
   try {
-    await reconcilePlanSessions(planId);
+    await reconcilePlanSessions(planId, athleteId);
   } catch (error) {
     console.error(`[plan/test] rapprochement des séances du plan ${planId} impossible :`, error);
   }
 
   try {
-    await syncPlanToIntervalsSafely('test chronométré');
+    await syncPlanToIntervalsSafely('test chronométré', athleteId);
   } catch (error) {
     console.error(`[plan/test] synchronisation du calendrier impossible :`, error);
   }

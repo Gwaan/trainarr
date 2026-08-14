@@ -24,6 +24,7 @@ import 'server-only';
  */
 
 import { getActivityFull, type ActivityFullDto, type ActivitySplitDto } from '@/data/activities';
+import { getCurrentAthleteId } from '@/data/athlete';
 import {
   ActivityNotFoundError,
   getActivityFeedback,
@@ -258,8 +259,10 @@ export async function generateActivityFeedback(activityId: number): Promise<Acti
   const activity = await getActivityFull(activityId);
   if (activity === null) throw new ActivityNotFoundError();
 
+  // Chemin de **requête** (la page d'une activité) : l'athlète vient de la
+  // session. `null` — onboarding non fait — rend un snapshot vide, comme avant.
   const [snapshot, comparables, plannedSession] = await Promise.all([
-    getTrainingSnapshot(),
+    getTrainingSnapshot(await getCurrentAthleteId()),
     getComparableActivities(activityId),
     getPlannedSessionForActivity(activityId),
   ]);

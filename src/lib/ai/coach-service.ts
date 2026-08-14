@@ -55,6 +55,7 @@ import 'server-only';
  */
 
 import { COACH_QUESTION_LIMITS } from './coach-question';
+import { getCurrentAthleteId } from '@/data/athlete';
 import { appendCoachExchange, listCoachMessages, type CoachMessageDto } from '@/data/coach-chat';
 import {
   getPlanContext,
@@ -251,8 +252,12 @@ export async function answerCoachQuestion(input: {
 
   // Tout est lu avant que quoi que ce soit ne soit écrit : le fil relu ici est
   // celui d'avant la question, à laquelle `buildCoachMessages` fait sa place.
+  // Chemin de **requête** (le chat) : l'athlète vient de la session. `null` —
+  // onboarding non fait — rend un snapshot vide, comme avant.
+  const athleteId = await getCurrentAthleteId();
+
   const [snapshot, planContext, history] = await Promise.all([
-    getTrainingSnapshot(),
+    getTrainingSnapshot(athleteId),
     getPlanContext(),
     listCoachMessages(COACH_CONTEXT_TURNS),
   ]);

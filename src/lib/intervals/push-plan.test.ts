@@ -31,8 +31,9 @@ const { api } = vi.hoisted(() => ({
 const { dal } = vi.hoisted(() => ({
   dal: {
     getActivePlanWithSessions: vi.fn(),
-    getAthleteProfile: vi.fn(),
-    getIntervalsCredentials: vi.fn(),
+    getAthleteProfileById: vi.fn(),
+    getIntervalsCredentialsById: vi.fn(),
+    getCurrentAthleteId: vi.fn(),
   },
 }));
 
@@ -51,12 +52,22 @@ vi.mock('@/data/athlete', async () => {
   const actual = await vi.importActual<typeof import('@/data/athlete')>('@/data/athlete');
   return {
     ...actual,
-    getAthleteProfile: dal.getAthleteProfile,
-    getIntervalsCredentials: dal.getIntervalsCredentials,
+    getAthleteProfileById: dal.getAthleteProfileById,
+    getIntervalsCredentialsById: dal.getIntervalsCredentialsById,
+    // La seule résolution de session qui reste : la porte manuelle
+    // (`resyncPlanToIntervalsOnDemand`), qui sert bien une requête.
+    getCurrentAthleteId: dal.getCurrentAthleteId,
   };
 });
 
 const API_KEY = 'cle-api-de-test';
+
+/**
+ * L'athlète dont on publie le calendrier. La synchronisation le **reçoit** :
+ * elle part aussi bien d'une Server Action que du suivi de plan déclenché par
+ * une ingestion de fond, qui n'a pas de session à interroger.
+ */
+const ATHLETE_ID = 7;
 
 /** Mardi 11 août 2026 — le plan court jusqu'au 30. */
 const TODAY = '2026-08-11';
@@ -118,7 +129,9 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`));
   vi.clearAllMocks();
 
-  dal.getIntervalsCredentials.mockResolvedValue({ intervalsAthleteId: null, apiKey: API_KEY });
+  dal.getIntervalsCredentialsById.mockResolvedValue({ intervalsAthleteId: null, apiKey: API_KEY });
+  // La porte manuelle est la seule à résoudre une session : elle sert un clic.
+  dal.getCurrentAthleteId.mockResolvedValue(ATHLETE_ID);
 
   api.listWorkoutEvents.mockResolvedValue([]);
   api.createWorkoutEvents.mockImplementation(
@@ -142,7 +155,7 @@ beforeEach(() => {
   // Profil sans FC max par défaut : le régime de repli, celui que tous les cas
   // ci-dessous décrivent. Ceux qui prescrivent en fréquence cardiaque la posent
   // eux-mêmes, explicitement.
-  dal.getAthleteProfile.mockResolvedValue(null);
+  dal.getAthleteProfileById.mockResolvedValue(null);
   // Le verrou vit sur `globalThis` : il survit d'un cas à l'autre.
   resetManualSyncLock();
 });
@@ -572,9 +585,9 @@ describe('planCalendarReplacement', () => {
 
 describe('syncPlanToIntervals', () => {
   it("ne tente rien sans clé API enregistrée, et le dit", async () => {
-    dal.getIntervalsCredentials.mockResolvedValue(null);
+    dal.getIntervalsCredentialsById.mockResolvedValue(null);
 
-    await expect(syncPlanToIntervals()).resolves.toEqual({
+    await expect(syncPlanToIntervals(ATHLETE_ID)).resolves.toEqual({
       status: 'unconfigured',
       reason: 'aucune clé API intervals.icu enregistrée',
     });
@@ -586,11 +599,11 @@ describe('syncPlanToIntervals', () => {
     // Le DAL lève plutôt que de faire passer une clé perdue pour une clé
     // absente ; ici, ça reste une configuration à refaire, pas une panne — et le
     // motif remonte jusqu'à l'athlète, qui n'a qu'à la ressaisir.
-    dal.getIntervalsCredentials.mockRejectedValue(
+    dal.getIntervalsCredentialsById.mockRejectedValue(
       new SecretDecryptionError('malformed'),
     );
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     expect(report.status).toBe('unconfigured');
     expect(report.status === 'unconfigured' && report.reason).toContain('illisible');
@@ -598,12 +611,12 @@ describe('syncPlanToIntervals', () => {
   });
 
   it("utilise l'identifiant intervals.icu enregistré par l'athlète", async () => {
-    dal.getIntervalsCredentials.mockResolvedValue({
+    dal.getIntervalsCredentialsById.mockResolvedValue({
       intervalsAthleteId: '123456',
       apiKey: API_KEY,
     });
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.listWorkoutEvents).toHaveBeenCalledWith(
       expect.objectContaining({ athleteId: 'i123456', apiKey: API_KEY }),
@@ -611,7 +624,7 @@ describe('syncPlanToIntervals', () => {
   });
 
   it("interroge l'athlète 0 quand le compte n'a pas d'identifiant enregistré", async () => {
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.listWorkoutEvents).toHaveBeenCalledWith(
       expect.objectContaining({ athleteId: '0', apiKey: API_KEY, oldest: TODAY }),
@@ -629,7 +642,7 @@ describe('syncPlanToIntervals', () => {
       ],
     });
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     const pushed = api.createWorkoutEvents.mock.calls[0][0].events as { externalId: string }[];
     expect(pushed.map((workout) => workout.externalId)).toEqual([
@@ -659,7 +672,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(
       expect.objectContaining({ ids: [4321, 4322] }),
@@ -685,7 +698,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
   });
@@ -738,10 +751,10 @@ describe('syncPlanToIntervals', () => {
   }
 
   it('croise la FC max du profil et celle du compte distant dans la description', async () => {
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(184));
     planWithEnduranceSession();
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     // 120–145 bpm sur une FC max de 184, exprimés en pourcentage de la FC max
     // du compte (205) : la montre y retrouve les mêmes battements.
@@ -749,7 +762,7 @@ describe('syncPlanToIntervals', () => {
   });
 
   it('ne lit la FC max distante qu’une fois par synchronisation', async () => {
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(184));
     dal.getActivePlanWithSessions.mockResolvedValue({
       plan: PLAN,
       sessions: [
@@ -759,7 +772,7 @@ describe('syncPlanToIntervals', () => {
       ],
     });
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.fetchRunMaxHr).toHaveBeenCalledTimes(1);
     expect(api.fetchRunMaxHr).toHaveBeenCalledWith(
@@ -770,12 +783,12 @@ describe('syncPlanToIntervals', () => {
   it('publie sans cible cardiaque, et le dit, quand les réglages sport sont illisibles', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     api.fetchRunMaxHr.mockRejectedValue(new Error('HTTP 500'));
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(184));
     planWithEnduranceSession();
 
     // L'échec de cette lecture n'emporte pas la synchronisation : le calendrier
     // reste publié, distances et durées comprises.
-    await expect(syncPlanToIntervals()).resolves.toEqual({
+    await expect(syncPlanToIntervals(ATHLETE_ID)).resolves.toEqual({
       status: 'synced',
       pushed: 1,
       deleted: 0,
@@ -790,10 +803,10 @@ describe('syncPlanToIntervals', () => {
   it('publie sans cible cardiaque, et le dit, quand le compte distant n’a pas de FC max', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     api.fetchRunMaxHr.mockResolvedValue(null);
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(184));
     planWithEnduranceSession();
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(publishedDescription()).toBe('- Course 7km');
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('FC max absente des réglages sport'));
@@ -802,20 +815,20 @@ describe('syncPlanToIntervals', () => {
   it('n’interroge pas les réglages sport sans FC max au profil', async () => {
     // Rien à traduire : sans FC max au profil, aucune zone ne se prescrit, et le
     // dénominateur distant n'aurait rien à dénommer.
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(null));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(null));
     planWithEnduranceSession();
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.fetchRunMaxHr).not.toHaveBeenCalled();
     expect(publishedDescription()).toBe('- Course 7km');
   });
 
   it('n’interroge pas les réglages sport sans plan actif', async () => {
-    dal.getAthleteProfile.mockResolvedValue(profileWithMaxHr(184));
+    dal.getAthleteProfileById.mockResolvedValue(profileWithMaxHr(184));
     dal.getActivePlanWithSessions.mockResolvedValue(null);
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.fetchRunMaxHr).not.toHaveBeenCalled();
   });
@@ -832,7 +845,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await expect(syncPlanToIntervals()).rejects.toThrow('HTTP 502');
+    await expect(syncPlanToIntervals(ATHLETE_ID)).rejects.toThrow('HTTP 502');
     expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
   });
 
@@ -846,7 +859,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await expect(syncPlanToIntervals()).rejects.toThrow('HTTP 500');
+    await expect(syncPlanToIntervals(ATHLETE_ID)).rejects.toThrow('HTTP 500');
     // Les séances voulues sont bien au calendrier : il reste des doublons, pas
     // un trou. Et l'échec ne se perd pas.
     expect(api.createWorkoutEvents).toHaveBeenCalled();
@@ -865,7 +878,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(
       expect.objectContaining({ ids: [4321, 9001] }),
@@ -882,7 +895,7 @@ describe('syncPlanToIntervals', () => {
     api.deleteCalendarEvents.mockResolvedValue(1);
     dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     expect(report).toEqual({ status: 'synced', pushed: 0, deleted: 1 });
   });
@@ -897,7 +910,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
     expect(report).toEqual({ status: 'synced', pushed: 1, deleted: 0 });
@@ -910,7 +923,7 @@ describe('syncPlanToIntervals', () => {
       event({ id: 5002, externalId: null }),
     ]);
 
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).toHaveBeenCalledWith(expect.objectContaining({ ids: [4321] }));
     // Rien à publier : pas d'appel inutile.
@@ -924,7 +937,7 @@ describe('syncPlanToIntervals', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await syncPlanToIntervals();
+    await syncPlanToIntervals(ATHLETE_ID);
 
     expect(api.deleteCalendarEvents).not.toHaveBeenCalled();
   });
@@ -932,7 +945,7 @@ describe('syncPlanToIntervals', () => {
   it('propage une panne réseau (la garde est chez son appelant)', async () => {
     api.listWorkoutEvents.mockRejectedValue(new Error('fetch failed'));
 
-    await expect(syncPlanToIntervals()).rejects.toThrow('fetch failed');
+    await expect(syncPlanToIntervals(ATHLETE_ID)).rejects.toThrow('fetch failed');
   });
 });
 
@@ -943,7 +956,7 @@ describe('syncPlanToIntervalsSafely', () => {
 
     // Elle rend l'échec plutôt que de le lever : c'est ce que la
     // resynchronisation manuelle affiche à l'athlète.
-    await expect(syncPlanToIntervalsSafely('plan 3')).resolves.toEqual({ status: 'failed' });
+    await expect(syncPlanToIntervalsSafely('plan 3', ATHLETE_ID)).resolves.toEqual({ status: 'failed' });
     expect(logged).toHaveBeenCalled();
   });
 
@@ -954,16 +967,16 @@ describe('syncPlanToIntervalsSafely', () => {
       sessions: [session({ scheduledOn: '2026-08-18' })],
     });
 
-    await syncPlanToIntervalsSafely('plan 3');
+    await syncPlanToIntervalsSafely('plan 3', ATHLETE_ID);
 
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('publiées : 1, supprimées : 0'));
   });
 
   it("dit pourquoi rien n'est parti quand la synchronisation n'est pas configurée", async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-    dal.getIntervalsCredentials.mockResolvedValue(null);
+    dal.getIntervalsCredentialsById.mockResolvedValue(null);
 
-    await syncPlanToIntervalsSafely('plan 3');
+    await syncPlanToIntervalsSafely('plan 3', ATHLETE_ID);
 
     expect(logged).toHaveBeenCalledWith(
       expect.stringContaining('aucune clé API intervals.icu enregistrée'),
@@ -974,13 +987,30 @@ describe('syncPlanToIntervalsSafely', () => {
     const logged = vi.spyOn(console, 'log').mockImplementation(() => {});
     dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
 
-    await syncPlanToIntervalsSafely('plan 3');
+    await syncPlanToIntervalsSafely('plan 3', ATHLETE_ID);
 
     expect(logged).not.toHaveBeenCalled();
   });
 });
 
 describe('resyncPlanToIntervalsOnDemand', () => {
+  it('ne republie rien tant qu’aucun athlète n’est enregistré', async () => {
+    dal.getCurrentAthleteId.mockResolvedValue(null);
+
+    await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({ status: 'no-plan' });
+    expect(dal.getActivePlanWithSessions).not.toHaveBeenCalled();
+    expect(api.listWorkoutEvents).not.toHaveBeenCalled();
+  });
+
+  it('publie sous l’athlète de la session', async () => {
+    dal.getActivePlanWithSessions.mockResolvedValue({ plan: PLAN, sessions: [] });
+
+    await resyncPlanToIntervalsOnDemand();
+
+    expect(dal.getActivePlanWithSessions).toHaveBeenCalledWith(ATHLETE_ID);
+    expect(dal.getIntervalsCredentialsById).toHaveBeenCalledWith(ATHLETE_ID);
+  });
+
   it('republie le calendrier et rend ses comptes', async () => {
     dal.getActivePlanWithSessions.mockResolvedValue({
       plan: PLAN,
@@ -1043,7 +1073,7 @@ describe('resyncPlanToIntervalsOnDemand', () => {
 
   it("dit la non-configuration plutôt que de se taire", async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    dal.getIntervalsCredentials.mockResolvedValue(null);
+    dal.getIntervalsCredentialsById.mockResolvedValue(null);
 
     await expect(resyncPlanToIntervalsOnDemand()).resolves.toEqual({
       status: 'unconfigured',

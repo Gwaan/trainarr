@@ -422,8 +422,13 @@ type PreparedReview =
  * No-op silencieux (aucun journal, il n'y a rien à dire) quand l'IA n'est pas
  * configurée ou joignable, quand il n'y a pas de plan actif, ou quand le seuil
  * de {@link REVIEW_EVERY_SESSIONS} séances n'est pas atteint.
+ *
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui la déclenche
+ * (`ingestFitBuffer`) : ce service tourne dans le watcher FIT, hors requête. Il
+ * n'y a pas de session à interroger — et tout ce qu'il appelle le reçoit à son
+ * tour, jusqu'à la publication du calendrier.
  */
-export async function maybeReviewActivePlan(): Promise<void> {
+export async function maybeReviewActivePlan(athleteId: number): Promise<void> {
   const state = reviewState();
   if (state.reviewing) {
     console.log('[plan/review] déclenchement ignoré : une révision est déjà en cours.');
@@ -441,7 +446,7 @@ export async function maybeReviewActivePlan(): Promise<void> {
 
   state.reviewing = true;
   try {
-    await reviewActivePlan();
+    await reviewActivePlan(athleteId);
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     // Échec transitoire : marqueur inchangé — la révision reste due — mais pas
@@ -478,8 +483,8 @@ function isPermanentFailure(error: unknown): boolean {
 }
 
 /** Le corps de {@link maybeReviewActivePlan}, une fois le verrou pris. */
-async function reviewActivePlan(): Promise<void> {
-  const prepared = await prepareReview();
+async function reviewActivePlan(athleteId: number): Promise<void> {
+  const prepared = await prepareReview(athleteId);
   if (prepared === null) return;
 
   if (prepared.kind === 'finished') {
@@ -488,7 +493,7 @@ async function reviewActivePlan(): Promise<void> {
     console.log(
       `[plan/review] plan ${prepared.planId} arrivé à son terme, rien à réviser — marqueur avancé.`,
     );
-    await markPlanReviewed(prepared.planId, prepared.completedSessionCount);
+    await markPlanReviewed(prepared.planId, prepared.completedSessionCount, athleteId);
     return;
   }
 
@@ -499,7 +504,7 @@ async function reviewActivePlan(): Promise<void> {
   );
 
   try {
-    await runReview(context);
+    await runReview(context, athleteId);
   } catch (error) {
     if (!isPermanentFailure(error)) throw error;
 
@@ -507,7 +512,7 @@ async function reviewActivePlan(): Promise<void> {
     console.error(
       `[plan/review] révision abandonnée (sortie du modèle inexploitable) — prochaine tentative au palier suivant (${REVIEW_EVERY_SESSIONS} séances) : ${detail}`,
     );
-    await markPlanReviewed(plan.id, review.completedSessionCount);
+    await markPlanReviewed(plan.id, review.completedSessionCount, athleteId);
   }
 }
 
@@ -529,12 +534,12 @@ async function reviewActivePlan(): Promise<void> {
  * en jeu par un rapprochement ou une synchronisation ratés (cf.
  * {@link applyReviewEffects}).
  */
-async function runReview(context: ReviewContext): Promise<void> {
+async function runReview(context: ReviewContext, athleteId: number): Promise<void> {
   const { plan, review } = context;
   const output = await generateReview(context);
 
   if (output.decision === 'keep') {
-    await markPlanReviewed(plan.id, review.completedSessionCount);
+    await markPlanReviewed(plan.id, review.completedSessionCount, athleteId);
     console.log(`[plan/review] plan ${plan.id} conservé — ${output.reason}`);
     return;
   }
@@ -551,7 +556,7 @@ async function runReview(context: ReviewContext): Promise<void> {
   // Le plan a-t-il bougé pendant les minutes de reconstruction ? Un ajustement
   // demandé entre-temps par l'athlète prime sur ce que la révision vient de
   // calculer — l'écraser reviendrait à annuler silencieusement sa demande.
-  const updatedAt = await getPlanUpdatedAt(plan.id);
+  const updatedAt = await getPlanUpdatedAt(plan.id, athleteId);
   if (updatedAt !== review.updatedAt) {
     // Le marqueur n'avance pas — la révision reste due, et c'est voulu : ce qui
     // vient d'être écrit par l'athlète n'a pas été relu. Mais sans cooldown, le
@@ -569,25 +574,25 @@ async function runReview(context: ReviewContext): Promise<void> {
     return;
   }
 
-  await writeReview(context, output, rewrite);
-  await markPlanReviewed(plan.id, review.completedSessionCount);
+  await writeReview(context, output, rewrite, athleteId);
+  await markPlanReviewed(plan.id, review.completedSessionCount, athleteId);
   console.log(`[plan/review] plan ${plan.id} ajusté — ${output.reason}`);
 
-  await applyReviewEffects(plan.id);
+  await applyReviewEffects(plan.id, athleteId);
 }
 
 /**
  * Tout ce qu'il faut pour réviser, `null` si la révision n'a pas lieu d'être
  * (pas d'IA, pas de plan actif, seuil non atteint), ou un plan échu.
  */
-async function prepareReview(): Promise<PreparedReview | null> {
+async function prepareReview(athleteId: number): Promise<PreparedReview | null> {
   const availability = await getAiAvailability();
   if (!availability.available) return null;
 
-  const active = await getActivePlanWithSessions();
+  const active = await getActivePlanWithSessions(athleteId);
   if (active === null) return null;
 
-  const review = await getPlanReview(active.plan.id);
+  const review = await getPlanReview(active.plan.id, athleteId);
   if (review === null) return null;
   if (review.completedSessionCount - review.reviewedSessionCount < REVIEW_EVERY_SESSIONS) {
     return null;
@@ -617,7 +622,7 @@ async function prepareReview(): Promise<PreparedReview | null> {
       plannedWeeklyKm: planWeeklyVolumeKm(active.sessions),
       window,
       review,
-      snapshot: await getTrainingSnapshot(),
+      snapshot: await getTrainingSnapshot(athleteId),
       // Le chrono déclaré à la création reste l'ancre des allures : une révision
       // réécrit des séances, pas la table qui les calibre.
       paces: planTrainingPaces(active.plan),
@@ -744,19 +749,24 @@ async function writeReview(
   context: ReviewContext,
   output: Extract<PlanReviewOutput, { decision: 'adjust' }>,
   rewrite: RemainingPlanRewrite,
+  athleteId: number,
 ): Promise<void> {
   const { plan, window, fromDate, snapshot } = context;
   const settings = reviewSettings(output.settings);
 
-  await applyPlanUpdate(plan.id, {
-    fromDate,
-    sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
-    settings: planSettingsPatch(
-      plan,
-      settings,
-      withReviewNote(plan.summary, snapshot.today, output.reason),
-    ),
-  });
+  await applyPlanUpdate(
+    plan.id,
+    {
+      fromDate,
+      sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
+      settings: planSettingsPatch(
+        plan,
+        settings,
+        withReviewNote(plan.summary, snapshot.today, output.reason),
+      ),
+    },
+    athleteId,
+  );
 }
 
 /**
@@ -778,9 +788,9 @@ async function writeReview(
  * et le marqueur déjà avancé. Un rapprochement raté se rattrape au prochain
  * import, une synchronisation ratée à la prochaine écriture.
  */
-async function applyReviewEffects(planId: number): Promise<void> {
+async function applyReviewEffects(planId: number, athleteId: number): Promise<void> {
   try {
-    await reconcilePlanSessions(planId);
+    await reconcilePlanSessions(planId, athleteId);
   } catch (error) {
     console.error(`[plan/review] rapprochement des séances du plan ${planId} impossible :`, error);
   }
@@ -788,7 +798,7 @@ async function applyReviewEffects(planId: number): Promise<void> {
   try {
     // La garde vit déjà dans le module de synchronisation ; celle-ci ne couvre
     // que ce qu'il ne prévoit pas.
-    await syncPlanToIntervalsSafely('révision du plan');
+    await syncPlanToIntervalsSafely('révision du plan', athleteId);
   } catch (error) {
     console.error(`[plan/review] synchronisation du calendrier impossible :`, error);
   }

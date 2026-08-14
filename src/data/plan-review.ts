@@ -4,7 +4,6 @@ import { and, asc, eq, lte } from 'drizzle-orm';
 
 import { toCivilDate } from '@/lib/dates/civil';
 
-import { getCurrentAthleteId } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans } from './db/schema';
 
@@ -12,6 +11,12 @@ import { activities, plannedSessions, plans } from './db/schema';
  * Le bilan qui alimente la révision automatique du plan : ce que l'athlète a
  * réellement fait depuis la dernière relecture du coach, et le marqueur qui
  * cadence celle-ci.
+ *
+ * **Aucune lecture de ce module ne résout l'athlète elle-même** : il lui est
+ * donné. Le seul déclencheur de la révision est l'ingestion d'un fichier FIT,
+ * qui tourne hors requête — il n'y a pas de session à interroger, et lire
+ * « l'athlète courant » rendait `null`, donc un bilan vide et une révision qui
+ * ne tournait jamais.
  *
  * Lecture **et** écriture du marqueur vivent ici plutôt que dans `plans.ts` :
  * `reviewed_session_count` n'est pas un réglage du plan, c'est l'état d'un
@@ -152,11 +157,10 @@ export function boundReviewSessions(
 }
 
 /**
- * Le bilan du plan **actif** de l'athlète, `null` s'il n'y en a pas (ou si
- * l'onboarding n'a pas eu lieu).
+ * Le bilan du plan **actif** de l'athlète, `null` s'il n'y en a pas.
  *
  * L'appartenance est dans les deux `WHERE` — le plan comme les séances sont
- * filtrés par athlète courant : un `planId` qui n'est pas le sien ne remonte
+ * filtrés par l'athlète reçu : un `planId` qui n'est pas le sien ne remonte
  * rien, exactement comme un plan inexistant (anti-IDOR).
  *
  * La jointure vers `activities` est **externe** : une séance passée sans
@@ -164,10 +168,10 @@ export function boundReviewSessions(
  * perdre en jointure interne reviendrait à ne montrer au coach que les séances
  * réussies.
  */
-export async function getPlanReview(planId: number): Promise<PlanReviewDto | null> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return null;
-
+export async function getPlanReview(
+  planId: number,
+  athleteId: number,
+): Promise<PlanReviewDto | null> {
   const planRows = await db
     .select({ reviewedSessionCount: plans.reviewedSessionCount, updatedAt: plans.updatedAt })
     .from(plans)
@@ -254,10 +258,10 @@ export async function getPlanReview(planId: number): Promise<PlanReviewDto | nul
  * minutes de génération (cf. `lib/ai/review-service.ts`). Charger tout le bilan
  * pour comparer un horodatage serait payer la jointure des séances pour rien.
  */
-export async function getPlanUpdatedAt(planId: number): Promise<string | null> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return null;
-
+export async function getPlanUpdatedAt(
+  planId: number,
+  athleteId: number,
+): Promise<string | null> {
   const rows = await db
     .select({ updatedAt: plans.updatedAt })
     .from(plans)
@@ -288,10 +292,8 @@ export async function getPlanUpdatedAt(planId: number): Promise<string | null> {
 export async function markPlanReviewed(
   planId: number,
   completedSessionCount: number,
+  athleteId: number,
 ): Promise<void> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return;
-
   await db
     .update(plans)
     .set({ reviewedSessionCount: completedSessionCount, reviewedAt: new Date() })

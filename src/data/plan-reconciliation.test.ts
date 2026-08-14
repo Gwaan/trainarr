@@ -1,6 +1,6 @@
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   linkActivityToPlannedSession,
@@ -16,28 +16,25 @@ import {
 vi.mock('server-only', () => ({}));
 
 /**
- * L'athlète appartient à un compte : le DAL le résout depuis la session
- * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
- * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
- * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ * **Ce module ne lit plus de session, et ce mock est là pour l'attester.**
+ *
+ * Le rapprochement est déclenché par l'ingestion d'un fichier FIT, qui tourne
+ * hors requête : `headers()` y lève, `getSession()` rend « pas de session », et
+ * l'athlète déduit ressortait `null` — les liens n'étaient jamais posés. Il est
+ * désormais un paramètre. La session est donc remplacée par un espion qui lève :
+ * n'importe quel retour à une déduction ferait échouer ces tests au lieu de
+ * repartir en silence.
  */
-const { sessionState } = vi.hoisted(() => {
-  type Session = { userId: string; name: string; email: string } | null;
-  const sessionState: { current: Session } = {
-    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
-  };
-  return { sessionState };
-});
+const { getSessionSpy } = vi.hoisted(() => ({
+  getSessionSpy: vi.fn(() => {
+    throw new Error('`getSession` ne doit pas être appelée : ce module reçoit son athlète.');
+  }),
+}));
 
-vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+vi.mock('./session', () => ({ getSession: getSessionSpy }));
 
-/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
-function withoutSession(): void {
-  sessionState.current = null;
-}
-
-beforeEach(() => {
-  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+afterEach(() => {
+  expect(getSessionSpy).not.toHaveBeenCalled();
 });
 
 /**
@@ -406,7 +403,7 @@ describe('reconcilePlanSessions', () => {
   it('rapproche les séances passées et compte les liens posés', async () => {
     givenPlanToReconcile();
 
-    await expect(reconcilePlanSessions(3)).resolves.toBe(1);
+    await expect(reconcilePlanSessions(3, 1)).resolves.toBe(1);
 
     expect(dbState.updates).toHaveLength(1);
     expect(dbState.updates[0]?.values).toEqual({ completedActivityId: 42 });
@@ -416,7 +413,7 @@ describe('reconcilePlanSessions', () => {
   it('ne lit que les séances passées non réalisées, du plan et de l’athlète', async () => {
     givenPlanToReconcile();
 
-    await reconcilePlanSessions(3);
+    await reconcilePlanSessions(3, 1);
 
     const where = renderWhere(
       dbState.selects.find((select) => select.table === 'planned_sessions')?.where,
@@ -430,14 +427,14 @@ describe('reconcilePlanSessions', () => {
     givenPlanToReconcile();
     dbState.rows.planned_sessions[1] = [{ activityId: 42 }];
 
-    await expect(reconcilePlanSessions(3)).resolves.toBe(0);
+    await expect(reconcilePlanSessions(3, 1)).resolves.toBe(0);
     expect(dbState.updates).toEqual([]);
   });
 
   it('ne lit aucune activité quand le plan n’a aucune séance passée en attente', async () => {
     dbState.rows.planned_sessions = [[]];
 
-    await expect(reconcilePlanSessions(3)).resolves.toBe(0);
+    await expect(reconcilePlanSessions(3, 1)).resolves.toBe(0);
     expect(dbState.selects.some((select) => select.table === 'activities')).toBe(false);
   });
 
@@ -445,14 +442,19 @@ describe('reconcilePlanSessions', () => {
     givenPlanToReconcile();
     dbState.returning.planned_sessions = [[]];
 
-    await expect(reconcilePlanSessions(3)).resolves.toBe(0);
+    await expect(reconcilePlanSessions(3, 1)).resolves.toBe(0);
   });
 
-  it('ne fait rien tant que l’onboarding n’a pas eu lieu', async () => {
-    withoutSession();
-    dbState.rows.athlete = [[]];
+  it('rapproche sous l’athlète reçu, jamais sous celui d’une session', async () => {
+    // Le déclencheur nominal est le suivi de plan derrière une ingestion : il
+    // tourne hors requête, il n'y a pas de session à interroger.
+    givenPlanToReconcile();
 
-    await expect(reconcilePlanSessions(3)).resolves.toBe(0);
-    expect(dbState.selects).toEqual([]);
+    await reconcilePlanSessions(3, 9);
+
+    const where = renderWhere(
+      dbState.selects.find((select) => select.table === 'planned_sessions')?.where,
+    );
+    expect(where.params).toEqual([3, 9, '2026-08-11']);
   });
 });

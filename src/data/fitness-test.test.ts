@@ -79,12 +79,13 @@ vi.mock('./db/client', async () => {
 });
 
 const { athlete } = vi.hoisted(() => ({
-  athlete: { getCurrentAthleteId: vi.fn(), getAthleteProfile: vi.fn() },
+  athlete: { getAthleteProfileById: vi.fn() },
 }));
 
+// Le module ne résout plus l'athlète : il le reçoit. Seule la lecture du profil
+// **par identifiant** subsiste, et c'est elle qu'on remplace.
 vi.mock('./athlete', () => ({
-  getCurrentAthleteId: athlete.getCurrentAthleteId,
-  getAthleteProfile: athlete.getAthleteProfile,
+  getAthleteProfileById: athlete.getAthleteProfileById,
 }));
 
 const dialect = new PgDialect();
@@ -119,7 +120,6 @@ function streams(activityId: number, paceSecPerKm: number) {
 /** La ligne de la jointure activité ↔ séance ↔ plan, telle que la requête la rend. */
 function joined(overrides: Partial<Record<string, unknown>> = {}) {
   return {
-    athleteId: 1,
     maxHrBpm: 181,
     sessionKind: 'Test 5 km',
     scheduledOn: '2026-09-16',
@@ -148,8 +148,7 @@ beforeEach(() => {
   dbState.returning = {};
   dbState.updates = [];
   dbState.selects = [];
-  athlete.getCurrentAthleteId.mockResolvedValue(1);
-  athlete.getAthleteProfile.mockResolvedValue({ maxHrBpm: 184 });
+  athlete.getAthleteProfileById.mockResolvedValue({ maxHrBpm: 184 });
 });
 
 describe('pickTestActivity', () => {
@@ -199,16 +198,25 @@ describe('getFitnessTestCandidate', () => {
   it('ne rend rien quand la séance rapprochée n’est pas un test', async () => {
     dbState.rows = { activities: [[joined({ sessionKind: 'Seuil' })]] };
 
-    expect(await getFitnessTestCandidate(42)).toBeNull();
+    expect(await getFitnessTestCandidate(42, 1)).toBeNull();
   });
 
   it('ne rend rien quand aucune séance d’un plan actif n’est rapprochée', async () => {
     dbState.rows = { activities: [[]] };
 
-    expect(await getFitnessTestCandidate(42)).toBeNull();
+    expect(await getFitnessTestCandidate(42, 1)).toBeNull();
     // Le filtre « plan actif » part bien avec la lecture : un plan archivé ne se
     // recalibre pas.
     expect(renderWhere(dbState.selects[0]?.where).params).toContain('active');
+  });
+
+  it('borne la lecture à l’athlète reçu : un id d’activité ne suffit pas', async () => {
+    dbState.rows = { activities: [[]] };
+
+    expect(await getFitnessTestCandidate(42, 9)).toBeNull();
+    // L'athlète est dans le `WHERE`, pas déduit d'une session : le service de
+    // fond n'en a pas, et l'activité d'un autre compte ne doit rien recalibrer.
+    expect(renderWhere(dbState.selects[0]?.where).params).toContain(9);
   });
 
   it('ne rend rien quand le plan n’a pas de chrono de référence', async () => {
@@ -216,7 +224,7 @@ describe('getFitnessTestCandidate', () => {
       activities: [[joined({ referenceDistance: null, referenceTimeS: null })]],
     };
 
-    expect(await getFitnessTestCandidate(42)).toBeNull();
+    expect(await getFitnessTestCandidate(42, 1)).toBeNull();
   });
 
   it('retient le meilleur 5 km de la journée, pas celui de l’activité rapprochée', async () => {
@@ -227,7 +235,7 @@ describe('getFitnessTestCandidate', () => {
       activity_streams: [[...streams(42, 360), ...streams(43, 310)]],
     };
 
-    const candidate = await getFitnessTestCandidate(42);
+    const candidate = await getFitnessTestCandidate(42, 1);
 
     expect(candidate).not.toBeNull();
     expect(candidate?.activityId).toBe(43);
@@ -252,7 +260,7 @@ describe('getFitnessTestCandidate', () => {
       ],
     };
 
-    const candidate = await getFitnessTestCandidate(42);
+    const candidate = await getFitnessTestCandidate(42, 1);
 
     expect(candidate?.activityId).toBe(42);
     expect(candidate?.bestFiveKTimeS).toBe(5 * 360);
@@ -264,7 +272,7 @@ describe('getFitnessTestCandidate', () => {
       activity_streams: [streams(42, 320)],
     };
 
-    const candidate = await getFitnessTestCandidate(42);
+    const candidate = await getFitnessTestCandidate(42, 1);
 
     expect(candidate).toEqual({
       planId: 3,
@@ -285,7 +293,7 @@ describe('getFitnessTestCandidate', () => {
   it('rend un candidat sans chrono quand la journée n’a aucun 5 km mesurable', async () => {
     dbState.rows = { activities: [[joined()], []], activity_streams: [[]] };
 
-    const candidate = await getFitnessTestCandidate(42);
+    const candidate = await getFitnessTestCandidate(42, 1);
 
     // Pas de refus silencieux : le service écrira « inexploitable » plutôt que
     // de ne rien dire.
@@ -294,10 +302,10 @@ describe('getFitnessTestCandidate', () => {
   });
 
   it('ne conclut rien de la FC quand le profil n’en porte pas', async () => {
-    athlete.getAthleteProfile.mockResolvedValue(null);
+    athlete.getAthleteProfileById.mockResolvedValue(null);
     dbState.rows = { activities: [[joined()], []], activity_streams: [streams(42, 320)] };
 
-    expect((await getFitnessTestCandidate(42))?.profileMaxHrBpm).toBeNull();
+    expect((await getFitnessTestCandidate(42, 1))?.profileMaxHrBpm).toBeNull();
   });
 });
 
@@ -305,7 +313,7 @@ describe('recordFitnessTest', () => {
   it('écrit la note seule quand le chrono ne bouge pas', async () => {
     dbState.returning = { plans: [[{ id: 3 }]] };
 
-    expect(await recordFitnessTest(3, { note: 'Test du 16 septembre : rien ne change.' })).toBe(
+    expect(await recordFitnessTest(3, { note: 'Test du 16 septembre : rien ne change.' }, 1)).toBe(
       true,
     );
 
@@ -322,10 +330,11 @@ describe('recordFitnessTest', () => {
   it('écrit le chrono et sa date quand le test l’améliore', async () => {
     dbState.returning = { plans: [[{ id: 3 }]] };
 
-    await recordFitnessTest(3, {
-      note: 'Nouveau record.',
-      reference: { timeS: 1_580.4, updatedOn: '2026-09-16' },
-    });
+    await recordFitnessTest(
+      3,
+      { note: 'Nouveau record.', reference: { timeS: 1_580.4, updatedOn: '2026-09-16' } },
+      1,
+    );
 
     const values = dbState.updates[0]?.values as Record<string, unknown>;
     expect(values.referenceDistance).toBe('5k');
@@ -336,22 +345,23 @@ describe('recordFitnessTest', () => {
   it('porte l’appartenance et l’état actif dans le `WHERE`, pas dans une lecture préalable', async () => {
     dbState.returning = { plans: [[{ id: 3 }]] };
 
-    await recordFitnessTest(3, { note: 'Note.' });
+    await recordFitnessTest(3, { note: 'Note.' }, 1);
 
     const { params } = renderWhere(dbState.updates[0]?.where);
     expect(params).toEqual([3, 1, 'active']);
   });
 
+  it('écrit sous l’athlète reçu, jamais sous celui d’une session', async () => {
+    dbState.returning = { plans: [[{ id: 3 }]] };
+
+    await recordFitnessTest(3, { note: 'Note.' }, 9);
+
+    expect(renderWhere(dbState.updates[0]?.where).params).toEqual([3, 9, 'active']);
+  });
+
   it('rend `false` quand le plan n’est plus le plan actif de l’athlète', async () => {
     dbState.returning = { plans: [[]] };
 
-    expect(await recordFitnessTest(3, { note: 'Note.' })).toBe(false);
-  });
-
-  it('n’écrit rien tant qu’aucun athlète n’est enregistré', async () => {
-    athlete.getCurrentAthleteId.mockResolvedValue(null);
-
-    expect(await recordFitnessTest(3, { note: 'Note.' })).toBe(false);
-    expect(dbState.updates).toHaveLength(0);
+    expect(await recordFitnessTest(3, { note: 'Note.' }, 1)).toBe(false);
   });
 });

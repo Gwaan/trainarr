@@ -718,15 +718,15 @@ export type PlanWithSessions = { plan: PlanDto; sessions: PlanSessionDto[] };
 
 /**
  * Le plan de l'athlète dans l'état demandé, avec ses séances ordonnées dans le
- * temps. `null` s'il n'y en a pas — ou si l'onboarding n'a pas encore eu lieu.
+ * temps. `null` s'il n'y en a pas.
  *
  * Le statut est toujours dans le `WHERE` : c'est lui qui garantit qu'un
  * brouillon ne sorte jamais par la porte du plan actif (et réciproquement).
  */
-async function getPlanWithSessions(status: PlanStatus): Promise<PlanWithSessions | null> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return null;
-
+async function getPlanWithSessions(
+  status: PlanStatus,
+  athleteId: number,
+): Promise<PlanWithSessions | null> {
   const planRows = await db
     .select()
     .from(plans)
@@ -757,9 +757,14 @@ async function getPlanWithSessions(status: PlanStatus): Promise<PlanWithSessions
  * C'est la seule lecture que le reste de l'appli utilise (page du plan,
  * ajustement, synchronisation intervals.icu) : une proposition en attente n'en
  * sort jamais.
+ *
+ * **L'athlète est un paramètre** : cette lecture sert les deux mondes — une
+ * page ou une Server Action, qui lisent l'athlète de la session, et le suivi de
+ * plan déclenché par une ingestion de fond, qui n'a pas de session et reçoit
+ * son athlète du chemin du fichier importé.
  */
-export function getActivePlanWithSessions(): Promise<PlanWithSessions | null> {
-  return getPlanWithSessions('active');
+export function getActivePlanWithSessions(athleteId: number): Promise<PlanWithSessions | null> {
+  return getPlanWithSessions('active', athleteId);
 }
 
 /**
@@ -768,8 +773,8 @@ export function getActivePlanWithSessions(): Promise<PlanWithSessions | null> {
  * Lecture réservée à l'écran qui la soumet à l'athlète : tant qu'elle n'est pas
  * adoptée, ce plan ne pilote rien.
  */
-export function getDraftPlanWithSessions(): Promise<PlanWithSessions | null> {
-  return getPlanWithSessions('draft');
+export function getDraftPlanWithSessions(athleteId: number): Promise<PlanWithSessions | null> {
+  return getPlanWithSessions('draft', athleteId);
 }
 
 /**
@@ -1200,11 +1205,19 @@ export type PlanUpdate = {
  * remplacées : une séance rapprochée d'une activité est de l'histoire, pas de
  * la planification, et le coach n'a pas à la réécrire.
  *
+ * **L'athlète est un paramètre** : l'écriture part aussi bien d'un ajustement
+ * demandé depuis la page du plan (session) que d'un test chronométré ou d'une
+ * révision déclenchés par une ingestion de fond (pas de session).
+ *
  * @throws {PlanNotFoundError} si le plan n'est pas celui, actif, de l'athlète.
  * @throws {InvalidPlanError} si une séance sort de la fenêtre du plan ou de
  * `fromDate`, ou si une valeur des réglages est hors bornes.
  */
-export async function applyPlanUpdate(planId: number, update: PlanUpdate): Promise<void> {
+export async function applyPlanUpdate(
+  planId: number,
+  update: PlanUpdate,
+  athleteId: number,
+): Promise<void> {
   if (!isCivilDate(update.fromDate)) {
     throw new InvalidPlanError('sessions', 'Date de reprise : format AAAA-MM-JJ attendu.');
   }
@@ -1212,9 +1225,6 @@ export async function applyPlanUpdate(planId: number, update: PlanUpdate): Promi
   // Les bornes des réglages se vérifient avant d'ouvrir la transaction : un patch
   // aberrant ne doit pas commencer par supprimer des séances.
   const values = toPlanSettingsValues(update.settings);
-
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) throw new PlanNotFoundError();
 
   await db.transaction(async (tx) => {
     const plan = await requireActivePlan(tx, planId, athleteId);

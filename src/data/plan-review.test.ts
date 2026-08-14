@@ -1,6 +1,6 @@
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   REVIEW_MAX_DETAILED_SESSIONS,
@@ -16,28 +16,24 @@ import {
 vi.mock('server-only', () => ({}));
 
 /**
- * L'athlète appartient à un compte : le DAL le résout depuis la session
- * (`getCurrentAthleteId`). Les tests de ce fichier travaillent donc sous une
- * session ouverte, sauf ceux qui éprouvent le cas « pas encore d'athlète » —
- * ils appellent `withoutSession()`, et le DAL ne rend alors aucun athlète.
+ * **Ce module ne lit plus de session, et ce mock est là pour l'attester.**
+ *
+ * Le seul déclencheur d'une révision est l'ingestion d'un fichier FIT, qui
+ * tourne hors requête : `getSession()` y rend « pas de session », et le bilan
+ * ressortait vide — la révision ne tournait jamais. L'athlète est désormais un
+ * paramètre, et la session est un espion qui lève : un retour à la déduction
+ * ferait échouer ces tests au lieu de repartir en silence.
  */
-const { sessionState } = vi.hoisted(() => {
-  type Session = { userId: string; name: string; email: string } | null;
-  const sessionState: { current: Session } = {
-    current: { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' },
-  };
-  return { sessionState };
-});
+const { getSessionSpy } = vi.hoisted(() => ({
+  getSessionSpy: vi.fn(() => {
+    throw new Error('`getSession` ne doit pas être appelée : ce module reçoit son athlète.');
+  }),
+}));
 
-vi.mock('./session', () => ({ getSession: () => Promise.resolve(sessionState.current) }));
+vi.mock('./session', () => ({ getSession: getSessionSpy }));
 
-/** Personne n'est connecté : aucune lecture du DAL ne rend d'athlète. */
-function withoutSession(): void {
-  sessionState.current = null;
-}
-
-beforeEach(() => {
-  sessionState.current = { userId: 'user_1', name: 'Gwen', email: 'gwen@example.test' };
+afterEach(() => {
+  expect(getSessionSpy).not.toHaveBeenCalled();
 });
 
 /**
@@ -245,7 +241,7 @@ describe('getPlanReview', () => {
       ],
     ];
 
-    await expect(getPlanReview(3)).resolves.toEqual({
+    await expect(getPlanReview(3, 1)).resolves.toEqual({
       completedSessionCount: 2,
       reviewedSessionCount: 1,
       older: null,
@@ -269,7 +265,7 @@ describe('getPlanReview', () => {
     dbState.rows.plans = [[{ reviewedSessionCount: 0, updatedAt: UPDATED_AT }]];
     dbState.rows.planned_sessions = [[]];
 
-    await getPlanReview(3);
+    await getPlanReview(3, 1);
 
     const planWhere = renderWhere(
       dbState.selects.find((select) => select.table === 'plans')?.where,
@@ -297,17 +293,21 @@ describe('getPlanReview', () => {
   it('ne rend rien quand le plan n’est pas le plan actif de l’athlète', async () => {
     dbState.rows.plans = [[]];
 
-    await expect(getPlanReview(999)).resolves.toBeNull();
+    await expect(getPlanReview(999, 1)).resolves.toBeNull();
     // Aucune lecture des séances : la question ne se pose plus.
     expect(dbState.selects.some((select) => select.table === 'planned_sessions')).toBe(false);
   });
 
-  it('ne rend rien tant qu’aucun athlète n’est enregistré', async () => {
-    withoutSession();
-    dbState.rows.athlete = [[]];
+  it('lit sous l’athlète reçu, jamais sous celui d’une session', async () => {
+    dbState.rows.plans = [[{ reviewedSessionCount: 0, updatedAt: UPDATED_AT }]];
+    dbState.rows.planned_sessions = [[]];
 
-    await expect(getPlanReview(3)).resolves.toBeNull();
-    expect(dbState.selects.some((select) => select.table === 'plans')).toBe(false);
+    await getPlanReview(3, 9);
+
+    const planWhere = renderWhere(
+      dbState.selects.find((select) => select.table === 'plans')?.where,
+    );
+    expect(planWhere.params).toContain(9);
   });
 });
 
@@ -315,7 +315,7 @@ describe('getPlanUpdatedAt', () => {
   it('rend la dernière modification du plan actif de l’athlète', async () => {
     dbState.rows.plans = [[{ updatedAt: UPDATED_AT }]];
 
-    await expect(getPlanUpdatedAt(3)).resolves.toBe(UPDATED_AT.toISOString());
+    await expect(getPlanUpdatedAt(3, 1)).resolves.toBe(UPDATED_AT.toISOString());
 
     const where = renderWhere(dbState.selects.find((select) => select.table === 'plans')?.where);
     expect(where.params).toContain(3);
@@ -326,21 +326,22 @@ describe('getPlanUpdatedAt', () => {
   it('ne rend rien quand le plan n’est plus le plan actif', async () => {
     dbState.rows.plans = [[]];
 
-    await expect(getPlanUpdatedAt(3)).resolves.toBeNull();
+    await expect(getPlanUpdatedAt(3, 1)).resolves.toBeNull();
   });
 
-  it('ne rend rien tant qu’aucun athlète n’est enregistré', async () => {
-    withoutSession();
-    dbState.rows.athlete = [[]];
+  it('lit sous l’athlète reçu, jamais sous celui d’une session', async () => {
+    dbState.rows.plans = [[{ updatedAt: UPDATED_AT }]];
 
-    await expect(getPlanUpdatedAt(3)).resolves.toBeNull();
-    expect(dbState.selects.some((select) => select.table === 'plans')).toBe(false);
+    await getPlanUpdatedAt(3, 9);
+
+    const where = renderWhere(dbState.selects.find((select) => select.table === 'plans')?.where);
+    expect(where.params).toContain(9);
   });
 });
 
 describe('markPlanReviewed', () => {
   it('avance le marqueur et date la révision, sur le seul plan actif de l’athlète', async () => {
-    await markPlanReviewed(3, 6);
+    await markPlanReviewed(3, 6, 1);
 
     const update = dbState.updates[0];
     expect(update.table).toBe('plans');
@@ -352,12 +353,9 @@ describe('markPlanReviewed', () => {
     expect(where.params).toContain('active');
   });
 
-  it('n’écrit rien tant qu’aucun athlète n’est enregistré', async () => {
-    withoutSession();
-    dbState.rows.athlete = [[]];
+  it('écrit sous l’athlète reçu, jamais sous celui d’une session', async () => {
+    await markPlanReviewed(3, 6, 9);
 
-    await markPlanReviewed(3, 6);
-
-    expect(dbState.updates).toHaveLength(0);
+    expect(renderWhere(dbState.updates[0].where).params).toContain(9);
   });
 });

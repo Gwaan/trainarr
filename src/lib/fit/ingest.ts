@@ -107,14 +107,18 @@ async function linkToPlannedSession(activityId: number): Promise<void> {
  * et l'une des deux écritures écraserait l'autre. Enchaînés, la révision part
  * sur l'état à jour — et son contrôle de fraîcheur n'a rien à rattraper.
  *
+ * **L'athlète leur est passé**, comme à l'ingestion elle-même : ils tournent
+ * dans le watcher, hors requête. Le déduire d'une session ne rendait rien, et
+ * les deux services s'arrêtaient sans le dire.
+ *
  * Les deux services ne lèvent pas et journalisent leurs propres échecs
  * (`[plan/test]`, `[plan/review]`) ; le `catch` est un dernier recours — une
  * promesse abandonnée sans lui ferait remonter un rejet non géré au niveau du
  * process.
  */
-function scheduleActivePlanFollowUp(activityId: number): void {
-  void maybeApplyFitnessTest(activityId)
-    .then(() => maybeReviewActivePlan())
+function scheduleActivePlanFollowUp(activityId: number, athleteId: number): void {
+  void maybeApplyFitnessTest(activityId, athleteId)
+    .then(() => maybeReviewActivePlan(athleteId))
     .catch((error: unknown) => {
       console.error('[fit] suivi du plan impossible —', error);
     });
@@ -136,6 +140,13 @@ function scheduleActivePlanFollowUp(activityId: number): void {
  * requête : chaque fichier partait en `failed/`. Le repli qui aurait « réparé »
  * ça (le premier athlète venu) est exactement ce que le cloisonnement par compte
  * interdit.
+ *
+ * **L'athlète descend jusqu'au bout de la chaîne**, et pas seulement jusqu'ici.
+ * Le rapprochement, le test chronométré, la révision du plan et la publication
+ * du calendrier le reçoivent tous en paramètre : le donner à l'ingestion sans le
+ * donner à ce qu'elle déclenche laissait ces quatre-là résoudre `null` et ne
+ * rien faire, sans le moindre échec visible — juste un `[auth] lecture de la
+ * session impossible` par fichier importé.
  *
  * Les séries temporelles suivent {@link shouldRewriteStreams}.
  *
@@ -159,7 +170,7 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
   }
 
   await linkToPlannedSession(activityId);
-  scheduleActivePlanFollowUp(activityId);
+  scheduleActivePlanFollowUp(activityId, athleteId);
 
   return { status, activityId };
 }

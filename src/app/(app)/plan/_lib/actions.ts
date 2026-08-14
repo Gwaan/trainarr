@@ -16,7 +16,12 @@ import { revalidatePath } from 'next/cache';
 import { after } from 'next/server';
 import { z } from 'zod';
 
-import { AthleteNotFoundError, isCivilDate, todayCivilDate } from '@/data/athlete';
+import {
+  AthleteNotFoundError,
+  getCurrentAthleteId,
+  isCivilDate,
+  todayCivilDate,
+} from '@/data/athlete';
 import {
   acceptDraftPlan,
   archiveActivePlan,
@@ -570,6 +575,11 @@ export async function acceptPlanAction(
   const parsed = planIdSchema.safeParse(textField(formData, 'planId'));
   if (!parsed.success) return { status: 'error', message: NO_DRAFT };
 
+  // L'athlète de la session : c'est lui que les suites de l'adoption prennent en
+  // paramètre — elles n'ont pas de requête à interroger, elles ne s'y fient pas.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { status: 'error', message: NO_DRAFT };
+
   let planId: number;
   try {
     planId = (await acceptDraftPlan(parsed.data)).id;
@@ -589,7 +599,7 @@ export async function acceptPlanAction(
   try {
     // La politique d'un plan devenu actif vit dans le service, pas ici : une
     // adoption produit exactement les mêmes effets qu'un ajustement.
-    await afterActivePlanChanged(planId);
+    await afterActivePlanChanged(planId, athleteId);
   } catch (error) {
     console.error("[plan] suites de l'adoption impossibles :", error);
   }
@@ -702,6 +712,11 @@ export async function archivePlanAction(
     return { status: 'error', message: "L'archivage doit être confirmé." };
   }
 
+  // Lu avant l'archivage : la republication du calendrier le prend en paramètre,
+  // et la lire après ne changerait rien — un athlète ne cesse pas d'exister.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { status: 'error', message: NO_ACTIVE_PLAN };
+
   let archived: boolean;
   try {
     archived = await archiveActivePlan();
@@ -718,7 +733,7 @@ export async function archivePlanAction(
   // part après la réponse (`after`) : l'API injoignable, l'attendre ici tiendrait
   // l'utilisatrice sur un spinner le temps des délais de garde, pour un résultat
   // qui ne change rien à ce qu'elle va voir.
-  after(() => syncPlanToIntervalsSafely('archivage du plan'));
+  after(() => syncPlanToIntervalsSafely('archivage du plan', athleteId));
 
   revalidatePath('/plan');
   revalidatePath('/');

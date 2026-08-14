@@ -7,7 +7,7 @@ import { computeBestSegments } from '@/lib/metrics/best-segments';
 import { REFERENCE_DISTANCES } from '@/lib/metrics/vdot';
 import { FITNESS_TEST_EFFORT_M, FITNESS_TEST_KIND } from '@/lib/plan-skeleton';
 
-import { getAthleteProfile, getCurrentAthleteId } from './athlete';
+import { getAthleteProfileById } from './athlete';
 import { db } from './db/client';
 import { activities, activityStreams, plannedSessions, plans } from './db/schema';
 import { isRunning } from './training-metrics';
@@ -78,9 +78,12 @@ export type FitnessTestCandidateDto = {
  * - le plan n'a pas de chrono de référence : il n'y a alors rien à mettre à
  *   jour, ses allures ne viennent pas d'une table VDOT.
  *
- * L'athlète est pris **sur l'activité**, comme dans le rapprochement : l'appelant
- * est le pipeline d'import, pas un client, et les deux tables sont jointes sous
- * le même athlète — aucun plan d'un autre ne peut être touché.
+ * **L'athlète est un paramètre** : l'appelant est le pipeline d'import, qui
+ * tourne hors requête et sait à qui appartient le fichier. Il borne l'activité
+ * lue, et les deux autres tables sont jointes sous le même athlète — aucun plan
+ * d'un autre ne peut être touché. Le profil, lui, était lu par la session
+ * (`getAthleteProfile`) : hors requête il ressortait `null`, et la FC max
+ * manquante faisait refuser tous les tests pour « effort non maximal ».
  *
  * ## Le chrono ne vient pas forcément de l'activité qui déclenche
  *
@@ -94,10 +97,10 @@ export type FitnessTestCandidateDto = {
  */
 export async function getFitnessTestCandidate(
   activityId: number,
+  athleteId: number,
 ): Promise<FitnessTestCandidateDto | null> {
   const rows = await db
     .select({
-      athleteId: activities.athleteId,
       maxHrBpm: activities.maxHrBpm,
       sessionKind: plannedSessions.kind,
       scheduledOn: plannedSessions.scheduledOn,
@@ -113,7 +116,13 @@ export async function getFitnessTestCandidate(
       plans,
       and(eq(plans.id, plannedSessions.planId), eq(plans.athleteId, activities.athleteId)),
     )
-    .where(and(eq(activities.id, activityId), eq(plans.status, 'active')))
+    .where(
+      and(
+        eq(activities.id, activityId),
+        eq(activities.athleteId, athleteId),
+        eq(plans.status, 'active'),
+      ),
+    )
     .limit(1);
 
   const row = rows[0];
@@ -122,8 +131,8 @@ export async function getFitnessTestCandidate(
   if (row.referenceDistance === null || row.referenceTimeS === null) return null;
 
   const [effort, profile] = await Promise.all([
-    bestEffortOfDay(row.athleteId, row.scheduledOn, { id: activityId, maxHrBpm: row.maxHrBpm }),
-    getAthleteProfile(),
+    bestEffortOfDay(athleteId, row.scheduledOn, { id: activityId, maxHrBpm: row.maxHrBpm }),
+    getAthleteProfileById(athleteId),
   ]);
 
   return {
@@ -287,10 +296,8 @@ export type FitnessTestRecord = {
 export async function recordFitnessTest(
   planId: number,
   record: FitnessTestRecord,
+  athleteId: number,
 ): Promise<boolean> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return false;
-
   const updated = await db
     .update(plans)
     .set({

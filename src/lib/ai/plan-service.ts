@@ -53,7 +53,7 @@ import 'server-only';
 import { after } from 'next/server';
 import { z } from 'zod';
 
-import { isCivilDate, todayCivilDate } from '@/data/athlete';
+import { getCurrentAthleteId, isCivilDate, todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot, type TrainingSnapshotDto } from '@/data/coach-context';
 import type { PlanGoalType, PlanLevel } from '@/data/db/schema';
 import { reconcilePlanSessions } from '@/data/plan-reconciliation';
@@ -991,21 +991,60 @@ async function planSummary(
  * - le **rapprochement** reste dans le fil de la requête, parce que son résultat
  *   conditionne ce que la page re-rendue affiche (« réalisée » plutôt que
  *   « manquée ») ;
- * - la **synchronisation** part en {@link after} : elle n'a aucune influence sur
- *   la réponse, et intervals.icu injoignable au niveau TCP coûte jusqu'à trois
- *   fois trente secondes de délai de garde — autant de spinner pour un plan déjà
- *   écrit en base.
+ * - la **synchronisation** part en {@link after} — **quand il y a une réponse**
+ *   (cf. {@link syncAfterResponse}) : elle n'a aucune influence sur elle, et
+ *   intervals.icu injoignable au niveau TCP coûte jusqu'à trois fois trente
+ *   secondes de délai de garde — autant de spinner pour un plan déjà écrit en
+ *   base.
+ *
+ * **L'athlète est un paramètre** : les deux points d'appel actuels sont des
+ * Server Actions, qui le lisent de leur session, mais rien de ce que fait cette
+ * fonction n'a besoin d'une requête — et le suivi de plan déclenché par une
+ * ingestion de fond appelle exactement les deux mêmes effets.
  */
-export async function afterActivePlanChanged(planId: number): Promise<void> {
+export async function afterActivePlanChanged(planId: number, athleteId: number): Promise<void> {
   try {
-    await reconcilePlanSessions(planId);
+    await reconcilePlanSessions(planId, athleteId);
   } catch (error) {
     console.error(`[plan] rapprochement des séances du plan ${planId} impossible :`, error);
   }
 
-  // Le catch vit dans le module de synchronisation : les trois points de
-  // branchement (adoption, ajustement, archivage) partagent la même garde.
-  after(() => syncPlanToIntervalsSafely(`plan ${planId}`));
+  await syncAfterResponse(planId, athleteId);
+}
+
+/**
+ * Republie le calendrier après la réponse — **s'il y a une réponse**.
+ *
+ * `after()` n'est pas neutre hors contexte de requête : il **lève**
+ * `E468` (« `after` was called outside a request scope »), vérifié dans
+ * `next/dist/server/after/after.js`, où l'absence de `workAsyncStorage` ou de
+ * `workUnitAsyncStorage` est un `throw` sec. Ce n'est donc pas « la
+ * synchronisation ne part pas » mais « la fonction échoue après une écriture
+ * déjà committée » — le mode de panne exact qui a fait attendre la révision
+ * automatique (cf. `applyReviewEffects` dans `review-service.ts`).
+ *
+ * Next n'expose aucun prédicat public « suis-je dans une requête ? » : le seul
+ * moyen honnête de le savoir est de tenter. L'échec ne masque rien — il
+ * **rétrograde** vers le comportement d'une tâche de fond, où il n'y a personne
+ * à ne pas faire attendre : la synchronisation est alors attendue ici même, et
+ * la raison du basculement est journalisée.
+ *
+ * Le `catch` du module de synchronisation ({@link syncPlanToIntervalsSafely})
+ * couvre les deux chemins : ni l'un ni l'autre ne peut faire échouer un plan
+ * déjà écrit.
+ */
+async function syncAfterResponse(planId: number, athleteId: number): Promise<void> {
+  const context = `plan ${planId}`;
+  try {
+    after(() => syncPlanToIntervalsSafely(context, athleteId));
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.log(
+      `[plan] ${context} : pas de contexte de requête (${reason}) — ` +
+        `synchronisation du calendrier attendue au lieu d'être différée.`,
+    );
+    await syncPlanToIntervalsSafely(context, athleteId);
+  }
 }
 
 /**
@@ -1035,7 +1074,10 @@ export async function generatePlan(request: PlanRequest, progressId?: string): P
   await requireAi();
 
   const window = planWindow(request, todayCivilDate());
-  const snapshot = await getTrainingSnapshot();
+  // Chemin de **requête** (Server Action de la page « Plan ») : l'athlète vient
+  // donc de la session. `null` — onboarding non fait — rend un snapshot vide,
+  // exactement comme avant, et l'écriture refusera ensuite avec sa propre erreur.
+  const snapshot = await getTrainingSnapshot(await getCurrentAthleteId());
 
   try {
     return await writeGeneratedPlan(request, window, snapshot, progressId);
@@ -2962,12 +3004,19 @@ async function writeUpdatedPlan(
 ): Promise<PlanDto> {
   await requireAi();
 
-  const active = await getActivePlanWithSessions();
+  // Chemin de **requête** (Server Action de la page « Plan ») : l'athlète vient
+  // de la session, et il descend ensuite explicitement dans tout ce que
+  // l'ajustement écrit. Pas d'athlète, pas de plan actif — la même réponse que
+  // lorsque la lecture rendait `null` d'elle-même.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) throw new PlanNotFoundError();
+
+  const active = await getActivePlanWithSessions(athleteId);
   if (active === null) throw new PlanNotFoundError();
 
   const fromDate = shiftCivilDate(todayCivilDate(), 1);
   const window = remainingPlanWindow(active.plan, fromDate);
-  const snapshot = await getTrainingSnapshot();
+  const snapshot = await getTrainingSnapshot(athleteId);
 
   // 1. La seule chose que le modèle décide du calendrier : les réglages durables.
   const settings = await instructionSettings(active.plan, window, instruction);
@@ -2993,14 +3042,18 @@ async function writeUpdatedPlan(
 
   // Séances et réglages en une seule transaction : un plan ne doit jamais
   // annoncer des contraintes que son calendrier ne suit pas.
-  await applyPlanUpdate(active.plan.id, {
-    fromDate,
-    sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
-    settings: planSettingsPatch(active.plan, settings, summary),
-  });
-  await afterActivePlanChanged(active.plan.id);
+  await applyPlanUpdate(
+    active.plan.id,
+    {
+      fromDate,
+      sessions: mapPlanWeeksToSessions(rewrite.weeks, window.firstWeekStart),
+      settings: planSettingsPatch(active.plan, settings, summary),
+    },
+    athleteId,
+  );
+  await afterActivePlanChanged(active.plan.id, athleteId);
 
-  const refreshed = await getActivePlanWithSessions();
+  const refreshed = await getActivePlanWithSessions(athleteId);
   if (refreshed === null) throw new PlanNotFoundError();
   return refreshed.plan;
 }

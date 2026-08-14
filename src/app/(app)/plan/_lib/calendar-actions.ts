@@ -21,7 +21,7 @@ import { revalidatePath } from 'next/cache';
 import { after } from 'next/server';
 import { z } from 'zod';
 
-import { todayCivilDate } from '@/data/athlete';
+import { getCurrentAthleteId, todayCivilDate } from '@/data/athlete';
 import {
   InvalidPlanError,
   PlanNotFoundError,
@@ -150,9 +150,14 @@ export async function moveSessionAction(
 
   const { sessionId, toDate } = parsed.data;
 
+  // L'action sert une requête : l'athlète vient de la session, et c'est lui qui
+  // borne la lecture du plan comme la republication du calendrier.
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return { status: 'error', message: NO_ACTIVE_PLAN };
+
   let active: PlanWithSessions | null;
   try {
-    active = await getActivePlanWithSessions();
+    active = await getActivePlanWithSessions(athleteId);
   } catch (error) {
     console.error('[calendrier] lecture du plan actif impossible :', error);
     return { status: 'error', message: "Le plan n'a pas pu être lu. Réessaie." };
@@ -197,7 +202,7 @@ export async function moveSessionAction(
   // à l'archivage — l'API injoignable, l'attendre ici tiendrait l'utilisatrice
   // sur un spinner le temps des délais de garde, pour un résultat qui ne change
   // rien à ce qu'elle va voir.
-  after(() => syncPlanToIntervalsSafely('déplacement de séance'));
+  after(() => syncPlanToIntervalsSafely('déplacement de séance', athleteId));
 
   // Le tableau de bord affiche la séance du jour : elle vient peut-être de
   // changer, dans un sens comme dans l'autre.

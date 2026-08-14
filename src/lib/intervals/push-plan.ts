@@ -89,7 +89,12 @@ import 'server-only';
  * écrit en base reste écrit même si intervals.icu est injoignable.
  */
 
-import { getAthleteProfile, getIntervalsCredentials, todayCivilDate } from '@/data/athlete';
+import {
+  getAthleteProfileById,
+  getCurrentAthleteId,
+  getIntervalsCredentialsById,
+  todayCivilDate,
+} from '@/data/athlete';
 import { getActivePlanWithSessions, PLAN_LIMITS, type PlanSessionDto } from '@/data/plans';
 // Formateurs de `@/lib/ai/format` : purs, sans `server-only`, et déjà porteurs
 // des conventions françaises du projet (allure `m:ss/km`). Les redéclarer ici
@@ -406,19 +411,19 @@ async function readIntervalsMaxHr(credentials: {
 /**
  * Les identifiants enregistrés, ou le constat que la clé ne se déchiffre plus.
  *
- * `getIntervalsCredentials` **lève** quand la clé est illisible, plutôt que de
- * la faire passer pour absente. C'est la bonne conduite pour le DAL et la
+ * `getIntervalsCredentialsById` **lève** quand la clé est illisible, plutôt que
+ * de la faire passer pour absente. C'est la bonne conduite pour le DAL et la
  * mauvaise pour ici : une clé perdue n'est pas une panne de synchronisation,
  * c'est une configuration à refaire — donc un `unconfigured` avec son motif, que
  * la resynchronisation manuelle réaffiche à l'athlète.
  */
-async function readCredentials(): Promise<
+async function readCredentials(athleteId: number): Promise<
   | { status: 'ready'; intervalsAthleteId: string | null; apiKey: string }
   | { status: 'unreadable'; reason: string }
   | null
 > {
   try {
-    const credentials = await getIntervalsCredentials();
+    const credentials = await getIntervalsCredentialsById(athleteId);
     return credentials === null ? null : { status: 'ready', ...credentials };
   } catch (error) {
     if (error instanceof SecretDecryptionError || error instanceof SecretKeyUnavailableError) {
@@ -437,17 +442,22 @@ async function readCredentials(): Promise<
  * Sans plan actif — archivage — le plan voulu est vide : toutes les séances
  * Trainarr encore à venir sont alors supprimées, et rien n'est publié.
  *
+ * **L'athlète est un paramètre**, jamais une déduction. La publication a deux
+ * déclencheurs : une écriture de plan demandée par l'athlète (Server Action —
+ * l'appelant lit l'athlète de sa session) et une écriture décidée par le suivi
+ * de plan derrière une ingestion de fond, qui n'a pas de requête et donc pas de
+ * session. Lire les identifiants « du compte connecté » ne rendait rien dans le
+ * second cas : le calendrier n'était jamais republié, et le journal ne montrait
+ * qu'un « aucune clé API enregistrée » trompeur.
+ *
  * @throws {IntervalsApiError} et ses sous-classes si l'API refuse ou ne répond
  * pas. Les appelants applicatifs passent par {@link syncPlanToIntervalsSafely}.
  */
-export async function syncPlanToIntervals(): Promise<PushReport> {
+export async function syncPlanToIntervals(athleteId: number): Promise<PushReport> {
   // Mêmes identifiants que le poller, et à la même source : ceux de l'athlète,
   // en base. La clé API suffit, l'identifiant d'athlète est facultatif
   // (`0` = le porteur de la clé).
-  //
-  // Cette lecture-ci passe par la session, comme le plan et le profil lus
-  // ci-dessous : la synchronisation pousse le calendrier de l'athlète connecté.
-  const stored = await readCredentials();
+  const stored = await readCredentials(athleteId);
   if (stored === null) {
     return { status: 'unconfigured', reason: 'aucune clé API intervals.icu enregistrée' };
   }
@@ -464,7 +474,10 @@ export async function syncPlanToIntervals(): Promise<PushReport> {
 
   // Le profil est lu à **chaque** synchronisation, et jamais figé dans le plan :
   // c'est ce qui fait suivre une FC max corrigée sur tout le calendrier.
-  const [active, profile] = await Promise.all([getActivePlanWithSessions(), getAthleteProfile()]);
+  const [active, profile] = await Promise.all([
+    getActivePlanWithSessions(athleteId),
+    getAthleteProfileById(athleteId),
+  ]);
   const profileMaxHrBpm = profile?.maxHrBpm ?? null;
 
   // La FC max distante n'a de sens qu'en dénominateur d'une prescription qui
@@ -532,9 +545,12 @@ export type SafeSyncOutcome = PushReport | { status: 'failed' };
  * l'ignorent (ils partent en `after()`), la resynchronisation manuelle en a
  * besoin pour dire à l'athlète ce qui vient de se passer.
  */
-export async function syncPlanToIntervalsSafely(context: string): Promise<SafeSyncOutcome> {
+export async function syncPlanToIntervalsSafely(
+  context: string,
+  athleteId: number,
+): Promise<SafeSyncOutcome> {
   try {
-    const report = await syncPlanToIntervals();
+    const report = await syncPlanToIntervals(athleteId);
     if (report.status === 'unconfigured') {
       console.error(
         `[plan/intervals] ${context} : calendrier non synchronisé — ${report.reason}.`,
@@ -636,8 +652,13 @@ export async function resyncPlanToIntervalsOnDemand(): Promise<ManualSyncOutcome
   lock.running = true;
 
   try {
-    if ((await getActivePlanWithSessions()) === null) return { status: 'no-plan' };
-    return await syncPlanToIntervalsSafely('resynchronisation manuelle');
+    // Porte de **requête** : l'athlète vient de la session. Pas d'athlète, pas de
+    // plan actif — la même réponse que si le plan avait été archivé.
+    const athleteId = await getCurrentAthleteId();
+    if (athleteId === null) return { status: 'no-plan' };
+
+    if ((await getActivePlanWithSessions(athleteId)) === null) return { status: 'no-plan' };
+    return await syncPlanToIntervalsSafely('resynchronisation manuelle', athleteId);
   } finally {
     lock.running = false;
   }
