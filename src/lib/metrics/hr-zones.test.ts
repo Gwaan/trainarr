@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { computeHrZones, hrZoneOf } from './hr-zones';
+import { computeHrZones, hrZoneAnchor, hrZoneOf, type HrZoneAnchor } from './hr-zones';
 
-const MAX_HR = 200;
+/** L'ancrage historique : une FC max de 200, sans FC seuil adoptée. */
+const MAX_HR: HrZoneAnchor = { kind: 'max-hr', bpm: 200 };
 
 /** Série 1 Hz de `count` secondes, FC donnée par une fonction du temps. */
 function series(count: number, hrAt: (second: number) => number) {
@@ -163,8 +164,8 @@ describe('computeHrZones', () => {
   it('ne calcule rien sans données exploitables', () => {
     const { time, hr } = series(100, () => 150);
 
-    expect(computeHrZones(hr, time, 0)).toEqual([]);
-    expect(computeHrZones(hr, time, Number.NaN)).toEqual([]);
+    expect(computeHrZones(hr, time, { kind: 'max-hr', bpm: 0 })).toEqual([]);
+    expect(computeHrZones(hr, time, { kind: 'max-hr', bpm: Number.NaN })).toEqual([]);
     expect(computeHrZones([], [], MAX_HR)).toEqual([]);
     // Un instant unique n'a pas de durée.
     expect(computeHrZones([150], [0], MAX_HR)).toEqual([]);
@@ -185,7 +186,75 @@ describe('hrZoneOf', () => {
 
   it('ne devine aucune zone sans FC max exploitable', () => {
     expect(hrZoneOf(150, null)).toBeNull();
-    expect(hrZoneOf(150, 0)).toBeNull();
+    expect(hrZoneOf(150, { kind: 'max-hr', bpm: 0 })).toBeNull();
     expect(hrZoneOf(0, MAX_HR)).toBeNull();
+  });
+});
+
+/** L'ancrage de l'athlète qui a adopté une FC seuil de 170. */
+const LTHR: HrZoneAnchor = { kind: 'lthr', bpm: 170 };
+
+describe('hrZoneAnchor', () => {
+  it('fait primer la FC seuil dès qu’elle existe — c’est tout l’objet de son adoption', () => {
+    expect(hrZoneAnchor(200, 170)).toEqual({ kind: 'lthr', bpm: 170 });
+  });
+
+  it('retombe sur la FC max sans FC seuil — le comportement d’avant, à la ligne près', () => {
+    expect(hrZoneAnchor(200, null)).toEqual({ kind: 'max-hr', bpm: 200 });
+  });
+
+  it('ne rend aucun ancrage sans référence exploitable', () => {
+    expect(hrZoneAnchor(null, null)).toBeNull();
+    expect(hrZoneAnchor(0, 0)).toBeNull();
+    expect(hrZoneAnchor(Number.NaN, Number.NaN)).toBeNull();
+    // Une FC seuil absurde ne bloque pas la FC max : c'est un ancrage qu'on
+    // choisit, pas un drapeau qui désactive tout.
+    expect(hrZoneAnchor(200, Number.NaN)).toEqual({ kind: 'max-hr', bpm: 200 });
+  });
+});
+
+describe('zones ancrées sur la FC seuil', () => {
+  it('applique les frontières de Friel : 85, 90, 95 et 100 % du seuil', () => {
+    // Sur un seuil de 170 : 144,5 = 85 %, 153 = 90 %, 161,5 = 95 %, 170 = 100 %.
+    const boundaries: Array<[number, number]> = [
+      [144, 1],
+      [145, 2],
+      [152, 2],
+      [153, 3],
+      [161, 3],
+      [162, 4],
+      [169, 4],
+      [170, 5],
+      [185, 5],
+    ];
+
+    for (const [beats, expected] of boundaries) {
+      expect(hrZoneOf(beats, LTHR), `${beats} bpm`).toBe(expected);
+    }
+  });
+
+  it('classe la même fréquence différemment selon l’ancrage — c’est le fond du sujet', () => {
+    // 160 bpm : 80 % d'une FC max de 200 (Z4 « seuil » de la table générique),
+    // mais seulement 94 % d'un seuil mesuré à 170 (Z3, endurance active). Deux
+    // coureurs de même FC max et de seuils différents ne courent pas la même
+    // chose au même pourcentage.
+    expect(hrZoneOf(160, MAX_HR)).toBe(4);
+    expect(hrZoneOf(160, LTHR)).toBe(3);
+  });
+
+  it('répartit tout le temps enregistré, comme l’autre ancrage', () => {
+    const { time, hr } = series(600, (second) => 130 + (second % 60));
+    const zones = computeHrZones(hr, time, LTHR);
+
+    expect(zones.map((zone) => zone.zone)).toEqual([1, 2, 3, 4, 5]);
+    expect(zones.reduce((sum, zone) => sum + zone.share, 0)).toBeCloseTo(1, 12);
+  });
+
+  it('ne déplace pas les zones de qui n’a pas adopté de seuil', () => {
+    const { time, hr } = series(300, () => 150);
+
+    expect(computeHrZones(hr, time, MAX_HR)).toEqual(
+      computeHrZones(hr, time, { kind: 'max-hr', bpm: 200 }),
+    );
   });
 });

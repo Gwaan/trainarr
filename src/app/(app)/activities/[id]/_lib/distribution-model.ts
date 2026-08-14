@@ -26,7 +26,7 @@
  */
 
 import { niceStep } from "@/lib/chart/model";
-import { hrZoneOf, type DistributionBin } from "@/lib/metrics";
+import { hrZoneOf, type DistributionBin, type HrZoneAnchor } from "@/lib/metrics";
 
 import { formatNumber } from "../../../_lib/format";
 import { formatPaceValue } from "./format-detail";
@@ -231,18 +231,23 @@ export function paceDistributionModel(bins: readonly DistributionBin[]): Distrib
 /**
  * Histogramme cardiaque.
  *
- * Avec une FC max au profil, chaque tranche prend la couleur de **sa zone**
+ * Avec une référence au profil, chaque tranche prend la couleur de **sa zone**
  * (rampe séquentielle du design system, zone du milieu de tranche) : la FC est
  * une magnitude ordonnée, et c'est la lecture que l'athlète attend — les zones
- * sautent aux yeux sans lire l'axe. Sans FC max, aucune zone n'est devinée : les
- * barres prennent la couleur de la série FC (`negative`), unie.
+ * sautent aux yeux sans lire l'axe. Sans référence, aucune zone n'est devinée :
+ * les barres prennent la couleur de la série FC (`negative`), unie.
+ *
+ * Les frontières de couleur sont celles de `hrZoneOf`, ancrage compris : adopter
+ * une FC seuil déplace donc les couleurs de cet histogramme exactement comme il
+ * déplace les barres du panneau des zones — c'est le même découpage, il n'y en a
+ * qu'un.
  */
 export function hrDistributionModel(
   bins: readonly DistributionBin[],
-  maxHrBpm: number | null,
+  anchor: HrZoneAnchor | null,
 ): DistributionModel {
   return buildModel(bins, (value) => String(Math.round(value)), " bpm", (bin) => {
-    const zone = hrZoneOf(binMidpoint(bin), maxHrBpm);
+    const zone = hrZoneOf(binMidpoint(bin), anchor);
     return zone === null
       ? { fillClass: "bg-negative", zoneLabel: null }
       : { fillClass: zoneBarClass(zone), zoneLabel: `Z${zone}` };

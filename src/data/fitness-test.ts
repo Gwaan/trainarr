@@ -10,6 +10,7 @@ import { FITNESS_TEST_EFFORT_M, FITNESS_TEST_KIND } from '@/lib/plan-skeleton';
 import { getAthleteProfileById } from './athlete';
 import { db } from './db/client';
 import { activities, activityStreams, plannedSessions, plans } from './db/schema';
+import { numberSeries } from './db/streams';
 import { isRunning } from './training-metrics';
 
 /**
@@ -305,17 +306,3 @@ export async function recordFitnessTest(
   return updated.length > 0;
 }
 
-/** La série est-elle bien une suite de nombres (ou de trous) ? */
-function isNumberSeries(data: readonly unknown[]): data is (number | null)[] {
-  return data.every((value) => value === null || typeof value === 'number');
-}
-
-/** Une série numérique de `activity_streams`, `null` si absente ou mal formée. */
-function numberSeries(
-  rows: readonly { type: string; data: unknown[] }[],
-  type: string,
-): (number | null)[] | null {
-  const row = rows.find((candidate) => candidate.type === type);
-  if (row === undefined || row.data.length === 0) return null;
-  return isNumberSeries(row.data) ? row.data : null;
-}

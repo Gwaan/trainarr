@@ -33,6 +33,16 @@ export type AthleteProfileDto = {
   sex: AthleteSex | null;
   maxHrBpm: number | null;
   restingHrBpm: number | null;
+  /**
+   * FC seuil adoptée, `null` tant qu'aucune ne l'a été.
+   *
+   * **En lecture seule** — c'est la seule ligne du DTO que le formulaire ne
+   * modifie pas : une FC seuil ne se saisit pas, elle se mesure et s'accepte
+   * depuis une proposition (`./lthr-suggestion.ts`). Elle figure ici parce que
+   * c'est elle qui décide de l'ancrage des zones cardiaques, et que chaque écran
+   * qui affiche une zone doit savoir sur quoi elle est calée.
+   */
+  lthrBpm: number | null;
   weightKg: number | null;
   /** Date civile `YYYY-MM-DD`. */
   birthDate: string | null;
@@ -41,8 +51,8 @@ export type AthleteProfileDto = {
 /**
  * Le profil tel que l'onboarding et l'édition le soumettent.
  *
- * Mêmes champs que le DTO : ce que l'UI affiche est exactement ce qu'elle peut
- * modifier. Tous les champs physiologiques sont facultatifs — un profil
+ * Mêmes champs que le DTO, **moins la FC seuil** : elle se mesure et s'accepte,
+ * elle ne se saisit pas. Tous les champs physiologiques sont facultatifs — un profil
  * incomplet vaut mieux qu'une valeur inventée (les métriques concernées se
  * déclarent « non calculables »).
  */
@@ -137,6 +147,7 @@ export function toAthleteProfileDto(row: Athlete): AthleteProfileDto {
     sex: row.sex,
     maxHrBpm: row.maxHrBpm,
     restingHrBpm: row.restingHrBpm,
+    lthrBpm: row.lthrBpm,
     weightKg: row.weightKg,
     birthDate: row.birthDate,
   };

@@ -8,6 +8,7 @@ import { requireSession } from "./_lib/require-session";
 
 import { DashboardSkeleton } from "./_components/dashboard-skeleton";
 import { KeyMetrics } from "./_components/key-metrics";
+import { LthrSuggestionCard } from "./_components/lthr-suggestion-card";
 import { MaxHrSuggestionCard } from "./_components/max-hr-suggestion-card";
 import { OnboardingCard } from "./_components/onboarding-card";
 import { PlanRevisionCard } from "./_components/plan-revision-card";
@@ -16,6 +17,7 @@ import { RestingHrSuggestionCard } from "./_components/resting-hr-suggestion-car
 import { TodaySessionPanel } from "./_components/today-session-panel";
 import { TrainingLoadPanel } from "./_components/training-load-panel";
 import { capitalize, formatFullDate } from "./_lib/format";
+import { toLthrSuggestionView } from "./_lib/lthr-suggestion";
 import { toMaxHrSuggestionView } from "./_lib/max-hr-suggestion";
 import { toRestingHrSuggestionView } from "./_lib/resting-hr-suggestion";
 import { toWellnessTileView } from "./_lib/wellness-view";
@@ -42,6 +44,7 @@ async function DashboardContent() {
   const hasProfile = summary.athleteName !== null;
   const maxHrSuggestion = toMaxHrSuggestionView(summary.maxHrSuggestion);
   const restingHrSuggestion = toRestingHrSuggestionView(summary.restingHrSuggestion);
+  const lthrSuggestion = toLthrSuggestionView(summary.lthrSuggestion);
 
   return (
     <div className="flex flex-col gap-5 sm:gap-6">
@@ -65,16 +68,33 @@ async function DashboardContent() {
         <MaxHrSuggestionCard suggestion={maxHrSuggestion} emphasis="accent" />
       )}
 
-      {/* Les deux propositions cardiaques peuvent coexister, et elles s'empilent
-          alors dans cet ordre. **Un seul CTA accent par écran** : c'est la FC max
-          qui le garde quand les deux sont là, parce qu'elle est la plus lourde de
-          conséquences (elle redéfinit à elle seule les zones, la VO₂max et le
-          TRIMP de tout l'historique, là où la FC de repos ne déplace que le
-          plancher de la réserve). Seule, la FC de repos le prend. */}
+      {/* Les trois propositions cardiaques peuvent coexister, et elles
+          s'empilent alors dans cet ordre : FC max, FC de repos, FC seuil.
+
+          **Un seul CTA accent par écran**, et l'arbitrage se lit de haut en bas
+          — la première carte présente le prend, les suivantes passent en
+          `secondary`. L'ordre n'est pas celui de la « gravité » mais celui de la
+          **dépendance** : la FC seuil se mesure et se juge sur des zones qui
+          dépendent encore de la FC max, et une FC max fausse fausse aussi le
+          contrôle d'effort maximal des tests. On corrige donc les références
+          brutes avant de changer d'ancrage — accepter le seuil d'abord, puis la
+          FC max, reviendrait à ancrer sur une valeur qu'on est en train de
+          corriger. */}
       {restingHrSuggestion === null ? null : (
         <RestingHrSuggestionCard
           suggestion={restingHrSuggestion}
           emphasis={maxHrSuggestion === null ? "accent" : "secondary"}
+        />
+      )}
+
+      {lthrSuggestion === null ? null : (
+        <LthrSuggestionCard
+          suggestion={lthrSuggestion}
+          emphasis={
+            maxHrSuggestion === null && restingHrSuggestion === null
+              ? "accent"
+              : "secondary"
+          }
         />
       )}
 

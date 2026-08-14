@@ -130,7 +130,7 @@ describe("hrDistributionModel", () => {
 
   it("colore chaque tranche dans la zone de son milieu", () => {
     // FC max 200 : 112,5 → 56 % (Z1), 142,5 → 71 % (Z3), 187,5 → 94 % (Z5).
-    const model = hrDistributionModel(bins, 200);
+    const model = hrDistributionModel(bins, { kind: "max-hr", bpm: 200 });
 
     expect(model.bars.map((bar) => bar.fillClass)).toEqual([
       "bg-zone-1",

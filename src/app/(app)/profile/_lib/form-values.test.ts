@@ -13,6 +13,7 @@ const FULL_PROFILE: AthleteProfileDto = {
   sex: 'female',
   maxHrBpm: 188,
   restingHrBpm: 48,
+  lthrBpm: null,
   weightKg: 62.5,
   birthDate: '1990-04-17',
 };
@@ -40,6 +41,7 @@ describe('toProfileFormValues', () => {
         sex: null,
         maxHrBpm: null,
         restingHrBpm: null,
+        lthrBpm: null,
         weightKg: null,
         birthDate: null,
       }),

@@ -15,6 +15,7 @@ const { mocks } = vi.hoisted(() => ({
     maybeApplyFitnessTest: vi.fn(),
     recordActivityWeather: vi.fn(),
     recordSustainedMaxHr: vi.fn(),
+    recordThresholdBlockLthr: vi.fn(),
   },
 }));
 
@@ -30,6 +31,10 @@ vi.mock('@/data/activities', () => ({
 
 vi.mock('@/data/max-hr-suggestion', () => ({
   recordSustainedMaxHr: mocks.recordSustainedMaxHr,
+}));
+
+vi.mock('@/data/lthr-suggestion', () => ({
+  recordThresholdBlockLthr: mocks.recordThresholdBlockLthr,
 }));
 
 vi.mock('@/data/plan-reconciliation', () => ({
@@ -108,9 +113,41 @@ beforeEach(() => {
   mocks.maybeApplyFitnessTest.mockResolvedValue(undefined);
   mocks.recordActivityWeather.mockResolvedValue(undefined);
   mocks.recordSustainedMaxHr.mockResolvedValue(undefined);
+  mocks.recordThresholdBlockLthr.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
+  it('mesure la FC seuil après le rapprochement, jamais avant', async () => {
+    // C'est le lien à la séance planifiée qui dit qu'un bloc de seuil a été
+    // couru, et de quelle longueur : mesurer avant n'aurait aucun ancrage.
+    const order: string[] = [];
+    mocks.linkActivityToPlannedSession.mockImplementation(() => {
+      order.push('link');
+      return Promise.resolve(true);
+    });
+    mocks.recordThresholdBlockLthr.mockImplementation(() => {
+      order.push('lthr');
+      return Promise.resolve(undefined);
+    });
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordThresholdBlockLthr).toHaveBeenCalledWith(42, ATHLETE_ID);
+    expect(order).toEqual(['link', 'lthr']);
+  });
+
+  it('journalise une mesure de FC seuil en échec sans faire échouer l’import', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mocks.recordThresholdBlockLthr.mockRejectedValue(new Error('base injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toMatchObject({
+      status: 'created',
+    });
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('FC seuil'));
+
+    logged.mockRestore();
+  });
+
   it('importe une nouvelle activité et ses séries', async () => {
     await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({ status: 'created', activityId: 42 });
 

@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { EASY_HR_BANDS, EASY_HR_ZONE } from '@/lib/metrics/hr-targets';
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 
 import { stepHrPercentBand, stepHrTargetBpm } from './hr-target';
 import type { PlanStep } from './schema';
+
+/** L'ancrage par défaut : la FC max du profil, faute de FC seuil adoptée. */
+const MAX_HR_184: HrZoneAnchor = { kind: 'max-hr', bpm: 184 };
+
 
 /** Une étape de course, toutes clés présentes — la forme que le contrat impose. */
 function step(overrides: Partial<PlanStep> = {}): PlanStep {
@@ -38,7 +43,7 @@ describe('stepHrPercentBand', () => {
     const legacy = { ...step(), hrPercentMin: undefined, hrPercentMax: undefined };
 
     expect(stepHrPercentBand(legacy)).toBeNull();
-    expect(stepHrTargetBpm({ ...legacy, hrZone: EASY_HR_ZONE }, 184)).toEqual({
+    expect(stepHrTargetBpm({ ...legacy, hrZone: EASY_HR_ZONE }, MAX_HR_184)).toEqual({
       minBpm: 120,
       maxBpm: 145,
     });
@@ -52,7 +57,7 @@ describe('stepHrPercentBand', () => {
 
 describe('stepHrTargetBpm', () => {
   it('résout un rang de zone comme avant', () => {
-    expect(stepHrTargetBpm(step({ hrZone: EASY_HR_ZONE }), 184)).toEqual({
+    expect(stepHrTargetBpm(step({ hrZone: EASY_HR_ZONE }), MAX_HR_184)).toEqual({
       minBpm: 120,
       maxBpm: 145,
     });
@@ -69,24 +74,24 @@ describe('stepHrTargetBpm', () => {
       hrPercentMax: EASY_HR_BANDS.high.maxPercentOfMax,
     });
 
-    expect(stepHrTargetBpm(finish, 184)).toEqual({ minBpm: 136, maxBpm: 145 });
-    expect(stepHrTargetBpm(step({ hrZone: EASY_HR_ZONE }), 184)).toEqual({
+    expect(stepHrTargetBpm(finish, MAX_HR_184)).toEqual({ minBpm: 136, maxBpm: 145 });
+    expect(stepHrTargetBpm(step({ hrZone: EASY_HR_ZONE }), MAX_HR_184)).toEqual({
       minBpm: 120,
       maxBpm: 145,
     });
   });
 
   it('prescrit sur la seule bande, sans rang — le régime sans table d’allures', () => {
-    expect(stepHrTargetBpm(step({ hrPercentMin: 65, hrPercentMax: 71 }), 184)).toEqual({
+    expect(stepHrTargetBpm(step({ hrPercentMin: 65, hrPercentMax: 71 }), MAX_HR_184)).toEqual({
       minBpm: 120,
       maxBpm: 131,
     });
   });
 
   it('ne rend rien sur une étape sans cible cardiaque, ou sans FC max', () => {
-    expect(stepHrTargetBpm(step(), 184)).toBeNull();
+    expect(stepHrTargetBpm(step(), MAX_HR_184)).toBeNull();
     expect(stepHrTargetBpm(step({ hrZone: EASY_HR_ZONE }), null)).toBeNull();
     // Une zone sans créneau de prescription déclaré : rien d'inventé.
-    expect(stepHrTargetBpm(step({ hrZone: 4 }), 184)).toBeNull();
+    expect(stepHrTargetBpm(step({ hrZone: 4 }), MAX_HR_184)).toBeNull();
   });
 });

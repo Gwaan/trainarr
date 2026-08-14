@@ -101,9 +101,10 @@ export function computeBestSegments(
   for (const targetM of BEST_SEGMENT_TARGETS_M) {
     if (targetM > total) continue;
 
-    const timeS = fastestWindowS(marks, instants, targetM);
-    if (timeS === null) continue;
+    const window = fastestWindow(marks, instants, targetM);
+    if (window === null) continue;
 
+    const timeS = window.toS - window.fromS;
     const pace = paceSecPerKm(targetM, timeS);
     if (pace === null) continue;
 
@@ -146,20 +147,25 @@ function usableSamples(
 }
 
 /**
- * Temps de la fenêtre la plus rapide couvrant `targetM`, ou `null` s'il n'en
- * existe aucune.
+ * La fenêtre la plus rapide couvrant `targetM` — ses deux instants —, ou `null`
+ * s'il n'en existe aucune.
+ *
+ * C'est aussi l'**emplacement** d'un effort dans la séance, et c'est à ce titre
+ * que {@link fastestSegmentWindow} l'expose : un fichier FIT ne porte aucun
+ * marqueur « ici commence le bloc », et la portion la plus rapide de la longueur
+ * prescrite est le seul repère honnête dont on dispose.
  *
  * Fenêtre glissante à deux pointeurs : pour chaque point d'arrivée, on avance le
  * point de départ tant que la fenêtre reste assez longue. Les deux pointeurs
  * étant monotones (la distance cumulée est non décroissante), un seul balayage
  * suffit par distance de référence.
  */
-function fastestWindowS(
+function fastestWindow(
   marks: readonly number[],
   instants: readonly number[],
   targetM: number,
-): number | null {
-  let best: number | null = null;
+): { fromS: number; toS: number } | null {
+  let best: { fromS: number; toS: number } | null = null;
   let start = 0;
 
   for (let end = 1; end < marks.length; end += 1) {
@@ -180,8 +186,40 @@ function fastestWindowS(
         : instants[start];
 
     const timeS = instants[end] - startTimeS;
-    if (timeS > 0 && (best === null || timeS < best)) best = timeS;
+    if (timeS > 0 && (best === null || timeS < best.toS - best.fromS)) {
+      best = { fromS: startTimeS, toS: instants[end] };
+    }
   }
 
   return best;
+}
+
+/**
+ * L'emplacement, dans la séance, de la portion la plus rapide de `targetM`
+ * mètres — `null` quand la séance n'en contient pas.
+ *
+ * Même balayage et mêmes règles de propreté que {@link computeBestSegments}
+ * (points sans distance ou sans instant écartés, cumul non décroissant, borne de
+ * départ interpolée) : c'est littéralement la même fenêtre, rendue en instants
+ * au lieu d'un chrono.
+ *
+ * Ce que cette fenêtre **n'est pas** : la preuve que l'athlète y a couru le bloc
+ * prescrit. Rien dans un fichier FIT ne le dit. Sur une séance de seuil courue
+ * comme prescrit, la portion la plus rapide de la longueur du bloc **est** une
+ * répétition — toute fenêtre décalée mordrait sur l'échauffement ou sur une
+ * récupération, donc serait plus lente. Sur une séance courue autrement, ce
+ * n'est qu'une portion rapide, et c'est l'appelant qui doit dire ce qu'il en
+ * accepte.
+ */
+export function fastestSegmentWindow(
+  distance: readonly (number | null)[],
+  time: readonly (number | null)[],
+  targetM: number,
+): { fromS: number; toS: number } | null {
+  if (!Number.isFinite(targetM) || targetM <= 0) return null;
+
+  const { marks, instants } = usableSamples(distance, time);
+  if (marks.length < 2) return null;
+
+  return fastestWindow(marks, instants, targetM);
 }

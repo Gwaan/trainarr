@@ -8,6 +8,7 @@ import { getAthleteProfile } from "@/data/athlete";
 import { getCalendarRange } from "@/data/calendar";
 import { getWeatherForecast } from "@/data/weather-forecast";
 import { toCivilDate } from "@/lib/dates/civil";
+import { hrZoneAnchor } from "@/lib/metrics/hr-zones";
 
 import { requireSession } from "../_lib/require-session";
 
@@ -109,7 +110,7 @@ async function ActivitiesContent({ searchParams }: PageProps) {
         month={month}
         range={range}
         today={today}
-        maxHrBpm={profile?.maxHrBpm ?? null}
+        hrAnchor={hrZoneAnchor(profile?.maxHrBpm ?? null, profile?.lthrBpm ?? null)}
         plan={calendar.plan}
         sessions={calendar.sessions}
         // Projetées ici, pas au passage de la frontière client : le DTO du DAL

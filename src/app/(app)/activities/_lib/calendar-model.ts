@@ -39,6 +39,7 @@ import type {
 import type { WeatherForecastDto } from "@/data/weather-forecast";
 import { sessionPaceZone } from "@/lib/ai/plan-schema";
 import { civilDateToMs, shiftCivilDate } from "@/lib/dates/civil";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 import { SESSION_KINDS } from "@/lib/plan-skeleton";
 import { resolveDayForecast, type DailyForecast } from "@/lib/weather/forecast-plan";
 import { describeWeatherCode, type WeatherIconName } from "@/lib/weather/wmo";
@@ -243,11 +244,12 @@ export function toCalendarSessionView(
   session: CalendarSessionDto,
   today: string,
   /**
-   * FC max du profil, `null` tant qu'elle n'est pas saisie : elle traduit les
-   * zones cardiaques des étapes en battements. Résolue à l'affichage, jamais
-   * stockée dans la séance — exactement comme sur la page Plan.
+   * L'ancrage cardiaque du profil — FC seuil si l'athlète en a adopté une, FC
+   * max sinon —, `null` tant qu'il n'y en a aucun : c'est lui qui traduit les
+   * zones cardiaques des étapes en battements. Résolu à l'affichage, jamais
+   * stocké dans la séance — exactement comme sur la page Plan.
    */
-  maxHrBpm: number | null = null,
+  hrAnchor: HrZoneAnchor | null = null,
 ): CalendarSessionView {
   return {
     id: session.id,
@@ -262,7 +264,7 @@ export function toCalendarSessionView(
     // celle du DAL (`toCalendarSessionDto`), au caractère près.
     movable: session.completedActivityId === null && session.date >= today,
     label: `${session.kind}, ${session.title}`,
-    detail: planSessionDetail(session, maxHrBpm),
+    detail: planSessionDetail(session, hrAnchor),
     completedActivityId: session.completedActivityId,
   };
 }
@@ -470,10 +472,10 @@ export type BuildCalendarMonthInput = {
   /** Jour civil courant, calculé côté serveur dans le fuseau de l'athlète. */
   today: string;
   /**
-   * FC max du profil, `null` tant qu'elle n'est pas saisie : elle traduit en
-   * battements les zones cardiaques du détail des séances.
+   * L'ancrage cardiaque du profil, `null` tant qu'il n'y en a aucun : il traduit
+   * en battements les zones cardiaques du détail des séances.
    */
-  maxHrBpm: number | null;
+  hrAnchor: HrZoneAnchor | null;
   plan: CalendarPlanBounds | null;
   sessions: readonly CalendarSessionDto[];
   /**
@@ -509,7 +511,7 @@ export function buildCalendarMonth(input: BuildCalendarMonthInput): CalendarWeek
   const sessionsByDay = new Map<string, CalendarSessionView[]>();
   const volumeByDay = new Map<string, number>();
   for (const session of input.sessions) {
-    const view = toCalendarSessionView(session, today, input.maxHrBpm);
+    const view = toCalendarSessionView(session, today, input.hrAnchor);
     const bucket = sessionsByDay.get(view.date);
     if (bucket === undefined) sessionsByDay.set(view.date, [view]);
     else bucket.push(view);

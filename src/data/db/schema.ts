@@ -15,6 +15,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
+import type { LthrSource } from '@/lib/metrics/lthr';
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
 import type { PlanRevisionDirection } from '@/lib/plan-revision/direction';
 // Type seul, donc effacé à la compilation : la table décrit la forme du payload
@@ -47,6 +48,19 @@ const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull(
 export const ATHLETE_SEXES = ['male', 'female'] as const;
 
 export type AthleteSex = (typeof ATHLETE_SEXES)[number];
+
+/**
+ * D'où sort la mesure de FC seuil que porte une séance
+ * (`activities.lthr_sample_source`).
+ *
+ * Recopié plutôt qu'importé — la base ne dépend pas du module de calcul — mais
+ * `satisfies` interdit qu'il en diverge (même dispositif que
+ * {@link PLAN_REVISION_DIRECTIONS}).
+ */
+export const LTHR_SAMPLE_SOURCES = [
+  'threshold-blocks',
+  'time-trial',
+] as const satisfies readonly LthrSource[];
 
 /**
  * Profil de l'athlète, **propriété d'un compte**.
@@ -89,6 +103,36 @@ export const athlete = pgTable('athlete', {
   sex: text('sex', { enum: ATHLETE_SEXES }),
   maxHrBpm: integer('max_hr_bpm'),
   restingHrBpm: integer('resting_hr_bpm'),
+  /**
+   * **FC seuil** (LTHR) adoptée par l'athlète, en bpm. `NULL` tant qu'il n'en a
+   * adopté aucune — ce qui est l'état par défaut, et l'état de tout l'existant.
+   *
+   * Cette colonne décide de l'**ancrage des zones cardiaques** (cf.
+   * `lib/metrics/hr-zones.ts`) : renseignée, les cinq zones se calent sur le
+   * seuil (échelle Friel) ; `NULL`, elles restent en pourcentage de FC max,
+   * exactement comme avant. Rien n'est stocké côté zones — tout se recalcule à
+   * la lecture —, donc l'adopter relit rétroactivement tout l'historique dans le
+   * nouveau cadre.
+   *
+   * Elle ne s'écrit **jamais toute seule** : l'application mesure, propose, et
+   * l'athlète tranche (`src/data/lthr-suggestion.ts`), comme pour la FC max et
+   * la FC de repos.
+   */
+  lthrBpm: integer('lthr_bpm'),
+  /**
+   * **Dernière** valeur de FC seuil écartée par l'athlète, en bpm. `NULL` tant
+   * qu'aucune ne l'a été.
+   *
+   * Une valeur, pas un seuil — le calque exact de
+   * `resting_hr_suggestion_dismissed_bpm`, et pour la même raison : une FC seuil
+   * bouge dans les **deux** sens (elle monte avec la forme, elle redescend avec
+   * le désentraînement ou l'âge), donc « tout ce qui est au-dessus de 172 est
+   * écarté » enterrerait la moitié des propositions légitimes. Rien ne se
+   * repropose tant que la candidate ne s'écarte pas d'au moins
+   * `LTHR_REPROPOSE_DELTA_BPM` battements de la valeur refusée (cf.
+   * `src/lib/metrics/lthr.ts`).
+   */
+  lthrSuggestionDismissedBpm: integer('lthr_suggestion_dismissed_bpm'),
   weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
   /** Date civile (mode `string`, `YYYY-MM-DD`) : pas d'heure, donc pas de fuseau. */
   birthDate: date('birth_date'),
@@ -260,6 +304,37 @@ export const activities = pgTable(
      * venir, et reste `NULL` sur l'historique déjà en base.
      */
     sustainedMaxHrBpm: integer('sustained_max_hr_bpm'),
+    /**
+     * Ce que cette séance dit de la **FC seuil** de l'athlète, en bpm — `NULL`
+     * quand elle n'en dit rien, ce qui est le cas de l'immense majorité des
+     * séances (un footing ne mesure aucun seuil).
+     *
+     * Deux façons pour une séance de porter cette mesure, et
+     * `lthr_sample_source` dit laquelle :
+     *
+     * - `threshold-blocks` : la séance réalisait une séance de **seuil**
+     *   planifiée, et la FC s'est stabilisée sur son bloc (mesure de la seconde
+     *   moitié du bloc — la FC met deux à trois minutes à rejoindre son plateau) ;
+     * - `time-trial` : la séance était le **test chronométré** du plan, vérifié
+     *   maximal, dont on retient la FC moyenne des 20 dernières minutes
+     *   (protocole Friel).
+     *
+     * Le détail des méthodes, leurs bornes de validité et leur niveau de preuve
+     * vivent dans `src/lib/metrics/lthr.ts`.
+     *
+     * **Une mesure par séance, pas une proposition** : c'est la médiane de
+     * plusieurs séances qui devient une candidate (`src/data/lthr-suggestion.ts`),
+     * jamais un bloc isolé — la FC d'un jour donné dépend autant de la chaleur et
+     * du sommeil que du seuil.
+     *
+     * Écrite au **rapprochement** de l'activité à sa séance planifiée : elle vaut
+     * donc pour les imports à venir, et reste `NULL` sur l'historique déjà en
+     * base. Comme `sustained_max_hr_bpm`, elle dérive du fichier seul et se
+     * réécrit à chaque relecture de celui-ci.
+     */
+    lthrSampleBpm: integer('lthr_sample_bpm'),
+    /** D'où sort `lthr_sample_bpm` — cf. {@link LTHR_SAMPLE_SOURCES}. `NULL` avec elle. */
+    lthrSampleSource: text('lthr_sample_source', { enum: LTHR_SAMPLE_SOURCES }),
     avgPaceSecPerKm: real('avg_pace_sec_per_km'),
     avgCadenceSpm: real('avg_cadence_spm'),
     createdAt: createdAt(),

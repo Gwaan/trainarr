@@ -11,6 +11,7 @@
  * masquée. Et le lieu des prévisions n'y est qu'un nom, jamais un point.
  */
 
+import type { LthrSuggestionView } from '../../_lib/lthr-suggestion';
 import type { MaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
 import type { RestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 
@@ -35,6 +36,23 @@ export type SettingsSectionsData = {
    * ensemble, sous le même champ « Fréquence cardiaque ».
    */
   restingHrSuggestion: RestingHrSuggestionView | null;
+  /**
+   * La FC seuil mesurée sur les séances de seuil (ou sur le dernier test), quand
+   * elle s'écarte de celle du profil et n'a pas été écartée. `null` le reste du
+   * temps. Indépendante des deux précédentes : les trois encarts peuvent se
+   * montrer ensemble.
+   */
+  lthrSuggestion: LthrSuggestionView | null;
+  /**
+   * La FC seuil **adoptée**, `null` tant qu'il n'y en a aucune.
+   *
+   * Elle n'a pas de champ de saisie — une FC seuil se mesure, elle ne se tape
+   * pas — mais elle décide de l'ancrage des zones, et un réglage qui gouverne
+   * autant doit être **lisible** quelque part. La section physiologique
+   * l'affiche donc en toutes lettres, à côté des deux fréquences qui se
+   * saisissent.
+   */
+  lthrBpm: number | null;
   intervals: IntervalsFormDefaults;
   /**
    * Le **nom** du lieu fixé pour les prévisions, `null` en mode automatique.

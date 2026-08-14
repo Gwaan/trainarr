@@ -3,6 +3,7 @@ import { ChevronDown, CircleCheck, CircleDashed, CircleDot } from "lucide-react"
 
 import { SESSION_TYPE_RAIL, SessionTypeLabel } from "@/components/session-type";
 import type { PlanSessionDto } from "@/data/plans";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 import { sessionType } from "@/lib/plan-session-type";
 import { cn } from "@/lib/utils";
 
@@ -53,24 +54,25 @@ const STATE_BADGES: Record<
 export function PlanSessionRow({
   session,
   today,
-  maxHrBpm,
+  hrAnchor,
 }: {
   session: PlanSessionDto;
   today: string;
   /**
-   * FC max du profil, `null` tant qu'elle n'est pas saisie — elle traduit les
-   * zones cardiaques des étapes en battements. Résolue à l'affichage, jamais
-   * stockée dans la séance : une correction du profil suit tout le plan.
+   * L'ancrage cardiaque du profil — FC seuil si l'athlète en a adopté une, FC
+   * max sinon —, `null` tant qu'il n'y en a aucun. C'est lui qui traduit les
+   * zones cardiaques des étapes en battements. Résolu à l'affichage, jamais
+   * stocké dans la séance : une correction du profil suit tout le plan.
    */
-  maxHrBpm: number | null;
+  hrAnchor: HrZoneAnchor | null;
 }) {
   const state = planSessionState(session, today);
   const isToday = state === "today";
   const badge = STATE_BADGES[state];
   const type = sessionType(session.kind);
 
-  const detail = planSessionDetail(session, maxHrBpm);
-  const summary = planSessionSummary(session, maxHrBpm);
+  const detail = planSessionDetail(session, hrAnchor);
+  const summary = planSessionSummary(session, hrAnchor);
   // Rien à révéler : ni déroulé, ni consigne, ni activité à rejoindre.
   const isExpandable = !detail.isEmpty || session.completedActivityId !== null;
 

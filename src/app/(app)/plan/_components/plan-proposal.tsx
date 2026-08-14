@@ -1,5 +1,6 @@
 import { Panel } from "@/components/panel";
 import type { PlanDto, PlanSessionDto } from "@/data/plans";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 
 import { PLAN_PROPOSAL_ANCHOR_ID } from "../_lib/anchors";
 import { groupPlanWeeks } from "../_lib/plan-weeks";
@@ -27,15 +28,15 @@ export function PlanProposal({
   plan,
   sessions,
   today,
-  maxHrBpm,
+  hrAnchor,
   hasActivePlan,
 }: {
   plan: PlanDto;
   sessions: PlanSessionDto[];
   /** Date civile du jour, calculée côté serveur dans le fuseau de l'athlète. */
   today: string;
-  /** FC max du profil, `null` sans saisie — cf. `PlanView`. */
-  maxHrBpm: number | null;
+  /** L'ancrage cardiaque du profil, `null` sans référence — cf. `PlanView`. */
+  hrAnchor: HrZoneAnchor | null;
   /** Un plan actif que l'adoption archiverait. */
   hasActivePlan: boolean;
 }) {
@@ -70,7 +71,7 @@ export function PlanProposal({
       <section className="flex flex-col gap-3">
         <h2 className="eyebrow px-0.5">Le programme proposé</h2>
         {weeks.map((week) => (
-          <PlanWeekCard key={week.startsOn} week={week} today={today} maxHrBpm={maxHrBpm} />
+          <PlanWeekCard key={week.startsOn} week={week} today={today} hrAnchor={hrAnchor} />
         ))}
       </section>
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PlanDto, PlanSessionDto } from '@/data/plans';
 import { SecretDecryptionError } from '@/lib/crypto/secret-box';
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 
 import type { IntervalsEvent } from './client';
 import {
@@ -16,6 +17,10 @@ import {
   syncPlanToIntervalsSafely,
   syncWindow,
 } from './push-plan';
+
+/** L'ancrage par défaut : la FC max du profil, faute de FC seuil adoptée. */
+const MAX_HR_184: HrZoneAnchor = { kind: 'max-hr', bpm: 184 };
+
 
 // Les modules serveur commencent par `import 'server-only'`, qui lève hors RSC.
 vi.mock('server-only', () => ({}));
@@ -327,7 +332,7 @@ describe('buildWorkoutEvents', () => {
     // 120–145 bpm prescrits sur une FC max de 184, ramenés au dénominateur du
     // compte distant (205) : la même prescription, en battements exacts chez eux.
     const [withHr] = buildWorkoutEvents(3, [easySession], {
-      profileMaxHrBpm: 184,
+      profileAnchor: MAX_HR_184,
       intervalsMaxHrBpm: 205,
     });
     expect(withHr.description).toBe('- Course 7km 59-71% HR');
@@ -336,7 +341,7 @@ describe('buildWorkoutEvents', () => {
     // `Z2 HR` prescrirait les zones du compte (77–81 % de la max) à la place de
     // l'endurance — une cible fausse est pire qu'une cible absente.
     const [withoutRemote] = buildWorkoutEvents(3, [easySession], {
-      profileMaxHrBpm: 184,
+      profileAnchor: MAX_HR_184,
       intervalsMaxHrBpm: null,
     });
     expect(withoutRemote.description).toBe('- Course 7km');

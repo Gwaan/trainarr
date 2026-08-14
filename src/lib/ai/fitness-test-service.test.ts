@@ -34,6 +34,7 @@ const { dal } = vi.hoisted(() => ({
     getPlanUpdatedAt: vi.fn(),
     reconcilePlanSessions: vi.fn(),
     todayCivilDate: vi.fn(),
+    recordTimeTrialLthr: vi.fn(),
   },
 }));
 
@@ -46,6 +47,7 @@ vi.mock('@/data/fitness-test', () => ({
   getFitnessTestCandidate: dal.getFitnessTestCandidate,
   recordFitnessTest: dal.recordFitnessTest,
 }));
+vi.mock('@/data/lthr-suggestion', () => ({ recordTimeTrialLthr: dal.recordTimeTrialLthr }));
 vi.mock('@/data/plan-reconciliation', () => ({ reconcilePlanSessions: dal.reconcilePlanSessions }));
 vi.mock('@/data/plan-review', () => ({ getPlanUpdatedAt: dal.getPlanUpdatedAt }));
 vi.mock('@/data/plan-revisions', async () => {
@@ -346,6 +348,52 @@ describe('maybeApplyFitnessTest — chaque verdict laisse une trace', () => {
     await maybeApplyFitnessTest(42, ATHLETE_ID);
 
     expect(dal.recordFitnessTest.mock.calls[0][1].note).toContain('chrono non retenu');
+  });
+});
+
+describe('maybeApplyFitnessTest — la FC seuil du contre-la-montre', () => {
+  it('relève la FC seuil d’un test vérifié maximal, sur l’activité qui a fourni le chrono', async () => {
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    expect(dal.recordTimeTrialLthr).toHaveBeenCalledWith(42, ATHLETE_ID);
+  });
+
+  it('la relève aussi quand le chrono ne progresse pas — l’effort était maximal', async () => {
+    dal.getFitnessTestCandidate.mockResolvedValue(candidate({ bestFiveKTimeS: 29 * 60 }));
+
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    expect(dal.recordTimeTrialLthr).toHaveBeenCalledWith(42, ATHLETE_ID);
+  });
+
+  it('ne relève rien quand l’effort n’est pas vérifié maximal', async () => {
+    // Sans cette validation, la FC relevée ne serait celle d'aucun seuil : c'est
+    // elle, et elle seule, qui distingue un contre-la-montre d'une sortie.
+    dal.getFitnessTestCandidate.mockResolvedValue(candidate({ activityMaxHrBpm: 160 }));
+
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    expect(dal.recordTimeTrialLthr).not.toHaveBeenCalled();
+  });
+
+  it('ne relève rien quand aucun 5 km n’est mesurable', async () => {
+    dal.getFitnessTestCandidate.mockResolvedValue(candidate({ bestFiveKTimeS: null }));
+
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    expect(dal.recordTimeTrialLthr).not.toHaveBeenCalled();
+  });
+
+  it('ne fait pas échouer le traitement du test si la mesure échoue', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    dal.recordTimeTrialLthr.mockRejectedValue(new Error('base injoignable'));
+
+    await maybeApplyFitnessTest(42, ATHLETE_ID);
+
+    expect(dal.depositPlanRevision).toHaveBeenCalled();
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('FC seuil'));
+
+    logged.mockRestore();
   });
 });
 

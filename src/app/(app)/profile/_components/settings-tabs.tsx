@@ -83,6 +83,8 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
           values={data.profile}
           maxHrSuggestion={data.maxHrSuggestion}
           restingHrSuggestion={data.restingHrSuggestion}
+          lthrSuggestion={data.lthrSuggestion}
+          lthrBpm={data.lthrBpm}
         />
       </TabsContent>
 

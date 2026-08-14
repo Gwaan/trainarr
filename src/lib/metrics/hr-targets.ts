@@ -34,6 +34,22 @@
  * max, elle donnerait 110–129 bpm, une plage où cette athlète marche. Les
  * fractions de Daniels donnent 120–145 bpm, qui est bien son endurance.
  *
+ * ## Les créneaux sont écrits en % de FC max, la résolution suit l'ancrage
+ *
+ * Toutes les bornes de ce module — la table ci-dessus, les sous-créneaux, et
+ * celles que les étapes de plan portent déjà en base (`PlanStep.hrPercentMin`) —
+ * sont exprimées en **pourcentage de FC max**. C'est la forme dans laquelle
+ * elles ont été publiées par Daniels, et c'est celle qu'un `jsonb` écrit il y a
+ * des mois contient : les réinterpréter comme des pourcentages d'autre chose
+ * ferait mentir tous les plans existants.
+ *
+ * La **résolution en battements**, elle, passe par l'ancrage du profil
+ * ({@link HrZoneAnchor}) : quand une FC seuil est adoptée, les bornes sont
+ * portées dans le repère du seuil avant d'être multipliées, via
+ * {@link LTHR_SHARE_OF_MAX_HR}. C'est le même geste que pour les zones
+ * d'analyse, et c'est ce qui fait qu'une séance facile se prescrit dans le même
+ * cadre que celui où elle sera relue.
+ *
  * ## Deux tables, un même entier — la lire sans se tromper
  *
  * `hr-zones.ts` partitionne le temps **enregistré** d'une séance sur les bornes
@@ -65,7 +81,8 @@
  * jour où on les prescrira en FC est une ligne dans {@link PRESCRIBED_HR_ZONES}.
  */
 
-import type { HrZoneNumber } from './hr-zones';
+import type { HrZoneAnchor, HrZoneNumber } from './hr-zones';
+import { LTHR_BOUNDS } from './lthr';
 
 /**
  * Un créneau cardiaque **nu** : deux bornes en pourcentage de FC max.
@@ -169,26 +186,73 @@ export type HrTargetBpm = {
 export const PRESCRIPTION_MAX_HR_BOUNDS = { min: 120, max: 230 } as const;
 
 /**
+ * La part de la FC max qu'occupe la FC seuil chez un coureur entraîné : **89 %**.
+ *
+ * ## À quoi elle sert, et à quoi elle ne sert pas
+ *
+ * Uniquement à **porter les bornes de Daniels dans le repère du seuil**, une
+ * fois pour toutes, dans ce module. Ce n'est ni une estimation du seuil d'un
+ * athlète (le seuil se **mesure**, cf. `./lthr` — c'est tout l'objet du
+ * chantier), ni une valeur qui entre dans une zone d'analyse.
+ *
+ * ## D'où vient le chiffre
+ *
+ * Le seuil lactique se situe couramment entre 85 et 92 % de FC max chez le
+ * coureur entraîné (fourchette de praticien, reprise par Friel) ; 89 % est le
+ * haut-milieu de cette fourchette, et il a une propriété qui a décidé du choix :
+ * le plafond de l'endurance de Daniels (79 % de FC max) devient alors
+ * **89 % de LTHR**, c'est-à-dire exactement le plafond de la zone 2 de Friel.
+ * Les deux méthodes — l'une écrite en % de FC max, l'autre en % de seuil —
+ * placent donc la frontière entre l'endurance et le travail actif au même
+ * endroit, ce qui est la meilleure vérification qu'on puisse demander à une
+ * conversion.
+ *
+ * Le créneau d'endurance devient ainsi **73–89 % de LTHR** (65 % ÷ 0,89 = 73).
+ *
+ * ## Ce que ça change, et pourquoi c'est le but
+ *
+ * Pour un athlète dont le seuil est bas (165 sur 190 de FC max, soit 87 %), les
+ * cibles d'endurance descendent de quelques battements ; pour un athlète dont le
+ * seuil est haut (178 sur 190, soit 94 %), elles montent. C'est exactement la
+ * correction que l'ancrage au seuil existe pour apporter — le même pourcentage
+ * de FC max ne décrit pas le même effort chez deux coureurs
+ * (Scharhag-Rosenberger et al. 2010).
+ */
+export const LTHR_SHARE_OF_MAX_HR = 0.89;
+
+/**
+ * Bornes de plausibilité de la référence, selon l'ancrage.
+ *
+ * Une FC seuil et une FC max ne vivent pas dans le même intervalle : refuser une
+ * FC seuil de 110 au motif qu'elle serait une FC max invraisemblable n'aurait
+ * pas de sens, et l'inverse non plus.
+ */
+function anchorBounds(anchor: HrZoneAnchor): { min: number; max: number } {
+  return anchor.kind === 'lthr' ? LTHR_BOUNDS : PRESCRIPTION_MAX_HR_BOUNDS;
+}
+
+/**
  * La cible en bpm d'une zone prescrite — `null` quand rien n'est calculable :
- * FC max absente, hors bornes ou non entière, zone sans créneau déclaré.
+ * aucun ancrage au profil, ancrage hors bornes ou non entier, zone sans créneau
+ * déclaré.
  *
  * `null` n'est pas un cas dégradé à rattraper : c'est la réponse honnête. Sans
- * FC max au profil, l'appli ne prescrit pas en fréquence cardiaque du tout, et
- * l'affichage retombe sur le rang de zone nu.
+ * référence au profil, l'appli ne prescrit pas en fréquence cardiaque du tout,
+ * et l'affichage retombe sur le rang de zone nu.
  *
  * Les deux bornes sont **arrondies à l'entier** : un plan se lit au bpm près, et
  * `119,6 bpm` ne se surveille sur aucune montre. À 184 bpm de FC max, la zone 2
- * rend donc 120–145 bpm.
+ * rend donc 120–145 bpm ; à 165 bpm de FC seuil, 120–147 bpm.
  *
- * Une FC max **non entière** est refusée plutôt qu'arrondie : aucun cardio ne
+ * Une référence **non entière** est refusée plutôt qu'arrondie : aucun cardio ne
  * mesure `184,5 bpm`, donc la valeur ne vient pas d'une mesure mais d'une saisie
  * ou d'un calcul fautif — et le profil, seul point d'entrée légitime, n'accepte
  * que des entiers. En dériver une plage donnerait l'illusion d'une prescription
  * fondée sur une donnée qui n'en est pas une.
  */
-export function hrZoneTargetBpm(zone: number, maxHrBpm: number | null): HrTargetBpm | null {
+export function hrZoneTargetBpm(zone: number, anchor: HrZoneAnchor | null): HrTargetBpm | null {
   const band = PRESCRIBED_HR_ZONES[zone as HrZoneNumber];
-  return band === undefined ? null : hrPercentTargetBpm(band, maxHrBpm);
+  return band === undefined ? null : hrPercentTargetBpm(band, anchor);
 }
 
 /**
@@ -199,16 +263,27 @@ export function hrZoneTargetBpm(zone: number, maxHrBpm: number | null): HrTarget
  * C'est la seule façon d'exprimer un sous-créneau ({@link EASY_HR_BANDS}) : le
  * rang de zone, lui, est un entier et ne distingue pas le haut d'une plage de
  * son bas.
+ *
+ * La bande est **toujours** écrite en pourcentage de FC max (c'est ce que porte
+ * `PlanStep.hrPercentMin`) ; quand l'ancrage est le seuil, elle y est portée par
+ * {@link LTHR_SHARE_OF_MAX_HR} avant d'être multipliée.
  */
-export function hrPercentTargetBpm(band: HrPercentBand, maxHrBpm: number | null): HrTargetBpm | null {
-  if (maxHrBpm === null || !Number.isInteger(maxHrBpm)) return null;
-  if (maxHrBpm < PRESCRIPTION_MAX_HR_BOUNDS.min || maxHrBpm > PRESCRIPTION_MAX_HR_BOUNDS.max) {
-    return null;
-  }
+export function hrPercentTargetBpm(
+  band: HrPercentBand,
+  anchor: HrZoneAnchor | null,
+): HrTargetBpm | null {
+  if (anchor === null || !Number.isInteger(anchor.bpm)) return null;
+
+  const bounds = anchorBounds(anchor);
+  if (anchor.bpm < bounds.min || anchor.bpm > bounds.max) return null;
+
+  // En repère de seuil, le pourcentage de FC max est d'abord porté en
+  // pourcentage de seuil ; en repère de FC max, le facteur vaut 1.
+  const share = anchor.kind === 'lthr' ? LTHR_SHARE_OF_MAX_HR : 1;
 
   return {
-    minBpm: Math.round((maxHrBpm * band.minPercentOfMax) / 100),
-    maxBpm: Math.round((maxHrBpm * band.maxPercentOfMax) / 100),
+    minBpm: Math.round((anchor.bpm * band.minPercentOfMax) / (100 * share)),
+    maxBpm: Math.round((anchor.bpm * band.maxPercentOfMax) / (100 * share)),
   };
 }
 
@@ -278,7 +353,18 @@ export function hrTargetPercentOfMax(
  * L'unique interrupteur de la fonctionnalité : sans FC max exploitable au
  * profil, tout le reste de la chaîne retrouve son comportement d'avant, à
  * l'étape près.
+ *
+ * **L'interrupteur reste sur la FC max**, et pas sur l'ancrage courant, parce
+ * que ce qu'il autorise est l'**écriture** d'une cible cardiaque dans une étape
+ * de plan — et une étape écrit ses bornes en pourcentage de FC max (cf.
+ * l'en-tête). L'ancrage, lui, intervient plus tard, quand ces bornes sont
+ * résolues en battements. Un athlète qui aurait une FC seuil sans FC max ne
+ * verrait donc pas ses séances prescrites en FC : c'est le comportement
+ * conservateur d'avant, et le cas n'existe pas en pratique (le profil porte sa
+ * FC max avant tout le reste — le TRIMP, la VO₂max et la validation des tests en
+ * dépendent).
  */
 export function canPrescribeHeartRate(maxHrBpm: number | null): boolean {
-  return hrZoneTargetBpm(EASY_HR_ZONE, maxHrBpm) !== null;
+  if (maxHrBpm === null) return false;
+  return hrZoneTargetBpm(EASY_HR_ZONE, { kind: 'max-hr', bpm: maxHrBpm }) !== null;
 }

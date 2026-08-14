@@ -15,11 +15,13 @@ import 'server-only';
 
 import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
 import { canInvite, listPendingInvitations } from '@/data/invitations';
+import { getLthrSuggestion } from '@/data/lthr-suggestion';
 import { getMaxHrSuggestion } from '@/data/max-hr-suggestion';
 import { getRestingHrSuggestion } from '@/data/resting-hr-suggestion';
 import { getForecastLocationLabel } from '@/data/weather-forecast';
 import { getAccountSummary } from '@/lib/auth/session';
 
+import { toLthrSuggestionView } from '../../_lib/lthr-suggestion';
 import { toMaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
 import { toRestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 
@@ -55,6 +57,7 @@ export async function loadSettingsData(): Promise<SettingsData> {
     profile,
     maxHrSuggestion,
     restingHrSuggestion,
+    lthrSuggestion,
     intervals,
     forecastLocationLabel,
     account,
@@ -64,6 +67,7 @@ export async function loadSettingsData(): Promise<SettingsData> {
       getAthleteProfile(),
       getMaxHrSuggestion(),
       getRestingHrSuggestion(),
+      getLthrSuggestion(),
       getIntervalsSettings(),
       getForecastLocationLabel(),
       getAccountSummary(),
@@ -87,6 +91,13 @@ export async function loadSettingsData(): Promise<SettingsData> {
     // peuvent être là en même temps ; aucun des deux ne porte l'accent ici,
     // « Enregistrer » l'a déjà.
     restingHrSuggestion: toRestingHrSuggestionView(restingHrSuggestion),
+    // La troisième, au même endroit : c'est la seule qui ne se pose contre aucun
+    // champ — sa valeur ne se saisit pas —, mais c'est bien la section
+    // physiologique qu'elle change.
+    lthrSuggestion: toLthrSuggestionView(lthrSuggestion),
+    // La FC seuil en vigueur, lue seule : sans elle, l'athlète n'aurait aucun
+    // endroit où voir ce qui ancre ses zones.
+    lthrBpm: profile?.lthrBpm ?? null,
     intervals: toIntervalsFormDefaults(intervals),
     // Reconstruit champ par champ plutôt que passé tel quel : ce qui part au
     // navigateur est ce qui est écrit ici, et rien de ce que la session

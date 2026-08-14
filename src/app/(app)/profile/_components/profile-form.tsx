@@ -15,8 +15,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
+import { LthrSuggestionCard } from "../../_components/lthr-suggestion-card";
 import { MaxHrSuggestionCard } from "../../_components/max-hr-suggestion-card";
 import { RestingHrSuggestionCard } from "../../_components/resting-hr-suggestion-card";
+import type { LthrSuggestionView } from "../../_lib/lthr-suggestion";
 import type { MaxHrSuggestionView } from "../../_lib/max-hr-suggestion";
 import type { RestingHrSuggestionView } from "../../_lib/resting-hr-suggestion";
 
@@ -176,6 +178,20 @@ export type ProfileFormProps = {
    * encarts peuvent s'afficher ensemble.
    */
   restingHrSuggestion?: RestingHrSuggestionView | null;
+  /**
+   * Une FC seuil mesurée qui s'écarte de celle du profil. `null` s'il n'y a rien
+   * à proposer — et rien à l'onboarding, où aucune séance n'a été courue.
+   * Indépendante des deux précédentes.
+   */
+  lthrSuggestion?: LthrSuggestionView | null;
+  /**
+   * La FC seuil **en vigueur**, `null` tant qu'aucune n'a été adoptée.
+   *
+   * Sans champ de saisie : elle se mesure, elle ne se tape pas. Mais c'est elle
+   * qui ancre les zones cardiaques, et un réglage aussi conséquent doit être
+   * lisible — la section l'affiche en clair sous les deux fréquences saisies.
+   */
+  lthrBpm?: number | null;
 };
 
 export function ProfileForm({
@@ -183,6 +199,8 @@ export function ProfileForm({
   values,
   maxHrSuggestion = null,
   restingHrSuggestion = null,
+  lthrSuggestion = null,
+  lthrBpm = null,
 }: ProfileFormProps) {
   const [state, formAction, isPending] = useActionState(
     saveProfileAction,
@@ -387,6 +405,18 @@ export function ProfileForm({
               />
             )}
 
+            {/* La troisième, sans `onAccepted` : elle ne propose aucun champ de
+                ce formulaire — la FC seuil n'en a pas — et sa valeur, une fois
+                acceptée, revient par la ligne de lecture ci-dessous après
+                revalidation. */}
+            {lthrSuggestion === null ? null : (
+              <LthrSuggestionCard
+                suggestion={lthrSuggestion}
+                emphasis="secondary"
+                className="mt-3"
+              />
+            )}
+
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-3">
               <div>
                 <label
@@ -453,6 +483,23 @@ export function ProfileForm({
                 ) : null}
               </div>
             </div>
+
+            {/* En lecture seule, et à sa place : c'est une fréquence cardiaque
+                de profil comme les deux autres, mais mesurée par l'application
+                — la donner à saisir inviterait à taper un chiffre trouvé sur
+                internet, ce qui est exactement ce que ce chantier remplace. */}
+            <p className="mt-3 text-[0.76rem] leading-snug text-fg-faint">
+              {lthrBpm === null
+                ? "FC seuil : aucune. Tes zones cardiaques sont calées sur ta FC max — elles s’ancreront sur ton seuil dès que tu en auras adopté un."
+                : null}
+              {lthrBpm === null ? null : (
+                <>
+                  FC seuil : <span className="num text-fg-muted">{lthrBpm}</span> bpm. Tes
+                  zones cardiaques sont calées dessus. Elle se mesure sur tes séances de
+                  seuil et tes tests — elle ne se saisit pas.
+                </>
+              )}
+            </p>
           </fieldset>
 
           <Field

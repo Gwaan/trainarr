@@ -9,6 +9,7 @@ import { toActivitySummaryDto, type ActivitySummaryDto } from './activities';
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
+import { selectLthrSuggestion, type LthrSuggestionDto } from './lthr-suggestion';
 import { selectMaxHrSuggestion, type MaxHrSuggestionDto } from './max-hr-suggestion';
 import { getPendingPlanRevision, type PlanRevisionDto } from './plan-revisions';
 import {
@@ -137,6 +138,17 @@ export type DashboardSummary = {
    * cartes s'empilent, et une seule des deux porte le CTA accent (cf. la page).
    */
   restingHrSuggestion: RestingHrSuggestionDto | null;
+  /**
+   * Une **FC seuil** mesurée qui s'écarte de celle du profil, `null` s'il n'y a
+   * rien à proposer (cf. `./lthr-suggestion.ts`).
+   *
+   * Ici pour la même raison que ses deux aînées — c'est le seul écran qu'on
+   * ouvre sans rien chercher —, mais c'est la proposition la plus lourde de
+   * conséquences des trois : l'accepter change l'**ancrage** des zones
+   * cardiaques. Elle peut coexister avec les deux autres, et c'est la page qui
+   * arbitre l'unique CTA accent.
+   */
+  lthrSuggestion: LthrSuggestionDto | null;
 };
 
 const RECENT_ACTIVITIES_COUNT = 3;
@@ -160,6 +172,8 @@ const EMPTY_SUMMARY: Omit<DashboardSummary, 'today' | 'wellness'> = {
   planRevision: null,
   // Sans athlète, aucun relevé bien-être n'a jamais été rapatrié.
   restingHrSuggestion: null,
+  // Sans athlète, aucune séance n'a jamais mesuré de seuil.
+  lthrSuggestion: null,
 };
 
 /**
@@ -216,6 +230,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     planRevision,
     wellness,
     restingHrSuggestion,
+    lthrSuggestion,
   ] = await Promise.all([
     // Historique complet : la CTL est une moyenne mobile sur 42 jours, et une
     // ligne d'activité est légère (les séries temporelles vivent à part).
@@ -262,6 +277,9 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     ),
     // Le profil est déjà lu, comme pour la FC max : la proposition le reçoit.
     selectRestingHrSuggestion(profile, today),
+    // Idem — et sa fenêtre porte sur des instants d'activité, pas sur des jours
+    // civils : elle prend l'horloge, pas le `today` de la page.
+    selectLthrSuggestion(profile),
   ]);
 
   const daily = buildDailyTrimp(activityRows, profile, today);
@@ -288,5 +306,6 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     planRevision,
     wellness,
     restingHrSuggestion,
+    lthrSuggestion,
   };
 }

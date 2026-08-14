@@ -9,6 +9,7 @@ import { getPendingPlanRevisionDetail } from "@/data/plan-revisions";
 import { getActivePlanWithSessions, getDraftPlanWithSessions } from "@/data/plans";
 import { getAiAvailability } from "@/lib/ai/availability";
 import { toCivilDate } from "@/lib/dates/civil";
+import { hrZoneAnchor } from "@/lib/metrics/hr-zones";
 
 import { requireSession } from "../_lib/require-session";
 
@@ -87,7 +88,10 @@ async function PlanContent() {
     getAthleteProfile(),
   ]);
 
-  const maxHrBpm = profile?.maxHrBpm ?? null;
+  // L'ancrage cardiaque du profil : la FC seuil si l'athlète en a adopté une,
+  // la FC max sinon. Lu une fois ici et descendu tel quel dans tout l'écran —
+  // c'est lui qui résout les zones prescrites en battements.
+  const hrAnchor = hrZoneAnchor(profile?.maxHrBpm ?? null, profile?.lthrBpm ?? null);
 
   /*
    * La réévaluation se pose **au-dessus du plan actif**, dans les deux
@@ -101,7 +105,7 @@ async function PlanContent() {
         detail={revision}
         plan={active.plan}
         today={today}
-        maxHrBpm={maxHrBpm}
+        hrAnchor={hrAnchor}
       />
     );
 
@@ -120,7 +124,7 @@ async function PlanContent() {
           plan={draft.plan}
           sessions={draft.sessions}
           today={today}
-          maxHrBpm={maxHrBpm}
+          hrAnchor={hrAnchor}
           hasActivePlan={active !== null}
         />
         {active === null ? null : (
@@ -132,7 +136,7 @@ async function PlanContent() {
                 plan={active.plan}
                 sessions={active.sessions}
                 today={today}
-                maxHrBpm={maxHrBpm}
+                hrAnchor={hrAnchor}
                 unavailableReason={availability.available ? null : availability.reason}
               />
             </div>
@@ -182,7 +186,7 @@ async function PlanContent() {
         plan={active.plan}
         sessions={active.sessions}
         today={today}
-        maxHrBpm={maxHrBpm}
+        hrAnchor={hrAnchor}
         unavailableReason={availability.available ? null : availability.reason}
       />
     </>

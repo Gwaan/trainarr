@@ -1,4 +1,7 @@
 import { Panel } from "@/components/panel";
+// Le module précis, pas le tonneau `@/lib/metrics` : ce composant n'a besoin que
+// du type de l'ancrage, pas de tous les calculs physio.
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 import { cn } from "@/lib/utils";
 
 import { MetricInfo } from "../../../_components/metric-info";
@@ -16,6 +19,19 @@ export type ZoneRow = {
 };
 
 /**
+ * Sur quoi les cinq zones sont calées, en une phrase.
+ *
+ * Les mêmes barres ne veulent pas dire la même chose selon l'ancrage : Z2 est
+ * « 60–70 % de FC max » dans un cas, « 85–89 % du seuil » dans l'autre. Le
+ * panneau le dit donc au lieu de le laisser deviner — la fiche ⓘ développe.
+ */
+function anchorCaption(anchor: HrZoneAnchor): string {
+  return anchor.kind === "lthr"
+    ? `Zones calées sur ta FC seuil (${anchor.bpm} bpm).`
+    : `Zones calées sur ta FC max (${anchor.bpm} bpm).`;
+}
+
+/**
  * Répartition du temps par zone cardio.
  *
  * Barres horizontales Z1→Z5 dans la rampe séquentielle du design system (une
@@ -25,9 +41,12 @@ export type ZoneRow = {
  */
 export function HrZonesPanel({
   zones,
+  anchor,
   className,
 }: {
   zones: readonly ZoneRow[];
+  /** La référence des bornes. Jamais `null` ici : sans elle, aucune zone n'existe. */
+  anchor: HrZoneAnchor;
   className?: string;
 }) {
   const total = totalZoneSeconds(zones.map((zone) => zone.timeS));
@@ -70,6 +89,10 @@ export function HrZonesPanel({
           </li>
         ))}
       </ul>
+
+      <p className="mt-3 text-[0.72rem] leading-relaxed text-fg-faint">
+        {anchorCaption(anchor)}
+      </p>
     </Panel>
   );
 }

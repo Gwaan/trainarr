@@ -132,6 +132,8 @@ const rawAthlete: Athlete = {
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
   restingHrSuggestionDismissedBpm: null,
+  lthrBpm: null,
+  lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
@@ -140,6 +142,9 @@ const rawAthlete: Athlete = {
 const PROFILE_KEYS = [
   'birthDate',
   'displayName',
+  // En lecture seule : la FC seuil se mesure et s'accepte, elle ne se saisit
+  // pas — mais l'écran doit pouvoir dire sur quoi les zones sont ancrées.
+  'lthrBpm',
   'maxHrBpm',
   'restingHrBpm',
   'sex',
@@ -219,6 +224,7 @@ describe('toAthleteProfileDto', () => {
       sex: 'female',
       maxHrBpm: 191,
       restingHrBpm: 48,
+      lthrBpm: null,
       weightKg: 68.4,
       birthDate: '1990-04-17',
     });

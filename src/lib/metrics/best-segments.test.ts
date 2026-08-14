@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { BEST_SEGMENT_TARGETS_M, computeBestSegments } from './best-segments';
+import {
+  BEST_SEGMENT_TARGETS_M,
+  computeBestSegments,
+  fastestSegmentWindow,
+} from './best-segments';
 
 /** Séance à 1 Hz : `t = 0..count-1`, distance cumulée depuis une vitesse. */
 function run(count: number, speedAt: (second: number) => number) {
@@ -140,5 +144,51 @@ describe('computeBestSegments', () => {
     expect(computeBestSegments([0, 500], [null, null])).toEqual([]);
     // Une séance sur tapis roulant à l'arrêt : la distance ne bouge pas.
     expect(computeBestSegments([100, 100, 100], [0, 1, 2])).toEqual([]);
+  });
+});
+
+describe('fastestSegmentWindow', () => {
+  it('rend les deux instants de la portion la plus rapide, borne de départ interpolée', () => {
+    // 1 000 m à 4 m/s (250 s), puis 1 000 m à 5 m/s (200 s) : le meilleur
+    // kilomètre est le second, du t = 250 s au t = 450 s.
+    const distance: number[] = [];
+    const time: number[] = [];
+    for (let second = 0; second <= 250; second += 1) {
+      time.push(second);
+      distance.push(second * 4);
+    }
+    for (let second = 251; second <= 450; second += 1) {
+      time.push(second);
+      distance.push(1_000 + (second - 250) * 5);
+    }
+
+    const window = fastestSegmentWindow(distance, time, 1_000);
+    expect(window).not.toBeNull();
+    expect(window?.fromS).toBeCloseTo(250, 6);
+    expect(window?.toS).toBeCloseTo(450, 6);
+  });
+
+  it('donne exactement le chrono que rend le meilleur effort', () => {
+    const distance: number[] = [];
+    const time: number[] = [];
+    for (let second = 0; second <= 400; second += 1) {
+      time.push(second);
+      distance.push(second * 3.5);
+    }
+
+    const window = fastestSegmentWindow(distance, time, 1_000);
+    const segment = computeBestSegments(distance, time).find((found) => found.targetM === 1_000);
+
+    expect(window).not.toBeNull();
+    expect((window?.toS ?? 0) - (window?.fromS ?? 0)).toBeCloseTo(segment?.timeS ?? 0, 9);
+  });
+
+  it('ne rend rien quand la séance ne couvre pas la distance demandée', () => {
+    const distance = [0, 100, 200];
+    const time = [0, 30, 60];
+
+    expect(fastestSegmentWindow(distance, time, 1_000)).toBeNull();
+    expect(fastestSegmentWindow([], [], 1_000)).toBeNull();
+    expect(fastestSegmentWindow(distance, time, 0)).toBeNull();
   });
 });

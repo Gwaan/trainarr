@@ -70,8 +70,9 @@
  * max est 184. Écrire les 65–79 % du créneau prescrit tel quel donnerait
  * 133–162 bpm à la montre — du seuil au lieu d'une endurance.
  *
- * La chaîne est donc : la zone se résout en **battements** sur la FC max du
- * profil (`hrZoneTargetBpm`, source unique de vérité), puis ces battements se
+ * La chaîne est donc : la zone se résout en **battements** sur la référence du
+ * profil (`hrZoneTargetBpm`, source unique de vérité — FC seuil si l'athlète en
+ * a adopté une, FC max sinon), puis ces battements se
  * ramènent en pourcentage de la FC max **distante**, lue à chaque publication
  * (`hrTargetPercentOfMax`). 120–145 bpm deviennent `59-71% HR` sur une référence
  * de 205, `65-79% HR` sur une référence de 184 : la même prescription, exprimée
@@ -95,6 +96,7 @@
  */
 
 import { hrTargetPercentOfMax } from '@/lib/metrics/hr-targets';
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 
 import { stepHrTargetBpm } from './hr-target';
 import { toSingleLine, type PlanSessionSteps, type PlanStep, type PlanStepRole } from './schema';
@@ -108,10 +110,11 @@ import { toSingleLine, type PlanSessionSteps, type PlanStep, type PlanStepRole }
  */
 export type HrReference = {
   /**
-   * La FC max du profil Trainarr, seule source de la prescription : c'est elle
-   * qui dit à quels battements se court la zone.
+   * La référence du profil Trainarr — FC seuil si l'athlète en a adopté une, FC
+   * max sinon —, seule source de la prescription : c'est elle qui dit à quels
+   * battements se court la zone.
    */
-  profileMaxHrBpm: number | null;
+  profileAnchor: HrZoneAnchor | null;
   /**
    * La FC max que porte le compte intervals.icu, lue à la publication : le
    * dénominateur du pourcentage émis, et rien d'autre.
@@ -197,7 +200,7 @@ function formatTargetToken(step: PlanStep, hr: HrReference | null): string | nul
   // La cible de l'étape, sous-créneau compris : un bloc qui vise le haut de
   // l'endurance doit partir sur ses propres bornes, sinon la fin appuyée d'une
   // sortie longue arrive sur la montre avec la cible du reste du parcours.
-  const target = stepHrTargetBpm(step, hr.profileMaxHrBpm);
+  const target = stepHrTargetBpm(step, hr.profileAnchor);
   if (target === null) return null;
 
   const percent = hrTargetPercentOfMax(target, hr.intervalsMaxHrBpm);

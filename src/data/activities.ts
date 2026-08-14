@@ -15,6 +15,8 @@ import {
   deriveVelocity,
   estimateEffectiveVo2max,
   hrDistribution,
+  hrZoneAnchor,
+  type HrZoneAnchor,
   paceDistribution,
   paceSecPerKm,
   resamplePoints,
@@ -427,15 +429,17 @@ export type ActivityFullDto = {
   charts: ActivityChartsDto | null;
   /** Vide si l'activité n'a pas de stream de distance. */
   splits: ActivitySplitDto[];
-  /** `null` sans stream de FC ou sans FC max au profil. */
+  /** `null` sans stream de FC ou sans référence cardiaque au profil. */
   hrZones: HrZoneDto[] | null;
   /**
-   * FC max **du profil athlète**, distincte de `detail.maxHrBpm` (le maximum
-   * atteint pendant cette séance). C'est elle qui découpe les zones : l'affichage
-   * en a besoin pour colorer une tranche d'histogramme dans la rampe des zones,
-   * et il n'a pas d'autre chemin vers le profil.
+   * La référence **du profil athlète** sur laquelle les zones sont ancrées —
+   * FC seuil si l'athlète en a adopté une, FC max sinon —, distincte de
+   * `detail.maxHrBpm` (le maximum atteint pendant cette séance). C'est elle qui
+   * découpe les zones : l'affichage en a besoin pour colorer une tranche
+   * d'histogramme dans la rampe des zones et pour dire sur quoi elles sont
+   * calées, et il n'a pas d'autre chemin vers le profil.
    */
-  profileMaxHrBpm: number | null;
+  hrAnchor: HrZoneAnchor | null;
   /** Temps par tranche d'allure. `null` sans vitesse mesurée ni dérivable. */
   paceDistribution: DistributionBin[] | null;
   /** Temps par tranche de FC. `null` sans stream de FC. */
@@ -683,6 +687,11 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   const { distance, heartrate, altitude } = numeric;
   const time = denseTimeAxis(numeric.time);
   const maxHrBpm = profile?.maxHrBpm ?? null;
+  // L'ancrage des zones : la FC seuil si l'athlète en a adopté une, la FC max
+  // sinon. La décision se prend **une fois**, ici, et voyage jusqu'à l'écran —
+  // deux valeurs traînées côte à côte auraient laissé chaque affichage
+  // redécider laquelle l'emporte.
+  const anchor = hrZoneAnchor(maxHrBpm, profile?.lthrBpm ?? null);
   const speeds = activitySpeeds(numeric, time);
 
   // Deux questions distinctes, et deux prédicats distincts : « est-ce de la
@@ -697,8 +706,8 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
       : [];
 
   const hrZones =
-    time !== null && heartrate !== undefined && maxHrBpm !== null
-      ? computeHrZones(heartrate, time, maxHrBpm)
+    time !== null && heartrate !== undefined && anchor !== null
+      ? computeHrZones(heartrate, time, anchor)
       : [];
 
   const trimp =
@@ -752,7 +761,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
     charts: buildCharts(numeric, time, latlng, speeds, footCadence),
     splits,
     hrZones: hrZones.length > 0 ? hrZones : null,
-    profileMaxHrBpm: maxHrBpm,
+    hrAnchor: anchor,
     paceDistribution: paceBins,
     hrDistribution: hrBins,
     decoupling,

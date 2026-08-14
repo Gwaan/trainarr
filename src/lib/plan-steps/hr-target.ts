@@ -19,6 +19,7 @@
  * cible. Une seconde règle de préséance écrite ailleurs finirait par diverger.
  */
 
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 import {
   hrPercentTargetBpm,
   hrZoneTargetBpm,
@@ -46,16 +47,20 @@ export function stepHrPercentBand(step: PlanStep): HrPercentBand | null {
 
 /**
  * La cible cardiaque de l'étape en battements — `null` quand elle n'en porte
- * pas, ou que rien ne permet de la calculer (pas de FC max au profil, zone sans
- * créneau déclaré).
+ * pas, ou que rien ne permet de la calculer (aucune référence au profil, zone
+ * sans créneau déclaré).
  *
- * @param maxHrBpm la FC max du **profil** : c'est elle qui prescrit. La
- * conversion vers un autre référentiel (le pourcentage attendu par
- * intervals.icu) se fait après, et depuis ces battements-là.
+ * @param anchor la référence du **profil** — FC seuil si l'athlète en a adopté
+ * une, FC max sinon : c'est elle qui prescrit. La conversion vers un autre
+ * référentiel (le pourcentage attendu par intervals.icu) se fait après, et
+ * depuis ces battements-là.
  */
-export function stepHrTargetBpm(step: PlanStep, maxHrBpm: number | null): HrTargetBpm | null {
+export function stepHrTargetBpm(
+  step: PlanStep,
+  anchor: HrZoneAnchor | null,
+): HrTargetBpm | null {
   const band = stepHrPercentBand(step);
-  if (band !== null) return hrPercentTargetBpm(band, maxHrBpm);
+  if (band !== null) return hrPercentTargetBpm(band, anchor);
 
-  return step.hrZone === null ? null : hrZoneTargetBpm(step.hrZone, maxHrBpm);
+  return step.hrZone === null ? null : hrZoneTargetBpm(step.hrZone, anchor);
 }

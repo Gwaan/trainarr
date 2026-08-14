@@ -18,7 +18,7 @@
  * | vo2max               | `lib/metrics/vo2max.ts`, `lib/metrics/vdot.ts`, `data/training-metrics.ts` |
  * | vdot                 | `lib/metrics/vdot.ts`, `lib/metrics/fitness-test.ts`          |
  * | decoupling / ef      | `lib/metrics/decoupling.ts`, `activities/[id]/_lib/decoupling-model.ts` |
- * | hr-zones             | `lib/metrics/hr-zones.ts`, `lib/metrics/series.ts`            |
+ * | hr-zones             | `lib/metrics/hr-zones.ts`, `lib/metrics/lthr.ts`, `lib/metrics/series.ts` |
  * | pace-distribution    | `lib/metrics/distribution.ts`                                 |
  * | hr-distribution      | `lib/metrics/distribution.ts`, `lib/metrics/hr-zones.ts`      |
  * | best-segments        | `lib/metrics/best-segments.ts`                                |
@@ -268,23 +268,27 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
     abbreviation: "Z1–Z5",
     name: "Zones cardio",
     question: "Que sont les zones cardio Z1 à Z5 ?",
-    what: "Le temps de la séance réparti en cinq tranches d'intensité, définies en pourcentage de ta FC max. C'est la lecture la plus directe de « à quelle intensité ai-je réellement couru ».",
+    what: "Le temps de la séance réparti en cinq tranches d'intensité. C'est la lecture la plus directe de « à quelle intensité ai-je réellement couru ». Les tranches se définissent en pourcentage d'une référence de ton profil : ta FC seuil si tu en as adopté une, ta FC max sinon.",
     interpret: [
       "Z1 récupération, Z2 endurance fondamentale, Z3 endurance active, Z4 seuil, Z5 VMA et anaérobie.",
       "Sur une sortie facile, l'essentiel du temps doit tomber en Z1–Z2. Une sortie « facile » qui passe la moitié du temps en Z3 n'est pas facile — c'est le principal usage de ce panneau.",
       "Sur une séance de qualité, regarde le temps passé en Z4–Z5 plutôt que la durée totale : c'est lui qui pèse.",
+      "L'ancrage actif est écrit sous les barres du panneau (« Zones calées sur ta FC seuil / ta FC max »), et la FC seuil en vigueur est rappelée dans tes réglages. Les deux ancrages ne donnent pas les mêmes frontières : ne compare pas une répartition d'avant l'adoption à une répartition d'après sans le savoir.",
       "Le total en tête du panneau est le temps enregistré, pas la durée de la séance : un écart s'explique par des pauses ou par des trous de la ceinture, jamais par une erreur de comptage.",
     ],
     computed: [
-      "Chaque mesure de FC est convertie en pourcentage de la FC max de ton profil. Z1 sous 60 %, Z2 de 60 à 70, Z3 de 70 à 80, Z4 de 80 à 90, Z5 à partir de 90 — bornes basses incluses, hautes exclues.",
-      "Tout ce qui est sous 50 % compte en Z1 (arrêts, récupérations) plutôt que d'être jeté : sans quoi la somme des zones ne vaudrait plus la durée enregistrée et le temps disparu serait inexplicable.",
+      "Chaque mesure de FC est convertie en pourcentage de la référence, puis rangée dans sa tranche — bornes basses incluses, hautes exclues.",
+      "Ancrage sur la FC max (par défaut) : Z1 sous 60 %, Z2 de 60 à 70, Z3 de 70 à 80, Z4 de 80 à 90, Z5 à partir de 90. C'est le modèle à cinq zones des montres grand public.",
+      "Ancrage sur la FC seuil (dès que tu en as adopté une) : Z1 sous 85 %, Z2 de 85 à 90, Z3 de 90 à 95, Z4 de 95 à 100, Z5 à partir de 100 %. Ce sont les frontières de l'échelle course à pied de Joe Friel, dont les trois sous-zones du haut (5a, 5b, 5c) sont réunies ici en une seule Z5 — aucune borne n'est déplacée.",
+      "Tout ce qui est très bas compte en Z1 (arrêts, récupérations) plutôt que d'être jeté : sans quoi la somme des zones ne vaudrait plus la durée enregistrée et le temps disparu serait inexplicable.",
       "Le temps n'est pas un comptage de points : chaque mesure porte la durée qu'elle représente vraiment (règle du point milieu), plafonnée à trois fois le pas médian de la séance et à une seconde au minimum.",
       "Ce plafond fait qu'une auto-pause n'est du temps passé dans aucune zone — le total est donc le temps enregistré, pas le temps écoulé.",
       "Les durées se calculent sur le sous-axe des instants où la ceinture a réellement parlé : une FC écrite un point sur quatre représente quatre secondes par mesure, pas une.",
-      "Sans FC max au profil, aucune zone n'est calculée — rien n'est déduit de ton âge.",
+      "Sans FC max ni FC seuil au profil, aucune zone n'est calculée — rien n'est déduit de ton âge.",
+      "Rien n'est stocké : les zones se recalculent à chaque affichage depuis ton profil. Adopter une FC seuil relit donc **tout** ton historique dans le nouveau cadre, et corriger une valeur de profil le relit à nouveau. Aucune ligne n'est réécrite en base.",
     ],
     caveat:
-      "Le modèle est en pourcentage de FC max, pas en pourcentage de réserve cardiaque (Karvonen) ni en pourcentage de FC au seuil : ces variantes déplacent les frontières de plusieurs points, mais exigent respectivement ta FC de repos et un test de seuil. Les zones ne sont pas paramétrables aujourd'hui, et elles ne valent que ce que vaut la FC max que tu as saisie.",
+      "Ancrées sur la FC max, les zones supposent que le même pourcentage décrit le même effort chez tout le monde — ce qui est faux : à pourcentage de FC max égal, les réponses métaboliques diffèrent nettement d'un individu à l'autre (Scharhag-Rosenberger et al., 2010). Deux coureurs à 190 de FC max dont les seuils sont à 165 et 178 ne courent pas la même chose à 85 %. C'est pourquoi l'ancrage sur la FC seuil est préférable dès qu'elle est mesurée : le seuil lactique est un repère individuel, et un prédicteur valide de la performance d'endurance (revue Faude, Kindermann & Meyer, Sports Med 2009). Dans les deux cas, les zones ne valent que ce que vaut la référence : une FC max saisie de mémoire ou une FC seuil mesurée sur trois séances par forte chaleur déplacent toutes les frontières.",
   },
 
   "pace-distribution": {
@@ -316,13 +320,13 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
     interpret: [
       "Le sommet de l'histogramme désigne la FC que tu as réellement tenue, souvent plus parlante que la FC moyenne quand la séance a alterné.",
       "Une traîne étalée vers le bas correspond aux récupérations et aux arrêts ; une traîne vers le haut, aux relances.",
-      "Quand ta FC max est renseignée, chaque tranche est colorée par sa zone : les frontières de couleur sont exactement celles des zones cardio, jamais un découpage à part.",
+      "Quand ton profil porte une référence cardiaque, chaque tranche est colorée par sa zone : les frontières de couleur sont exactement celles des zones cardio, jamais un découpage à part — ancrage compris, donc adopter une FC seuil déplace aussi les couleurs de cet histogramme.",
     ],
     computed: [
       "Tranches de 5 bpm. Aucune borne imposée, contrairement à l'allure : l'axe est déduit des données, arrondi au multiple de 5 englobant — il n'y a donc pas de colonne de bord.",
       "On somme du temps et non des points, avec le même plafond de durée par échantillon (trois fois le pas médian) : une auto-pause n'apparaît nulle part.",
       "Les valeurs nulles ou négatives sont écartées comme des artefacts : un cœur à 0 bpm n'est pas une mesure.",
-      "La couleur des tranches reprend les seuils des zones cardio (60, 70, 80, 90 % de la FC max). Sans FC max au profil, les colonnes restent neutres et la légende ne promet rien.",
+      "La couleur des tranches reprend les seuils des zones cardio — 60, 70, 80, 90 % de la FC max, ou 85, 90, 95, 100 % de la FC seuil quand tu en as adopté une. Sans référence au profil, les colonnes restent neutres et la légende ne promet rien.",
     ],
   },
 

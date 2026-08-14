@@ -92,7 +92,7 @@ const ACTIVITY: ActivityFullDto = {
     { zone: 4, timeS: 0, share: 0 },
     { zone: 5, timeS: 0, share: 0 },
   ],
-  profileMaxHrBpm: 188,
+  hrAnchor: { kind: 'max-hr', bpm: 188 },
   paceDistribution: null,
   hrDistribution: null,
   decoupling: {

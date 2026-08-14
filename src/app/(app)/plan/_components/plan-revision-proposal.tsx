@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import type { PlanRevisionDetailDto } from "@/data/plan-revisions";
 import type { PlanDto } from "@/data/plans";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 
 import {
   PLAN_REVISION_DIRECTIONS,
@@ -39,15 +40,15 @@ export function PlanRevisionProposal({
   detail,
   plan,
   today,
-  maxHrBpm,
+  hrAnchor,
 }: {
   detail: PlanRevisionDetailDto;
   /** Le plan visé — sa longueur donne le numéro des semaines réécrites. */
   plan: PlanDto;
   /** Date civile du jour, calculée côté serveur dans le fuseau de l'athlète. */
   today: string;
-  /** FC max du profil, `null` sans saisie — cf. `PlanView`. */
-  maxHrBpm: number | null;
+  /** L'ancrage cardiaque du profil, `null` sans référence — cf. `PlanView`. */
+  hrAnchor: HrZoneAnchor | null;
 }) {
   const { revision } = detail;
   const direction = PLAN_REVISION_DIRECTIONS[revision.direction];
@@ -97,7 +98,7 @@ export function PlanRevisionProposal({
       <section className="flex flex-col gap-3">
         <h3 className="eyebrow px-0.5">Les semaines proposées</h3>
         {weeks.map((week) => (
-          <PlanWeekCard key={week.startsOn} week={week} today={today} maxHrBpm={maxHrBpm} />
+          <PlanWeekCard key={week.startsOn} week={week} today={today} hrAnchor={hrAnchor} />
         ))}
       </section>
 

@@ -1,0 +1,2197 @@
+{
+  "id": "ff747d40-f575-4448-9e3f-50b225d9fb84",
+  "prevId": "45b60d25-13a0-4e56-a073-c29326ddf6bc",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.activities": {
+      "name": "activities",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fit_file_hash": {
+          "name": "fit_file_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sport_type": {
+          "name": "sport_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "distance_m": {
+          "name": "distance_m",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "moving_time_s": {
+          "name": "moving_time_s",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "elapsed_time_s": {
+          "name": "elapsed_time_s",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "elevation_gain_m": {
+          "name": "elevation_gain_m",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "avg_hr_bpm": {
+          "name": "avg_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_hr_bpm": {
+          "name": "max_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sustained_max_hr_bpm": {
+          "name": "sustained_max_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lthr_sample_bpm": {
+          "name": "lthr_sample_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lthr_sample_source": {
+          "name": "lthr_sample_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "avg_pace_sec_per_km": {
+          "name": "avg_pace_sec_per_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "avg_cadence_spm": {
+          "name": "avg_cadence_spm",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "activities_athlete_started_at_sport_unique": {
+          "name": "activities_athlete_started_at_sport_unique",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sport_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "activities_athlete_id_athlete_id_fk": {
+          "name": "activities_athlete_id_athlete_id_fk",
+          "tableFrom": "activities",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "activities_fit_file_hash_unique": {
+          "name": "activities_fit_file_hash_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "fit_file_hash"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.activity_feedbacks": {
+      "name": "activity_feedbacks",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "activity_id": {
+          "name": "activity_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "activity_feedbacks_activity_id_activities_id_fk": {
+          "name": "activity_feedbacks_activity_id_activities_id_fk",
+          "tableFrom": "activity_feedbacks",
+          "tableTo": "activities",
+          "columnsFrom": [
+            "activity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "activity_feedbacks_activity_id_unique": {
+          "name": "activity_feedbacks_activity_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "activity_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.activity_streams": {
+      "name": "activity_streams",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "activity_id": {
+          "name": "activity_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "data": {
+          "name": "data",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "activity_streams_activity_id_idx": {
+          "name": "activity_streams_activity_id_idx",
+          "columns": [
+            {
+              "expression": "activity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "activity_streams_activity_id_type_idx": {
+          "name": "activity_streams_activity_id_type_idx",
+          "columns": [
+            {
+              "expression": "activity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "activity_streams_activity_id_activities_id_fk": {
+          "name": "activity_streams_activity_id_activities_id_fk",
+          "tableFrom": "activity_streams",
+          "tableTo": "activities",
+          "columnsFrom": [
+            "activity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.activity_weather": {
+      "name": "activity_weather",
+      "schema": "",
+      "columns": {
+        "activity_id": {
+          "name": "activity_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "latitude_deg": {
+          "name": "latitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "longitude_deg": {
+          "name": "longitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "temperature_c": {
+          "name": "temperature_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "apparent_temperature_c": {
+          "name": "apparent_temperature_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "precipitation_mm": {
+          "name": "precipitation_mm",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wind_speed_kmh": {
+          "name": "wind_speed_kmh",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wind_direction_deg": {
+          "name": "wind_direction_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "relative_humidity_pct": {
+          "name": "relative_humidity_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "weather_code": {
+          "name": "weather_code",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_attempt_at": {
+          "name": "last_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "activity_weather_status_last_attempt_idx": {
+          "name": "activity_weather_status_last_attempt_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "last_attempt_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "activity_weather_activity_id_activities_id_fk": {
+          "name": "activity_weather_activity_id_activities_id_fk",
+          "tableFrom": "activity_weather",
+          "tableTo": "activities",
+          "columnsFrom": [
+            "activity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.athlete": {
+      "name": "athlete",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "display_name": {
+          "name": "display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sex": {
+          "name": "sex",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_hr_bpm": {
+          "name": "max_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resting_hr_bpm": {
+          "name": "resting_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lthr_bpm": {
+          "name": "lthr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lthr_suggestion_dismissed_bpm": {
+          "name": "lthr_suggestion_dismissed_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "weight_kg": {
+          "name": "weight_kg",
+          "type": "numeric(5, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "birth_date": {
+          "name": "birth_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "intervals_athlete_id": {
+          "name": "intervals_athlete_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "intervals_api_key_encrypted": {
+          "name": "intervals_api_key_encrypted",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "forecast_location_label": {
+          "name": "forecast_location_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "forecast_latitude_deg": {
+          "name": "forecast_latitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "forecast_longitude_deg": {
+          "name": "forecast_longitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_hr_suggestion_dismissed_bpm": {
+          "name": "max_hr_suggestion_dismissed_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resting_hr_suggestion_dismissed_bpm": {
+          "name": "resting_hr_suggestion_dismissed_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wellness_reading_day": {
+          "name": "wellness_reading_day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "athlete_user_id_auth_users_id_fk": {
+          "name": "athlete_user_id_auth_users_id_fk",
+          "tableFrom": "athlete",
+          "tableTo": "auth_users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "athlete_user_id_unique": {
+          "name": "athlete_user_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.auth_accounts": {
+      "name": "auth_accounts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "access_token": {
+          "name": "access_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "refresh_token": {
+          "name": "refresh_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id_token": {
+          "name": "id_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "access_token_expires_at": {
+          "name": "access_token_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "refresh_token_expires_at": {
+          "name": "refresh_token_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "password": {
+          "name": "password",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "auth_accounts_user_id_idx": {
+          "name": "auth_accounts_user_id_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "auth_accounts_user_id_auth_users_id_fk": {
+          "name": "auth_accounts_user_id_auth_users_id_fk",
+          "tableFrom": "auth_accounts",
+          "tableTo": "auth_users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.auth_invitations": {
+      "name": "auth_invitations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "consumed_by_user_id": {
+          "name": "consumed_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "auth_invitations_token_hash_unique": {
+          "name": "auth_invitations_token_hash_unique",
+          "columns": [
+            {
+              "expression": "token_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "auth_invitations_created_by_user_id_auth_users_id_fk": {
+          "name": "auth_invitations_created_by_user_id_auth_users_id_fk",
+          "tableFrom": "auth_invitations",
+          "tableTo": "auth_users",
+          "columnsFrom": [
+            "created_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "auth_invitations_consumed_by_user_id_auth_users_id_fk": {
+          "name": "auth_invitations_consumed_by_user_id_auth_users_id_fk",
+          "tableFrom": "auth_invitations",
+          "tableTo": "auth_users",
+          "columnsFrom": [
+            "consumed_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.auth_sessions": {
+      "name": "auth_sessions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token": {
+          "name": "token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "ip_address": {
+          "name": "ip_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_agent": {
+          "name": "user_agent",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "auth_sessions_user_id_idx": {
+          "name": "auth_sessions_user_id_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "auth_sessions_user_id_auth_users_id_fk": {
+          "name": "auth_sessions_user_id_auth_users_id_fk",
+          "tableFrom": "auth_sessions",
+          "tableTo": "auth_users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "auth_sessions_token_unique": {
+          "name": "auth_sessions_token_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "token"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.auth_users": {
+      "name": "auth_users",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email_verified": {
+          "name": "email_verified",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "image": {
+          "name": "image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "is_first_account": {
+          "name": "is_first_account",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "auth_users_first_account_unique": {
+          "name": "auth_users_first_account_unique",
+          "columns": [
+            {
+              "expression": "is_first_account",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"auth_users\".\"is_first_account\"",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "auth_users_email_unique": {
+          "name": "auth_users_email_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "email"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.auth_verifications": {
+      "name": "auth_verifications",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "identifier": {
+          "name": "identifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "auth_verifications_identifier_idx": {
+          "name": "auth_verifications_identifier_idx",
+          "columns": [
+            {
+              "expression": "identifier",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.coach_messages": {
+      "name": "coach_messages",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "coach_messages_athlete_created_at_idx": {
+          "name": "coach_messages_athlete_created_at_idx",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "coach_messages_athlete_id_athlete_id_fk": {
+          "name": "coach_messages_athlete_id_athlete_id_fk",
+          "tableFrom": "coach_messages",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.plan_review_decisions": {
+      "name": "plan_review_decisions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plan_id": {
+          "name": "plan_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plan_week": {
+          "name": "plan_week",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sessions_completed": {
+          "name": "sessions_completed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sessions_missed": {
+          "name": "sessions_missed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ctl": {
+          "name": "ctl",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "atl": {
+          "name": "atl",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tsb": {
+          "name": "tsb",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "plan_review_decisions_athlete_created_at_idx": {
+          "name": "plan_review_decisions_athlete_created_at_idx",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "plan_review_decisions_athlete_id_athlete_id_fk": {
+          "name": "plan_review_decisions_athlete_id_athlete_id_fk",
+          "tableFrom": "plan_review_decisions",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "plan_review_decisions_plan_id_plans_id_fk": {
+          "name": "plan_review_decisions_plan_id_plans_id_fk",
+          "tableFrom": "plan_review_decisions",
+          "tableTo": "plans",
+          "columnsFrom": [
+            "plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.plan_revisions": {
+      "name": "plan_revisions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plan_id": {
+          "name": "plan_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "direction": {
+          "name": "direction",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "weeks": {
+          "name": "weeks",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "before_volume_km": {
+          "name": "before_volume_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "before_intensity_km": {
+          "name": "before_intensity_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "after_volume_km": {
+          "name": "after_volume_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "after_intensity_km": {
+          "name": "after_intensity_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plan_updated_at": {
+          "name": "plan_updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "plan_revisions_pending_per_athlete": {
+          "name": "plan_revisions_pending_per_athlete",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "plan_revisions_plan_id_idx": {
+          "name": "plan_revisions_plan_id_idx",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "plan_revisions_athlete_id_athlete_id_fk": {
+          "name": "plan_revisions_athlete_id_athlete_id_fk",
+          "tableFrom": "plan_revisions",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "plan_revisions_plan_id_plans_id_fk": {
+          "name": "plan_revisions_plan_id_plans_id_fk",
+          "tableFrom": "plan_revisions",
+          "tableTo": "plans",
+          "columnsFrom": [
+            "plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.planned_sessions": {
+      "name": "planned_sessions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plan_id": {
+          "name": "plan_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scheduled_on": {
+          "name": "scheduled_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_pace_sec_per_km": {
+          "name": "target_pace_sec_per_km",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "warmup": {
+          "name": "warmup",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recovery": {
+          "name": "recovery",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cooldown": {
+          "name": "cooldown",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "steps": {
+          "name": "steps",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "volume_m": {
+          "name": "volume_m",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "duration_s": {
+          "name": "duration_s",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_activity_id": {
+          "name": "completed_activity_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "planned_sessions_athlete_scheduled_on_idx": {
+          "name": "planned_sessions_athlete_scheduled_on_idx",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scheduled_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "planned_sessions_plan_id_idx": {
+          "name": "planned_sessions_plan_id_idx",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "planned_sessions_athlete_id_athlete_id_fk": {
+          "name": "planned_sessions_athlete_id_athlete_id_fk",
+          "tableFrom": "planned_sessions",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "planned_sessions_plan_id_plans_id_fk": {
+          "name": "planned_sessions_plan_id_plans_id_fk",
+          "tableFrom": "planned_sessions",
+          "tableTo": "plans",
+          "columnsFrom": [
+            "plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "planned_sessions_completed_activity_id_activities_id_fk": {
+          "name": "planned_sessions_completed_activity_id_activities_id_fk",
+          "tableFrom": "planned_sessions",
+          "tableTo": "activities",
+          "columnsFrom": [
+            "completed_activity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.plans": {
+      "name": "plans",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "goal_type": {
+          "name": "goal_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "intent": {
+          "name": "intent",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "return_injury_history": {
+          "name": "return_injury_history",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "level": {
+          "name": "level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_text": {
+          "name": "goal_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "race_date": {
+          "name": "race_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starts_on": {
+          "name": "starts_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "weeks": {
+          "name": "weeks",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sessions_per_week": {
+          "name": "sessions_per_week",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "weekly_time_minutes": {
+          "name": "weekly_time_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "long_run_day": {
+          "name": "long_run_day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reference_distance": {
+          "name": "reference_distance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reference_time_s": {
+          "name": "reference_time_s",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reference_updated_on": {
+          "name": "reference_updated_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_test_note": {
+          "name": "last_test_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewed_session_count": {
+          "name": "reviewed_session_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "reviewed_at": {
+          "name": "reviewed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "plans_active_per_athlete": {
+          "name": "plans_active_per_athlete",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'active'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "plans_draft_per_athlete": {
+          "name": "plans_draft_per_athlete",
+          "columns": [
+            {
+              "expression": "athlete_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'draft'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "plans_athlete_id_athlete_id_fk": {
+          "name": "plans_athlete_id_athlete_id_fk",
+          "tableFrom": "plans",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.weather_forecast_runs": {
+      "name": "weather_forecast_runs",
+      "schema": "",
+      "columns": {
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "reading_day": {
+          "name": "reading_day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_attempt_at": {
+          "name": "last_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "latitude_deg": {
+          "name": "latitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "longitude_deg": {
+          "name": "longitude_deg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "weather_forecast_runs_athlete_id_athlete_id_fk": {
+          "name": "weather_forecast_runs_athlete_id_athlete_id_fk",
+          "tableFrom": "weather_forecast_runs",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.weather_forecasts": {
+      "name": "weather_forecasts",
+      "schema": "",
+      "columns": {
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "forecast_date": {
+          "name": "forecast_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fetched_at": {
+          "name": "fetched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "weather_code": {
+          "name": "weather_code",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "temperature_max_c": {
+          "name": "temperature_max_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "temperature_min_c": {
+          "name": "temperature_min_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "apparent_temperature_max_c": {
+          "name": "apparent_temperature_max_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "apparent_temperature_min_c": {
+          "name": "apparent_temperature_min_c",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "precipitation_sum_mm": {
+          "name": "precipitation_sum_mm",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "precipitation_probability_max_pct": {
+          "name": "precipitation_probability_max_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wind_speed_max_kmh": {
+          "name": "wind_speed_max_kmh",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "weather_forecasts_athlete_id_athlete_id_fk": {
+          "name": "weather_forecasts_athlete_id_athlete_id_fk",
+          "tableFrom": "weather_forecasts",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "weather_forecasts_athlete_id_forecast_date_pk": {
+          "name": "weather_forecasts_athlete_id_forecast_date_pk",
+          "columns": [
+            "athlete_id",
+            "forecast_date"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.wellness_days": {
+      "name": "wellness_days",
+      "schema": "",
+      "columns": {
+        "athlete_id": {
+          "name": "athlete_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resting_hr_bpm": {
+          "name": "resting_hr_bpm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "hrv_rmssd_ms": {
+          "name": "hrv_rmssd_ms",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "hrv_sdnn_ms": {
+          "name": "hrv_sdnn_ms",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sleep_time_s": {
+          "name": "sleep_time_s",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sleep_score": {
+          "name": "sleep_score",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "avg_sleeping_hr_bpm": {
+          "name": "avg_sleeping_hr_bpm",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "weight_kg": {
+          "name": "weight_kg",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "wellness_days_athlete_id_athlete_id_fk": {
+          "name": "wellness_days_athlete_id_athlete_id_fk",
+          "tableFrom": "wellness_days",
+          "tableTo": "athlete",
+          "columnsFrom": [
+            "athlete_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "wellness_days_athlete_id_day_pk": {
+          "name": "wellness_days_athlete_id_day_pk",
+          "columns": [
+            "athlete_id",
+            "day"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

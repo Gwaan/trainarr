@@ -1,6 +1,7 @@
 import { Panel } from "@/components/panel";
 import type { PlanDto, PlanSessionDto } from "@/data/plans";
 import type { AiUnavailableReason } from "@/lib/ai/errors";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 
 import { formatPlanProgress, groupPlanWeeks } from "../_lib/plan-weeks";
 
@@ -32,11 +33,11 @@ export type PlanViewProps = {
   /** Date civile du jour, calculée côté serveur dans le fuseau de l'athlète. */
   today: string;
   /**
-   * FC max du profil, `null` tant qu'elle n'est pas saisie. Lue une fois par la
-   * page et descendue telle quelle : c'est elle qui traduit en battements les
-   * zones cardiaques prescrites sur les séances faciles.
+   * L'ancrage cardiaque du profil, `null` tant qu'il n'y en a aucun. Lu une
+   * fois par la page et descendu tel quel : c'est lui qui traduit en battements
+   * les zones cardiaques prescrites sur les séances faciles.
    */
-  maxHrBpm: number | null;
+  hrAnchor: HrZoneAnchor | null;
   /** `null` quand le coach est joignable. */
   unavailableReason: AiUnavailableReason | null;
 };
@@ -45,7 +46,7 @@ export function PlanView({
   plan,
   sessions,
   today,
-  maxHrBpm,
+  hrAnchor,
   unavailableReason,
 }: PlanViewProps) {
   const weeks = groupPlanWeeks(plan, sessions, today);
@@ -75,7 +76,7 @@ export function PlanView({
       <section className="flex flex-col gap-3">
         <h2 className="eyebrow px-0.5">Programme</h2>
         {weeks.map((week) => (
-          <PlanWeekCard key={week.startsOn} week={week} today={today} maxHrBpm={maxHrBpm} />
+          <PlanWeekCard key={week.startsOn} week={week} today={today} hrAnchor={hrAnchor} />
         ))}
       </section>
 

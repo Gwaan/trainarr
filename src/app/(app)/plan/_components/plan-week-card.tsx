@@ -1,6 +1,7 @@
 import { ChevronDown, Moon } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 import { cn } from "@/lib/utils";
 
 import { formatWeekSummary, type PlanWeekView } from "../_lib/plan-weeks";
@@ -29,12 +30,12 @@ import { PlanSessionRow } from "./plan-session-row";
 export function PlanWeekCard({
   week,
   today,
-  maxHrBpm,
+  hrAnchor,
 }: {
   week: PlanWeekView;
   today: string;
-  /** FC max du profil, `null` sans saisie — cf. `PlanSessionRow`. */
-  maxHrBpm: number | null;
+  /** L'ancrage cardiaque du profil, `null` sans référence — cf. `PlanSessionRow`. */
+  hrAnchor: HrZoneAnchor | null;
 }) {
   const isCurrent = week.status === "current";
   const summary = formatWeekSummary(week);
@@ -87,7 +88,7 @@ export function PlanWeekCard({
               key={session.id}
               session={session}
               today={today}
-              maxHrBpm={maxHrBpm}
+              hrAnchor={hrAnchor}
             />
           ))}
         </ul>

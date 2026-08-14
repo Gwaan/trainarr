@@ -145,6 +145,8 @@ const rawActivity: Activity = {
   avgPaceSecPerKm: 290.1,
   avgCadenceSpm: 87.5,
   sustainedMaxHrBpm: null,
+  lthrSampleBpm: null,
+  lthrSampleSource: null,
   createdAt: new Date('2026-08-02T08:00:00.000Z'),
 };
 

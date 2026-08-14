@@ -109,7 +109,7 @@ async function ActivityDetail({ params }: PageProps) {
   const hrBars =
     full.hrDistribution === null
       ? null
-      : hrDistributionModel(full.hrDistribution, full.profileMaxHrBpm);
+      : hrDistributionModel(full.hrDistribution, full.hrAnchor);
   const both = paceBars !== null && hrBars !== null;
 
   const hasEfforts = decoupling !== null || bestSegments.length > 0;
@@ -148,9 +148,10 @@ async function ActivityDetail({ params }: PageProps) {
           {splits.length > 0 ? (
             <ActivitySplits splits={splits} className="lg:col-span-3" />
           ) : null}
-          {hrZones === null ? null : (
+          {hrZones === null || full.hrAnchor === null ? null : (
             <HrZonesPanel
               zones={hrZones}
+              anchor={full.hrAnchor}
               className={splits.length > 0 ? "self-start lg:col-span-2" : "lg:col-span-5"}
             />
           )}
@@ -176,7 +177,7 @@ async function ActivityDetail({ params }: PageProps) {
               // La couleur ne se devine pas : quand les tranches sont zonées,
               // la légende le dit — sinon elle ne promet rien.
               hint={
-                full.profileMaxHrBpm === null
+                full.hrAnchor === null
                   ? "Temps passé dans chaque tranche de fréquence cardiaque."
                   : "Temps passé dans chaque tranche de fréquence cardiaque, colorée par zone."
               }

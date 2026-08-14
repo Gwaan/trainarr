@@ -103,6 +103,8 @@ const ATHLETE: Athlete = {
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
   restingHrSuggestionDismissedBpm: null,
+  lthrBpm: null,
+  lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -128,6 +130,8 @@ const ACTIVITY: Activity = {
   avgPaceSecPerKm: 250,
   avgCadenceSpm: 172,
   sustainedMaxHrBpm: null,
+  lthrSampleBpm: null,
+  lthrSampleSource: null,
   createdAt: new Date('2026-08-09T07:00:00.000Z'),
 };
 
@@ -314,7 +318,9 @@ describe('getActivityFull', () => {
 
     expect(full.trimp).toBeGreaterThan(0);
     expect(full.effectiveVo2max).toBeGreaterThan(20);
-    expect(full.profileMaxHrBpm).toBe(190);
+    // Sans FC seuil au profil, l'ancrage reste la FC max — le comportement
+    // d'avant, à la ligne près.
+    expect(full.hrAnchor).toEqual({ kind: 'max-hr', bpm: 190 });
 
     // Distribution d'allure : 250 s/km constants tombent tous dans la tranche
     // [240, 255) de la grille de 15 s ancrée à 3:00/km.
@@ -441,7 +447,7 @@ describe('getActivityFull', () => {
     expect(full?.splits).toHaveLength(3);
     // Sans FC max ni sexe au profil, rien n'est estimé.
     expect(full?.hrZones).toBeNull();
-    expect(full?.profileMaxHrBpm).toBeNull();
+    expect(full?.hrAnchor).toBeNull();
     expect(full?.trimp).toBeNull();
     expect(full?.effectiveVo2max).toBeNull();
     // Les distributions ne dépendent d'aucun profil : une répartition brute.

@@ -32,7 +32,32 @@ export {
   isPartialSplit,
   type Split,
 } from './splits';
-export { computeHrZones, hrZoneOf, type HrZoneNumber, type ZoneTime } from './hr-zones';
+export {
+  HR_ZONE_FLOORS_PERCENT,
+  computeHrZones,
+  hrZoneAnchor,
+  hrZoneOf,
+  type HrZoneAnchor,
+  type HrZoneNumber,
+  type ZoneTime,
+} from './hr-zones';
+export {
+  LTHR_BOUNDS,
+  LTHR_MIN_SESSIONS,
+  LTHR_REPROPOSE_DELTA_BPM,
+  LTHR_SOURCES,
+  LTHR_SUGGESTION_DELTA_BPM,
+  THRESHOLD_BLOCK_MIN_S,
+  TIME_TRIAL_TAIL_S,
+  blockPlateauHrBpm,
+  lthrCandidate,
+  lthrSuggestion,
+  medianLthrBpm,
+  timeTrialLthrBpm,
+  type LthrCandidate,
+  type LthrSource,
+  type LthrSuggestionInput,
+} from './lthr';
 export {
   EASY_HR_ZONE,
   PRESCRIBED_HR_ZONES,
@@ -54,6 +79,7 @@ export { computeDecoupling, type Decoupling, type HalfStats } from './decoupling
 export {
   BEST_SEGMENT_TARGETS_M,
   computeBestSegments,
+  fastestSegmentWindow,
   type BestSegment,
 } from './best-segments';
 export { SUSTAINED_HR_WINDOW_S, sustainedMaxHrBpm } from './sustained-hr';

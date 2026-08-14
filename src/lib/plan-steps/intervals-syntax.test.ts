@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { EASY_HR_BANDS } from '@/lib/metrics/hr-targets';
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 
 import { stepsToIntervalsSyntax } from './intervals-syntax';
 import { planSessionStepsSchema, type PlanSessionSteps, type PlanStep } from './schema';
+
+/** L'ancrage par défaut : la FC max du profil, faute de FC seuil adoptée. */
+const MAX_HR_184: HrZoneAnchor = { kind: 'max-hr', bpm: 184 };
+
 
 /** Étape neutre : chaque test ne surcharge que ce qu'il éprouve. */
 function step(overrides: Partial<PlanStep> = {}): PlanStep {
@@ -109,13 +114,13 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     // La FC max du compte réel (205) diverge de la vraie (184) : les 120–145 bpm
     // prescrits sur 184 valent 59–71 % de 205.
     expect(
-      stepsToIntervalsSyntax(endurance, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+      stepsToIntervalsSyntax(endurance, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 205 }),
     ).toBe('- Course 2km 59-71% HR');
 
     // Références confondues : le pourcentage redonne exactement le créneau
     // prescrit (65–79 % de FC max, cf. `lib/metrics/hr-targets`).
     expect(
-      stepsToIntervalsSyntax(endurance, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 }),
+      stepsToIntervalsSyntax(endurance, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 184 }),
     ).toBe('- Course 2km 65-79% HR');
   });
 
@@ -144,12 +149,12 @@ describe('stepsToIntervalsSyntax — cibles', () => {
 
     // 74–79 % de 184 = 136–145 bpm, soit 66–71 % d'une référence à 205.
     expect(
-      stepsToIntervalsSyntax(longRun, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+      stepsToIntervalsSyntax(longRun, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 205 }),
     ).toBe(['- Course 16km 59-71% HR', '- Course 4km 66-71% HR'].join('\n'));
 
     // Références confondues : le sous-créneau ressort tel qu'il est prescrit.
     expect(
-      stepsToIntervalsSyntax(longRun, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 }),
+      stepsToIntervalsSyntax(longRun, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 184 }),
     ).toBe(['- Course 16km 65-79% HR', '- Course 4km 74-79% HR'].join('\n'));
   });
 
@@ -157,7 +162,7 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     expect(
       stepsToIntervalsSyntax(
         [{ repeat: 1, steps: [step({ hrPercentMin: 65, hrPercentMax: 71 })] }],
-        { profileMaxHrBpm: 184, intervalsMaxHrBpm: 184 },
+        { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 184 },
       ),
     ).toBe('- Course 2km 65-71% HR');
   });
@@ -177,7 +182,7 @@ describe('stepsToIntervalsSyntax — cibles', () => {
    */
   it('ne suffixe jamais autrement que par ` HR` — `MaxHR` partirait en puissance', () => {
     const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], {
-      profileMaxHrBpm: 184,
+      profileAnchor: MAX_HR_184,
       intervalsMaxHrBpm: 205,
     });
 
@@ -189,7 +194,7 @@ describe('stepsToIntervalsSyntax — cibles', () => {
 
   it('ne pousse jamais un numéro de zone, qui référencerait les zones du compte', () => {
     const line = stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 2 })] }], {
-      profileMaxHrBpm: 184,
+      profileAnchor: MAX_HR_184,
       intervalsMaxHrBpm: 205,
     });
     expect(line).not.toContain('Z2');
@@ -202,21 +207,21 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     expect(stepsToIntervalsSyntax(steps)).toBe('- Course 2km');
     // FC max distante illisible (API en erreur, champ absent) : le repli.
     expect(
-      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: null }),
+      stepsToIntervalsSyntax(steps, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: null }),
     ).toBe('- Course 2km');
     // FC max distante aberrante : rien n'est calculé, rien n'est deviné.
-    expect(stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 40 })).toBe(
+    expect(stepsToIntervalsSyntax(steps, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 40 })).toBe(
       '- Course 2km',
     );
     // FC max du profil absente : plus rien ne prescrit, le dénominateur seul ne
     // suffit pas.
     expect(
-      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: null, intervalsMaxHrBpm: 205 }),
+      stepsToIntervalsSyntax(steps, { profileAnchor: null, intervalsMaxHrBpm: 205 }),
     ).toBe('- Course 2km');
     // Zone sans créneau de prescription déclaré (cf. `lib/metrics/hr-targets`).
     expect(
       stepsToIntervalsSyntax([{ repeat: 1, steps: [step({ hrZone: 4 })] }], {
-        profileMaxHrBpm: 184,
+        profileAnchor: MAX_HR_184,
         intervalsMaxHrBpm: 205,
       }),
     ).toBe('- Course 2km');
@@ -230,7 +235,7 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     ];
 
     expect(
-      stepsToIntervalsSyntax(withPace, { profileMaxHrBpm: 184, intervalsMaxHrBpm: null }),
+      stepsToIntervalsSyntax(withPace, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: null }),
     ).toBe('- Course 2km 4:25-4:35/km Pace');
   });
 
@@ -240,7 +245,7 @@ describe('stepsToIntervalsSyntax — cibles', () => {
     expect(
       stepsToIntervalsSyntax(
         [{ repeat: 1, steps: [step({ paceMinSecPerKm: 265, paceMaxSecPerKm: 275 })] }],
-        { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 },
+        { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 205 },
       ),
     ).toBe('- Course 2km 4:25-4:35/km Pace');
   });
@@ -286,7 +291,7 @@ describe('stepsToIntervalsSyntax — blocs', () => {
     ];
 
     expect(
-      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+      stepsToIntervalsSyntax(steps, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 205 }),
     ).toBe(
       [
         '- Echauffement 15m 59-71% HR',
@@ -358,7 +363,7 @@ describe('stepsToIntervalsSyntax — séance complète', () => {
     expect(planSessionStepsSchema.safeParse(steps).success).toBe(true);
 
     expect(
-      stepsToIntervalsSyntax(steps, { profileMaxHrBpm: 184, intervalsMaxHrBpm: 205 }),
+      stepsToIntervalsSyntax(steps, { profileAnchor: MAX_HR_184, intervalsMaxHrBpm: 205 }),
     ).toBe(
       [
         '- Echauffement - très souple 15m 59-71% HR',

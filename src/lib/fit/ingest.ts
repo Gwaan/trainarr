@@ -6,6 +6,7 @@ import {
   upsertActivityFromFit,
   type FitUpsertOutcome,
 } from '@/data/activities';
+import { recordThresholdBlockLthr } from '@/data/lthr-suggestion';
 import { recordSustainedMaxHr } from '@/data/max-hr-suggestion';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
@@ -92,6 +93,29 @@ async function linkToPlannedSession(activityId: number, athleteId: number): Prom
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(`[fit] activité ${activityId} : rapprochement du plan impossible — ${reason}`);
+  }
+}
+
+/**
+ * Relève ce que la séance dit de la **FC seuil**, quand elle réalise une séance
+ * de seuil planifiée.
+ *
+ * **Après le rapprochement**, et ce n'est pas un détail d'ordre : c'est le lien
+ * à la séance planifiée qui dit qu'un bloc de seuil a été couru, et quelle
+ * longueur il faisait. Sans lui, la mesure n'a aucun point d'ancrage.
+ *
+ * **Jamais une condition de l'import**, comme le rapprochement et la météo : une
+ * séance dont on ne sait pas tirer de plateau cardiaque reste une séance valide,
+ * et elle ne doit pas repartir en `failed/` pour ça. L'échec se journalise avec
+ * son motif — un silence ferait passer « aucune mesure » pour un état normal
+ * alors que c'en est un pour la plupart des séances, mais pas pour toutes.
+ */
+async function recordThresholdLthr(activityId: number, athleteId: number): Promise<void> {
+  try {
+    await recordThresholdBlockLthr(activityId, athleteId);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : mesure de FC seuil impossible — ${reason}`);
   }
 }
 
@@ -210,6 +234,7 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
   }
 
   await linkToPlannedSession(activityId, athleteId);
+  await recordThresholdLthr(activityId, athleteId);
   await recordWeather(activityId, athleteId);
   scheduleActivePlanFollowUp(activityId, athleteId);
 

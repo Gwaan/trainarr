@@ -239,10 +239,11 @@ describe('toCalendarSessionView — le détail que la modale ouvre', () => {
       steps: [{ repeat: 1, steps: [step({ hrZone: 2, durationS: 2_400 })] }],
     });
 
-    expect(toCalendarSessionView(easy, '2026-08-13', 190).detail.blocks[0].steps[0].target).toBe(
-      '124–150 bpm',
-    );
-    // Sans FC max au profil, le rang de zone nu — rien n'est inventé.
+    expect(
+      toCalendarSessionView(easy, '2026-08-13', { kind: 'max-hr', bpm: 190 }).detail.blocks[0]
+        .steps[0].target,
+    ).toBe('124–150 bpm');
+    // Sans référence au profil, le rang de zone nu — rien n'est inventé.
     expect(toCalendarSessionView(easy, '2026-08-13').detail.blocks[0].steps[0].target).toBe('Z2');
   });
 
@@ -333,7 +334,7 @@ describe('buildCalendarMonth', () => {
 
   const base = {
     ...AUGUST,
-    maxHrBpm: null,
+    hrAnchor: null,
     plan: PLAN,
     sessions: [],
     activities: [],
@@ -409,7 +410,7 @@ describe('buildCalendarMonth', () => {
         .flatMap((week) => week.days)
         .find((day) => day.date === '2026-08-12')?.sessions[0]?.detail.blocks[0]?.steps[0]?.target;
 
-    expect(target(buildCalendarMonth({ ...base, maxHrBpm: 190, sessions }))).toBe('124–150 bpm');
+    expect(target(buildCalendarMonth({ ...base, hrAnchor: { kind: 'max-hr', bpm: 190 }, sessions }))).toBe('124–150 bpm');
     expect(target(buildCalendarMonth({ ...base, sessions }))).toBe('Z2');
   });
 
@@ -516,7 +517,7 @@ describe('buildCalendarMonth — météo prévue', () => {
 
   const base = {
     ...AUGUST,
-    maxHrBpm: null,
+    hrAnchor: null,
     plan: PLAN,
     sessions: [] as CalendarSessionDto[],
     activities: [] as CalendarActivityView[],
@@ -607,7 +608,7 @@ describe('buildCalendarMonth — météo relevée', () => {
 
   const base = {
     ...AUGUST,
-    maxHrBpm: null,
+    hrAnchor: null,
     plan: PLAN,
     sessions: [] as CalendarSessionDto[],
     activities: [] as CalendarActivityView[],

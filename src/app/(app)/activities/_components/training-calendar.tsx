@@ -30,6 +30,7 @@ import { SESSION_TYPE_DOT } from "@/components/session-type";
 import { Button } from "@/components/ui/button";
 import type { CalendarDayWeatherDto, CalendarSessionDto } from "@/data/calendar";
 import type { WeatherForecastDto } from "@/data/weather-forecast";
+import type { HrZoneAnchor } from "@/lib/metrics/hr-zones";
 import { judgeSessionMove, type MoveSession } from "@/lib/plan-calendar/move-rules";
 import { sessionTypesPresent, type SessionType } from "@/lib/plan-session-type";
 import { cn } from "@/lib/utils";
@@ -105,12 +106,13 @@ export type TrainingCalendarProps = {
   /** Jour civil courant, calculé côté serveur dans le fuseau de l'athlète. */
   today: string;
   /**
-   * FC max du profil, `null` tant qu'elle n'est pas saisie — elle traduit en
-   * battements les zones cardiaques du détail des séances. Résolue à
-   * l'affichage, jamais stockée dans la séance : une correction du profil suit
-   * tout le plan, exactement comme sur la page Plan.
+   * L'ancrage cardiaque du profil — FC seuil si l'athlète en a adopté une, FC
+   * max sinon —, `null` tant qu'il n'y en a aucun : il traduit en battements les
+   * zones cardiaques du détail des séances. Résolu à l'affichage, jamais stocké
+   * dans la séance : une correction du profil suit tout le plan, exactement
+   * comme sur la page Plan.
    */
-  maxHrBpm: number | null;
+  hrAnchor: HrZoneAnchor | null;
   plan: CalendarPlanBounds | null;
   sessions: CalendarSessionDto[];
   /**
@@ -256,7 +258,7 @@ export function TrainingCalendar({
   month,
   range,
   today,
-  maxHrBpm,
+  hrAnchor,
   plan,
   sessions,
   activities,
@@ -314,7 +316,7 @@ export function TrainingCalendar({
         to: range.to,
         month,
         today,
-        maxHrBpm,
+        hrAnchor,
         plan,
         sessions: visibleSessions,
         activities,
@@ -326,7 +328,7 @@ export function TrainingCalendar({
       range.to,
       month,
       today,
-      maxHrBpm,
+      hrAnchor,
       plan,
       visibleSessions,
       activities,

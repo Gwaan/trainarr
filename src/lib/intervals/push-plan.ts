@@ -103,6 +103,7 @@ import { formatPace } from '@/lib/ai/format';
 import { SecretDecryptionError, SecretKeyUnavailableError } from '@/lib/crypto/secret-box';
 import { shiftCivilDate } from '@/lib/dates/civil';
 import { canPrescribeHeartRate } from '@/lib/metrics/hr-targets';
+import { hrZoneAnchor } from '@/lib/metrics/hr-zones';
 import { stepsToIntervalsSyntax, type HrReference } from '@/lib/plan-steps/intervals-syntax';
 import type { PlanSessionSteps } from '@/lib/plan-steps/schema';
 
@@ -479,6 +480,10 @@ export async function syncPlanToIntervals(athleteId: number): Promise<PushReport
     getAthleteProfileById(athleteId),
   ]);
   const profileMaxHrBpm = profile?.maxHrBpm ?? null;
+  // L'ancrage qui **prescrit** : la FC seuil si l'athlète en a adopté une, la FC
+  // max sinon. La décision se prend une fois, ici, et descend jusqu'à la
+  // sérialisation (cf. `plan-steps/intervals-syntax`).
+  const profileAnchor = hrZoneAnchor(profileMaxHrBpm, profile?.lthrBpm ?? null);
 
   // La FC max distante n'a de sens qu'en dénominateur d'une prescription qui
   // existe : sans FC max exploitable au profil, aucune zone ne se traduit en
@@ -497,7 +502,7 @@ export async function syncPlanToIntervals(athleteId: number): Promise<PushReport
           // Comparaison lexicographique : sur des dates civiles `YYYY-MM-DD`,
           // elle coïncide avec l'ordre chronologique.
           active.sessions.filter((session) => session.scheduledOn >= today),
-          { profileMaxHrBpm, intervalsMaxHrBpm },
+          { profileAnchor, intervalsMaxHrBpm },
         );
 
   const range = syncWindow(today);

@@ -151,6 +151,8 @@ const ATHLETE: Athlete = {
   forecastLongitudeDeg: null,
   maxHrSuggestionDismissedBpm: null,
   restingHrSuggestionDismissedBpm: null,
+  lthrBpm: null,
+  lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
@@ -175,6 +177,8 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
     sustainedMaxHrBpm: null,
+    lthrSampleBpm: null,
+    lthrSampleSource: null,
     createdAt: new Date('2026-08-01T10:00:00.000Z'),
     ...overrides,
   };
@@ -246,6 +250,8 @@ describe('getDashboardSummary — base vide', () => {
       // absentes, et la tuile le dira plutôt que de rester blanche.
       wellness: { today: '2026-08-10', restingHr: null, hrv: null, sleep: null },
       restingHrSuggestion: null,
+      // Ni séance de seuil, ni test : aucune FC seuil n'a jamais été mesurée.
+      lthrSuggestion: null,
     });
   });
 

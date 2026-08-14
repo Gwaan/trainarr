@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PlanSessionDto } from '@/data/plans';
+import type { HrZoneAnchor } from '@/lib/metrics/hr-zones';
 import { PLAN_STEP_ROLES, type PlanSessionSteps, type PlanStep } from '@/lib/plan-steps/schema';
 
 import {
@@ -14,6 +15,10 @@ import {
   planSessionSummary,
   planSessionTotals,
 } from './session-detail';
+
+/** L'ancrage par défaut : la FC max du profil, faute de FC seuil adoptée. */
+const MAX_HR_184: HrZoneAnchor = { kind: 'max-hr', bpm: 184 };
+
 
 /** Étape minimale : sans mesure ni cible, à compléter par le test. */
 function step(overrides: Partial<PlanStep> = {}): PlanStep {
@@ -114,13 +119,13 @@ describe('formatStepTarget', () => {
 
   it('rend des battements dès que la FC max est connue', () => {
     // C'est ce qui se surveille au poignet : « Z2 » ne dit rien à qui court.
-    expect(formatStepTarget(step({ hrZone: 2 }), 184)).toBe('120–145 bpm');
+    expect(formatStepTarget(step({ hrZone: 2 }), MAX_HR_184)).toBe('120–145 bpm');
   });
 
   it('retombe sur le rang de zone quand rien n’est calculable', () => {
     expect(formatStepTarget(step({ hrZone: 2 }), null)).toBe('Z2');
     // Zone sans créneau de prescription déclaré : rien n'est inventé.
-    expect(formatStepTarget(step({ hrZone: 4 }), 184)).toBe('Z4');
+    expect(formatStepTarget(step({ hrZone: 4 }), MAX_HR_184)).toBe('Z4');
   });
 
   it('rend null quand l’étape n’a pas de cible', () => {
@@ -134,13 +139,13 @@ describe('formatStepTarget', () => {
    */
   it('affiche le sous-créneau, pas la plage entière de la zone', () => {
     expect(
-      formatStepTarget(step({ hrZone: 2, hrPercentMin: 74, hrPercentMax: 79 }), 184),
+      formatStepTarget(step({ hrZone: 2, hrPercentMin: 74, hrPercentMax: 79 }), MAX_HR_184),
     ).toBe('136–145 bpm');
-    expect(formatStepTarget(step({ hrZone: 2 }), 184)).toBe('120–145 bpm');
+    expect(formatStepTarget(step({ hrZone: 2 }), MAX_HR_184)).toBe('120–145 bpm');
   });
 
   it('affiche un sous-créneau sans rang de zone, et retombe à null sans FC max', () => {
-    expect(formatStepTarget(step({ hrPercentMin: 65, hrPercentMax: 71 }), 184)).toBe(
+    expect(formatStepTarget(step({ hrPercentMin: 65, hrPercentMax: 71 }), MAX_HR_184)).toBe(
       '120–131 bpm',
     );
     expect(formatStepTarget(step({ hrPercentMin: 65, hrPercentMax: 71 }), null)).toBeNull();
@@ -166,7 +171,7 @@ describe('séance prescrite en fréquence cardiaque', () => {
   });
 
   it('annonce la cible FC avant l’allure sur la ligne repliée', () => {
-    expect(planSessionSummary(easy, 184)).toEqual([
+    expect(planSessionSummary(easy, MAX_HR_184)).toEqual([
       '7 km',
       '50 min',
       '120–145 bpm',
@@ -175,7 +180,7 @@ describe('séance prescrite en fréquence cardiaque', () => {
   });
 
   it('nomme l’allure « indicative » dans le récapitulatif, cible FC devant', () => {
-    expect(planSessionDetail(easy, 184).totals).toEqual([
+    expect(planSessionDetail(easy, MAX_HR_184).totals).toEqual([
       { label: 'Distance', value: '7 km' },
       { label: 'Durée', value: '50 min' },
       { label: 'Cible FC', value: '120–145 bpm' },
@@ -208,7 +213,7 @@ describe('séance prescrite en fréquence cardiaque', () => {
       ],
     });
 
-    expect(planSessionSummary(mixed, 184)).toEqual(['12 km', '@ 7:08/km']);
+    expect(planSessionSummary(mixed, MAX_HR_184)).toEqual(['12 km', '@ 7:08/km']);
   });
 
   /**
@@ -229,9 +234,9 @@ describe('séance prescrite en fréquence cardiaque', () => {
       ],
     });
 
-    expect(planSessionSummary(finish, 184)).toEqual(['20 km', '120–145 bpm']);
+    expect(planSessionSummary(finish, MAX_HR_184)).toEqual(['20 km', '120–145 bpm']);
     expect(
-      planSessionDetail(finish, 184).blocks.map((block) => block.steps[0].target),
+      planSessionDetail(finish, MAX_HR_184).blocks.map((block) => block.steps[0].target),
     ).toEqual(['120–145 bpm', '136–145 bpm']);
   });
 
@@ -246,7 +251,7 @@ describe('séance prescrite en fréquence cardiaque', () => {
       ],
     });
 
-    expect(planSessionSummary(withEnvelope, 184)).toEqual(['8 km', '120–145 bpm']);
+    expect(planSessionSummary(withEnvelope, MAX_HR_184)).toEqual(['8 km', '120–145 bpm']);
   });
 });
 

@@ -70,6 +70,7 @@ import 'server-only';
 import { todayCivilDate } from '@/data/athlete';
 import { getTrainingSnapshot } from '@/data/coach-context';
 import { getFitnessTestCandidate, recordFitnessTest } from '@/data/fitness-test';
+import { recordTimeTrialLthr } from '@/data/lthr-suggestion';
 import { getPlanUpdatedAt } from '@/data/plan-review';
 import { depositPlanRevision, toPlanRevisionSessions } from '@/data/plan-revisions';
 import {
@@ -265,6 +266,28 @@ async function applyFitnessTest(activityId: number, athleteId: number): Promise<
       `seuil d'effort maximal ${Math.round(MAXIMAL_EFFORT_HR_SHARE * 100)} %, ` +
       `${daysSinceReference} j depuis la référence).`,
   );
+
+  // Un test **vérifié maximal et mesurable** est aussi un contre-la-montre, donc
+  // une mesure de FC seuil (protocole Friel : la FC moyenne des 20 dernières
+  // minutes de l'effort). Les deux verdicts qui portent un chrono — `improved`
+  // et `not-improved` — sont exactement ceux qui ont franchi la validation
+  // d'effort maximal ; les autres ne disent rien de l'intensité réellement
+  // atteinte, et une FC relevée dessus ne serait celle d'aucun seuil.
+  //
+  // Cette mesure ne recalibre rien toute seule : elle se dépose sur l'activité,
+  // et c'est la proposition de FC seuil (`data/lthr-suggestion.ts`) qui décide
+  // s'il y a lieu d'en parler à l'athlète. Elle ne peut donc pas faire échouer
+  // le traitement du test, d'où le `catch` qui la borne.
+  if (verdict.outcome === 'improved' || verdict.outcome === 'not-improved') {
+    try {
+      await recordTimeTrialLthr(candidate.activityId, athleteId);
+    } catch (error) {
+      const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+      console.error(
+        `[plan/test] activité ${candidate.activityId} : mesure de FC seuil impossible — ${reason}`,
+      );
+    }
+  }
 
   if (verdict.outcome !== 'improved') {
     await recordFitnessTest(
