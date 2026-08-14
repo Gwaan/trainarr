@@ -8,6 +8,7 @@ import type { SettingsSectionsData } from "../_lib/settings-values";
 
 import { AccountPanel } from "./account-panel";
 import { IntervalsPanel } from "./intervals-panel";
+import { InvitationsPanel } from "./invitations-panel";
 import { ProfileForm } from "./profile-form";
 
 /**
@@ -74,8 +75,18 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
         <ProfileForm mode="edit" values={data.profile} />
       </TabsContent>
 
+      {/* Les invitations sont une affaire de compte, pas de profil physiologique
+          — d'où leur place ici, sous « Ton compte », plutôt que dans un quatrième
+          onglet qui n'existerait que pour une personne. Pour tout autre compte
+          que le premier, la section est **absente** : rien de grisé, rien à
+          deviner. */}
       <TabsContent value="account" active={current === "account"}>
-        <AccountPanel account={data.account} />
+        <div className="flex flex-col gap-4 sm:gap-5">
+          <AccountPanel account={data.account} />
+          {data.invitations.canInvite ? (
+            <InvitationsPanel invitations={data.invitations.invitations} />
+          ) : null}
+        </div>
       </TabsContent>
 
       <TabsContent value="imports" active={current === "imports"}>

@@ -6,6 +6,7 @@ import {
   SIGN_UP_CLOSED_MESSAGE,
   guardSignUp,
 } from './sign-up-guard';
+import { withInvitationClaim } from './invitation-claim';
 import { hasAnyUser } from '@/data/users';
 
 vi.mock('server-only', () => ({}));
@@ -62,5 +63,74 @@ describe('guardSignUp', () => {
     await expect(guardSignUp()).rejects.toThrow(SIGN_UP_CLOSED_MESSAGE);
 
     expect(hasAnyUserMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * L'invitation est la seconde porte — et il faut vérifier autant qu'elle
+ * s'ouvre pour qui a dépensé un jeton, qu'elle reste close pour tout le reste.
+ */
+describe('guardSignUp, sous invitation', () => {
+  it("laisse passer la création alors que la porte d'amorçage est fermée", async () => {
+    hasAnyUserMock.mockResolvedValue(true);
+
+    await expect(
+      withInvitationClaim(42, () => guardSignUp()),
+    ).resolves.toEqual({ data: { isFirstAccount: null } });
+  });
+
+  it("ne marque pas un compte invité comme compte d'amorçage", async () => {
+    hasAnyUserMock.mockResolvedValue(true);
+
+    const { data } = await withInvitationClaim(42, () => guardSignUp());
+
+    // La marque entre dans l'index partiel unique : la poser ici ferait échouer
+    // toutes les invitations sauf la première.
+    expect(data.isFirstAccount).toBeNull();
+  });
+
+  it("n'a même pas besoin d'interroger la base : l'invitation tranche seule", async () => {
+    hasAnyUserMock.mockResolvedValue(true);
+
+    await withInvitationClaim(42, () => guardSignUp());
+
+    expect(hasAnyUserMock).not.toHaveBeenCalled();
+  });
+
+  it('ne couvre qu\'une seule création — la seconde retombe sur le refus', async () => {
+    hasAnyUserMock.mockResolvedValue(true);
+
+    const outcome = await withInvitationClaim(42, async () => {
+      await guardSignUp();
+      return guardSignUp().catch((error: unknown) => error);
+    });
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome).toMatchObject({ body: { code: SIGN_UP_CLOSED_CODE } });
+  });
+
+  /**
+   * Le contournement qu'un drapeau global aurait ouvert : marteler
+   * `/api/auth/sign-up/email` pendant qu'une invitation légitime s'exécute. La
+   * requête concurrente n'est pas dans la portée de la marque — elle est
+   * refusée, et l'invitation aboutit quand même.
+   */
+  it("refuse une inscription concurrente lancée pendant qu'une invitation s'exécute", async () => {
+    hasAnyUserMock.mockResolvedValue(true);
+
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+
+    const invited = withInvitationClaim(42, async () => {
+      await gate;
+      return guardSignUp();
+    });
+    const intruder = guardSignUp();
+
+    await expect(intruder).rejects.toThrow(SIGN_UP_CLOSED_MESSAGE);
+    openGate();
+    await expect(invited).resolves.toEqual({ data: { isFirstAccount: null } });
   });
 });

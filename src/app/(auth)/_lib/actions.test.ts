@@ -3,9 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_PASSWORD_MIN_LENGTH } from '@/lib/auth/limits';
 import { APIError } from 'better-auth/api';
 
-import { createFirstAccountAction, signInAction } from './actions';
+import {
+  createFirstAccountAction,
+  createInvitedAccountAction,
+  signInAction,
+} from './actions';
 import type { AuthFormState } from './form-state';
 import { getAuth } from '@/lib/auth';
+import { generateInvitationToken } from '@/lib/auth/invitation-token';
+import { INVITATION_UNUSABLE_MESSAGE, InvitationUnusableError, consumeInvitation } from '@/data/invitations';
 import { redirect } from 'next/navigation';
 
 vi.mock('server-only', () => ({}));
@@ -45,9 +51,21 @@ vi.mock('@/lib/auth', async () => {
   };
 });
 
+/**
+ * Le DAL des invitations est remplacé par un espion, mais **ses règles restent
+ * les vraies** : la classe d'erreur et le message viennent du module réel — ce
+ * sont eux que l'action doit reconnaître et rendre tels quels.
+ */
+vi.mock('@/data/invitations', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/data/invitations')>()),
+  consumeInvitation: vi.fn(),
+}));
+
 const { SIGN_UP_CLOSED_CODE, SIGN_UP_CLOSED_MESSAGE } = await import(
   '@/lib/auth/sign-up-guard'
 );
+
+const consumeInvitationMock = vi.mocked(consumeInvitation);
 
 const getAuthMock = vi.mocked(getAuth);
 const redirectMock = vi.mocked(redirect);
@@ -79,6 +97,7 @@ function authStub(overrides: {
 beforeEach(() => {
   getAuthMock.mockReset();
   redirectMock.mockClear();
+  consumeInvitationMock.mockReset();
   vi.restoreAllMocks();
 });
 
@@ -281,5 +300,127 @@ describe('createFirstAccountAction', () => {
 
     expect(state).toEqual({ status: 'error', message: "Le compte n'a pas pu être créé. Réessaie." });
     expect(consoleError).toHaveBeenCalledOnce();
+  });
+});
+
+describe('createInvitedAccountAction', () => {
+  const TOKEN = generateInvitationToken();
+
+  /** Le formulaire complet, jeton compris — le champ caché de l'écran d'invitation. */
+  function invitedForm(overrides: Record<string, string> = {}): FormData {
+    return formData({
+      name: 'Alex',
+      email: 'alex@example.test',
+      password: VALID_PASSWORD,
+      passwordConfirm: VALID_PASSWORD,
+      token: TOKEN,
+      ...overrides,
+    });
+  }
+
+  /** Une consommation qui aboutit : le DAL exécute le rappel de création. */
+  function consumptionSucceeds(): void {
+    consumeInvitationMock.mockImplementation(async (_token, createAccount) => {
+      await createAccount();
+    });
+  }
+
+  it('crée le compte à travers la consommation du jeton, puis renvoie à l\'accueil', async () => {
+    const signUpEmail = vi.fn(() => Promise.resolve({ user: { id: 'u-new' } }));
+    getAuthMock.mockReturnValue(authStub({ signUpEmail }));
+    consumptionSucceeds();
+
+    await expect(createInvitedAccountAction(IDLE, invitedForm())).rejects.toThrow(
+      'NEXT_REDIRECT',
+    );
+
+    // Le jeton part au DAL, et la création n'est qu'un rappel qu'il déclenche :
+    // il n'y a pas de chemin où l'un s'exécute sans l'autre.
+    expect(consumeInvitationMock).toHaveBeenCalledOnce();
+    expect(consumeInvitationMock.mock.calls[0]?.[0]).toBe(TOKEN);
+    expect(signUpEmail).toHaveBeenCalledOnce();
+    expect(redirectMock).toHaveBeenCalledWith('/');
+  });
+
+  it("n'inscrit personne quand le lien n'ouvre rien", async () => {
+    const signUpEmail = vi.fn(() => Promise.resolve({ user: { id: 'u-new' } }));
+    getAuthMock.mockReturnValue(authStub({ signUpEmail }));
+    consumeInvitationMock.mockRejectedValue(new InvitationUnusableError());
+
+    const state = await createInvitedAccountAction(IDLE, invitedForm());
+
+    // Le rappel n'a jamais été appelé : better-auth n'a rien vu passer.
+    expect(signUpEmail).not.toHaveBeenCalled();
+    expect(state).toEqual({ status: 'error', message: INVITATION_UNUSABLE_MESSAGE });
+    expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  it('oppose le même refus à un lien inconnu, expiré, révoqué ou déjà servi', async () => {
+    getAuthMock.mockReturnValue(authStub({}));
+
+    // Mal formé : refusé avant même d'atteindre la base.
+    const malformed = await createInvitedAccountAction(
+      IDLE,
+      invitedForm({ token: 'pas-un-jeton' }),
+    );
+    // Refusé par la base, pour l'une quelconque des quatre raisons.
+    consumeInvitationMock.mockRejectedValue(new InvitationUnusableError());
+    const refused = await createInvitedAccountAction(IDLE, invitedForm());
+
+    expect(malformed).toEqual(refused);
+    expect(malformed.message).toBe(INVITATION_UNUSABLE_MESSAGE);
+  });
+
+  it('ne touche ni au DAL ni à better-auth quand le jeton est mal formé', async () => {
+    getAuthMock.mockReturnValue(authStub({}));
+
+    await createInvitedAccountAction(IDLE, invitedForm({ token: '' }));
+
+    expect(consumeInvitationMock).not.toHaveBeenCalled();
+    expect(getAuthMock).not.toHaveBeenCalled();
+  });
+
+  it('vérifie les mêmes bornes que la création du premier compte', async () => {
+    getAuthMock.mockReturnValue(authStub({}));
+
+    const short = await createInvitedAccountAction(
+      IDLE,
+      invitedForm({ password: 'court', passwordConfirm: 'court' }),
+    );
+    const mismatch = await createInvitedAccountAction(
+      IDLE,
+      invitedForm({ passwordConfirm: `${VALID_PASSWORD}x` }),
+    );
+
+    expect(short.fieldErrors?.password).toContain(String(AUTH_PASSWORD_MIN_LENGTH));
+    expect(mismatch.fieldErrors?.passwordConfirm).toBeDefined();
+    expect(consumeInvitationMock).not.toHaveBeenCalled();
+  });
+
+  it("dit qu'une adresse est déjà prise — le lien, lui, n'a pas été dépensé", async () => {
+    getAuthMock.mockReturnValue(authStub({}));
+    consumeInvitationMock.mockRejectedValue(
+      new APIError('UNPROCESSABLE_ENTITY', {
+        message: 'User already exists. Use another email.',
+        code: 'USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL',
+      }),
+    );
+
+    const state = await createInvitedAccountAction(IDLE, invitedForm());
+
+    expect(state.fieldErrors?.email).toBeDefined();
+    expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  it('ne laisse jamais filer le jeton, ni au client ni dans les journaux', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    getAuthMock.mockReturnValue(authStub({}));
+    consumeInvitationMock.mockRejectedValue(new Error('base injoignable'));
+
+    const state = await createInvitedAccountAction(IDLE, invitedForm());
+
+    expect(JSON.stringify(state)).not.toContain(TOKEN);
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(TOKEN);
+    expect(state).toEqual({ status: 'error', message: "Le compte n'a pas pu être créé. Réessaie." });
   });
 });

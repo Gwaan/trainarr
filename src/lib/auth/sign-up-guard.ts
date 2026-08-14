@@ -4,10 +4,22 @@ import { APIError } from 'better-auth/api';
 
 import { hasAnyUser } from '@/data/users';
 
+import { takeInvitationClaim } from './invitation-claim';
+
 /**
  * La règle d'ouverture de l'inscription, isolée de l'instance better-auth pour
  * être éprouvable seule : c'est la seule chose qui sépare une installation
  * neuve d'une installation ouverte à tous les vents.
+ *
+ * Deux portes, et deux seulement :
+ *
+ * - **l'amorçage**, tant qu'aucun compte n'existe ;
+ * - **l'invitation**, attestée par une marque de contexte d'exécution que seule
+ *   la consommation effective d'un jeton à usage unique pose
+ *   (cf. `invitation-claim.ts`).
+ *
+ * Tout le reste — et notamment un POST direct sur
+ * `/api/auth/sign-up/email` — est refusé.
  */
 
 /** Refus opposé à toute inscription une fois le premier compte créé. */
@@ -38,9 +50,21 @@ export const SIGN_UP_CLOSED_CODE = 'SIGN_UP_CLOSED';
  * le risque d'enfermer l'utilisatrice dehors sur une base neuve — un jeton
  * d'amorçage à usage unique, lui, aurait pu se perdre sur un échec.
  *
- * @throws {APIError} 403 tant qu'un compte existe.
+ * **L'invitation est examinée en premier**, et court-circuite tout le reste : un
+ * compte invité n'est pas un compte d'amorçage, il ne porte donc pas la marque
+ * `isFirstAccount` — sans quoi il entrerait en collision avec l'index partiel et
+ * la seule invitation possible serait la première.
+ *
+ * @throws {APIError} 403 dès qu'un compte existe, hors invitation.
  */
-export async function guardSignUp(): Promise<{ data: { isFirstAccount: true } }> {
+export async function guardSignUp(): Promise<{ data: { isFirstAccount: true | null } }> {
+  // Prélevée avant toute chose : la marque n'existe que dans le contexte
+  // d'exécution ouvert par la consommation d'un jeton valide, jamais dans celui
+  // d'une requête entrante quelconque.
+  if (takeInvitationClaim() !== null) {
+    return { data: { isFirstAccount: null } };
+  }
+
   if (await hasAnyUser()) {
     throw new APIError('FORBIDDEN', {
       message: SIGN_UP_CLOSED_MESSAGE,

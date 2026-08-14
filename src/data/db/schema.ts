@@ -760,6 +760,61 @@ export const authVerifications = pgTable(
   ],
 );
 
+/**
+ * Invitations à créer un compte — la seule porte d'entrée une fois le compte
+ * d'amorçage créé.
+ *
+ * **Le jeton n'est jamais stocké.** Seule son empreinte SHA-256 l'est, et c'est
+ * par elle que se fait la recherche. Un hachage lent (scrypt, comme les mots de
+ * passe) n'apporterait rien ici : il protège les secrets *devinables*, et un
+ * jeton de 256 bits tirés au sort ne l'est pas. Ce que l'empreinte protège, en
+ * revanche, c'est la fuite de base : une copie du dump ne donne aucun lien
+ * utilisable.
+ *
+ * `consumed_at` est le **verrou d'usage unique**, et il est posé par une mise à
+ * jour conditionnelle (`WHERE consumed_at IS NULL AND expires_at > now()`) et
+ * non par une lecture suivie d'une écriture : en `READ COMMITTED`, Postgres
+ * réévalue la clause sur la ligne verrouillée, si bien que deux réclamations
+ * simultanées du même lien ne peuvent pas aboutir toutes les deux
+ * (cf. `claimOrphanAthlete`, même motif).
+ *
+ * `consumed_by_user_id` est renseigné juste après la création du compte : au
+ * moment où la ligne est verrouillée, l'identifiant n'existe pas encore — c'est
+ * better-auth qui le génère.
+ */
+export const authInvitations = pgTable(
+  'auth_invitations',
+  {
+    id: serial('id').primaryKey(),
+    /** SHA-256 du jeton, en hexadécimal. Le jeton lui-même n'est écrit nulle part. */
+    tokenHash: text('token_hash').notNull(),
+    /** Le compte qui a émis l'invitation — le compte d'amorçage, seul habilité. */
+    createdByUserId: text('created_by_user_id')
+      .notNull()
+      .references(() => authUsers.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /** `NULL` tant que le lien n'a pas servi. */
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    /**
+     * Le compte né de cette invitation. `SET NULL` à sa suppression : la trace
+     * de la consommation reste (le lien a bien servi), seul le lien vers un
+     * compte disparu s'efface.
+     */
+    consumedByUserId: text('consumed_by_user_id').references(() => authUsers.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    /**
+     * Unicité de l'empreinte : c'est la clé de recherche du lien présenté, et
+     * deux invitations ne peuvent pas désigner le même jeton (le tirage rend la
+     * collision invraisemblable ; la base la rend impossible).
+     */
+    uniqueIndex('auth_invitations_token_hash_unique').on(table.tokenHash),
+  ],
+);
+
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
@@ -784,3 +839,6 @@ export type NewCoachMessage = InferInsertModel<typeof coachMessages>;
 
 export type AuthUser = InferSelectModel<typeof authUsers>;
 export type NewAuthUser = InferInsertModel<typeof authUsers>;
+
+export type AuthInvitation = InferSelectModel<typeof authInvitations>;
+export type NewAuthInvitation = InferInsertModel<typeof authInvitations>;

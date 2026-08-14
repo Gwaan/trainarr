@@ -14,21 +14,47 @@ import 'server-only';
  */
 
 import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
+import { canInvite, listPendingInvitations } from '@/data/invitations';
 import { getAccountSummary } from '@/lib/auth/session';
 
 import { toProfileFormValues } from './form-values';
 import { toIntervalsFormDefaults } from './intervals-values';
+import {
+  NO_INVITATIONS_SETTINGS,
+  toInvitationRows,
+  type InvitationsSettings,
+} from './invitation-values';
 import type { SettingsData } from './settings-values';
 
+/**
+ * Les invitations en cours, ou rien du tout.
+ *
+ * Deux lectures en séquence, et non en parallèle : la seconde n'a de sens que si
+ * la première autorise (`listPendingInvitations` refuserait de toute façon). Une
+ * panne rend « ne peut pas inviter » plutôt que de faire tomber tous les
+ * réglages — la section disparaît, le reste s'affiche.
+ */
+async function loadInvitations(): Promise<InvitationsSettings> {
+  try {
+    if (!(await canInvite())) return NO_INVITATIONS_SETTINGS;
+    return { canInvite: true, invitations: toInvitationRows(await listPendingInvitations()) };
+  } catch (error) {
+    console.error('[profile] lecture des invitations impossible', error);
+    return NO_INVITATIONS_SETTINGS;
+  }
+}
+
 export async function loadSettingsData(): Promise<SettingsData> {
-  const [profile, intervals, account] = await Promise.all([
+  const [profile, intervals, account, invitations] = await Promise.all([
     getAthleteProfile(),
     getIntervalsSettings(),
     getAccountSummary(),
+    loadInvitations(),
   ]);
 
   return {
     mode: profile === null ? 'onboarding' : 'edit',
+    invitations,
     // Des chaînes prêtes à afficher : la conversion des mesures reste ici, et
     // les identifiants intervals.icu se réduisent à l'état de la clé.
     profile: toProfileFormValues(profile),

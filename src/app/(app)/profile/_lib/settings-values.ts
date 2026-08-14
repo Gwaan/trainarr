@@ -12,6 +12,7 @@
 
 import type { ProfileFormValues } from './form-values';
 import type { IntervalsFormDefaults } from './intervals-values';
+import type { InvitationsSettings } from './invitation-values';
 
 /** Ce dont les trois sections de réglages ont besoin, et rien d'autre. */
 export type SettingsSectionsData = {
@@ -19,6 +20,11 @@ export type SettingsSectionsData = {
   intervals: IntervalsFormDefaults;
   /** Le nom du compte connecté, `null` si personne ne l'est. Jamais l'e-mail ni l'identifiant. */
   account: { name: string } | null;
+  /**
+   * Les invitations en cours — `{ canInvite: false }` pour tout compte qui n'est
+   * pas le premier de l'installation, et la section n'est alors pas rendue.
+   */
+  invitations: InvitationsSettings;
 };
 
 export type SettingsData = SettingsSectionsData & {
