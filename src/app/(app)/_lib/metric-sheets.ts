@@ -22,6 +22,7 @@
  * | pace-distribution    | `lib/metrics/distribution.ts`                                 |
  * | hr-distribution      | `lib/metrics/distribution.ts`, `lib/metrics/hr-zones.ts`      |
  * | best-segments        | `lib/metrics/best-segments.ts`                                |
+ * | session-goals        | `lib/metrics/session-execution.ts`, `activities/[id]/_lib/session-execution-model.ts` |
  * | splits               | `lib/metrics/splits.ts`, `lib/metrics/series.ts`              |
  * | stride               | `lib/metrics/stride.ts`, `data/activities.ts`                 |
  * | hrv / resting-hr     | `lib/intervals/wellness-client.ts`, `lib/wellness/hrv.ts`, `lib/metrics/resting-hr.ts`, `data/wellness.ts` |
@@ -49,6 +50,7 @@ export type MetricSheetId =
   | "pace-distribution"
   | "hr-distribution"
   | "best-segments"
+  | "session-goals"
   | "splits"
   | "stride"
   | "hrv"
@@ -350,6 +352,29 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
     ],
     caveat:
       "Un meilleur effort ne vaut que ce que vaut la trace GPS. En sous-bois, en ville ou sur tapis, une distance sur-lue raccourcit mécaniquement le temps affiché — une erreur de 1 % suffit à changer la lecture.",
+  },
+
+  "session-goals": {
+    id: "session-goals",
+    abbreviation: "Objectifs",
+    name: "Cibles de la séance planifiée",
+    question: "Comment les objectifs de séance sont-ils comparés ?",
+    what: "La confrontation de ce que la séance du plan demandait à ce que tu as réellement couru : une barre par cible, la bande visée en aplat et ton réalisé en marqueur par-dessus. Rien n'est stocké — tout se recalcule à chaque affichage, depuis ton profil du moment.",
+    interpret: [
+      "L'aplat est ce qui était demandé, le repère clair est ce que tu as fait. Être hors de la bande n'est pas une faute : plus vite que la bande d'un footing est un écart au même titre que plus lentement, et c'est pour ça qu'aucune barre ne change de couleur selon le résultat.",
+      "Sur une séance à blocs, une barre par répétition, et la ligne du haut dit combien sont tombées dans la bande. Sur une séance simple, l'allure et la fréquence cardiaque moyennes de la séance entière — la moyenne d'un fractionné, elle, ne vise rien et n'est donc jamais affichée.",
+      "Le volume (distance ou durée) n'a pas de bande : il se lit à son écart avec ce qui était prescrit.",
+    ],
+    computed: [
+      "Les cibles viennent du déroulé de la séance planifiée : la bande d'allure des étapes de course, ou leur cible cardiaque — rang de zone et sous-créneau — résolue en battements sur la référence de ton profil (ta FC seuil si tu en as adopté une, ta FC max sinon).",
+      "Un fichier FIT ne dit pas où commence une répétition. Les blocs sont donc retrouvés par la portion la plus rapide de la longueur prescrite, puis la recherche recommence en dehors de cette portion : pour 6 × 800 m, six fenêtres de 800 m qui ne se chevauchent pas, remises dans l'ordre du chrono. C'est la mécanique qui sert déjà à mesurer ta FC seuil.",
+      "L'allure d'un bloc est celle du bloc entier — distance prescrite ÷ temps écoulé entre ses deux bornes. Pas de règle de la seconde moitié ici : contrairement à la fréquence cardiaque, une allure n'a pas d'inertie.",
+      "« Dans la bande » se juge sur la valeur affichée, arrondie comme elle est écrite (à la seconde par kilomètre, au battement), bornes incluses.",
+      "Les blocs, c'est tout ou rien : si les six fenêtres ne se placent pas, ou si le capteur de distance couvre moins de 70 % de l'une d'elles, aucune répétition n'est affichée — et le panneau dit pourquoi. Cinq fenêtres sur six ne sont pas cinq répétitions, c'est une localisation ratée dont on ignore laquelle manque.",
+      "Une cible qui n'a pas été prescrite ne produit aucune ligne. Une cible prescrite mais non comparable produit une phrase, jamais une valeur approchée.",
+    ],
+    caveat:
+      "Les blocs sont déduits, pas lus. Sur une séance courue comme prescrite, la portion la plus rapide de la bonne longueur est bien la répétition : toute fenêtre décalée mordrait sur une récupération, donc serait plus lente. Sur une séance courue très différemment de ce qui était prévu — blocs raccourcis, récupérations avalées, séance écourtée — ce ne sont plus que les portions les plus rapides de la trace, et la comparaison perd son sens sans que rien ne puisse toujours le détecter.",
   },
 
   splits: {

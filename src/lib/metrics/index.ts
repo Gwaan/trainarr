@@ -82,6 +82,21 @@ export {
   fastestSegmentWindow,
   type BestSegment,
 } from './best-segments';
+export {
+  EXECUTION_GAPS,
+  EXECUTION_METRICS,
+  EXECUTION_STANDINGS,
+  executionSummary,
+  sessionExecution,
+  type ExecutionBand,
+  type ExecutionGap,
+  type ExecutionMetric,
+  type ExecutionRepeats,
+  type ExecutionRow,
+  type ExecutionStanding,
+  type SessionExecution,
+  type SessionExecutionInput,
+} from './session-execution';
 export { SUSTAINED_HR_WINDOW_S, sustainedMaxHrBpm } from './sustained-hr';
 export {
   RESTING_HR_MIN_SAMPLE,

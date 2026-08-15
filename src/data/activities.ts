@@ -20,12 +20,14 @@ import {
   paceDistribution,
   paceSecPerKm,
   resamplePoints,
+  sessionExecution,
   smoothPace,
   strideSeries,
   type BestSegment,
   type Decoupling,
   type DistributionBin,
   type SeriesSample,
+  type SessionExecution,
 } from '@/lib/metrics';
 
 import { getAthleteProfileById, getCurrentAthleteId } from './athlete';
@@ -36,6 +38,7 @@ import {
   ACTIVITY_STREAM_TYPES,
   activities,
   activityStreams,
+  plannedSessions,
   type Activity,
   type ActivityStream,
   type ActivityStreamType,
@@ -448,6 +451,16 @@ export type ActivityFullDto = {
   decoupling: Decoupling | null;
   /** Meilleurs efforts sur les distances de référence — course à pied uniquement. */
   bestSegments: BestSegment[];
+  /**
+   * Ce que la séance du plan prescrivait, confronté à ce qui a été couru —
+   * `null` quand l'activité ne réalise aucune séance planifiée, ou que la
+   * séance ne prescrit rien de comparable.
+   *
+   * Calculé à la lecture comme les zones : rien n'est stocké, et corriger sa FC
+   * max ou adopter une FC seuil relit toute la comparaison dans le nouveau
+   * cadre.
+   */
+  sessionExecution: SessionExecution | null;
   trimp: number | null;
   /** Course à pied uniquement. */
   effectiveVo2max: number | null;
@@ -663,7 +676,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
-  const [activityRows, streamRows, profile] = await Promise.all([
+  const [activityRows, streamRows, profile, plannedRows] = await Promise.all([
     db
       .select()
       .from(activities)
@@ -678,6 +691,24 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
       )
       .where(eq(activityStreams.activityId, id)),
     getAthleteProfileById(athleteId),
+    // La séance du plan que cette activité réalise, s'il y en a une. Les
+    // colonnes strictement nécessaires à la comparaison : le déroulé et ce qui
+    // en tient lieu sur les séances historiques.
+    db
+      .select({
+        steps: plannedSessions.steps,
+        targetPaceSecPerKm: plannedSessions.targetPaceSecPerKm,
+        volumeM: plannedSessions.volumeM,
+        durationS: plannedSessions.durationS,
+      })
+      .from(plannedSessions)
+      .where(
+        and(
+          eq(plannedSessions.completedActivityId, id),
+          eq(plannedSessions.athleteId, athleteId),
+        ),
+      )
+      .limit(1),
   ]);
 
   const row = activityRows[0];
@@ -756,6 +787,32 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
       ? computeBestSegments(distance, time)
       : [];
 
+  /*
+   * La comparaison aux objectifs de la séance planifiée.
+   *
+   * Course à pied seulement, comme les lectures d'allure ci-dessus : une cible
+   * en s/km n'a pas de sens sur un vélo, et le rapprochement au plan est de
+   * toute façon celui d'une séance de course.
+   */
+  const planned = plannedRows[0];
+  const execution =
+    running && planned !== undefined
+      ? sessionExecution({
+          steps: planned.steps,
+          targetPaceSecPerKm: planned.targetPaceSecPerKm,
+          volumeM: planned.volumeM,
+          durationS: planned.durationS,
+          hrAnchor: anchor,
+          actual: {
+            distanceM: row.distanceM,
+            movingTimeS: row.movingTimeS,
+            avgPaceSecPerKm: row.avgPaceSecPerKm,
+            avgHrBpm: row.avgHrBpm,
+          },
+          streams: time !== null && distance !== undefined ? { distance, time } : null,
+        })
+      : null;
+
   return {
     detail: toActivityDetailDto(row),
     charts: buildCharts(numeric, time, latlng, speeds, footCadence),
@@ -766,6 +823,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
     hrDistribution: hrBins,
     decoupling,
     bestSegments,
+    sessionExecution: execution,
     trimp,
     effectiveVo2max,
   };

@@ -101,6 +101,9 @@ const ACTIVITY: ActivityFullDto = {
     decouplingPct: 8.8,
   },
   bestSegments: [{ targetM: 5_000, timeS: 1_440, paceSecPerKm: 288 }],
+  // Le prompt du coach ne lit pas la comparaison aux objectifs : il se nourrit
+  // des agrégats, pas du modèle d'affichage.
+  sessionExecution: null,
   trimp: 112.4,
   effectiveVo2max: 48.2,
 };

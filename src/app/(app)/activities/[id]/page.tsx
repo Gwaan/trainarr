@@ -20,6 +20,7 @@ import { DecouplingPanel } from "./_components/decoupling-panel";
 import { DistributionPanel } from "./_components/distribution-panel";
 import { HrZonesPanel } from "./_components/hr-zones-panel";
 import { NoDetailedData } from "./_components/no-detailed-data";
+import { SessionGoalsPanel } from "./_components/session-goals-panel";
 import { WeatherPanel } from "./_components/weather-panel";
 import { parseActivityId } from "./_lib/activity-id";
 import { hrDistributionModel, paceDistributionModel } from "./_lib/distribution-model";
@@ -136,6 +137,14 @@ async function ActivityDetail({ params }: PageProps) {
           n'ouvre pas la page. Rien ne s'affiche tant que le relevé n'a pas eu
           lieu : le panneau ne dit « pas de météo » que quand c'est établi. */}
       {weather === null ? null : <WeatherPanel weather={weather} />}
+
+      {/* Ce qui était demandé, juste avant ce que le coach en dit : le panneau
+          répond à « ai-je fait la séance ? » quand le coach répond à « qu'en
+          penser ? ». Il n'existe que si l'activité réalise une séance du plan
+          qui prescrivait quelque chose de comparable. */}
+      {full.sessionExecution === null ? null : (
+        <SessionGoalsPanel execution={full.sessionExecution} />
+      )}
 
       <Suspense fallback={<CoachPanelSkeleton />}>
         <CoachFeedback activityId={id} />

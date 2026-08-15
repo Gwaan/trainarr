@@ -533,6 +533,69 @@ describe('getActivityFull', () => {
     expect(full?.trimp).toBeGreaterThan(0);
   });
 
+  it('ne compare à aucun objectif sans séance planifiée rapprochée', async () => {
+    queryState.rows = { activities: [ACTIVITY], athlete: [ATHLETE] };
+
+    expect((await getActivityFull(ACTIVITY.id))?.sessionExecution).toBeNull();
+  });
+
+  it('compare la séance réalisée aux objectifs de la séance planifiée', async () => {
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+      planned_sessions: [
+        { steps: null, targetPaceSecPerKm: 240, volumeM: 2_500, durationS: null },
+      ],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    // Allure moyenne 250 s/km contre 240 prescrites, 2 600 m contre 2 500.
+    expect(full?.sessionExecution?.rows).toEqual([
+      {
+        metric: 'pace',
+        repetition: null,
+        band: null,
+        target: 240,
+        actual: 250,
+        delta: 10,
+        standing: 'no-band',
+      },
+      {
+        metric: 'distance',
+        repetition: null,
+        band: null,
+        target: 2_500,
+        actual: 2_600,
+        delta: 100,
+        standing: 'no-band',
+      },
+    ]);
+  });
+
+  it('cloisonne la lecture de la séance planifiée par athlète', async () => {
+    queryState.rows = { activities: [ACTIVITY], athlete: [ATHLETE] };
+
+    await getActivityFull(ACTIVITY.id);
+
+    const planned = queryState.queries.find((query) => query.table === 'planned_sessions');
+    expect(planned).toBeDefined();
+    expect(render(planned?.where).params).toEqual([ACTIVITY.id, ATHLETE.id]);
+  });
+
+  it('ne compare pas une séance hors course à pied', async () => {
+    queryState.rows = {
+      activities: [{ ...ACTIVITY, sportType: 'Ride' }],
+      athlete: [ATHLETE],
+      planned_sessions: [
+        { steps: null, targetPaceSecPerKm: 240, volumeM: 2_500, durationS: null },
+      ],
+    };
+
+    expect((await getActivityFull(ACTIVITY.id))?.sessionExecution).toBeNull();
+  });
+
   it('ignore une série dont la forme ne correspond pas au type déclaré', async () => {
     const time = indexes();
     queryState.rows = {
