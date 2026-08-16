@@ -140,6 +140,9 @@ const ATHLETE_ROW: Athlete = {
   lthrBpm: null,
   lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
+  pushDailySession: true,
+  pushActivityAnalyzed: true,
+  pushSuggestions: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };

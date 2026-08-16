@@ -10,7 +10,7 @@ import type {
   TrimpInput,
 } from '@/lib/metrics';
 
-import { getDashboardSummary } from './dashboard';
+import { getDashboardSummary, selectTodaySession } from './dashboard';
 import type { Activity, Athlete, PlannedSession } from './db/schema';
 
 // Les modules du DAL commencent par `import 'server-only'`, qui lève hors RSC.
@@ -154,6 +154,9 @@ const ATHLETE: Athlete = {
   lthrBpm: null,
   lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
+  pushDailySession: true,
+  pushActivityAnalyzed: true,
+  pushSuggestions: true,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };
@@ -670,8 +673,10 @@ describe('getDashboardSummary — séance du jour', () => {
       cooldown: '10 min souple',
       volumeM: 12_400,
       durationS: 3_900,
+      completed: false,
     });
     expect(summary.todaySession).not.toHaveProperty('athleteId');
+    // De `completed_activity_id` ne franchit la frontière que ce qu'il signifie.
     expect(summary.todaySession).not.toHaveProperty('completedActivityId');
   });
 
@@ -728,5 +733,71 @@ describe('getDashboardSummary — proposition de FC max', () => {
       activityName: '10 km de Bordeaux',
       activityStartedAt: new Date('2026-08-09T09:00:00.000Z'),
     });
+  });
+});
+
+/**
+ * La lecture jumelle de la séance du jour, celle du **rappel matinal**.
+ *
+ * Le tableau de bord y passe déjà (avec le profil qu'il vient de lire) ; la
+ * boucle des notifications, elle, tourne hors requête. Elle doit donc lire sous
+ * l'athlète qu'on lui donne, **sans session**, et rendre exactement le même DTO
+ * — sans quoi la bannière annoncerait une autre séance que l'écran qu'elle
+ * ouvre.
+ */
+describe('selectTodaySession', () => {
+  it('lit sous l’athlète donné et le jour donné, sans aucune session', async () => {
+    withoutSession();
+
+    await selectTodaySession(9, '2026-08-12');
+
+    const where = renderWhere(queryState.whereClauses.planned_sessions);
+    expect(where.params).toEqual([9, '2026-08-12', 'active']);
+  });
+
+  it('rend le même DTO minimal que le tableau de bord', async () => {
+    withoutSession();
+    queryState.rows.planned_sessions = [PLANNED_SESSION];
+
+    const session = await selectTodaySession(1, '2026-08-10');
+
+    expect(session).toEqual({
+      id: 7,
+      scheduledOn: '2026-08-10',
+      kind: 'VMA courte · piste',
+      title: '6 × 800 m',
+      targetPaceSecPerKm: 225,
+      warmup: '20 min @ 5:30/km',
+      recovery: '90 s en trot',
+      cooldown: '10 min souple',
+      volumeM: 12_400,
+      durationS: 3_900,
+      completed: false,
+    });
+    expect(session).not.toHaveProperty('athleteId');
+    expect(session).not.toHaveProperty('completedActivityId');
+  });
+
+  /*
+   * Ce que le **rappel du matin** lit pour se taire : sortie à 5 h 30, fichier
+   * importé à 6 h 05, le rapprochement a posé le lien. À 7 h, la bannière
+   * « Séance du jour » contredirait la bannière « Séance analysée » de la même
+   * séance. La lecture ne filtre pas pour autant — le tableau de bord doit
+   * continuer d'afficher le programme du jour, réalisé ou non.
+   */
+  it('signale la séance déjà courue au lieu de la faire disparaître', async () => {
+    withoutSession();
+    queryState.rows.planned_sessions = [{ ...PLANNED_SESSION, completedActivityId: 512 }];
+
+    const session = await selectTodaySession(1, '2026-08-10');
+
+    expect(session).toMatchObject({ id: 7, completed: true });
+  });
+
+  /* Une journée de repos ne se notifie pas : encore faut-il qu'elle se dise. */
+  it('rend null quand rien n’est planifié ce jour-là', async () => {
+    withoutSession();
+
+    await expect(selectTodaySession(1, '2026-08-10')).resolves.toBeNull();
   });
 });

@@ -12,6 +12,7 @@ import {
   listRecentStartCoordinates,
   saveForecastLocation,
   saveForecastReading,
+  selectWeatherForecast,
   validateForecastLocation,
 } from './weather-forecast';
 
@@ -563,5 +564,52 @@ describe('getWeatherForecast', () => {
     expect(forecast.days).toEqual([DAY]);
     expect(Object.keys(forecast.days[0])).not.toContain('fetchedAt');
     expect(Object.keys(forecast.days[0]).join()).not.toMatch(/latitude|longitude/);
+  });
+});
+
+/**
+ * La lecture jumelle de {@link getWeatherForecast}, celle du **rappel matinal**.
+ *
+ * Elle existe pour une raison unique : la boucle des notifications tourne hors
+ * requête, il n'y a aucune session à interroger — et un repli « le premier
+ * athlète venu » est exactement ce que le cloisonnement par compte interdit.
+ * Elle doit donc lire sous l'athlète qu'on lui donne, **sans jamais** consulter
+ * la session.
+ */
+describe('selectWeatherForecast', () => {
+  it('lit sous l’athlète donné, sans aucune session', async () => {
+    // Personne n'est connecté : la lecture doit fonctionner quand même.
+    athleteState.currentId = null;
+
+    await selectWeatherForecast(9, '2026-08-14');
+
+    expect(render(queryOn('weather_forecasts').where).params).toEqual([9, '2026-08-14']);
+    expect(render(queryOn('weather_forecast_runs').where).params).toEqual([9]);
+  });
+
+  /*
+   * Le jour est **passé**, jamais relu de l'horloge : c'est le même
+   * « aujourd'hui » qui a sélectionné la séance du jour, et deux lectures à
+   * cheval sur minuit annonceraient la météo de la veille sous la séance du
+   * lendemain.
+   */
+  it('prend le jour qu’on lui donne pour borne', async () => {
+    athleteState.currentId = null;
+
+    await selectWeatherForecast(9, '2026-12-25');
+
+    expect(render(queryOn('weather_forecasts').where).params).toEqual([9, '2026-12-25']);
+  });
+
+  it('rend le même contrat que la lecture d’écran', async () => {
+    dbState.rows.weather_forecast_runs = [{ status: 'forecast', lastAttemptAt: NOW }];
+    dbState.rows.weather_forecasts = [{ ...DAY, fetchedAt: NOW }];
+
+    expect(await selectWeatherForecast(9, '2026-08-14')).toEqual({
+      status: 'forecast',
+      fetchedAt: NOW,
+      location: { source: 'derived' },
+      days: [DAY],
+    });
   });
 });

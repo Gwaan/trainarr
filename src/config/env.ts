@@ -63,6 +63,37 @@ const envSchema = z.object({
   // athlète, cf. src/lib/crypto/) : le changer les rend illisibles — les comptes
   // concernés sont alors sautés par le rapatriement, avec leur motif.
   BETTER_AUTH_SECRET: z.string().min(1).optional(),
+
+  // Notifications Web Push (cf. src/lib/push/).
+  //
+  // **Facultatives, toutes les trois** : sans elles, les notifications sont
+  // inactives — l'écran de réglages le dit et nomme ce qui manque — mais
+  // l'application démarre et sert tout le reste. Même parti pris que
+  // BETTER_AUTH_SECRET juste au-dessus.
+  //
+  // Le couple de clés VAPID identifie **le serveur** auprès des services de push
+  // (Apple, Google, Mozilla) : c'est lui qui signe chaque envoi. Le générer une
+  // fois, puis ne plus en changer :
+  //   pnpm exec web-push generate-vapid-keys
+  // Changer la clé publique périme tous les abonnements déjà enregistrés — chaque
+  // appareil devra se réabonner depuis les réglages.
+  //
+  // La publique n'est pas un secret (elle est envoyée au navigateur pour
+  // construire l'abonnement) ; elle transite quand même par ici et non par un
+  // `NEXT_PUBLIC_*`, parce que la règle du projet veut que l'environnement ne
+  // soit lu qu'ici et dans le DAL — l'écran la reçoit en prop.
+  VAPID_PUBLIC_KEY: z.string().min(1).optional(),
+  // Secret : jamais dans le repo, jamais dans un log.
+  VAPID_PRIVATE_KEY: z.string().min(1).optional(),
+  // Identité de l'expéditeur, exigée par le protocole Web Push (RFC 8292) : un
+  // `mailto:…` ou une URL `https://…` par où un service de push peut joindre le
+  // responsable de l'installation en cas d'abus.
+  //
+  // Sa **forme** n'est volontairement pas validée ici, exactement comme la
+  // longueur du secret better-auth : une valeur mal écrite doit désactiver les
+  // seules notifications, jamais empêcher le démarrage. Le verdict et son
+  // diagnostic vivent dans `planPushActivation` (src/lib/push/config.ts).
+  VAPID_SUBJECT: z.string().min(1).optional(),
 });
 
 export type Env = Readonly<z.infer<typeof envSchema>>;

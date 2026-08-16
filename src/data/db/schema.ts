@@ -230,6 +230,22 @@ export const athlete = pgTable('athlete', {
    * cycle suivant plutôt que d'attendre le lendemain.
    */
   wellnessReadingDay: date('wellness_reading_day'),
+  /**
+   * Les trois catégories de notifications push, réglables séparément.
+   *
+   * **`true` par défaut, et c'est délibéré** : ces colonnes ne décident de rien
+   * tant qu'aucun appareil n'est abonné — c'est l'abonnement qui est le
+   * consentement, pas ces cases. Les mettre à `false` par défaut obligerait à
+   * traverser trois interrupteurs juste après avoir accepté la permission
+   * système, pour recevoir ce qu'on venait d'accepter.
+   *
+   * Elles vivent sur `athlete`, comme les seuils de refus des propositions de FC
+   * juste au-dessus : c'est un réglage de compte, une seule ligne, et rien n'y a
+   * de cycle de vie propre.
+   */
+  pushDailySession: boolean('push_daily_session').notNull().default(true),
+  pushActivityAnalyzed: boolean('push_activity_analyzed').notNull().default(true),
+  pushSuggestions: boolean('push_suggestions').notNull().default(true),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -1487,6 +1503,138 @@ export const authInvitations = pgTable(
   ],
 );
 
+/**
+ * Un **appareil** abonné aux notifications push — une ligne par navigateur, pas
+ * par athlète.
+ *
+ * Ce que le navigateur remet à l'abonnement, c'est un triplet : une `endpoint`
+ * (l'URL du service de push d'Apple, Google ou Mozilla, propre à cette
+ * installation de l'application sur cet appareil) et deux clés de chiffrement
+ * (`p256dh`, `auth`) sans lesquelles le service refuserait de livrer le
+ * message. Les trois sont opaques et ne s'inventent pas.
+ *
+ * `ON DELETE CASCADE` : un abonnement n'a aucun sens sans son athlète, et c'est
+ * une donnée **périssable** — un service de push révoque une endpoint dès que
+ * l'utilisateur désinstalle ou refuse (cf. `dropSubscription`, qui efface sur
+ * un 404 ou un 410). Rien ne se perd à l'effacer avec son propriétaire : il
+ * suffit de se réabonner.
+ */
+export const pushSubscriptions = pgTable(
+  'push_subscriptions',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id, { onDelete: 'cascade' }),
+    /**
+     * L'URL du service de push. **Clé naturelle de la ligne** : le navigateur la
+     * régénère à l'identique tant que l'abonnement vit, ce qui fait de
+     * l'enregistrement un simple upsert plutôt qu'une accumulation de doublons
+     * à chaque visite de l'écran de réglages.
+     */
+    endpoint: text('endpoint').notNull(),
+    /** Clé publique de l'appareil (courbe P-256), en base64url. */
+    p256dh: text('p256dh').notNull(),
+    /** Secret d'authentification de l'abonnement, en base64url. */
+    auth: text('auth').notNull(),
+    /**
+     * L'agent utilisateur au moment de l'abonnement, `NULL` s'il n'a pas été
+     * transmis. Il ne sert à rien d'autre qu'à ce que l'athlète distingue ses
+     * appareils dans la liste — il n'entre dans aucune décision d'envoi.
+     */
+    userAgent: text('user_agent'),
+    createdAt: createdAt(),
+    /**
+     * Dernier envoi **accepté** par le service de push, `NULL` tant qu'il n'y en
+     * a eu aucun. C'est ce qui permet de reconnaître un abonnement qui n'a
+     * jamais rien reçu d'un abonnement vivant.
+     */
+    lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+  },
+  (table) => [
+    /**
+     * Une endpoint désigne **un** appareil : deux lignes pour la même
+     * enverraient la notification en double. L'unicité est globale et non par
+     * athlète — l'endpoint est déjà unique au monde.
+     *
+     * Ce que cette unicité ne dit pas, et que `saveSubscription` tranche : une
+     * ligne existante **ne change jamais de propriétaire**. L'endpoint vient du
+     * client, et l'installation sert plusieurs comptes ; la réattribuer
+     * permettrait à l'un de détourner l'appareil de l'autre.
+     */
+    uniqueIndex('push_subscriptions_endpoint_unique').on(table.endpoint),
+    /** Le chemin d'accès de l'envoi : « tous les appareils de cet athlète ». */
+    index('push_subscriptions_athlete_id_idx').on(table.athleteId),
+  ],
+);
+
+/**
+ * Les catégories de notifications, et donc les familles de clés d'idempotence.
+ *
+ * `test` en fait partie pour que la table décrive **toutes** les notifications
+ * possibles ; l'envoi de test, lui, ne réserve rien (il doit pouvoir se rejouer
+ * autant de fois qu'on veut, cf. `sendTestNotificationAction`).
+ */
+export const PUSH_NOTICE_KINDS = [
+  'daily-session',
+  'activity-analyzed',
+  'suggestion',
+  'test',
+] as const;
+
+export type PushNoticeKind = (typeof PUSH_NOTICE_KINDS)[number];
+
+/**
+ * La trace d'une notification **déjà émise** — la table d'idempotence commune
+ * aux notifications métier.
+ *
+ * ## Ce qu'elle empêche
+ *
+ * Les déclencheurs sont des boucles de fond qui repassent toutes les minutes :
+ * sans mémoire, « ta séance du jour » partirait à chaque tour. La ligne est
+ * donc **réservée avant l'envoi**, par un `INSERT … ON CONFLICT DO NOTHING`
+ * dont on regarde le résultat (cf. `claimNotice`) : c'est l'insertion qui
+ * décide, pas une lecture préalable, si bien que deux cycles concurrents ne
+ * peuvent pas conclure tous les deux qu'il n'y a rien en base.
+ *
+ * `dedupe_key` est la clé **métier** de l'occurrence, et son sens dépend du
+ * `kind` : une date civile pour la séance du jour, un identifiant d'activité
+ * pour l'analyse. C'est l'appelant qui la fabrique — la table ne l'interprète
+ * pas.
+ *
+ * ## Pas de clé primaire technique
+ *
+ * L'identité d'une ligne, ici, *est* le triplet `(athlete_id, kind,
+ * dedupe_key)` : un `serial` de plus n'ouvrirait aucun accès et laisserait
+ * croire qu'on peut désigner une réservation autrement que par ce qu'elle
+ * réserve.
+ *
+ * `ON DELETE CASCADE` : de l'anti-doublon, pas de l'historique.
+ */
+export const pushNotices = pgTable(
+  'push_notices',
+  {
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: PUSH_NOTICE_KINDS }).notNull(),
+    /** Ce qui distingue deux occurrences d'un même `kind` (jour civil, id d'activité…). */
+    dedupeKey: text('dedupe_key').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    /**
+     * **C'est cet index qui porte toute la garantie** : sans lui, `claimNotice`
+     * insérerait toujours, et la notification partirait à chaque cycle.
+     */
+    uniqueIndex('push_notices_athlete_kind_dedupe_unique').on(
+      table.athleteId,
+      table.kind,
+      table.dedupeKey,
+    ),
+  ],
+);
+
 // Types inférés depuis le schéma — ne jamais les réécrire à la main.
 export type Athlete = InferSelectModel<typeof athlete>;
 export type NewAthlete = InferInsertModel<typeof athlete>;
@@ -1532,3 +1680,9 @@ export type NewAuthUser = InferInsertModel<typeof authUsers>;
 
 export type AuthInvitation = InferSelectModel<typeof authInvitations>;
 export type NewAuthInvitation = InferInsertModel<typeof authInvitations>;
+
+export type PushSubscriptionRow = InferSelectModel<typeof pushSubscriptions>;
+export type NewPushSubscriptionRow = InferInsertModel<typeof pushSubscriptions>;
+
+export type PushNotice = InferSelectModel<typeof pushNotices>;
+export type NewPushNotice = InferInsertModel<typeof pushNotices>;

@@ -11,6 +11,7 @@ import {
   groupActivitiesByWeek,
   listActivityWeekPage,
   listRecentActivities,
+  selectAnalyzedActivity,
   toActivityDetailDto,
   toActivitySummaryDto,
   trimpContextOf,
@@ -630,5 +631,88 @@ describe('trimpContextOf', () => {
     const sessions = [10, 20, 30, 40, 50].map((min) => session(min));
 
     expect(trimpContextOf(sessions, { ...PROFILE, sex: null })).toBeNull();
+  });
+});
+
+/**
+ * Ce qu'une notification « analyse prête » lit — et ce qu'elle ne peut pas lire.
+ *
+ * Deux propriétés, et elles ne se déduisent pas l'une de l'autre :
+ *
+ * 1. **l'athlète est un paramètre** : l'appelant est l'ingestion, qui tourne
+ *    dans le watcher, sans session. Un repli sur « l'athlète courant » y
+ *    répondrait `null` et la bannière ne partirait jamais ;
+ * 2. **le rapprochement au plan est cloisonné lui aussi** : la séance planifiée
+ *    d'un autre compte ne peut pas s'inviter dans le message.
+ */
+describe('selectAnalyzedActivity', () => {
+  it('lit sous l’athlète donné, sans aucune session', async () => {
+    withoutSession();
+    dbState.rows.activities = [rawActivity];
+
+    await selectAnalyzedActivity(42, 9);
+
+    const where = renderWhere(queriesOn('activities')[0]);
+    expect(where.sql).toContain('"id" = $1');
+    expect(where.sql).toContain('"athlete_id" = $2');
+    expect(where.params).toEqual([42, 9]);
+  });
+
+  it('borne aussi le rapprochement au plan à l’athlète et à l’activité', async () => {
+    withoutSession();
+    dbState.rows.activities = [rawActivity];
+
+    await selectAnalyzedActivity(42, 9);
+
+    expect(renderWhere(queriesOn('planned_sessions')[0]).params).toEqual([42, 9]);
+  });
+
+  it('rend les faits de la séance, sans la séance du plan quand il n’y en a pas', async () => {
+    dbState.rows.activities = [
+      {
+        id: 42,
+        name: 'Sortie longue',
+        startedAt: new Date('2026-08-16T05:30:00.000Z'),
+        distanceM: 21_097.5,
+        movingTimeS: 6_120,
+        avgPaceSecPerKm: 290.1,
+      },
+    ];
+
+    // `startedAt` n'est pas un fait à afficher : c'est ce qui permet au
+    // déclencheur de distinguer une sortie du matin d'un rattrapage
+    // d'historique, qui ingère cinquante fichiers par minute.
+    await expect(selectAnalyzedActivity(42, 1)).resolves.toEqual({
+      id: 42,
+      name: 'Sortie longue',
+      startedAt: new Date('2026-08-16T05:30:00.000Z'),
+      distanceM: 21_097.5,
+      movingTimeS: 6_120,
+      avgPaceSecPerKm: 290.1,
+      plannedSession: null,
+    });
+  });
+
+  it('nomme la séance du plan quand le rapprochement vient d’aboutir', async () => {
+    dbState.rows.activities = [
+      {
+        id: 42,
+        name: 'Sortie longue',
+        startedAt: new Date('2026-08-16T05:30:00.000Z'),
+        distanceM: 21_097.5,
+        movingTimeS: 6_120,
+        avgPaceSecPerKm: 290.1,
+      },
+    ];
+    dbState.rows.planned_sessions = [{ kind: 'Sortie longue · nature', title: '21 km' }];
+
+    const dto = await selectAnalyzedActivity(42, 1);
+
+    expect(dto?.plannedSession).toEqual({ kind: 'Sortie longue · nature', title: '21 km' });
+  });
+
+  /* Activité d'un autre compte, ou inexistante : les deux cas se confondent. */
+  it('rend null quand l’activité n’est pas celle de cet athlète', async () => {
+    await expect(selectAnalyzedActivity(42, 1)).resolves.toBeNull();
   });
 });

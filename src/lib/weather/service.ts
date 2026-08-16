@@ -47,6 +47,8 @@ import {
   type WeatherLookupTarget,
 } from '@/data/activity-weather';
 
+import { createStopControls, type StopControls } from '@/lib/services/stop-controls';
+
 import {
   fetchHourlyWeather,
   WeatherAbortError,
@@ -197,62 +199,6 @@ export async function recordActivityWeather(activityId: number, athleteId: numbe
   } catch (error) {
     logError(`activité ${activityId} : relevé météo impossible — ${errorMessage(error)}`);
   }
-}
-
-/*
- * Arrêt.
- */
-
-type StopControls = {
-  /** État réel du drapeau d'arrêt — c'est lui, et lui seul, qui autorise le silence. */
-  readonly stopping: boolean;
-  /** Annulation des appels réseau en vol. */
-  readonly signal: AbortSignal;
-  /** Attente interruptible. */
-  sleep(ms: number): Promise<void>;
-  requestStop(): void;
-};
-
-/**
- * Le drapeau d'arrêt, les réveils et l'annulation réseau, dans une portée fermée
- * plutôt qu'en variables de module : deux démarrages (rechargement à chaud en
- * développement) partageraient sinon le même état.
- */
-function createStopControls(): StopControls {
-  let stopping = false;
-  const sleepers = new Set<() => void>();
-  /**
-   * Le drapeau n'est relu qu'entre deux étapes : un appel HTTP suspendu
-   * retiendrait la boucle bien au-delà du délai de grâce de Docker.
-   */
-  const inFlight = new AbortController();
-
-  return {
-    get stopping() {
-      return stopping;
-    },
-    get signal() {
-      return inFlight.signal;
-    },
-    sleep(ms: number): Promise<void> {
-      if (stopping) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          sleepers.delete(done);
-          resolve();
-        };
-        const timer = setTimeout(done, ms);
-        sleepers.add(done);
-      });
-    },
-    requestStop(): void {
-      if (stopping) return;
-      stopping = true;
-      inFlight.abort();
-      for (const wake of [...sleepers]) wake();
-    },
-  };
 }
 
 /*

@@ -74,6 +74,16 @@ export type PlannedSessionDto = {
   cooldown: string | null;
   volumeM: number | null;
   durationS: number | null;
+  /**
+   * La séance a déjà été courue — le rapprochement lui a attaché une activité.
+   *
+   * Un booléen, pas l'identifiant : ce qui franchit la frontière, c'est le fait,
+   * pas la clé interne qui le porte. C'est le **rappel du matin** qui en a
+   * besoin (cf. `lib/push/notices.ts`) : sorti à 5 h 30, importé à 6 h 05, une
+   * bannière « Séance du jour » à 7 h contredirait la bannière « Séance
+   * analysée » partie une heure plus tôt.
+   */
+  completed: boolean;
 };
 
 export type DashboardSummary = {
@@ -199,7 +209,10 @@ function buildLoadWeeks(series: readonly LoadPoint[], today: string): LoadWeekDt
   return weeks;
 }
 
-/** DTO explicite : ni `athleteId`, ni `completedActivityId`, ni `createdAt`. */
+/**
+ * DTO explicite : ni `athleteId`, ni `createdAt`, et de `completedActivityId` on
+ * ne garde que ce qu'il **signifie** — la séance a été courue, ou non.
+ */
 function toPlannedSessionDto(row: PlannedSession): PlannedSessionDto {
   return {
     id: row.id,
@@ -212,7 +225,54 @@ function toPlannedSessionDto(row: PlannedSession): PlannedSessionDto {
     cooldown: row.cooldown,
     volumeM: row.volumeM,
     durationS: row.durationS,
+    completed: row.completedActivityId !== null,
   };
+}
+
+/**
+ * La séance planifiée d'un jour, pour un athlète **désigné** — `null` s'il n'y
+ * en a pas.
+ *
+ * Lecture primitive, sur le modèle du doublet `selectX(…)` / `getX()` de
+ * `./max-hr-suggestion.ts` : le tableau de bord l'appelle avec le profil qu'il
+ * vient de lire, le **rappel matinal** (`lib/push`) avec l'athlète qu'on lui a
+ * passé — il tourne hors requête, sans session à interroger. Une seule requête,
+ * deux appelants : la notification ne peut pas annoncer une autre séance que
+ * celle qu'affichera l'écran qu'elle ouvre.
+ *
+ * Archiver un plan laisse en base ses séances passées ou déjà réalisées : le
+ * filtre sur `plans.status` évite qu'une d'elles ne s'affiche à la place de
+ * celle du plan en cours. Une séance hors plan (`plan_id` nul) reste, elle,
+ * toujours valable.
+ *
+ * **Une séance déjà courue n'est pas écartée ici, elle est signalée**
+ * (`completed`). Le tableau de bord doit continuer de l'afficher — c'est le
+ * programme du jour, réalisé ou non ; seul le rappel du matin a une raison de se
+ * taire, et c'est à lui d'en décider. Un filtre en base priverait l'écran de sa
+ * séance pour rendre service à une notification.
+ */
+export async function selectTodaySession(
+  athleteId: number,
+  today: string,
+): Promise<PlannedSessionDto | null> {
+  const rows = await db
+    .select(getTableColumns(plannedSessions))
+    .from(plannedSessions)
+    .leftJoin(plans, eq(plannedSessions.planId, plans.id))
+    .where(
+      and(
+        eq(plannedSessions.athleteId, athleteId),
+        eq(plannedSessions.scheduledOn, today),
+        or(isNull(plannedSessions.planId), eq(plans.status, 'active')),
+      ),
+    )
+    // Deux séances peuvent tomber le même jour : la plus récemment créée gagne,
+    // plutôt que celle que Postgres rend en premier ce jour-là.
+    .orderBy(desc(plannedSessions.id))
+    .limit(1);
+
+  const row = rows[0];
+  return row === undefined ? null : toPlannedSessionDto(row);
 }
 
 /** Agrège en une seule passe tout ce que le dashboard affiche. */
@@ -224,7 +284,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
 
   const [
     activityRows,
-    sessionRows,
+    todaySession,
     forecast,
     maxHrSuggestion,
     planRevision,
@@ -239,29 +299,9 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
       .from(activities)
       .where(eq(activities.athleteId, profile.id))
       .orderBy(desc(activities.startedAt)),
-    /*
-     * La séance du jour, à condition qu'un plan actif la porte encore.
-     *
-     * Archiver un plan laisse en base ses séances passées ou déjà réalisées : le
-     * filtre sur `plans.status` évite qu'une d'elles ne s'affiche à la place de
-     * celle du plan en cours. Une séance hors plan (`plan_id` nul) reste, elle,
-     * toujours valable.
-     */
-    db
-      .select(getTableColumns(plannedSessions))
-      .from(plannedSessions)
-      .leftJoin(plans, eq(plannedSessions.planId, plans.id))
-      .where(
-        and(
-          eq(plannedSessions.athleteId, profile.id),
-          eq(plannedSessions.scheduledOn, today),
-          or(isNull(plannedSessions.planId), eq(plans.status, 'active')),
-        ),
-      )
-      // Deux séances peuvent tomber le même jour : la plus récemment créée gagne,
-      // plutôt que celle que Postgres rend en premier ce jour-là.
-      .orderBy(desc(plannedSessions.id))
-      .limit(1),
+    // La séance du jour, à condition qu'un plan actif la porte encore — la même
+    // lecture que celle du rappel matinal, avec l'athlète déjà résolu.
+    selectTodaySession(profile.id, today),
     getWeatherForecast(),
     // Le profil est déjà lu : la proposition n'a pas à le relire, elle le reçoit.
     selectMaxHrSuggestion(profile),
@@ -284,7 +324,6 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
 
   const daily = buildDailyTrimp(activityRows, profile, today);
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
-  const todaySession = sessionRows[0];
 
   const fitness = buildFitness(loadSeries);
   const vo2max = buildVo2max(activityRows, profile, today);
@@ -298,7 +337,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     vo2max,
     vo2maxUnavailable: vo2max ? null : buildVo2maxUnavailable(activityRows, profile, today),
     loadWeeks: buildLoadWeeks(loadSeries, today),
-    todaySession: todaySession ? toPlannedSessionDto(todaySession) : null,
+    todaySession,
     today,
     forecast,
     recentActivities: activityRows.slice(0, RECENT_ACTIVITIES_COUNT).map(toActivitySummaryDto),

@@ -135,6 +135,9 @@ const rawAthlete: Athlete = {
   lthrBpm: null,
   lthrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
+  pushDailySession: true,
+  pushActivityAnalyzed: true,
+  pushSuggestions: true,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
 };

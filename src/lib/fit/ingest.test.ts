@@ -16,6 +16,7 @@ const { mocks } = vi.hoisted(() => ({
     recordActivityWeather: vi.fn(),
     recordSustainedMaxHr: vi.fn(),
     recordThresholdBlockLthr: vi.fn(),
+    notifyActivityAnalyzed: vi.fn(),
   },
 }));
 
@@ -51,6 +52,10 @@ vi.mock('@/lib/ai/fitness-test-service', () => ({
 
 vi.mock('@/lib/weather/service', () => ({
   recordActivityWeather: mocks.recordActivityWeather,
+}));
+
+vi.mock('@/lib/push/notices', () => ({
+  notifyActivityAnalyzed: mocks.notifyActivityAnalyzed,
 }));
 
 const { ingestFitBuffer } = await import('./ingest');
@@ -114,6 +119,7 @@ beforeEach(() => {
   mocks.recordActivityWeather.mockResolvedValue(undefined);
   mocks.recordSustainedMaxHr.mockResolvedValue(undefined);
   mocks.recordThresholdBlockLthr.mockResolvedValue(undefined);
+  mocks.notifyActivityAnalyzed.mockResolvedValue(undefined);
 });
 
 describe('ingestFitBuffer', () => {
@@ -284,6 +290,38 @@ describe('ingestFitBuffer', () => {
     logged.mockRestore();
   });
 
+  /*
+   * L'invariant absolu de ce module, et le dernier post-traitement qui ne
+   * l'éprouvait pas : une bannière ratée ne renvoie pas le fichier en `failed/`.
+   * Le service de notification journalise déjà ses propres motifs et ne lève
+   * pas ; ce test verrouille le dernier recours, celui qui fait que même un
+   * futur `notifyActivityAnalyzed` moins prudent ne pourrait pas coûter un
+   * import.
+   */
+  it('journalise une notification en échec sans faire échouer l’import', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.notifyActivityAnalyzed.mockRejectedValue(new Error('service de push injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({
+      status: 'created',
+      activityId: 42,
+    });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('service de push injoignable'));
+    logged.mockRestore();
+  });
+
+  it('notifie en dernier, une fois le rapprochement au plan posé', async () => {
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    // Notifier avant reviendrait à annoncer « séance hors plan » d'une séance
+    // qui vient d'être rattachée : le message lit le lien que pose le
+    // rapprochement.
+    expect(mocks.linkActivityToPlannedSession.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.notifyActivityAnalyzed.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
   it('demande une révision du plan, après le rapprochement', async () => {
     await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
@@ -329,6 +367,7 @@ describe('ingestFitBuffer', () => {
 
     expect(mocks.linkActivityToPlannedSession).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.recordActivityWeather).toHaveBeenCalledWith(42, ATHLETE_ID);
+    expect(mocks.notifyActivityAnalyzed).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeApplyFitnessTest).toHaveBeenCalledWith(42, ATHLETE_ID);
     expect(mocks.maybeReviewActivePlan).toHaveBeenCalledWith(ATHLETE_ID);
   });

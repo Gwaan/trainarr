@@ -17,9 +17,11 @@ import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
 import { canInvite, listPendingInvitations } from '@/data/invitations';
 import { getLthrSuggestion } from '@/data/lthr-suggestion';
 import { getMaxHrSuggestion } from '@/data/max-hr-suggestion';
+import { countSubscriptions, getPushPreferences } from '@/data/push';
 import { getRestingHrSuggestion } from '@/data/resting-hr-suggestion';
 import { getForecastLocationLabel } from '@/data/weather-forecast';
 import { getAccountSummary } from '@/lib/auth/session';
+import { PUSH_DISABLED_MESSAGES, resolvePushConfig, type PushConfig } from '@/lib/push/config';
 
 import { toLthrSuggestionView } from '../../_lib/lthr-suggestion';
 import { toMaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
@@ -32,6 +34,7 @@ import {
   toInvitationRows,
   type InvitationsSettings,
 } from './invitation-values';
+import type { PushSettings } from './push-state';
 import type { SettingsData } from './settings-values';
 
 /**
@@ -52,6 +55,60 @@ async function loadInvitations(): Promise<InvitationsSettings> {
   }
 }
 
+/**
+ * L'état des notifications, tel que le panneau le reçoit.
+ *
+ * Le verdict d'activation vient de l'environnement (`resolvePushConfig`) et le
+ * reste de la base. Seule la clé **publique** franchit la frontière : elle est
+ * faite pour ça — c'est elle qui signe l'abonnement côté navigateur — et elle
+ * passe par une prop plutôt que par un `NEXT_PUBLIC_*`, la règle du projet
+ * voulant que l'environnement ne soit lu que dans `src/config/` et le DAL.
+ *
+ * Une panne de lecture rend « pas d'appareil, préférences par défaut » plutôt
+ * que de faire tomber tous les réglages — même parti pris que
+ * {@link loadInvitations}. **Y compris une panne de l'environnement** :
+ * `resolvePushConfig` lit `env`, qui valide paresseusement et lève si une
+ * variable sans rapport avec les notifications est mal écrite. Laisser cet
+ * appel hors du `try` aurait fait tomber toute la page de réglages — dont le
+ * formulaire de profil, qui n'a rien à voir.
+ */
+async function loadPushSettings(): Promise<PushSettings> {
+  const disabled: PushSettings = {
+    publicKey: null,
+    disabledMessage: null,
+    deviceCount: 0,
+    preferences: { dailySession: true, activityAnalyzed: true, suggestions: true },
+  };
+
+  let config: PushConfig;
+  try {
+    config = resolvePushConfig();
+  } catch (error) {
+    console.error('[profile] configuration des notifications illisible', error);
+    // Un diagnostic, jamais la trace : elle part vers le navigateur.
+    return {
+      ...disabled,
+      disabledMessage:
+        'Notifications indisponibles : l’environnement du serveur n’a pas pu être lu. Le détail est dans les journaux du serveur.',
+    };
+  }
+
+  if (config.status === 'disabled') {
+    return { ...disabled, disabledMessage: PUSH_DISABLED_MESSAGES[config.reason] };
+  }
+
+  try {
+    const [deviceCount, preferences] = await Promise.all([
+      countSubscriptions(),
+      getPushPreferences(),
+    ]);
+    return { publicKey: config.publicKey, disabledMessage: null, deviceCount, preferences };
+  } catch (error) {
+    console.error('[profile] lecture des notifications impossible', error);
+    return { ...disabled, publicKey: config.publicKey };
+  }
+}
+
 export async function loadSettingsData(): Promise<SettingsData> {
   const [
     profile,
@@ -62,6 +119,7 @@ export async function loadSettingsData(): Promise<SettingsData> {
     forecastLocationLabel,
     account,
     invitations,
+    push,
   ] =
     await Promise.all([
       getAthleteProfile(),
@@ -72,6 +130,7 @@ export async function loadSettingsData(): Promise<SettingsData> {
       getForecastLocationLabel(),
       getAccountSummary(),
       loadInvitations(),
+      loadPushSettings(),
     ]);
 
   return {
@@ -103,5 +162,9 @@ export async function loadSettingsData(): Promise<SettingsData> {
     // navigateur est ce qui est écrit ici, et rien de ce que la session
     // pourrait porter demain en plus.
     account: account === null ? null : { name: account.name },
+    // Les notifications sont un réglage de **compte** (les appareils sont ceux
+    // du compte, les catégories aussi) : elles voyagent avec lui, sous le même
+    // onglet.
+    push,
   };
 }

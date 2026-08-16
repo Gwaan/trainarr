@@ -11,6 +11,7 @@ import { ForecastLocationPanel } from "./forecast-location-panel";
 import { IntervalsPanel } from "./intervals-panel";
 import { InvitationsPanel } from "./invitations-panel";
 import { ProfileForm } from "./profile-form";
+import { PushPanel } from "./push-panel";
 
 /**
  * Les trois sections de réglages, écrites **une seule fois**.
@@ -96,6 +97,13 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
       <TabsContent value="account" active={current === "account"}>
         <div className="flex flex-col gap-4 sm:gap-5">
           <AccountPanel account={data.account} />
+          {/* Les notifications sont ici, et pas dans « Profil » : ce qu'on y
+              règle, ce sont les **appareils** du compte et ce qu'ils reçoivent —
+              rien de physiologique. Elles ne méritent pas non plus un quatrième
+              onglet : sur un téléphone, quatre libellés se partageraient mal la
+              ligne, et une section qu'on ouvre deux fois par an n'a pas à peser
+              autant que le profil. */}
+          <PushPanel push={data.push} />
           {data.invitations.canInvite ? (
             <InvitationsPanel invitations={data.invitations.invitations} />
           ) : null}

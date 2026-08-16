@@ -104,6 +104,7 @@ import {
   type PollWindow,
 } from '@/lib/intervals/poll-plan';
 import { runDailyWellness, wellnessStartupLine } from '@/lib/intervals/wellness-service';
+import { createStopControls, type StopControls } from '@/lib/services/stop-controls';
 
 /**
  * Délai avant de relancer une boucle tombée sur une erreur qu'aucun de ses
@@ -136,77 +137,6 @@ function pollLogError(message: string): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-}
-
-/*
- * Arrêt.
- */
-
-type StopControls = {
-  /** État réel du drapeau d'arrêt — c'est lui, et lui seul, qui autorise le silence. */
-  readonly stopping: boolean;
-  /** Annulation des appels réseau en vol. */
-  readonly signal: AbortSignal;
-  /** Attente interruptible, plafonnée à {@link MAX_SLEEP_MS}. */
-  sleep(ms: number): Promise<void>;
-  requestStop(): void;
-};
-
-/**
- * Le drapeau d'arrêt, les réveils et l'annulation réseau, dans une portée fermée
- * plutôt qu'en variables de module : deux démarrages du service (rechargement à
- * chaud en développement) partageraient sinon le même état, et le premier arrêt
- * couperait les boucles du second.
- */
-function createStopControls(): StopControls {
-  let stopping = false;
-  /**
-   * Réveils des attentes en cours. Un ensemble et non une référence unique : le
-   * watcher et le poller dorment chacun de leur côté, réveiller le dernier
-   * endormi laisserait l'autre traîner jusqu'à son échéance — jusqu'à une heure
-   * pour le poller, soit un SIGKILL de Docker.
-   */
-  const sleepers = new Set<() => void>();
-  /**
-   * Le drapeau `stopping` n'est relu qu'entre deux étapes : un appel HTTP
-   * suspendu retiendrait le poller jusqu'aux temporisations d'undici (300 s),
-   * bien après le délai de grâce de Docker — donc un SIGKILL, au milieu d'un
-   * dépôt de fichier.
-   */
-  const inFlight = new AbortController();
-
-  return {
-    get stopping() {
-      return stopping;
-    },
-    get signal() {
-      return inFlight.signal;
-    },
-    /**
-     * Le plafond est un garde-fou de dernier recours : au-delà de 2³¹−1 ms,
-     * `setTimeout` retombe à 1 ms et la boucle se met à tourner à vide. Les
-     * appelants bornent déjà leur délai (cf. `nextPollDelayMs`) ; celui-ci
-     * garantit qu'aucune configuration ne peut faire déborder le compteur.
-     */
-    sleep(ms: number): Promise<void> {
-      if (stopping) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          sleepers.delete(done);
-          resolve();
-        };
-        const timer = setTimeout(done, Math.min(ms, MAX_SLEEP_MS));
-        sleepers.add(done);
-      });
-    },
-    requestStop(): void {
-      if (stopping) return;
-      stopping = true;
-      inFlight.abort();
-      for (const wake of [...sleepers]) wake();
-    },
-  };
 }
 
 /*
@@ -1142,7 +1072,13 @@ export type FitService = {
  * exception imprévue) est journalisé et laisse le serveur HTTP intact.
  */
 export function startFitService(): FitService {
-  const controls = createStopControls();
+  /*
+   * Le plafond d'attente est plus serré que celui du module partagé : un
+   * `Retry-After` abusif d'intervals.icu ne doit pas endormir le poller plus
+   * d'une heure (cf. `nextPollDelayMs`, qui borne déjà le délai demandé — ceci
+   * en est le garde-fou de dernier recours).
+   */
+  const controls = createStopControls({ maxSleepMs: MAX_SLEEP_MS });
 
   const running = run(controls).catch((error: unknown) => {
     // Filet ultime : `run` attrape déjà tout ce qu'il sait nommer.

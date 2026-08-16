@@ -101,6 +101,9 @@ const ATHLETE: Athlete = {
   maxHrSuggestionDismissedBpm: null,
   restingHrSuggestionDismissedBpm: null,
   wellnessReadingDay: null,
+  pushDailySession: true,
+  pushActivityAnalyzed: true,
+  pushSuggestions: true,
   createdAt: new Date('2026-01-01T00:00:00Z'),
   updatedAt: new Date('2026-01-01T00:00:00Z'),
 };

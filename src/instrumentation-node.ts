@@ -25,11 +25,19 @@ import 'server-only';
  */
 
 import { startFitService } from '@/lib/fit/service';
+import { logPushActivation } from '@/lib/push/config';
+import { startPushService } from '@/lib/push/service';
 import { startWeatherService } from '@/lib/weather/service';
 
-// Ne lèvent jamais et rendent la main aussitôt : le serveur n'attend ni l'import
-// ni la météo pour commencer à servir.
-const services = [startFitService(), startWeatherService()];
+// Pas un service : aucune boucle, aucun arrêt à orchestrer. Juste une ligne au
+// démarrage — une installation sans clés VAPID doit l'apprendre ici, et non au
+// premier envoi silencieusement raté. Ne lève jamais.
+logPushActivation();
+
+// Ne lèvent jamais et rendent la main aussitôt : le serveur n'attend ni l'import,
+// ni la météo, ni les notifications pour commencer à servir. Sans clés VAPID,
+// `startPushService` ne démarre aucune boucle et rend un `stop()` inerte.
+const services = [startFitService(), startWeatherService(), startPushService()];
 
 // Un Ctrl+C dans un shell interactif envoie SIGINT à toute la descendance : le
 // gestionnaire peut être appelé plusieurs fois, une seule ligne suffit.

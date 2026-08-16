@@ -12,6 +12,7 @@ import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
 import { sustainedMaxHrBpm } from '@/lib/metrics';
+import { notifyActivityAnalyzed } from '@/lib/push/notices';
 import { recordActivityWeather } from '@/lib/weather/service';
 
 import { parseFitActivity } from './parse';
@@ -147,6 +148,33 @@ async function recordWeather(activityId: number, athleteId: number): Promise<voi
 }
 
 /**
+ * Annonce à l'athlète que sa séance est analysée.
+ *
+ * **Jamais une condition de l'import**, comme le rapprochement, le seuil et la
+ * météo : une bannière qui n'est pas partie ne doit pas renvoyer le fichier en
+ * `failed/`. Le service journalise ses propres motifs et ne lève pas
+ * (`[push]`) ; ce `catch` est un dernier recours.
+ *
+ * **Attendu**, contrairement au suivi du plan : quelques lectures indexées et un
+ * appel HTTP borné vers le service de push. Le rendre asynchrone n'y gagnerait
+ * rien et ferait perdre l'ordre des notifications entre deux fichiers déposés à
+ * la suite.
+ *
+ * **En dernier**, et ce n'est pas un détail d'ordre : le message annonce le
+ * rapprochement au plan quand il a eu lieu, et ce lien est posé plus haut par
+ * {@link linkToPlannedSession}. Le notifier avant reviendrait à dire « séance
+ * hors plan » d'une séance qui vient d'être rattachée.
+ */
+async function notifyAnalysis(activityId: number, athleteId: number): Promise<void> {
+  try {
+    await notifyActivityAnalyzed(activityId, athleteId);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : notification impossible — ${reason}`);
+  }
+}
+
+/**
  * Confie la séance au plan — **sans attendre** : d'abord le test chronométré
  * qu'elle réalise peut-être, puis la relecture du plan par le coach.
  *
@@ -236,6 +264,7 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
   await linkToPlannedSession(activityId, athleteId);
   await recordThresholdLthr(activityId, athleteId);
   await recordWeather(activityId, athleteId);
+  await notifyAnalysis(activityId, athleteId);
   scheduleActivePlanFollowUp(activityId, athleteId);
 
   return { status, activityId };

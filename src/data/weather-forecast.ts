@@ -480,7 +480,14 @@ const EMPTY_FORECAST: WeatherForecastDto = {
 };
 
 /**
- * Les prévisions **de l'athlète connecté**, à partir d'aujourd'hui.
+ * Les prévisions d'un athlète **désigné**, à partir de `today`.
+ *
+ * Lecture primitive, sur le modèle du doublet `selectX(…)` / `getX()` de
+ * `./max-hr-suggestion.ts` : l'écran passe par {@link getWeatherForecast}, qui
+ * résout l'athlète depuis la session ; le **rappel matinal** (`lib/push`) passe
+ * par ici, avec son athlète en paramètre — il tourne hors requête, il n'y a
+ * aucune session à interroger. Une seule logique, deux points d'entrée : la
+ * notification et le tableau de bord ne peuvent pas annoncer deux météos.
  *
  * Rendues en bloc plutôt que par plage : un relevé compte seize jours au plus,
  * soit une lecture d'un ou deux kilo-octets qu'aucun découpage n'allégerait
@@ -491,10 +498,10 @@ const EMPTY_FORECAST: WeatherForecastDto = {
  * matin, la veille est encore en table, et une prévision d'hier n'a plus rien à
  * dire — c'est la météo relevée de l'activité qui parle.
  */
-export async function getWeatherForecast(): Promise<WeatherForecastDto> {
-  const athleteId = await getCurrentAthleteId();
-  if (athleteId === null) return EMPTY_FORECAST;
-
+export async function selectWeatherForecast(
+  athleteId: number,
+  today: string = todayCivilDate(),
+): Promise<WeatherForecastDto> {
   const [configured, runs, days] = await Promise.all([
     getForecastLocation(athleteId),
     db
@@ -520,10 +527,7 @@ export async function getWeatherForecast(): Promise<WeatherForecastDto> {
       })
       .from(weatherForecasts)
       .where(
-        and(
-          eq(weatherForecasts.athleteId, athleteId),
-          gte(weatherForecasts.forecastDate, todayCivilDate()),
-        ),
+        and(eq(weatherForecasts.athleteId, athleteId), gte(weatherForecasts.forecastDate, today)),
       )
       .orderBy(weatherForecasts.forecastDate),
   ]);
@@ -557,4 +561,15 @@ export async function getWeatherForecast(): Promise<WeatherForecastDto> {
       windSpeedMaxKmh: day.windSpeedMaxKmh,
     })),
   };
+}
+
+/**
+ * Les prévisions **de l'athlète connecté**, à partir d'aujourd'hui — la lecture
+ * d'écran. Rien du tout sans session, et sans athlète.
+ */
+export async function getWeatherForecast(): Promise<WeatherForecastDto> {
+  const athleteId = await getCurrentAthleteId();
+  if (athleteId === null) return EMPTY_FORECAST;
+
+  return selectWeatherForecast(athleteId);
 }

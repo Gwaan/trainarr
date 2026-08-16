@@ -18,6 +18,7 @@ import type { RestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 import type { ProfileFormValues } from './form-values';
 import type { IntervalsFormDefaults } from './intervals-values';
 import type { InvitationsSettings } from './invitation-values';
+import type { PushSettings } from './push-state';
 
 /** Ce dont les trois sections de réglages ont besoin, et rien d'autre. */
 export type SettingsSectionsData = {
@@ -61,6 +62,12 @@ export type SettingsSectionsData = {
   forecastLocationLabel: string | null;
   /** Le nom du compte connecté, `null` si personne ne l'est. Jamais l'e-mail ni l'identifiant. */
   account: { name: string } | null;
+  /**
+   * Les notifications push : la clé publique VAPID (faite pour le navigateur),
+   * le diagnostic quand le serveur n'est pas configuré, le nombre d'appareils
+   * abonnés et l'état des trois catégories. Jamais la clé privée ni le sujet.
+   */
+  push: PushSettings;
   /**
    * Les invitations en cours — `{ canInvite: false }` pour tout compte qui n'est
    * pas le premier de l'installation, et la section n'est alors pas rendue.

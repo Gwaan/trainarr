@@ -385,6 +385,81 @@ export async function getActivityById(id: number): Promise<ActivityDetailDto | n
   return row ? toActivityDetailDto(row) : null;
 }
 
+/**
+ * Ce qu'une notification « analyse prête » a le droit d'annoncer d'une séance
+ * qui vient d'être importée.
+ *
+ * **Uniquement ce qui est calculé au moment de l'ingestion** : les scalaires que
+ * le parseur a écrits, et le rapprochement au plan si `linkActivityToPlannedSession`
+ * l'a fait juste avant. Rien du verdict du coach — la relecture du plan est un
+ * appel LLM non attendu qui dure des minutes, elle ne sera pas prête, et la
+ * promettre serait mentir.
+ */
+export type AnalyzedActivityDto = {
+  id: number;
+  name: string;
+  /**
+   * Quand la séance a **démarré** — pas quand le fichier est arrivé.
+   *
+   * Ce n'est pas un fait à afficher : c'est ce qui permet au déclencheur de
+   * distinguer une sortie du matin d'un rattrapage d'historique, qui ingère
+   * cinquante fichiers par minute (cf. `lib/push/notices.ts`).
+   */
+  startedAt: Date;
+  distanceM: number;
+  movingTimeS: number;
+  /** `null` sur une séance sans distance exploitable (tapis mal calibré, sport sans allure). */
+  avgPaceSecPerKm: number | null;
+  /** La séance planifiée que cette activité réalise, `null` si aucune ne l'a été. */
+  plannedSession: { kind: string; title: string } | null;
+};
+
+/**
+ * La séance qu'on vient d'importer, réduite à ce qu'une bannière peut dire —
+ * `null` si elle n'existe pas ou n'appartient pas à cet athlète.
+ *
+ * **L'athlète est un paramètre** : l'appelant est l'ingestion, qui tourne dans
+ * le watcher, hors requête. Il n'y a pas de session à interroger.
+ */
+export async function selectAnalyzedActivity(
+  activityId: number,
+  athleteId: number,
+): Promise<AnalyzedActivityDto | null> {
+  const [rows, plannedRows] = await Promise.all([
+    db
+      .select({
+        id: activities.id,
+        name: activities.name,
+        startedAt: activities.startedAt,
+        distanceM: activities.distanceM,
+        movingTimeS: activities.movingTimeS,
+        avgPaceSecPerKm: activities.avgPaceSecPerKm,
+      })
+      .from(activities)
+      .where(and(eq(activities.id, activityId), eq(activities.athleteId, athleteId)))
+      .limit(1),
+    // Le lien vient d'être posé (ou non) par le rapprochement, quelques
+    // instructions plus haut dans l'ingestion. Le filtre porte sur l'athlète
+    // **et** sur l'activité : une séance planifiée d'un autre compte ne peut pas
+    // s'inviter dans la bannière.
+    db
+      .select({ kind: plannedSessions.kind, title: plannedSessions.title })
+      .from(plannedSessions)
+      .where(
+        and(
+          eq(plannedSessions.completedActivityId, activityId),
+          eq(plannedSessions.athleteId, athleteId),
+        ),
+      )
+      .limit(1),
+  ]);
+
+  const row = rows[0];
+  if (row === undefined) return null;
+
+  return { ...row, plannedSession: plannedRows[0] ?? null };
+}
+
 /*
  * Détail complet d'une activité : ce que la page de séance affiche.
  *

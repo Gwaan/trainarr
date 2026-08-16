@@ -7,8 +7,8 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Toutes les variables (DATABASE_URL, clés IA, BETTER_AUTH_SECRET)
-    # viennent de .env — jamais du repo.
+    # Toutes les variables (DATABASE_URL, clés IA, BETTER_AUTH_SECRET, clés
+    # VAPID des notifications push) viennent de .env — jamais du repo.
     env_file: .env
     environment:
       # Le code fixe déjà le fuseau de l'athlète (src/config/time.ts) ; ceci
