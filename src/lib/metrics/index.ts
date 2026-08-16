@@ -21,6 +21,17 @@ export {
   type ReferenceDistance,
   type TrainingPaces,
 } from './vdot';
+export {
+  CALIBRATED_WINDOW_MIN,
+  PREDICTED_DISTANCES,
+  SPECULATIVE_FACTOR,
+  predictedRaceTimeS,
+  predictedRaces,
+  predictionConfidence,
+  type PredictionConfidence,
+  type RacePrediction,
+} from './race-prediction';
+export { computeMonotonySeries, type MonotonyPoint } from './monotony';
 export { estimateEffectiveVo2max, type EffectiveVo2maxInput } from './vo2max';
 export { paceSecPerKm } from './pace';
 export { deriveVelocity } from './velocity';

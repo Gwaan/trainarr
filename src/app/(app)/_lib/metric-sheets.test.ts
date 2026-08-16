@@ -79,7 +79,30 @@ describe("registre des fiches de métriques", () => {
     if (sheet.caveat !== undefined) expect(sheet.caveat.trim()).not.toBe("");
   });
 
-  const ESTIMATED: readonly MetricSheetId[] = ["vo2max", "vdot", "ctl", "atl", "tsb", "trimp"];
+  /**
+   * Les métriques que Trainarr **estime** plutôt que de les mesurer, et qui
+   * doivent donc toutes porter leur limite.
+   *
+   * Les trois dernières sont arrivées avec la page « Progression » :
+   *  - `monotony` sort du TRIMP, donc d'un modèle nourri par la fréquence
+   *    cardiaque, et son repère de lecture est une moyenne de population ;
+   *  - `race-prediction` est une projection, jamais une performance ;
+   *  - `personal-bests` mesure un chrono, mais sur une distance **estimée par
+   *    la montre** — une trace sur-lue raccourcit le temps affiché —, et sa
+   *    liste reste provisoire tant que le rattrapage n'a pas balayé
+   *    l'historique.
+   */
+  const ESTIMATED: readonly MetricSheetId[] = [
+    "vo2max",
+    "vdot",
+    "ctl",
+    "atl",
+    "tsb",
+    "trimp",
+    "monotony",
+    "race-prediction",
+    "personal-bests",
+  ];
 
   it.each(ESTIMATED)("la métrique estimée « %s » porte sa limite", (id) => {
     expect(metricSheet(id).caveat).toBeDefined();

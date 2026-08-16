@@ -7,6 +7,7 @@
 
 import type { ReferenceDistance } from "@/lib/metrics/vdot";
 
+import { REFERENCE_DISTANCE_LABELS } from "../../_lib/distance-labels";
 import { ISO_DAY_LABELS } from "./format-plan";
 
 /**
@@ -83,13 +84,13 @@ export const DEFAULT_LEVEL: Level = "intermediate";
  * coach. Facultative, mais un plan sans chrono reste délibérément prudent.
  */
 
-/** Libellé français d'une distance de référence — le formulaire et l'en-tête du plan le partagent. */
-export const REFERENCE_DISTANCE_LABELS: Record<ReferenceDistance, string> = {
-  "5k": "5 km",
-  "10k": "10 km",
-  half: "Semi",
-  marathon: "Marathon",
-};
+/**
+ * Libellé français d'une distance de référence. La table a été remontée dans
+ * `(app)/_lib/distance-labels` — la page « Progression » nomme les mêmes
+ * distances dans ses prédictions et ses records —, et reste ré-exportée ici pour
+ * les appelants du formulaire et de l'en-tête du plan.
+ */
+export { REFERENCE_DISTANCE_LABELS };
 
 /**
  * Distances proposées, avec le format de saisie que chacune appelle : `mm:ss`

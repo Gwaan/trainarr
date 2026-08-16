@@ -133,6 +133,28 @@ environ une minute après sa synchronisation sur intervals.icu.**
 | `pnpm test` | Vitest |
 | `pnpm db:generate` | Génère une migration après modification du schéma |
 | `pnpm db:migrate` | Applique les migrations |
+| `pnpm db:backfill:best-segments` | Calcule les meilleurs efforts de l'historique importé avant la table qui les porte |
+
+### Rattraper les meilleurs efforts
+
+Les meilleurs efforts d'une séance (400 m, 1 km, mile, 5 km, 10 km, semi) sont
+calculés **à l'import** et rangés dans `activity_best_segments` : c'est ce qui
+permet aux records de tous les temps d'être une agrégation sur des lignes
+étroites plutôt qu'un parcours de tous les flux de la base. Les séances
+importées avant cette table n'en ont donc pas.
+
+```bash
+pnpm db:backfill:best-segments   # une fois, après `pnpm db:migrate`
+```
+
+Le script balaie les séances de course sans segments, par lots de 50, en lisant
+les flux **une séance à la fois** (le pic mémoire est celui d'une seule sortie,
+quelle que soit la taille de l'historique). Il journalise sa progression
+(`120/540 activités traitées`), passe sans broncher sur une séance illisible, et
+se relance sans risque : ce qui est déjà en base n'est pas recalculé.
+
+Tant qu'il n'a pas tourné, l'écran des records annonce ses valeurs comme
+**provisoires** et indique combien de séances restent à balayer.
 
 > **pnpm uniquement.** Utiliser `pnpm exec` / `pnpm dlx` plutôt que npx.
 

@@ -43,12 +43,14 @@ import {
 } from '@/lib/metrics';
 
 import { getAthleteProfileById, getCurrentAthleteId } from './athlete';
+import { bestSegmentsScanMark, toBestSegmentRows } from './db/best-segments-scope';
 import { db } from './db/client';
 import { uniqueViolationConstraint } from './db/errors';
 import {
   ACTIVITIES_SESSION_UNIQUE_INDEX,
   ACTIVITY_STREAM_TYPES,
   activities,
+  activityBestSegments,
   activityStreams,
   plannedSessions,
   type Activity,
@@ -872,57 +874,78 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   // aucune frontière de fuseau n'a d'incidence sur des quartiles.
   const contextSince = new Date(Date.now() - TRIMP_CONTEXT_DAYS * 24 * 60 * 60 * 1000);
 
-  const [activityRows, streamRows, profile, plannedRows, contextRows] = await Promise.all([
-    db
-      .select()
-      .from(activities)
-      .where(and(eq(activities.id, id), eq(activities.athleteId, athleteId)))
-      .limit(1),
-    db
-      .select(getTableColumns(activityStreams))
-      .from(activityStreams)
-      .innerJoin(
-        activities,
-        and(eq(activities.id, activityStreams.activityId), eq(activities.athleteId, athleteId)),
-      )
-      .where(eq(activityStreams.activityId, id)),
-    getAthleteProfileById(athleteId),
-    // La séance du plan que cette activité réalise, s'il y en a une. Les
-    // colonnes strictement nécessaires à la comparaison : le déroulé et ce qui
-    // en tient lieu sur les séances historiques.
-    db
-      .select({
-        steps: plannedSessions.steps,
-        targetPaceSecPerKm: plannedSessions.targetPaceSecPerKm,
-        volumeM: plannedSessions.volumeM,
-        durationS: plannedSessions.durationS,
-      })
-      .from(plannedSessions)
-      .where(
-        and(
-          eq(plannedSessions.completedActivityId, id),
-          eq(plannedSessions.athleteId, athleteId),
+  const [activityRows, streamRows, profile, plannedRows, contextRows, storedSegmentRows] =
+    await Promise.all([
+      db
+        .select()
+        .from(activities)
+        .where(and(eq(activities.id, id), eq(activities.athleteId, athleteId)))
+        .limit(1),
+      db
+        .select(getTableColumns(activityStreams))
+        .from(activityStreams)
+        .innerJoin(
+          activities,
+          and(eq(activities.id, activityStreams.activityId), eq(activities.athleteId, athleteId)),
+        )
+        .where(eq(activityStreams.activityId, id)),
+      getAthleteProfileById(athleteId),
+      // La séance du plan que cette activité réalise, s'il y en a une. Les
+      // colonnes strictement nécessaires à la comparaison : le déroulé et ce qui
+      // en tient lieu sur les séances historiques.
+      db
+        .select({
+          steps: plannedSessions.steps,
+          targetPaceSecPerKm: plannedSessions.targetPaceSecPerKm,
+          volumeM: plannedSessions.volumeM,
+          durationS: plannedSessions.durationS,
+        })
+        .from(plannedSessions)
+        .where(
+          and(
+            eq(plannedSessions.completedActivityId, id),
+            eq(plannedSessions.athleteId, athleteId),
+          ),
+        )
+        .limit(1),
+      // Le référentiel de charge : les séances de la fenêtre qui portent une FC
+      // moyenne — les seules dont un TRIMP se calcule. Deux colonnes, et la
+      // fenêtre borne le volume : jamais l'historique entier en mémoire.
+      //
+      // La séance lue en fait partie **quelle que soit sa date** : relire une
+      // vieille sortie ne doit pas la comparer à un référentiel dont elle est
+      // exclue.
+      db
+        .select({ movingTimeS: activities.movingTimeS, avgHrBpm: activities.avgHrBpm })
+        .from(activities)
+        .where(
+          and(
+            eq(activities.athleteId, athleteId),
+            isNotNull(activities.avgHrBpm),
+            or(gte(activities.startedAt, contextSince), eq(activities.id, id)),
+          ),
         ),
-      )
-      .limit(1),
-    // Le référentiel de charge : les séances de la fenêtre qui portent une FC
-    // moyenne — les seules dont un TRIMP se calcule. Deux colonnes, et la
-    // fenêtre borne le volume : jamais l'historique entier en mémoire.
-    //
-    // La séance lue en fait partie **quelle que soit sa date** : relire une
-    // vieille sortie ne doit pas la comparer à un référentiel dont elle est
-    // exclue.
-    db
-      .select({ movingTimeS: activities.movingTimeS, avgHrBpm: activities.avgHrBpm })
-      .from(activities)
-      .where(
-        and(
-          eq(activities.athleteId, athleteId),
-          isNotNull(activities.avgHrBpm),
-          or(gte(activities.startedAt, contextSince), eq(activities.id, id)),
-        ),
-      ),
-  ]);
+      // Les meilleurs efforts **persistés** de la séance, écrits à l'ingestion.
+      // Cloisonnés comme les séries, et pour la même raison :
+      // `activity_best_segments` n'a pas d'`athlete_id`, c'est la jointure sur la
+      // table parente qui le porte.
+      db
+        .select({
+          targetM: activityBestSegments.targetM,
+          timeS: activityBestSegments.timeS,
+          paceSecPerKm: activityBestSegments.paceSecPerKm,
+        })
+        .from(activityBestSegments)
+        .innerJoin(
+          activities,
+          and(
+            eq(activities.id, activityBestSegments.activityId),
+            eq(activities.athleteId, athleteId),
+          ),
+        )
+        .where(eq(activityBestSegments.activityId, id))
+        .orderBy(activityBestSegments.targetM),
+    ]);
 
   const row = activityRows[0];
   if (!row) return null;
@@ -998,12 +1021,40 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
       ? computeDecoupling(speeds, heartrate, time)
       : null;
 
-  // Un « record » à l'allure n'a pas de sens à vélo : les meilleurs efforts sont
-  // une lecture de course à pied, comme la VO₂max effective au-dessus.
-  const bestSegments =
-    running && time !== null && distance !== undefined
-      ? computeBestSegments(distance, time)
-      : [];
+  /*
+   * Les meilleurs efforts : ceux qui sont **en base** d'abord, le calcul en
+   * repli.
+   *
+   * Depuis que l'ingestion les persiste (`activity_best_segments`), une séance
+   * importée porte ses segments : les relire coûte trois colonnes indexées, là
+   * où les recalculer demande de balayer deux flux entiers. Et c'est la même
+   * fonction qui les a produits — le DTO ne change pas d'un iota selon la
+   * branche.
+   *
+   * Le repli n'existe que pour **l'historique antérieur à cette table**, qui
+   * n'a rien en base tant que `pnpm db:backfill:best-segments` n'a pas tourné.
+   *
+   * **Le garde-fou « course à pied » couvre les deux branches**, pas seulement
+   * le repli : un record à l'allure n'a pas de sens à vélo, et une séance dont
+   * le sport stocké n'est pas une course ne doit pas montrer un panneau
+   * « meilleurs efforts » sous prétexte qu'elle porte des lignes héritées (sport
+   * corrigé après coup, réimport). L'ingestion purge ces lignes de son côté
+   * (`recordBestSegments`) ; ici on refuse simplement de les lire — les deux
+   * défenses ne se remplacent pas, la purge suppose un réimport.
+   *
+   * **Date de péremption** : le jour où le rattrapage sera passé sur toute la
+   * base (l'écran des records l'annonce, cf. `pendingActivities` dans
+   * `./personal-bests`), cette branche `computeBestSegments` deviendra du code
+   * mort et pourra être retirée, avec son import. La garder plus longtemps
+   * coûterait un doute permanent : « laquelle des deux valeurs vois-je ? ».
+   */
+  const bestSegments = !running
+    ? []
+    : storedSegmentRows.length > 0
+      ? storedSegmentRows
+      : time !== null && distance !== undefined
+        ? computeBestSegments(distance, time)
+        : [];
 
   /*
    * La comparaison aux objectifs de la séance planifiée.
@@ -1160,6 +1211,63 @@ export async function hasActivityStreams(
     .where(eq(activityStreams.activityId, activityId))
     .limit(1);
   return rows.length > 0;
+}
+
+/**
+ * Remplace les meilleurs efforts persistés d'une activité.
+ *
+ * **Remplacement, pas complétion**, exactement comme {@link saveActivityStreams}
+ * et pour la même raison : ces lignes n'ont d'autre source que le fichier, elles
+ * ne s'éditent nulle part dans l'appli, et une correction du calcul doit pouvoir
+ * se propager au simple redépôt du fichier. Les cibles qui ne sortent plus du
+ * calcul (séance dont on relit une distance plus courte) sont donc supprimées :
+ * une ligne orpheline deviendrait un record fantôme, impossible à faire tomber
+ * puisqu'aucune séance ne l'a jamais couru.
+ *
+ * Une liste vide est une écriture valide — elle efface. C'est le cas d'une
+ * séance de moins de 400 m, qui n'a aucun meilleur effort à montrer, et de
+ * toute séance qui n'est pas de la course à pied (l'ingestion appelle alors
+ * cette fonction avec `[]`, pour purger d'éventuelles lignes héritées).
+ *
+ * **La marque de balayage est posée dans la même transaction**, quel que soit
+ * le nombre de lignes écrites (`bestSegmentsScanMark`). C'est elle qui fait
+ * sortir la séance du prédicat de rattrapage : sans elle, une séance dont le
+ * calcul ne rend rien resterait comptée « en attente » indéfiniment, et l'écran
+ * des records annoncerait des records provisoires pour toujours. Une écriture
+ * qui échoue annule la marque avec le reste — la séance repart en attente.
+ *
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui l'appelle : elle
+ * tourne dans le watcher, hors requête. `activity_best_segments` n'ayant pas
+ * d'`athlete_id`, l'appartenance est vérifiée sur la table parente avant toute
+ * écriture.
+ *
+ * @throws {ActivityNotFoundError} si l'activité n'est pas celle de l'athlète
+ * (ou n'existe pas : les deux cas ne se distinguent pas).
+ */
+export async function saveActivityBestSegments(
+  activityId: number,
+  athleteId: number,
+  segments: readonly BestSegment[],
+): Promise<void> {
+  if (!(await ownsActivity(activityId, athleteId))) throw new ActivityNotFoundError();
+
+  const rows = toBestSegmentRows(activityId, segments);
+
+  await db.transaction(async (tx) => {
+    // Purge puis réécriture, dans la même transaction : l'activité n'est jamais
+    // vue sans ses segments par une lecture concurrente.
+    await tx
+      .delete(activityBestSegments)
+      .where(eq(activityBestSegments.activityId, activityId));
+    if (rows.length > 0) await tx.insert(activityBestSegments).values(rows);
+    // « Regardée », et pas « pourvue de segments » : c'est cette marque qui fait
+    // sortir la séance du prédicat de rattrapage, y compris quand le calcul n'a
+    // rien rendu.
+    await tx
+      .update(activities)
+      .set(bestSegmentsScanMark(new Date()))
+      .where(eq(activities.id, activityId));
+  });
 }
 
 /** Colonnes nullables qu'un redépôt du même fichier peut venir combler. */

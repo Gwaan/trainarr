@@ -163,6 +163,7 @@ function run(overrides: Partial<Activity> & { startedAt: Date }): Activity {
     maxHrBpm: 168,
     avgPaceSecPerKm: 300,
     avgCadenceSpm: 172,
+    bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,
     lthrSampleSource: null,

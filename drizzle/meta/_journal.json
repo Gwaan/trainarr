@@ -204,6 +204,13 @@
       "when": 1786900663807,
       "tag": "0028_military_supreme_intelligence",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1786910232392,
+      "tag": "0029_best_segments_targets_and_scan_mark",
+      "breakpoints": true
     }
   ]
 }

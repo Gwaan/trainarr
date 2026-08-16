@@ -66,6 +66,26 @@ export function formatLoad(value: number): string {
   return formatNumber(value, 0);
 }
 
+/**
+ * Monotonie de Foster au dixième, ex. `1,8`.
+ *
+ * Un quotient sans unité, dont l'amplitude utile tient entre 0,5 et 3 : à
+ * l'entier, deux semaines de nature différente afficheraient le même nombre.
+ */
+export function formatMonotony(value: number): string {
+  return formatNumber(value, 1);
+}
+
+/**
+ * Contrainte de Foster à l'entier, ex. `2450`.
+ *
+ * Elle se compte en unités TRIMP × monotonie et se lit par centaines : une
+ * décimale n'y ajouterait aucune information lisible.
+ */
+export function formatStrain(value: number): string {
+  return formatNumber(value, 0);
+}
+
 /** Allure au format `4:18/km`. */
 export function formatPace(secPerKm: number): string {
   const total = Math.round(secPerKm);
@@ -77,6 +97,25 @@ export function formatPace(secPerKm: number): string {
 /** Distance en kilomètres au dixième, ex. `18,2 km`. */
 export function formatDistance(meters: number): string {
   return `${formatNumber(meters / 1000, 1)} km`;
+}
+
+/**
+ * Durée exacte façon chronomètre : `48:12`, `1:04:32`.
+ *
+ * Vit ici, et non plus dans le détail d'une activité : trois routes affichent
+ * désormais un chrono à la seconde (le détail d'une séance, les records de tous
+ * les temps, les chronos prévus). `activities/[id]/_lib/format-detail` la
+ * ré-exporte pour ses appelants — la fonction n'a pas bougé d'un caractère.
+ */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  const mm = hours > 0 ? String(minutes).padStart(2, "0") : String(minutes);
+  return hours > 0
+    ? `${hours}:${mm}:${String(rest).padStart(2, "0")}`
+    : `${mm}:${String(rest).padStart(2, "0")}`;
 }
 
 /** Durée lisible : `45 s`, `48 min`, `1 h 05`. */
@@ -143,4 +182,25 @@ export function formatRelativeDay(date: Date, now: Date = new Date()): string {
 /** Date complète en minuscules, ex. `dimanche 9 août`. */
 export function formatFullDate(date: Date): string {
   return fullDateFormatter.format(date);
+}
+
+/**
+ * Date civile en toutes lettres, **millésimée dès qu'elle sort de l'année de
+ * `reference`** : `dimanche 9 août`, mais `dimanche 17 mai 2024`.
+ *
+ * `null` quand la chaîne n'est pas une date civile — jamais une date inventée.
+ *
+ * Le millésime conditionnel n'est pas de la coquetterie : les écrans qui datent
+ * un record de tous les temps ou le chrono de référence d'un plan affichent des
+ * jours qui peuvent avoir deux ans, et « dimanche 17 mai » ne désigne alors rien
+ * du tout. Il se lit sur la chaîne civile plutôt que sur un troisième
+ * formateur : l'année y est déjà écrite.
+ */
+export function formatCivilFullDate(civilDate: string, reference: string): string | null {
+  const date = parseCivilDate(civilDate);
+  if (date === null) return null;
+
+  const year = civilDate.slice(0, 4);
+  const full = formatFullDate(date);
+  return year === reference.slice(0, 4) ? full : `${full} ${year}`;
 }

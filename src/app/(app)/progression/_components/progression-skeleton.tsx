@@ -1,4 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
 /** Cadre de panneau, repris à l'identique du composant `Panel`. */
 function PanelFrame({ children }: { children: React.ReactNode }) {
@@ -19,6 +20,75 @@ function BarsFrame() {
     <div className="flex gap-2 p-4 sm:p-5">
       <Skeleton className="h-40 w-9 shrink-0 sm:h-48 sm:w-12" />
       <Skeleton className="h-40 min-w-0 flex-1 sm:h-48" />
+    </div>
+  );
+}
+
+/**
+ * Un tableau de quatre colonnes : en-tête, puis `rows` lignes. Même emprise que
+ * les tableaux des chronos prévus et des records, dont les cellules font la
+ * même hauteur.
+ */
+function TableFrame({ rows }: { rows: number }) {
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 sm:px-5">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="h-3 w-12" />
+      </div>
+      {Array.from({ length: rows }, (_, row) => (
+        <div
+          key={row}
+          className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 last:border-b-0 sm:px-5"
+        >
+          <Skeleton className="h-3.5 w-14" />
+          <Skeleton className="h-3.5 w-20" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Un paragraphe : `mobile` lignes sous `sm`, `wide` au-delà.
+ *
+ * Deux comptes, parce qu'un même texte n'occupe pas le même nombre de lignes de
+ * part et d'autre de la gouttière — la colonne fait ~310 px sur téléphone et
+ * ~900 px sur `max-w-5xl`, soit trois fois plus de caractères par ligne. Un
+ * squelette taillé pour l'un saute sur l'autre, dans un sens ou dans l'autre.
+ * Les lignes en trop sont masquées plutôt que rendues, pour que la gouttière
+ * flex ne les compte pas.
+ *
+ * La dernière ligne de chaque paragraphe est plus courte : un bloc de lignes
+ * toutes pleines se lit comme un cadre, pas comme du texte.
+ */
+function TextLines({
+  mobile,
+  wide,
+  lineClass,
+  className,
+}: {
+  mobile: number;
+  wide: number;
+  lineClass: string;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex flex-col gap-2", className)}>
+      {Array.from({ length: mobile }, (_, line) => (
+        <Skeleton
+          key={line}
+          className={cn(
+            lineClass,
+            line === mobile - 1 ? "w-2/3" : "w-full",
+            // Au-delà de `wide` lignes, la ligne n'existe que sur mobile.
+            line >= wide && "sm:hidden",
+            // …et la dernière ligne visible sur large doit, elle aussi, être
+            // plus courte que les précédentes.
+            line === wide - 1 && mobile > wide && "sm:w-2/3",
+          )}
+        />
+      ))}
     </div>
   );
 }
@@ -87,10 +157,50 @@ export function ProgressionSkeleton() {
         </div>
       </PanelFrame>
 
+      {/* Monotonie et contrainte : un panneau à deux axes, donc deux gouttières
+          de graduations, et la note de lecture sous le graphe. */}
+      <PanelFrame>
+        <div className="flex flex-col gap-4 p-4 sm:p-5">
+          <Skeleton className="h-4 w-full" />
+          <div className="flex flex-col gap-1.5">
+            <Skeleton className="h-3 w-full" />
+            <div className="flex gap-2">
+              <Skeleton className="h-44 w-9 shrink-0 sm:h-56 sm:w-12" />
+              <Skeleton className="h-44 min-w-0 flex-1 sm:h-56" />
+              <Skeleton className="h-44 w-9 shrink-0 sm:h-56 sm:w-12" />
+            </div>
+          </div>
+          {/* La note de lecture (`MonotonyReading`) : ~270 caractères en
+              `text-[0.82rem] leading-relaxed`, soit six lignes sur mobile et
+              deux sur large — ~130 px et ~45 px. Un `h-8` (32 px) faisait
+              grandir la card de cent pixels à l'arrivée des données. */}
+          <TextLines mobile={6} wide={2} lineClass="h-3.5" />
+        </div>
+      </PanelFrame>
+
       <PanelFrame>
         <div className="flex gap-2 p-4 sm:p-5">
           <Skeleton className="h-40 w-9 shrink-0 sm:h-52 sm:w-12" />
           <Skeleton className="h-40 min-w-0 flex-1 sm:h-52" />
+        </div>
+      </PanelFrame>
+
+      {/* Chronos prévus : quatre distances, puis le pied qui porte l'ancre et
+          la réserve de fiabilité. Trois paragraphes, pas deux lignes — la ligne
+          « Chrono de référence », la phrase de source (avec sa note de
+          recalibration éventuelle, ~270 caractères) et la réserve de fiabilité
+          (jusqu'à trois phrases, ~350 caractères) en `text-[0.78rem]
+          leading-relaxed`. Sur mobile le pied réel occupe 150 à 200 px, là où
+          deux lignes en réservaient 64. */}
+      <PanelFrame>
+        <TableFrame rows={4} />
+        <div className="border-t border-border px-4 py-4 sm:px-5">
+          <div className="flex items-baseline justify-between gap-3">
+            <Skeleton className="h-3 w-32" />
+            <Skeleton className="h-3.5 w-24" />
+          </div>
+          <TextLines className="mt-2" mobile={3} wide={1} lineClass="h-3" />
+          <TextLines className="mt-2.5" mobile={4} wide={2} lineClass="h-3" />
         </div>
       </PanelFrame>
 
@@ -100,6 +210,12 @@ export function ProgressionSkeleton() {
 
       <PanelFrame>
         <BarsFrame />
+      </PanelFrame>
+
+      {/* Records personnels : six distances de référence, sans pied — la note
+          « provisoires » n'apparaît que si le rattrapage reste à faire. */}
+      <PanelFrame>
+        <TableFrame rows={6} />
       </PanelFrame>
 
       {/* Bien-être : quatre mesures en deux colonnes, chacune libellé + valeur,

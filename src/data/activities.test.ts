@@ -149,6 +149,7 @@ const rawActivity: Activity = {
   maxHrBpm: 176,
   avgPaceSecPerKm: 290.1,
   avgCadenceSpm: 87.5,
+  bestSegmentsScannedAt: null,
   sustainedMaxHrBpm: null,
   lthrSampleBpm: null,
   lthrSampleSource: null,

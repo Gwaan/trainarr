@@ -11,7 +11,13 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    /**
+     * `scripts/` en plus de `src/` : les scripts autonomes (rattrapages) portent
+     * des invariants qui ne se vérifient qu'en les faisant tourner — « le
+     * compteur d'activités en attente finit par atteindre zéro » ne se lit dans
+     * aucun module du DAL.
+     */
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     /**
      * `src/config/env.ts` valide l'environnement au chargement du module : sans
      * DATABASE_URL, tout import d'un module serveur échouerait. Valeur factice —

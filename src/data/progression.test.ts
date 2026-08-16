@@ -4,6 +4,7 @@ import type {
   DailyTrimp,
   EffectiveVo2maxInput,
   LoadPoint,
+  MonotonyPoint,
   TrimpInput,
 } from '@/lib/metrics';
 
@@ -95,6 +96,20 @@ vi.mock('@/lib/metrics', () => ({
       tsb: index - day.trimp,
     })),
   ),
+  /*
+   * Même mécanique de double que `computeLoadSeries` : un point par jour de la
+   * série **complète**, dont les six premiers restent `null` — c'est ce que le
+   * socle rend sur une fenêtre de sept jours incomplète, et la troncature à la
+   * période ne doit pas les faire réapparaître au bord de la fenêtre.
+   */
+  computeMonotonySeries: vi.fn((daily: readonly DailyTrimp[]): MonotonyPoint[] =>
+    daily.map((day, index) => ({
+      date: day.date,
+      monotony: index < 6 ? null : index,
+      strain: index < 6 ? null : index * 10,
+      weeklyLoad: day.trimp,
+    })),
+  ),
   estimateEffectiveVo2max: vi.fn((input: EffectiveVo2maxInput): number | null => {
     if (input.avgHrBpm === null || input.maxHrBpm === null) return null;
     if (input.distanceM < 3_000) return null;
@@ -157,6 +172,7 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     maxHrBpm: 158,
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
+    bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,
     lthrSampleSource: null,
@@ -202,6 +218,7 @@ describe('getProgression — base vide', () => {
       hasProfile: false,
       current: { fitness: null, vo2max: null },
       load: [],
+      monotony: [],
       vo2max: null,
       trimpBuckets: [],
       volume: [],
@@ -219,6 +236,7 @@ describe('getProgression — base vide', () => {
 
     expect(progression.hasProfile).toBe(true);
     expect(progression.load).toEqual([]);
+    expect(progression.monotony).toEqual([]);
     expect(progression.trimpBuckets).toEqual([]);
     expect(progression.volume).toEqual([]);
     expect(progression.vo2max).toBeNull();
@@ -254,6 +272,23 @@ describe('getProgression — troncature de la série de charge', () => {
       atl: 0,
       tsb: 221,
     });
+  });
+
+  it('tronque la monotonie comme la charge, sans redémarrer sa fenêtre', async () => {
+    queryState.rows.athlete = [ATHLETE];
+    queryState.rows.activities = dailyActivities('2026-01-01', '2026-08-09');
+
+    const progression = await getProgression('3m');
+
+    expect(progression.monotony).toHaveLength(91);
+    expect(progression.monotony[0].date).toBe('2026-05-12');
+    /*
+     * Le premier point affiché porte l'index 131 de la série complète : si la
+     * monotonie était calculée à partir du 12 mai, les six premiers jours
+     * affichés seraient `null` par pure construction — un trou qui ne dirait
+     * rien de l'entraînement.
+     */
+    expect(progression.monotony[0].monotony).toBe(131);
   });
 
   it('laisse l’instantané indépendant de la période affichée', async () => {

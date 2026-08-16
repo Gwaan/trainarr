@@ -2,28 +2,8 @@ import { Panel } from "@/components/panel";
 import type { BestSegment } from "@/lib/metrics";
 
 import { MetricInfo } from "../../../_components/metric-info";
-import { formatNumber } from "../../../_lib/format";
+import { distanceTargetLabel } from "../../../_lib/distance-labels";
 import { formatClock, formatPaceValue } from "../_lib/format-detail";
-
-/**
- * Libellés des distances de référence.
- *
- * Une cible inconnue de cette table retombe sur ses kilomètres plutôt que de
- * disparaître : ajouter une distance à `BEST_SEGMENT_TARGETS_M` ne doit pas
- * escamoter une ligne en silence.
- */
-const TARGET_LABELS = new Map<number, string>([
-  [400, "400 m"],
-  [1000, "1 km"],
-  [1609.34, "1 mile"],
-  [5000, "5 km"],
-  [10000, "10 km"],
-  [21097.5, "Semi"],
-]);
-
-function targetLabel(targetM: number): string {
-  return TARGET_LABELS.get(targetM) ?? `${formatNumber(targetM / 1000, 1)} km`;
-}
 
 /**
  * Meilleurs efforts de la séance.
@@ -73,7 +53,7 @@ export function BestSegmentsPanel({
                 scope="row"
                 className="num px-4 py-2 text-left font-medium whitespace-nowrap text-fg sm:px-5"
               >
-                {targetLabel(segment.targetM)}
+                {distanceTargetLabel(segment.targetM)}
               </th>
               <td className="num py-2 text-right whitespace-nowrap text-fg">
                 {formatClock(segment.timeS)}

@@ -2,6 +2,7 @@ import 'server-only';
 
 import {
   hasActivityStreams,
+  saveActivityBestSegments,
   saveActivityStreams,
   upsertActivityFromFit,
   type FitUpsertOutcome,
@@ -9,13 +10,14 @@ import {
 import { recordThresholdBlockLthr } from '@/data/lthr-suggestion';
 import { recordSustainedMaxHr } from '@/data/max-hr-suggestion';
 import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
+import { isRunning } from '@/data/training-metrics';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
-import { sustainedMaxHrBpm } from '@/lib/metrics';
+import { computeBestSegments, sustainedMaxHrBpm } from '@/lib/metrics';
 import { notifyActivityAnalyzed } from '@/lib/push/notices';
 import { recordActivityWeather } from '@/lib/weather/service';
 
-import { parseFitActivity } from './parse';
+import { parseFitActivity, type ParsedFitActivity } from './parse';
 
 /**
  * Ingestion d'un fichier FIT : parsing → écriture en base → séries temporelles.
@@ -76,6 +78,57 @@ const REPORT_STATUS = {
   'same-file': 'updated',
   'same-session': 'merged',
 } as const satisfies Record<FitUpsertOutcome, IngestReport['status']>;
+
+/**
+ * Enregistre les **meilleurs efforts** de la séance (400 m → semi), calculés sur
+ * les flux qu'on vient d'écrire.
+ *
+ * **Pourquoi persister ce calcul, alors que le dépôt recalcule presque tout à la
+ * lecture** : un meilleur effort ne dépend d'aucune donnée de profil — c'est une
+ * distance et un chrono lus dans le fichier. Le figer ne peut donc pas produire
+ * l'incohérence « je corrige ma FC max, l'historique ne suit pas » qui interdit
+ * de figer les zones ou le TRIMP. En échange, les records de tous les temps
+ * deviennent un `MIN` sur des lignes étroites au lieu d'un parcours de tout
+ * l'historique de flux JSONB (cf. le commentaire de la table dans le schéma).
+ *
+ * **Course à pied seulement**, comme `getActivityFull` : un record à l'allure
+ * n'a pas de sens à vélo. Un autre sport n'écrit donc aucun segment — mais il
+ * **purge** quand même (appel avec une liste vide), au lieu de sortir avant tout
+ * appel comme il le faisait. La différence compte : une activité peut porter des
+ * lignes qu'elle ne devrait plus avoir (sport corrigé à la main, réimport sous
+ * un autre sport), et l'écran des records ne filtre pas par sport — il lirait
+ * ces lignes comme des records d'allure. Une purge inutile coûte un `DELETE`
+ * sans ligne ; une ligne orpheline coûte un record faux, que rien ne peut faire
+ * tomber puisque personne ne l'a couru.
+ *
+ * **Ici, et pas ailleurs** : les flux sont déjà en main (`parsed.streams`), les
+ * relire depuis la base pour le même résultat serait absurde. C'est aussi la
+ * raison de la place de cet appel, sous la même condition que la FC max
+ * soutenue — un fichier dont on n'a pas retenu les séries (doublon venu d'une
+ * autre source) n'a pas non plus à décider des records de la séance.
+ *
+ * **Jamais une condition de l'import**, comme le rapprochement, le seuil, la
+ * météo et la notification : une séance dont les segments ne sont pas écrits
+ * reste une séance valide, et elle ne doit pas repartir en `failed/` pour ça.
+ * Le prochain passage du rattrapage (`pnpm db:backfill:best-segments`) la
+ * ramassera. L'échec se journalise avec son motif.
+ */
+async function recordBestSegments(
+  activityId: number,
+  athleteId: number,
+  parsed: ParsedFitActivity,
+): Promise<void> {
+  const segments = isRunning(parsed.sportType)
+    ? computeBestSegments(parsed.streams.distance ?? [], parsed.streams.time ?? [])
+    : [];
+
+  try {
+    await saveActivityBestSegments(activityId, athleteId, segments);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : meilleurs efforts non enregistrés — ${reason}`);
+  }
+}
 
 /**
  * Rapproche l'activité de la séance planifiée qu'elle réalise, quel que soit le
@@ -259,6 +312,7 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
       athleteId,
       sustainedMaxHrBpm(parsed.streams.heartrate ?? [], parsed.streams.time ?? []),
     );
+    await recordBestSegments(activityId, athleteId, parsed);
   }
 
   await linkToPlannedSession(activityId, athleteId);

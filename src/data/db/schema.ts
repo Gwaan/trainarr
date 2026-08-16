@@ -1,6 +1,7 @@
 import { sql, type InferInsertModel, type InferSelectModel } from 'drizzle-orm';
 import {
   boolean,
+  check,
   date,
   index,
   integer,
@@ -15,6 +16,11 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
+// Import de **valeur**, donc en chemin relatif : ce module est chargé par `tsx`
+// hors du build Next (`scripts/backfill-best-segments.ts`, `src/data/db/migrate.ts`),
+// qui ne résout pas l'alias `@/`. Les imports de type voisins, eux, sont effacés
+// à la compilation et n'ont pas cette contrainte.
+import { BEST_SEGMENT_TARGETS_M } from '../../lib/metrics/best-segments';
 import type { LthrSource } from '@/lib/metrics/lthr';
 import type { ReferenceDistance } from '@/lib/metrics/vdot';
 import type { PlanRevisionDirection } from '@/lib/plan-revision/direction';
@@ -353,6 +359,38 @@ export const activities = pgTable(
     lthrSampleSource: text('lthr_sample_source', { enum: LTHR_SAMPLE_SOURCES }),
     avgPaceSecPerKm: real('avg_pace_sec_per_km'),
     avgCadenceSpm: real('avg_cadence_spm'),
+    /**
+     * Instant du dernier **balayage** des meilleurs efforts de cette séance —
+     * `NULL` tant qu'aucun n'a eu lieu.
+     *
+     * Ce n'est pas « la séance a des segments » : c'est « on a regardé ». La
+     * distinction est tout l'objet de la colonne. Une séance peut être balayée
+     * sans produire la moindre ligne dans `activity_best_segments` — flux de
+     * distance entièrement `null` (import indoor), canal non numérique d'un
+     * import ancien, amplitude réelle inférieure à 400 m alors que
+     * `distance_m` annonce davantage. Sans marque, ces séances-là restaient
+     * éternellement « en attente de rattrapage » : le compteur de l'écran des
+     * records (`pendingActivities`) ne pouvait jamais atteindre zéro, et
+     * l'écran réclamait `pnpm db:backfill:best-segments` **après** que la
+     * commande soit passée, pour toujours.
+     *
+     * Posée par les **deux** écrivains, dans la transaction qui purge et
+     * réécrit les segments : le DAL (`saveActivityBestSegments`, appelé par
+     * l'ingestion) et le rattrapage (`scripts/backfill-best-segments.ts`).
+     * Toujours, y compris quand le calcul ne rend rien — c'est précisément le
+     * cas qu'elle existe pour clore. Jamais quand l'écriture échoue : la
+     * transaction entière est annulée, la séance reste en attente, et le
+     * prochain passage la reprendra.
+     *
+     * **Ce qu'elle interdit** : re-balayer l'historique après une correction de
+     * `computeBestSegments`. C'est volontaire, et le remède est explicite —
+     * `DELETE FROM activity_best_segments;` puis
+     * `UPDATE activities SET best_segments_scanned_at = NULL;` remettent tout
+     * en file (les deux, parce que le prédicat de rattrapage exige aussi
+     * qu'aucune ligne n'existe). Une marque qu'on efface à la main vaut mieux
+     * qu'un compteur qui ment à l'écran.
+     */
+    bestSegmentsScannedAt: timestamp('best_segments_scanned_at', { withTimezone: true }),
     createdAt: createdAt(),
   },
   (table) => [
@@ -427,6 +465,169 @@ export const activityStreams = pgTable(
      * si deux imports de la même activité se croisent.
      */
     uniqueIndex('activity_streams_activity_id_type_idx').on(table.activityId, table.type),
+  ],
+);
+
+/**
+ * Les cibles telles que la contrainte les écrit — et la preuve, au chargement du
+ * schéma, que `numeric(9,2)` les rend à l'identique.
+ *
+ * L'aller-retour des six valeurs d'aujourd'hui est exact, mais rien n'obligeait
+ * qu'il le reste : une cible future à trois décimales (1 609,344 m, le mile
+ * exact) serait **arrondie en silence** par Postgres, et deux cibles distantes
+ * de moins d'un centimètre entreraient en collision sur la clé primaire. Le
+ * `CHECK` ne peut rien contre ça — la valeur est ramenée à deux décimales
+ * *avant* d'être confrontée à la contrainte, qui la trouve donc conforme.
+ *
+ * Le seul endroit où l'incompatibilité se voit encore est ici, avant que la
+ * colonne n'existe : une cible non représentable fait échouer le chargement du
+ * schéma, donc `drizzle-kit generate`, le build et les tests. Le remède est
+ * alors d'élargir `scale` **et** de migrer la colonne — jamais d'arrondir la
+ * cible.
+ */
+const BEST_SEGMENT_TARGET_LITERALS = BEST_SEGMENT_TARGETS_M.map((target) => {
+  const literal = target.toFixed(2);
+  if (Number(literal) !== target) {
+    throw new Error(
+      `Cible de meilleur effort non représentable en numeric(9,2) : ${target} (stockée ${literal}). ` +
+        'Élargir la précision de `activity_best_segments.target_m` avant de l’ajouter.',
+    );
+  }
+  return literal;
+});
+
+/**
+ * Meilleurs efforts d'une séance : **une ligne par (activité, distance de
+ * référence)**, avec son chrono et son allure (cf. `lib/metrics/best-segments`).
+ *
+ * ## Pourquoi celle-ci est persistée alors que tout le reste se recalcule
+ *
+ * La règle du dépôt est de **ne rien figer qui dépende du profil** : les zones
+ * cardiaques, le TRIMP ou la comparaison aux objectifs se recalculent à chaque
+ * lecture, sans quoi corriger sa FC max laisserait un historique qui ne suit
+ * pas. Un meilleur effort ne dépend d'**aucune donnée de profil** — c'est une
+ * distance et un chrono, lus dans le fichier et dans lui seul. Le figer ne crée
+ * donc aucune de ces incohérences : à streams égaux, le calcul rendra
+ * éternellement la même chose.
+ *
+ * Ce que la persistance achète, en revanche, est décisif : les records de tous
+ * les temps sont une agrégation sur **tout l'historique**. Les tirer des flux
+ * bruts obligerait à parser des dizaines de mégaoctets de JSONB à chaque
+ * affichage — et à faire lire `activity_streams` à des modules qui ne l'ont
+ * jamais fait (`progression.ts`, `dashboard.ts`). Ici, un record est un `MIN`
+ * sur quelques milliers de lignes étroites.
+ *
+ * ## Ce qu'elle contient, et ce qu'elle ne contient pas
+ *
+ * Uniquement de la **course à pied** : un « record » à l'allure n'a pas de sens
+ * à vélo, exactement comme dans `getActivityFull`. Et uniquement les cibles
+ * réellement couvertes par la séance — un 10 km n'existe pas dans une sortie de
+ * 8 km, il n'y a donc pas de ligne, et surtout pas de ligne à zéro.
+ *
+ * Pas de colonne `athlete_id` : l'appartenance est celle de l'activité, et
+ * toute lecture joint `activities` sur l'athlète plutôt que de la supposer — la
+ * dupliquer ouvrirait la possibilité qu'elle diverge. `ON DELETE CASCADE`
+ * parce qu'un segment n'a aucun sens sans sa séance : c'est une donnée dérivée
+ * d'elle, elle meurt avec elle.
+ *
+ * Écrite à l'ingestion (cf. `src/lib/fit/ingest.ts`), comme
+ * `sustained_max_hr_bpm` : elle vaut donc pour les imports à venir, et reste
+ * absente de l'historique déjà en base tant que le rattrapage
+ * (`pnpm db:backfill:best-segments`) n'est pas passé.
+ */
+
+export const activityBestSegments = pgTable(
+  'activity_best_segments',
+  {
+    activityId: integer('activity_id')
+      .notNull()
+      .references(() => activities.id, { onDelete: 'cascade' }),
+    /**
+     * Distance de référence, en mètres — l'une de `BEST_SEGMENT_TARGETS_M`.
+     *
+     * **`numeric` et non `real`**, parce que cette colonne est une **clé** et
+     * que toutes les cibles ne sont pas entières (le mile vaut 1 609,34 m, le
+     * semi 21 097,5 m). En `real` (float4), 1 609,34 n'est pas représentable
+     * exactement : comparer la colonne au littéral `1609.34` (un `double` côté
+     * JS) promeut le float4 en float8 et rend `false` — une lecture par cible ne
+     * trouverait jamais rien, et un `ON CONFLICT` finirait par diverger de ce
+     * que l'application croit écrire. Le `numeric(9,2)` est exact au centimètre
+     * (largement au-delà de la précision d'un GPS), rend ces six valeurs à
+     * l'identique, et `mode: 'number'` les rend en `number` comme le reste du
+     * schéma.
+     */
+    targetM: numeric('target_m', { precision: 9, scale: 2, mode: 'number' }).notNull(),
+    /**
+     * Temps **écoulé** entre les deux bornes du segment, pauses comprises
+     * (convention Strava, cf. l'en-tête de `lib/metrics/best-segments`).
+     * Fractionnaire : la borne de départ est interpolée.
+     */
+    timeS: real('time_s').notNull(),
+    paceSecPerKm: real('pace_sec_per_km').notNull(),
+  },
+  (table) => [
+    /**
+     * Un segment par (activité, cible) : deux lignes concurrentes pour une même
+     * cible d'une même séance n'auraient aucun sens, et la contrainte l'interdit
+     * au niveau où ça compte.
+     *
+     * **Elle ne porte pas l'idempotence de l'écriture** : il n'y a aucun
+     * `ON CONFLICT` sur cette table. Les deux écrivains — le DAL
+     * (`saveActivityBestSegments`) et le rattrapage
+     * (`scripts/backfill-best-segments.ts`) — font *purge de l'activité puis
+     * insertion*, dans une seule transaction. C'est de là que vient
+     * l'idempotence, et c'est aussi ce qui fait disparaître les cibles qui ne
+     * sortent plus du calcul, ce qu'un `ON CONFLICT DO UPDATE` aurait laissées
+     * traîner en records fantômes. La clé, elle, est le filet : elle fait
+     * échouer bruyamment une écriture qui contredirait cette discipline.
+     *
+     * Son préfixe `activity_id` sert par ailleurs la lecture de la page de
+     * détail (« les segments de cette séance »).
+     */
+    primaryKey({ columns: [table.activityId, table.targetM] }),
+    /**
+     * Chemin d'accès de l'écran des records : « le meilleur temps de tous les
+     * temps, par cible, pour un athlète » (`DISTINCT ON (target_m) … ORDER BY
+     * target_m, time_s, activities.started_at`).
+     *
+     * `target_m` d'abord : c'est la clé de regroupement, et elle ne prend que
+     * six valeurs — l'index découpe donc la table en six intervalles contigus.
+     * `time_s` ensuite, en ordre naturel (croissant) : à l'intérieur d'une
+     * cible, le record est **la première ligne** de l'intervalle.
+     *
+     * L'index couvre les **deux premières** colonnes du tri, pas la troisième :
+     * `activities.started_at` appartient à une autre table, et aucun index de
+     * celle-ci ne peut s'y ajouter. Postgres n'a donc pas le tri tout fait — au
+     * mieux il fera un tri **incrémental**, groupe par groupe de
+     * `(target_m, time_s)`, ce qui reste sans commune mesure avec un tri de la
+     * table entière. Le troisième critère ne départage que les ex æquo au
+     * centième de seconde près : ces groupes sont d'un ou deux éléments.
+     *
+     * L'ordre inverse `(time_s, target_m)` n'aurait servi à rien : un chrono
+     * n'est comparable qu'à distance égale.
+     */
+    index('activity_best_segments_target_m_time_s_idx').on(table.targetM, table.timeS),
+    /**
+     * `target_m` ne prend que les cibles connues, et la base le vérifie.
+     *
+     * La liste est **dérivée de {@link BEST_SEGMENT_TARGETS_M}**, pas recopiée :
+     * ajouter une cible régénère la contrainte, et rien ne peut arriver dans
+     * cette colonne que le calcul ne produise. Ce que ça attrape : une écriture
+     * d'une distance qui n'est pas une cible (erreur d'unité, cible retirée du
+     * socle mais encore écrite quelque part), c'est-à-dire une ligne qui
+     * deviendrait un record sur une distance que l'écran ne sait pas nommer.
+     *
+     * **Ce que la contrainte ne peut pas attraper**, et qui est traité en amont
+     * (cf. {@link BEST_SEGMENT_TARGET_LITERALS}) : une cible que `numeric(9,2)`
+     * ne représente pas. Postgres arrondit la valeur **avant** d'évaluer le
+     * `CHECK` — vérifié : insérer 1 609,344 passe la contrainte et se retrouve
+     * stocké 1 609,34. La contrainte ne verrait donc rien ; la collision se
+     * manifesterait sur la clé primaire, un jour, sur une séance.
+     */
+    check(
+      'activity_best_segments_target_m_known',
+      sql`${table.targetM} in ${sql.raw(`(${BEST_SEGMENT_TARGET_LITERALS.join(', ')})`)}`,
+    ),
   ],
 );
 
@@ -1644,6 +1845,9 @@ export type NewActivity = InferInsertModel<typeof activities>;
 
 export type ActivityStream = InferSelectModel<typeof activityStreams>;
 export type NewActivityStream = InferInsertModel<typeof activityStreams>;
+
+export type ActivityBestSegment = InferSelectModel<typeof activityBestSegments>;
+export type NewActivityBestSegment = InferInsertModel<typeof activityBestSegments>;
 
 export type ActivityWeather = InferSelectModel<typeof activityWeather>;
 export type NewActivityWeather = InferInsertModel<typeof activityWeather>;

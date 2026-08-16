@@ -8,7 +8,15 @@
 
 import { APP_TIME_ZONE } from "@/config/time";
 
-import { capitalize, formatNumber } from "../../../_lib/format";
+import { capitalize, formatClock, formatNumber } from "../../../_lib/format";
+
+/**
+ * L'horloge exacte est remontée dans le formatage partagé du groupe : les
+ * records de tous les temps et les chronos prévus l'affichent eux aussi, et
+ * deux implémentations d'un même chrono finiraient par diverger. Ré-exportée
+ * ici parce que c'est de ce module que le détail d'une séance la tient.
+ */
+export { formatClock };
 
 /** Valeur absente : tiret cadratin, jamais une case vide ni un zéro inventé. */
 export const MISSING = "—";
@@ -37,23 +45,6 @@ const dateTimeStampFormatter = new Intl.DateTimeFormat("fr-FR", {
  */
 export function formatDateTimeStamp(date: Date): string {
   return dateTimeStampFormatter.format(date);
-}
-
-/**
- * Durée exacte façon chronomètre : `48:12`, `1:04:32`.
- *
- * Le détail d'une séance affiche la durée à la seconde (l'arrondi de
- * `formatDuration` convient aux totaux hebdomadaires, pas à une sortie).
- */
-export function formatClock(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const rest = total % 60;
-  const mm = hours > 0 ? String(minutes).padStart(2, "0") : String(minutes);
-  return hours > 0
-    ? `${hours}:${mm}:${String(rest).padStart(2, "0")}`
-    : `${mm}:${String(rest).padStart(2, "0")}`;
 }
 
 /** Allure nue `4:35` — sans `/km`, pour les axes et les cellules de tableau. */

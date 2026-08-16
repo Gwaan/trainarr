@@ -9,6 +9,7 @@ const { mocks } = vi.hoisted(() => ({
     parseFitActivity: vi.fn(),
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
+    saveActivityBestSegments: vi.fn(),
     hasActivityStreams: vi.fn(),
     linkActivityToPlannedSession: vi.fn(),
     maybeReviewActivePlan: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('./parse', () => ({
 vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
   saveActivityStreams: mocks.saveActivityStreams,
+  saveActivityBestSegments: mocks.saveActivityBestSegments,
   hasActivityStreams: mocks.hasActivityStreams,
 }));
 
@@ -90,6 +92,18 @@ const REPARSED: ParsedFitActivity = {
   },
 };
 
+/**
+ * Une séance de 2 000 m à 4 m/s, échantillonnée à 1 Hz : assez longue pour
+ * porter le 400 m, le 1 000 m et le mile, trop courte pour le 5 km.
+ */
+const RUN_2K: ParsedFitActivity = {
+  ...PARSED,
+  streams: {
+    time: Array.from({ length: 501 }, (_, index) => index),
+    distance: Array.from({ length: 501 }, (_, index) => index * 4),
+  },
+};
+
 /** Une séance dont le flux cardiaque tient un plateau, pic de capteur compris. */
 const SUSTAINED: ParsedFitActivity = {
   ...PARSED,
@@ -112,6 +126,7 @@ beforeEach(() => {
   mocks.parseFitActivity.mockReturnValue(PARSED);
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'created' });
   mocks.saveActivityStreams.mockResolvedValue(undefined);
+  mocks.saveActivityBestSegments.mockResolvedValue(undefined);
   mocks.hasActivityStreams.mockResolvedValue(false);
   mocks.linkActivityToPlannedSession.mockResolvedValue(true);
   mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
@@ -219,6 +234,72 @@ describe('ingestFitBuffer', () => {
     await ingestFitBuffer(BUFFER, ATHLETE_ID);
 
     expect(mocks.recordSustainedMaxHr).toHaveBeenCalledWith(42, ATHLETE_ID, null);
+  });
+
+  it('enregistre les meilleurs efforts, après les séries dont ils dérivent', async () => {
+    mocks.parseFitActivity.mockReturnValue(RUN_2K);
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    // 2 000 m à 4 m/s : le 400 m en 100 s, le 1 000 m en 250 s, le mile en
+    // 402,335 s. Le 5 km n'existe pas dans cette séance — pas de ligne à zéro.
+    expect(mocks.saveActivityBestSegments).toHaveBeenCalledWith(42, ATHLETE_ID, [
+      { targetM: 400, timeS: 100, paceSecPerKm: 250 },
+      { targetM: 1000, timeS: 250, paceSecPerKm: 250 },
+      { targetM: 1609.34, timeS: 1609.34 / 4, paceSecPerKm: 250 },
+    ]);
+    // Les flux sont déjà en main : ils sont écrits d'abord, et le calcul les lit
+    // sans repasser par la base.
+    expect(mocks.saveActivityStreams.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.saveActivityBestSegments.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it('purge les meilleurs efforts hors course à pied, au lieu de passer son chemin', async () => {
+    // Un record à l'allure n'a pas de sens à vélo : aucun segment n'est calculé,
+    // exactement comme `getActivityFull` n'en lit aucun. Mais l'écriture a bien
+    // lieu, avec une liste vide : une activité peut porter des lignes qu'elle ne
+    // devrait plus avoir (sport corrigé, réimport sous un autre sport), et
+    // l'écran des records ne filtre pas par sport — il les lirait comme des
+    // records d'allure que rien ne pourrait faire tomber.
+    mocks.parseFitActivity.mockReturnValue({ ...RUN_2K, sportType: 'Ride' });
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.saveActivityBestSegments).toHaveBeenCalledWith(42, ATHLETE_ID, []);
+  });
+
+  it('n’enregistre pas les segments d’un doublon dont les séries sont écartées', async () => {
+    // Même règle que la FC max soutenue : un fichier dont on n'a pas retenu les
+    // séries n'a pas à décider des records de la séance.
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
+    mocks.parseFitActivity.mockReturnValue(RUN_2K);
+    mocks.hasActivityStreams.mockResolvedValue(true);
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.saveActivityBestSegments).not.toHaveBeenCalled();
+  });
+
+  /*
+   * L'invariant absolu de ce module, appliqué au dernier post-traitement en
+   * date : une séance dont les meilleurs efforts n'ont pas pu s'écrire reste une
+   * séance valide, et ne doit pas repartir en `failed/`. Le rattrapage la
+   * ramassera.
+   */
+  it('journalise des meilleurs efforts en échec sans faire échouer l’import', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.parseFitActivity.mockReturnValue(RUN_2K);
+    mocks.saveActivityBestSegments.mockRejectedValue(new Error('base injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({
+      status: 'created',
+      activityId: 42,
+    });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('meilleurs efforts'));
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('base injoignable'));
+    logged.mockRestore();
   });
 
   it('écrit les séries d’un rapprochement de séance quand l’activité n’en a aucune', async () => {

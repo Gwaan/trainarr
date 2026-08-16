@@ -115,6 +115,7 @@ function existingRow(overrides: Partial<Activity> = {}): Activity {
     lthrSampleSource: null,
     avgPaceSecPerKm: null,
     avgCadenceSpm: null,
+    bestSegmentsScannedAt: null,
     createdAt: new Date('2026-08-02T08:00:00.000Z'),
     ...overrides,
   };

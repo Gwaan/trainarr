@@ -22,6 +22,9 @@
  * | pace-distribution    | `lib/metrics/distribution.ts`                                 |
  * | hr-distribution      | `lib/metrics/distribution.ts`, `lib/metrics/hr-zones.ts`      |
  * | best-segments        | `lib/metrics/best-segments.ts`                                |
+ * | personal-bests       | `lib/metrics/best-segments.ts`, `data/personal-bests.ts`      |
+ * | monotony             | `lib/metrics/monotony.ts`, `_lib/metric-tone.ts`             |
+ * | race-prediction      | `lib/metrics/race-prediction.ts`, `lib/metrics/vdot.ts`, `data/race-prediction.ts` |
  * | session-goals        | `lib/metrics/session-execution.ts`, `activities/[id]/_lib/session-execution-model.ts` |
  * | splits               | `lib/metrics/splits.ts`, `lib/metrics/series.ts`              |
  * | stride               | `lib/metrics/stride.ts`, `data/activities.ts`                 |
@@ -50,6 +53,9 @@ export type MetricSheetId =
   | "pace-distribution"
   | "hr-distribution"
   | "best-segments"
+  | "personal-bests"
+  | "monotony"
+  | "race-prediction"
   | "session-goals"
   | "splits"
   | "stride"
@@ -352,6 +358,82 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
     ],
     caveat:
       "Un meilleur effort ne vaut que ce que vaut la trace GPS. En sous-bois, en ville ou sur tapis, une distance sur-lue raccourcit mécaniquement le temps affiché — une erreur de 1 % suffit à changer la lecture.",
+  },
+
+  "personal-bests": {
+    id: "personal-bests",
+    abbreviation: "Records",
+    name: "Meilleurs temps de tous les temps",
+    question: "Que sont les records personnels ?",
+    what: "Pour chaque distance de référence, le temps le plus court que tu aies couvert sur une portion continue d'une séance, toutes sorties confondues. Ce ne sont pas des courses officielles : ce sont tes meilleurs efforts mesurés, à l'entraînement comme en compétition.",
+    interpret: [
+      "Chaque ligne renvoie à la séance qui porte le record : c'est là qu'on voit dans quel contexte il a été couru — un fractionné, une course, une sortie où tu t'es fait plaisir sur la fin.",
+      "Un record sur une distance courte tombe presque toujours dans une séance de qualité ; un record sur semi ne peut venir que d'une sortie longue ou d'une course. Ils ne se comparent donc pas entre eux comme une progression régulière.",
+      "Tant que le message « records provisoires » s'affiche, la liste ne couvre qu'une partie de ton historique : un temps peut encore être battu par une séance plus ancienne, pas encore balayée.",
+      "Le marathon n'y figure pas : les distances balayées sont celles des meilleurs efforts d'une séance, et un marathon ne se court pas à l'entraînement.",
+    ],
+    computed: [
+      "Distances balayées : 400 m, 1 km, 1 mile (1 609,34 m), 5 km, 10 km et le semi-marathon (21 097,5 m) — les mêmes que les meilleurs segments d'une séance.",
+      "Les efforts sont relevés **à l'import** de chaque séance et stockés (`activity_best_segments`) : le record est ensuite le plus petit temps de la table pour chaque distance, jamais un parcours des séries temporelles à l'affichage.",
+      "Ex æquo au centième près : le record revient à la séance qui l'a établi la **première**, pas à celle qui l'a égalé ensuite.",
+      "Le temps affiché est le temps **écoulé** entre les deux bornes, pauses comprises — s'arrêter trente secondes au milieu de son 1 000 m ne donne pas droit à un record.",
+      "La borne de départ est interpolée entre les deux échantillons qui l'encadrent, et seuls les points où la distance est réellement mesurée sont balayés.",
+      "Les séances importées avant la mise en place de cette table n'ont pas de segments tant que le rattrapage `pnpm db:backfill:best-segments` n'est pas passé. Leur nombre est affiché sous le tableau : tant qu'il n'est pas nul, les records sont provisoires.",
+    ],
+    caveat:
+      "Un record ne vaut que ce que vaut la trace de la montre. En sous-bois, en ville ou sur tapis, une distance sur-lue raccourcit mécaniquement le temps affiché — une erreur de 1 % suffit à changer la lecture, et ces temps ne sont donc pas comparables à un chrono de course mesuré sur un parcours homologué.",
+  },
+
+  monotony: {
+    id: "monotony",
+    abbreviation: "Monotonie",
+    name: "Monotonie et contrainte de Foster",
+    question: "Qu'est-ce que la monotonie de l'entraînement ?",
+    what: "L'uniformité d'une semaine d'entraînement : la charge moyenne de tes sept derniers jours divisée par sa dispersion. Ce n'est pas un volume — c'est la réponse à « est-ce que j'alterne vraiment dur et facile, ou est-ce que je répète sept fois la même séance moyenne ? ».",
+    interpret: [
+      "Elle monte quand tous tes jours se ressemblent, et elle baisse dès que la semaine oppose des séances dures à des jours vraiment faciles ou à du repos. Deux semaines de charge totale identique n'ont pas la même monotonie.",
+      "Le repère usuel (Foster, 1998) place la limite autour de 2 : au-delà, l'alternance est jugée insuffisante. C'est une moyenne de population, pas un seuil calé sur toi — une valeur à 2,1 pose une question, elle ne constate pas une faute.",
+      "La contrainte remet le volume dans l'équation : une semaine monotone mais légère n'est pas une semaine monotone et lourde. Elle se lit contre tes propres semaines, jamais contre un barème — il n'existe aucun seuil publié.",
+      "Les deux courbes se lisent en regard de la charge : la CTL dit combien tu charges, la monotonie dit comment tu répartis.",
+      "Un trou dans la courbe n'est pas un zéro : c'est une semaine où la monotonie n'a pas de sens (moins de sept jours d'historique, ou sept jours rigoureusement identiques — dont sept jours sans rien).",
+    ],
+    computed: [
+      "Même série TRIMP quotidienne que la CTL et l'ATL, densifiée jour par jour : un jour de repos entre dans la fenêtre **avec une charge de 0**, jamais écarté — l'écarter reviendrait à effacer exactement l'information cherchée.",
+      "Fenêtre glissante de 7 jours s'achevant à la date affichée. Monotonie = moyenne des sept charges ÷ leur écart-type.",
+      "L'écart-type est celui de la **population** (÷ 7), pas d'un échantillon (÷ 6) : ces sept valeurs ne sont pas un tirage, elles sont la semaine en entier.",
+      "Contrainte = charge totale de la semaine × monotonie.",
+      "Rien n'est rendu — jamais l'infini, jamais un zéro — sur une fenêtre incomplète (les six premiers jours de l'historique) ni sur un écart-type nul, où le quotient diverge.",
+      "La série est calculée sur tout l'historique puis coupée à la période affichée : sans quoi les six premiers jours de la fenêtre seraient vides par construction.",
+      "Le seuil de lecture (2) vit dans la couche d'affichage, jamais dans le calcul : le module de calcul ne rend que des nombres.",
+    ],
+    caveat:
+      "La monotonie hérite de tout ce qui fragilise le TRIMP : elle ne connaît que ta fréquence cardiaque. Une séance courue sans cardio compte pour zéro et fait donc *baisser* la monotonie comme le ferait un jour de repos. Et le repère de 2 sort d'un suivi de groupe des années 1990, sur des sports d'endurance variés : il n'a jamais été calé sur toi, sur ton volume ni sur ton nombre de séances hebdomadaires.",
+  },
+
+  "race-prediction": {
+    id: "race-prediction",
+    abbreviation: "Prédictions",
+    name: "Chronos prévus sur les distances de route",
+    question: "Comment les chronos prévus sont-ils calculés ?",
+    what: "Le temps que ton chrono de référence implique sur 5 km, 10 km, semi et marathon, d'après les tables de Daniels & Gilbert. C'est le sens inverse du VDOT : au lieu de demander « quel indice ce chrono vaut-il ? », on demande « quel chrono cet indice implique-t-il ? ».",
+    interpret: [
+      "Ces temps supposent un effort **maximal**, une préparation spécifique à la distance et des conditions correctes. Ce ne sont pas des objectifs de séance, et encore moins des allures d'entraînement — celles-là sont dans ton plan.",
+      "La colonne « fiabilité » n'est pas décorative : `calibré` veut dire que la durée prévue tombe dans la fenêtre de 15 à 50 minutes sur laquelle la régression a été ajustée ; `extrapolé`, que le modèle est prolongé au-delà — l'ordre de grandeur tient, pas la minute ; `spéculatif`, qu'on est à plus du double de cette fenêtre.",
+      "Une prédiction marathon est **spéculative à tout niveau**, sans exception : le modèle ne connaît ni l'épuisement du glycogène, ni le mur, ni la thermorégulation, ni la casse musculaire d'une course longue. Elle lit donc structurellement trop vite.",
+      "La date affichée sous le tableau compte autant que les chronos : une prédiction fondée sur une performance d'il y a huit mois décrit la forme d'il y a huit mois.",
+      "Le 1 500 m et le mile n'apparaissent pas, alors que tes records les portent : dès un niveau modeste, la prédiction y tombe sous la fenêtre de validité du modèle, qui ne décrit pas la part anaérobie de ces distances.",
+    ],
+    computed: [
+      "L'ancre est le **chrono de référence de ton plan actif** (distance + temps), converti en VDOT par les deux régressions de Daniels & Gilbert — les mêmes que la fiche VDOT.",
+      "La VO₂max effective de la page n'est **jamais** utilisée comme ancre : elle est corrigée par la fréquence cardiaque et ne suppose pas un effort maximal. Sans chrono de référence, rien n'est prédit — aucune valeur de repli n'est inventée.",
+      "Un test chronométré n'est pas une source séparée : quand il bat la référence, c'est la référence elle-même qu'il remplace, une fois la recalibration acceptée.",
+      "Le chrono prévu est la racine de VDOT(distance, t) = ton VDOT, résolue par bissection : l'inconnue apparaît des deux côtés de l'équation et il n'existe pas de forme close.",
+      "Rien n'est rendu pour une distance dont la racine tomberait sous 4 minutes (plancher du modèle) ou au-delà de 8 heures : la ligne disparaît, elle ne s'affiche jamais approchée.",
+      "Le niveau de fiabilité se déduit de la seule durée prévue : dans la fenêtre 15–50 min → calibré ; jusqu'à un facteur 2 hors de cette fenêtre → extrapolé ; au-delà → spéculatif.",
+      "Ce tableau ne dépend pas de la période affichée : c'est un état courant, comme la CTL du jour.",
+    ],
+    caveat:
+      "C'est une projection, pas une performance. Le modèle ne connaît que ton chrono de référence : ni ton kilométrage, ni ta plus longue sortie, ni ton expérience de la distance, ni la chaleur du jour J. Il suppose de surcroît que ce chrono a été couru à fond — une référence courue en gestion te sous-estime sur toute la ligne. Et il ne dit rien de ta capacité à *tenir* une distance que tu n'as jamais courue : un marathon prévu à 3 h 20 sur la foi d'un 5 km ne se court pas en 3 h 20 sans les semaines qui vont avec.",
   },
 
   "session-goals": {

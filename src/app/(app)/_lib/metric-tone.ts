@@ -106,3 +106,40 @@ export const TSB_GAUGE_BANDS: readonly GaugeBand[] = [
   { upTo: TSB_THRESHOLDS.fresh, className: "stroke-fg-faint", label: TSB_NOTES.balanced },
   { upTo: TSB_GAUGE_DOMAIN.max, className: "stroke-positive", label: TSB_NOTES.fresh },
 ];
+
+/**
+ * Repère de lecture de la monotonie de Foster.
+ *
+ * Foster (1998) associe une monotonie durablement **au-delà d'environ 2** à un
+ * risque accru de maladie et de surentraînement : au-delà, la semaine ne
+ * distingue plus ses jours durs de ses jours faciles. Le seuil vit ici, comme
+ * les bandes de TSB, et **jamais** dans `lib/metrics/monotony.ts` — ce module
+ * ne rend que des nombres.
+ *
+ * C'est un repère de **population**, pas un seuil personnalisé : il sort d'un
+ * suivi de groupe, aucune donnée de l'athlète ne l'a calé. Une semaine à 2,1
+ * n'est pas une alerte, c'est une question. La contrainte, elle, n'a aucun
+ * seuil publié — elle ne se lit que contre les semaines précédentes, et c'est
+ * pourquoi rien ici ne la juge.
+ */
+export const MONOTONY_THRESHOLD = 2;
+
+/** Les deux lectures de la monotonie — source unique des phrases. */
+const MONOTONY_NOTES = {
+  varied: "Semaine alternée : les jours durs et les jours faciles se distinguent.",
+  uniform: "Semaine uniforme : peu d'écart entre les jours, repos compris.",
+} as const;
+
+/**
+ * Lecture qualitative de la monotonie. Le chiffre affiché reste celui calculé
+ * par `lib/metrics/monotony` — ceci n'en est qu'une glose.
+ *
+ * Le ton reste `warning` au pire : une monotonie haute est un signal à
+ * regarder, pas une faute — un bloc de reprise à cinq footings identiques la
+ * fait monter sans que rien n'aille mal.
+ */
+export function readMonotony(monotony: number): { tone: StatTone; note: string } {
+  return monotony >= MONOTONY_THRESHOLD
+    ? { tone: "warning", note: MONOTONY_NOTES.uniform }
+    : { tone: "default", note: MONOTONY_NOTES.varied };
+}

@@ -132,6 +132,7 @@ const ACTIVITY: Activity = {
   maxHrBpm: 168,
   avgPaceSecPerKm: 250,
   avgCadenceSpm: 172,
+  bestSegmentsScannedAt: null,
   sustainedMaxHrBpm: null,
   lthrSampleBpm: null,
   lthrSampleSource: null,
@@ -346,6 +347,78 @@ describe('getActivityFull', () => {
     ]);
     expect(full.bestSegments[1].timeS).toBeCloseTo(250, 6);
     expect(full.bestSegments[1].paceSecPerKm).toBeCloseTo(250, 6);
+  });
+
+  it('préfère les meilleurs efforts persistés au recalcul', async () => {
+    // Depuis que l'ingestion les écrit, la page lit trois colonnes indexées au
+    // lieu de rebalayer deux flux entiers. Les valeurs servies ici sont
+    // volontairement différentes de ce que le calcul rendrait sur ces mêmes
+    // séries : c'est la seule façon de prouver laquelle des deux branches parle.
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+      activity_best_segments: [
+        { targetM: 400, timeS: 88, paceSecPerKm: 220 },
+        { targetM: 1000, timeS: 232, paceSecPerKm: 232 },
+      ],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    expect(full?.bestSegments).toEqual([
+      { targetM: 400, timeS: 88, paceSecPerKm: 220 },
+      { targetM: 1000, timeS: 232, paceSecPerKm: 232 },
+    ]);
+  });
+
+  it('cloisonne les meilleurs efforts persistés par la jointure', async () => {
+    queryState.rows = { activities: [ACTIVITY], athlete: [ATHLETE] };
+
+    await getActivityFull(ACTIVITY.id);
+
+    // `activity_best_segments` n'a pas d'`athlete_id`, comme `activity_streams` :
+    // c'est la jointure sur la table parente qui le porte.
+    const segments = queryState.queries.find(
+      (query) => query.table === 'activity_best_segments',
+    );
+    expect(render(segments?.join).params).toEqual([ATHLETE.id]);
+    expect(render(segments?.where).params).toEqual([ACTIVITY.id]);
+  });
+
+  it('ne sert pas les meilleurs efforts persistés d’une séance qui n’est pas une course', async () => {
+    // Le garde-fou « course à pied » couvre les **deux** branches, pas seulement
+    // le repli calculé : une activité dont le sport stocké n'est pas une course
+    // mais qui porte des lignes héritées (sport corrigé après coup, réimport)
+    // afficherait sinon un panneau « meilleurs efforts » là où la page n'en a
+    // jamais montré.
+    queryState.rows = {
+      activities: [{ ...ACTIVITY, sportType: 'Ride' }],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+      activity_best_segments: [{ targetM: 400, timeS: 88, paceSecPerKm: 220 }],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    expect(full?.bestSegments).toEqual([]);
+  });
+
+  it('recalcule les meilleurs efforts tant que l’historique n’est pas rattrapé', async () => {
+    // Aucune ligne persistée : le repli calcule, et le DTO ne change pas de
+    // forme. Cette branche disparaîtra le jour où le rattrapage sera passé sur
+    // toute la base.
+    queryState.rows = {
+      activities: [ACTIVITY],
+      activity_streams: fullStreams(),
+      athlete: [ATHLETE],
+      activity_best_segments: [],
+    };
+
+    const full = await getActivityFull(ACTIVITY.id);
+
+    expect(full?.bestSegments.map((segment) => segment.targetM)).toEqual([400, 1000, 1609.34]);
+    expect(full?.bestSegments[1].timeS).toBeCloseTo(250, 6);
   });
 
   it('calcule la dérive cardiaque d’une séance assez longue', async () => {

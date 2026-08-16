@@ -321,6 +321,49 @@ est en panne ».
 - Ne jamais extrapoler silencieusement : si les données nécessaires manquent (pas de FC, pas de FC max renseignée), retourner « non calculable » plutôt qu'une valeur par défaut.
 - Les unités sont explicites dans les noms (`paceSecPerKm`, `distanceM`, `hrBpm`) — pas de nombres nus ambigus.
 
+### Ce qui se recalcule, ce qui se persiste
+
+Par défaut **tout se recalcule à la lecture** : zones FC, TRIMP, VO₂max,
+comparaison aux objectifs. C'est la seule façon qu'une correction du profil
+(FC max, FC seuil, sexe) relise rétroactivement tout l'historique au lieu de
+laisser des valeurs figées mentir.
+
+L'exception, et son critère : **une dérivée qui ne dépend d'aucune donnée de
+profil** peut être persistée, parce qu'elle ne peut pas devenir incohérente avec
+lui. C'est le cas des meilleurs efforts (`activity_best_segments`) — une
+distance et un chrono, lus dans le fichier et dans lui seul —, écrits à
+l'ingestion comme `sustained_max_hr_bpm`. Ce qu'on y gagne : les records de tous
+les temps sont un `MIN` indexé, là où les tirer des flux imposerait de parser
+des dizaines de mégaoctets de JSONB à chaque affichage, et de faire lire
+`activity_streams` à des modules d'écran qui ne l'ont jamais fait
+(`progression.ts`, `dashboard.ts`).
+
+Toute colonne calculée à l'ingestion vaut **pour les imports à venir** et laisse
+l'historique déjà en base sans valeur : soit on l'assume (`NULL`, cf. la FC max
+soutenue), soit on livre un rattrapage — `pnpm db:backfill:best-segments`, par
+lots, idempotent, autonome comme `src/data/db/migrate.ts`. Tant qu'il n'est pas
+passé, l'écran doit **dire** que sa lecture est provisoire plutôt que de laisser
+croire à un historique complet.
+
+**Un rattrapage doit pouvoir finir.** Le compteur qui déclenche cet
+avertissement se lit « il reste des séances à balayer » ; il doit donc pouvoir
+atteindre zéro. Une séance balayée **sans résultat** — flux de distance absent,
+canal vide d'un import indoor, valeurs non numériques d'un ancien fichier — se
+marque comme balayée (`activities.best_segments_scanned_at`, posée dans la même
+transaction que l'écriture, y compris quand le calcul ne rend rien). Sans cette
+marque, le prédicat la resélectionne indéfiniment : l'écran réclamerait le
+rattrapage pour toujours, après qu'il a été lancé. Le critère de sortie d'un
+rattrapage est « je l'ai regardée », jamais « elle a produit quelque chose ».
+
+**Une contrainte `CHECK` ne protège pas d'un arrondi de type.** Postgres coerce
+la valeur vers le type de la colonne **avant** d'évaluer la contrainte : sur un
+`numeric(9,2)`, insérer `1609.344` passe un `CHECK` qui liste `1609.34`, et se
+stocke arrondi — l'incohérence n'apparaît que plus tard, en collision de clé.
+Ce que le `CHECK` attrape, c'est une valeur qui n'est pas une cible connue (une
+erreur d'unité) ; ce qu'il n'attrape pas, c'est une cible plus précise que la
+colonne. Cette seconde garde se pose côté TypeScript, au chargement du schéma,
+pour échouer au build et aux tests plutôt qu'en production.
+
 ## Base de données
 
 - Toute modif de schéma passe par Drizzle : éditer `lib/db/schema.ts` → `drizzle-kit generate` → migration versionnée dans le repo. Jamais de SQL manuel sur la base.

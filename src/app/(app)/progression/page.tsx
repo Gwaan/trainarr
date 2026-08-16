@@ -1,23 +1,28 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { ChartSpline, Gauge, HeartPulse, TrendingUp } from "lucide-react";
+import { Activity, ChartSpline, Gauge, HeartPulse, TrendingUp } from "lucide-react";
 import { connection } from "next/server";
 
 import { PageHeader } from "@/components/page-header";
 import { Panel } from "@/components/panel";
+import { getPersonalBests } from "@/data/personal-bests";
 import {
   getProgression,
   type FitnessUnavailableDto,
   type ProgressionDto,
 } from "@/data/progression";
+import { getRacePredictions } from "@/data/race-prediction";
 import { civilDateToMs } from "@/lib/dates/civil";
 
 import { BucketBars } from "./_components/bucket-bars";
 import { FitnessCharts } from "./_components/fitness-charts";
 import { MetricEmptyState } from "./_components/metric-empty-state";
+import { MonotonyCharts } from "./_components/monotony-charts";
 import { PeriodFilter } from "./_components/period-filter";
+import { PersonalBestsPanel } from "./_components/personal-bests-panel";
 import { ProgressionSkeleton } from "./_components/progression-skeleton";
 import { ProgressionStats } from "./_components/progression-stats";
+import { RacePredictionsPanel } from "./_components/race-predictions-panel";
 import { Vo2maxChart } from "./_components/vo2max-chart";
 import { WellnessPanel } from "./_components/wellness-panel";
 import {
@@ -100,6 +105,46 @@ function LoadPanel({ progression }: { progression: ProgressionDto }) {
           title: "Pas encore de courbe de charge",
           description:
             "Il faut au moins deux jours d'entraînement enregistrés pour tracer une évolution de la charge.",
+        })}
+      />
+    </Panel>
+  );
+}
+
+/**
+ * Une monotonie demande sept jours pleins derrière elle, et une courbe en
+ * demande deux : sous huit jours de série, il n'y a rien à tracer — pas même un
+ * point. En dessous, le panneau explique son vide au lieu d'afficher un cadre.
+ */
+const MIN_MONOTONY_DAYS = 8;
+
+/**
+ * La même semaine que le panneau précédent, lue autrement : la charge dit
+ * combien on encaisse, la monotonie dit si on alterne. Les deux sortent de la
+ * même série de TRIMP quotidiens — d'où la même cause d'indisponibilité.
+ */
+function MonotonyPanel({ progression }: { progression: ProgressionDto }) {
+  if (progression.monotony.length >= MIN_MONOTONY_DAYS) {
+    return (
+      <Panel
+        title="Monotonie et contrainte"
+        meta={<span className="num">7 jours glissants</span>}
+      >
+        {/* Pas de ⓘ sur l'en-tête : le graphe porte lui-même sa fiche, au bout
+            du titre de son panneau — comme celui de la charge. */}
+        <MonotonyCharts points={progression.monotony} />
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="Monotonie et contrainte" padded={false}>
+      <MetricEmptyState
+        icon={Activity}
+        {...loadUnavailableCopy(progression.fitnessUnavailable, {
+          title: "Pas encore de semaine complète",
+          description:
+            "La monotonie compare les sept derniers jours entre eux : il faut au moins huit jours d'historique dans la période pour en tracer une évolution.",
         })}
       />
     </Panel>
@@ -226,7 +271,14 @@ async function ProgressionContent({ searchParams }: PageProps) {
   await requireSession();
 
   const param = parseRangeParam((await searchParams)[RANGE_PARAM]);
-  const progression = await getProgression(toProgressionRange(param));
+  // Trois lectures indépendantes : les records et les chronos prévus ne
+  // dépendent ni l'un de l'autre ni de la période, les enchaîner ne ferait
+  // qu'additionner leurs latences.
+  const [progression, predictions, personalBests] = await Promise.all([
+    getProgression(toProgressionRange(param)),
+    getRacePredictions(),
+    getPersonalBests(),
+  ]);
 
   return (
     <>
@@ -249,9 +301,21 @@ async function ProgressionContent({ searchParams }: PageProps) {
       />
 
       <LoadPanel progression={progression} />
+      {/* Juste après la charge, et de la même série de TRIMP : les deux
+          panneaux décrivent la même semaine, l'un par ce qu'elle pèse, l'autre
+          par la façon dont elle alterne. */}
+      <MonotonyPanel progression={progression} />
       <Vo2maxPanel progression={progression} />
+      {/* Sous la VO₂max, dont elle est le pendant honnête : la tuile dit une
+          estimation d'après la FC, ce tableau dit ce qu'un chrono réellement
+          couru implique. */}
+      <RacePredictionsPanel predictions={predictions} today={progression.to} />
       <TrimpPanel progression={progression} />
       <VolumePanel progression={progression} />
+      {/* Avant le bien-être : ce sont des valeurs que l'application calcule sur
+          des séances importées, à leur place parmi les autres — la règle qui
+          garde le bien-être en dernier ne les concerne pas. */}
+      <PersonalBestsPanel bests={personalBests} today={progression.to} />
       {/* En dernier, et c'est voulu : ce sont les seules valeurs de la page que
           l'application ne calcule pas — elles éclairent les précédentes, elles
           ne les remplacent pas. */}

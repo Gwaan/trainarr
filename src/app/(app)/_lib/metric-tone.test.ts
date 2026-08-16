@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import { buildGaugeModel } from "@/lib/chart/gauge";
 
 import {
+  MONOTONY_THRESHOLD,
   TSB_GAUGE_BANDS,
   TSB_GAUGE_DOMAIN,
   TSB_THRESHOLDS,
+  readMonotony,
   readTsb,
   toDelta,
 } from "./metric-tone";
@@ -73,5 +75,23 @@ describe("TSB_GAUGE_BANDS", () => {
     // sous une bande neutre.
     expect(bandAt(TSB_THRESHOLDS.fresh)).toBe(readTsb(TSB_THRESHOLDS.fresh - 1).note);
     expect(bandAt(TSB_THRESHOLDS.fresh)).not.toBe(readTsb(TSB_THRESHOLDS.fresh).note);
+  });
+});
+
+describe("readMonotony", () => {
+  it("bascule au repère de Foster, borne comprise", () => {
+    expect(readMonotony(1.4).tone).toBe("default");
+    expect(readMonotony(MONOTONY_THRESHOLD).tone).toBe("warning");
+  });
+
+  it("ne va jamais au-delà de l'avertissement", () => {
+    // Une semaine uniforme est un signal à regarder, pas une faute : rien ici
+    // ne doit atteindre le ton d'une erreur.
+    expect(readMonotony(6).tone).toBe("warning");
+  });
+
+  it("accompagne chaque registre d'une lecture en français", () => {
+    expect(readMonotony(1).note).toContain("alternée");
+    expect(readMonotony(3).note).toContain("uniforme");
   });
 });

@@ -12,7 +12,12 @@ import {
   shiftCivilDate,
   toCivilDate,
 } from '@/lib/dates/civil';
-import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
+import {
+  computeLoadSeries,
+  computeMonotonySeries,
+  type LoadPoint,
+  type MonotonyPoint,
+} from '@/lib/metrics';
 
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
@@ -110,6 +115,18 @@ export type ProgressionDto = {
    * complet (cf. {@link getProgression}).
    */
   load: LoadPoint[];
+  /**
+   * Monotonie et contrainte de Foster, **tronquées** à la période comme
+   * {@link ProgressionDto.load} et calculées comme elle sur l'historique
+   * complet : la fenêtre glissante fait sept jours, et démarrer le calcul au
+   * premier jour affiché rendrait `null` les six premiers points par pure
+   * construction — un trou qui ne dirait rien de l'entraînement.
+   *
+   * Même série TRIMP quotidienne que la charge : les deux panneaux décrivent la
+   * même semaine, l'un par ce qu'elle pèse, l'autre par la façon dont elle
+   * alterne.
+   */
+  monotony: MonotonyPoint[];
   /** `null` quand aucune course de la période n'est exploitable. */
   vo2max: Vo2maxTrendDto | null;
   /**
@@ -396,6 +413,7 @@ function emptyProgression(range: ProgressionRange, today: string): ProgressionDt
     hasProfile: false,
     current: { fitness: null, vo2max: null },
     load: [],
+    monotony: [],
     vo2max: null,
     trimpBuckets: [],
     volume: [],
@@ -450,6 +468,7 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
 
   const daily = buildDailyTrimp(rows, profile, today);
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
+  const monotonySeries = daily.length > 0 ? computeMonotonySeries(daily) : [];
   const fitness = buildFitness(loadSeries);
   const currentVo2max = buildVo2max(rows, profile, today);
 
@@ -479,6 +498,7 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
     hasProfile: true,
     current: { fitness, vo2max: currentVo2max },
     load: loadSeries.filter((point) => point.date >= from),
+    monotony: monotonySeries.filter((point) => point.date >= from),
     vo2max:
       points.length > 0 ? { points, trend: buildVo2maxTrend(samples, from, today) } : null,
     trimpBuckets: buildTrimpBuckets(daily, buckets, bucketKind),

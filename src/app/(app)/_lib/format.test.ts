@@ -2,14 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   capitalize,
+  formatCivilFullDate,
+  formatClock,
   formatDistance,
   formatDuration,
   formatFullDate,
   formatHeartRate,
   formatLoad,
+  formatMonotony,
   formatNumber,
   formatPace,
   formatRelativeDay,
+  formatStrain,
   formatVo2max,
   parseCivilDate,
 } from './format';
@@ -169,6 +173,38 @@ describe('formatRelativeDay', () => {
 describe('formatFullDate', () => {
   it('rend une date complète en français', () => {
     expect(formatFullDate(civilDate(2026, 8, 9))).toBe('dimanche 9 août');
+  });
+});
+
+describe('formatCivilFullDate', () => {
+  it('tait le millésime dans l’année en cours', () => {
+    expect(formatCivilFullDate('2026-08-09', '2026-08-16')).toBe('dimanche 9 août');
+  });
+
+  it('millésime dès que l’année diffère — sinon la date ne désigne rien', () => {
+    expect(formatCivilFullDate('2024-05-17', '2026-08-16')).toBe('vendredi 17 mai 2024');
+  });
+
+  it('ne date rien plutôt que d’inventer un jour', () => {
+    expect(formatCivilFullDate('2026-02-30', '2026-08-16')).toBeNull();
+    expect(formatCivilFullDate('pas-une-date', '2026-08-16')).toBeNull();
+  });
+});
+
+describe('formatClock', () => {
+  it('rend un chrono exact à la seconde', () => {
+    expect(formatClock(2_892)).toBe('48:12');
+    expect(formatClock(3_872)).toBe('1:04:32');
+    expect(formatClock(-10)).toBe('0:00');
+  });
+});
+
+describe('formatMonotony et formatStrain', () => {
+  it('donne à chacune la précision de son amplitude', () => {
+    // La monotonie vit entre 0,5 et 3 : l'entier écraserait deux semaines de
+    // nature différente sur le même nombre. La contrainte se lit par centaines.
+    expect(formatMonotony(1.84)).toBe('1,8');
+    expect(formatStrain(2_449.6)).toBe('2450');
   });
 });
 
