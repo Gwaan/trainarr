@@ -97,7 +97,12 @@ async function ActivityDetail({ params }: PageProps) {
   if (full === null) notFound();
 
   const { detail, charts, splits, hrZones, decoupling, bestSegments } = full;
-  const summary = { ...detail, trimp: full.trimp, effectiveVo2max: full.effectiveVo2max };
+  const summary = {
+    ...detail,
+    trimp: full.trimp,
+    trimpContext: full.trimpContext,
+    effectiveVo2max: full.effectiveVo2max,
+  };
 
   const path = charts?.latlng ?? null;
   const hasMap = path !== null && path.length >= 2;

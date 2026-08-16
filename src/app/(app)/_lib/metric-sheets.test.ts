@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { METRIC_SHEETS, isMetricSheetId, metricSheet } from "./metric-sheets";
+import { METRIC_SHEETS, metricSheet, type MetricSheetId } from "./metric-sheets";
 
 /**
  * Deux garanties, et elles sont de nature différente.
@@ -19,6 +19,9 @@ import { METRIC_SHEETS, isMetricSheetId, metricSheet } from "./metric-sheets";
  */
 
 const SHEET_IDS = Object.keys(METRIC_SHEETS);
+
+/** Chaque fiche avec la clé sous laquelle le registre la range. */
+const SHEET_ENTRIES = Object.entries(METRIC_SHEETS);
 
 /** Les identifiants cités dans le JSX : `id="…"` de `MetricInfo`, `sheet="…"`. */
 const REFERENCE_PATTERNS = [
@@ -51,12 +54,7 @@ describe("registre des fiches de métriques", () => {
     );
   });
 
-  it.each(SHEET_IDS)("la fiche « %s » est complète", (id) => {
-    expect(isMetricSheetId(id)).toBe(true);
-    if (!isMetricSheetId(id)) return;
-
-    const sheet = metricSheet(id);
-
+  it.each(SHEET_ENTRIES)("la fiche « %s » est complète", (id, sheet) => {
     // La clé du registre et l'`id` de la fiche ne doivent jamais diverger : le
     // composant lit l'un et affiche l'autre.
     expect(sheet.id).toBe(id);
@@ -81,19 +79,10 @@ describe("registre des fiches de métriques", () => {
     if (sheet.caveat !== undefined) expect(sheet.caveat.trim()).not.toBe("");
   });
 
-  it.each(["vo2max", "vdot", "ctl", "atl", "tsb", "trimp"])(
-    "la métrique estimée « %s » porte sa limite",
-    (id) => {
-      expect(isMetricSheetId(id)).toBe(true);
-      if (!isMetricSheetId(id)) return;
+  const ESTIMATED: readonly MetricSheetId[] = ["vo2max", "vdot", "ctl", "atl", "tsb", "trimp"];
 
-      expect(metricSheet(id).caveat).toBeDefined();
-    },
-  );
-
-  it("écarte un identifiant inconnu", () => {
-    expect(isMetricSheetId("acwr")).toBe(false);
-    expect(isMetricSheetId("")).toBe(false);
+  it.each(ESTIMATED)("la métrique estimée « %s » porte sa limite", (id) => {
+    expect(metricSheet(id).caveat).toBeDefined();
   });
 });
 
@@ -119,7 +108,7 @@ describe("renvois depuis l'UI", () => {
     // Un balayage qui ne trouve rien passerait ce test sans rien vérifier.
     expect(cited.size).toBeGreaterThan(0);
 
-    const unknown = [...cited].filter(([id]) => !isMetricSheetId(id));
+    const unknown = [...cited].filter(([id]) => !SHEET_IDS.includes(id));
     expect(unknown).toEqual([]);
   });
 });

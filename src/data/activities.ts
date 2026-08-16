@@ -1,6 +1,17 @@
 import 'server-only';
 
-import { and, desc, eq, getTableColumns, gte, lte, notInArray, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  getTableColumns,
+  gte,
+  isNotNull,
+  lte,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import { APP_TIME_ZONE } from '@/config/time';
 import { isoWeekNumber, isoWeekStart, toCivilDate } from '@/lib/dates/civil';
@@ -28,6 +39,7 @@ import {
   type DistributionBin,
   type SeriesSample,
   type SessionExecution,
+  type Sex,
 } from '@/lib/metrics';
 
 import { getAthleteProfileById, getCurrentAthleteId } from './athlete';
@@ -462,9 +474,113 @@ export type ActivityFullDto = {
    */
   sessionExecution: SessionExecution | null;
   trimp: number | null;
+  /**
+   * Le référentiel de charge de l'athlète, pour situer le TRIMP de cette séance
+   * parmi les siennes. `null` sous {@link TRIMP_CONTEXT_MIN_SESSIONS} séances
+   * exploitables — on n'invente pas une échelle sur trois points.
+   */
+  trimpContext: TrimpContextDto | null;
   /** Course à pied uniquement. */
   effectiveVo2max: number | null;
 };
+
+/*
+ * Référentiel de charge — « ce TRIMP, c'est beaucoup ou peu, pour moi ? »
+ *
+ * Un TRIMP nu ne dit rien : 120 est une grosse séance pour l'une, une sortie
+ * ordinaire pour l'autre. La réponse ne peut venir que de l'historique récent de
+ * **cet** athlète, jamais d'une échelle universelle.
+ */
+
+/** Quartiles du TRIMP des séances récentes, et l'effectif qui les fonde. */
+export type TrimpContextDto = {
+  p25: number;
+  p50: number;
+  p75: number;
+  /** Séance la plus chargée de la fenêtre — la borne haute de l'échelle. */
+  max: number;
+  /** Nombre de séances portant un TRIMP dans la fenêtre. */
+  sampleSize: number;
+};
+
+/**
+ * Fenêtre du référentiel : trois mois glissants, assez pour couvrir un bloc
+ * d'entraînement complet (du volume au spécifique) sans traîner la forme d'une
+ * saison précédente.
+ */
+export const TRIMP_CONTEXT_DAYS = 90;
+
+/**
+ * Plancher d'effectif : sous cinq séances, des « quartiles » ne décrivent que
+ * les quelques points qui les portent. Mieux vaut le chiffre nu qu'une échelle
+ * qui prétend situer.
+ */
+export const TRIMP_CONTEXT_MIN_SESSIONS = 5;
+
+/** Ce qu'une séance doit porter pour entrer dans le référentiel. */
+type TrimpSession = { movingTimeS: number; avgHrBpm: number | null };
+
+/** Ce que le profil doit porter pour qu'un TRIMP soit calculable. */
+type TrimpProfile = {
+  sex: Sex | null;
+  restingHrBpm: number | null;
+  maxHrBpm: number | null;
+};
+
+/**
+ * Quantile à interpolation linéaire — la définition de `percentile_cont` de
+ * Postgres, et celle qu'attend une échelle continue : entre deux séances, la
+ * borne se pose entre leurs deux charges plutôt que sur l'une d'elles.
+ *
+ * `sorted` est croissante et non vide (garanti par l'appelant).
+ */
+function quantile(sorted: readonly number[], fraction: number): number {
+  const rank = (sorted.length - 1) * fraction;
+  const low = Math.floor(rank);
+  const high = Math.ceil(rank);
+  return sorted[low] + (sorted[high] - sorted[low]) * (rank - low);
+}
+
+/**
+ * Quartiles du TRIMP des séances données, ou `null` s'il y en a trop peu.
+ *
+ * Le TRIMP est **recalculé** ici (il n'est pas stocké : il dépend du profil, et
+ * corriger sa FC max doit relire tout l'historique dans le nouveau cadre). Les
+ * séances dont il n'est pas calculable — pas de FC moyenne, profil incomplet —
+ * ne comptent pas, et une charge nulle non plus : une FC moyenne sous la FC de
+ * repos est une aberration de mesure, pas une séance sans effort.
+ *
+ * Fonction pure, exportée pour les tests.
+ */
+export function trimpContextOf(
+  sessions: readonly TrimpSession[],
+  profile: TrimpProfile,
+): TrimpContextDto | null {
+  if (profile.sex === null) return null;
+
+  const values: number[] = [];
+  for (const session of sessions) {
+    const trimp = computeTrimp({
+      movingTimeS: session.movingTimeS,
+      avgHrBpm: session.avgHrBpm,
+      restingHrBpm: profile.restingHrBpm,
+      maxHrBpm: profile.maxHrBpm,
+      sex: profile.sex,
+    });
+    if (trimp !== null && trimp > 0) values.push(trimp);
+  }
+
+  if (values.length < TRIMP_CONTEXT_MIN_SESSIONS) return null;
+
+  values.sort((a, b) => a - b);
+  return {
+    p25: quantile(values, 0.25),
+    p50: quantile(values, 0.5),
+    p75: quantile(values, 0.75),
+    max: values[values.length - 1],
+    sampleSize: values.length,
+  };
+}
 
 /**
  * Streams scalaires d'une activité, indexés par type.
@@ -676,7 +792,12 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   const athleteId = await getCurrentAthleteId();
   if (athleteId === null) return null;
 
-  const [activityRows, streamRows, profile, plannedRows] = await Promise.all([
+  // Fenêtre du référentiel de charge. Décalage en millisecondes plutôt qu'en
+  // jours civils : 90 jours de recul n'ont pas de bord à la minute près, et
+  // aucune frontière de fuseau n'a d'incidence sur des quartiles.
+  const contextSince = new Date(Date.now() - TRIMP_CONTEXT_DAYS * 24 * 60 * 60 * 1000);
+
+  const [activityRows, streamRows, profile, plannedRows, contextRows] = await Promise.all([
     db
       .select()
       .from(activities)
@@ -709,6 +830,23 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
         ),
       )
       .limit(1),
+    // Le référentiel de charge : les séances de la fenêtre qui portent une FC
+    // moyenne — les seules dont un TRIMP se calcule. Deux colonnes, et la
+    // fenêtre borne le volume : jamais l'historique entier en mémoire.
+    //
+    // La séance lue en fait partie **quelle que soit sa date** : relire une
+    // vieille sortie ne doit pas la comparer à un référentiel dont elle est
+    // exclue.
+    db
+      .select({ movingTimeS: activities.movingTimeS, avgHrBpm: activities.avgHrBpm })
+      .from(activities)
+      .where(
+        and(
+          eq(activities.athleteId, athleteId),
+          isNotNull(activities.avgHrBpm),
+          or(gte(activities.startedAt, contextSince), eq(activities.id, id)),
+        ),
+      ),
   ]);
 
   const row = activityRows[0];
@@ -751,6 +889,11 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
           sex: profile.sex,
         })
       : null;
+
+  // Le référentiel n'existe que si le TRIMP de la séance existe : une jauge sans
+  // valeur à situer n'a rien à montrer.
+  const trimpContext =
+    trimp === null || profile === null ? null : trimpContextOf(contextRows, profile);
 
   const effectiveVo2max = running
     ? estimateEffectiveVo2max({
@@ -825,6 +968,7 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
     bestSegments,
     sessionExecution: execution,
     trimp,
+    trimpContext,
     effectiveVo2max,
   };
 }

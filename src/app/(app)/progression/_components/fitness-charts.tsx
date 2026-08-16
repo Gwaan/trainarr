@@ -2,12 +2,12 @@
 
 import { useMemo } from "react";
 
-import { SyncedPanels } from "@/components/chart/synced-panels";
+import { SyncedMultiPanels } from "@/components/chart/synced-multi-panels";
 import { civilDateToMs } from "@/lib/dates/civil";
 import type { LoadPoint } from "@/lib/metrics";
 
 import { MetricInfo } from "../../_components/metric-info";
-import { isMetricSheetId } from "../../_lib/metric-sheets";
+import { metricSheet, type MetricSheetId } from "../../_lib/metric-sheets";
 
 import { buildLoadChartsModel } from "../_lib/load-series";
 import { formatFullDay } from "../_lib/date-axis";
@@ -17,10 +17,13 @@ export type FitnessChartsProps = {
   load: readonly LoadPoint[];
 };
 
+/** Les trois métriques tracées, dans l'ordre des séries du panneau. */
+const LOAD_SHEETS: readonly MetricSheetId[] = ["ctl", "atl", "tsb"];
+
 /**
- * Charge d'entraînement en petits multiples synchronisés : forme (CTL), fatigue
- * (ATL) et fraîcheur (TSB), un panneau chacun, une abscisse commune en dates et
- * un curseur qui les traverse tous.
+ * Charge d'entraînement en un seul graphe : forme (CTL), fatigue (ATL) et
+ * fraîcheur (TSB) superposées sur un axe commun — elles se comptent toutes en
+ * unités TRIMP par jour, et c'est leur écart qui porte la lecture.
  */
 export function FitnessCharts({ load }: FitnessChartsProps) {
   // Mémoïsation manuelle assumée : sans elle, les chemins des trois séries
@@ -37,14 +40,30 @@ export function FitnessCharts({ load }: FitnessChartsProps) {
   }
 
   return (
-    <SyncedPanels
+    <SyncedMultiPanels
       model={model}
-      ariaLabel="Graphes synchronisés de la charge d'entraînement"
+      ariaLabel="Graphe synchronisé de la charge d'entraînement"
       header={(hover) => <CursorReadout load={load} hover={hover} />}
-      // Les trois clés de `LOAD_SPECS` sont exactement `ctl`, `atl` et `tsb` :
-      // chaque panneau porte donc la fiche de la métrique qu'il trace.
-      info={(key) => (isMetricSheetId(key) ? <MetricInfo id={key} /> : null)}
+      // Le slot ⓘ est par **panneau**, et il n'y en a plus qu'un pour trois
+      // métriques : les trois fiches se posent donc groupées au bout du titre,
+      // chacune derrière son abréviation — trois ⓘ nus ne diraient pas lequel
+      // ouvre quoi.
+      info={() => <LoadMetricSheets />}
     />
+  );
+}
+
+/** Les trois déclencheurs de fiches, chacun annoncé par son abréviation. */
+function LoadMetricSheets() {
+  return (
+    <span className="ms-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+      {LOAD_SHEETS.map((id) => (
+        <span key={id} className="flex items-center gap-1">
+          {metricSheet(id).abbreviation}
+          <MetricInfo id={id} />
+        </span>
+      ))}
+    </span>
   );
 }
 

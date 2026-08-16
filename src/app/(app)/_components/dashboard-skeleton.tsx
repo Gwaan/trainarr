@@ -31,10 +31,14 @@ export function DashboardSkeleton() {
           <Skeleton className="h-3 w-20" />
           <Skeleton className="mt-3 h-[1.9rem] w-16 sm:h-[2.3rem]" />
         </div>
+        {/* Forme TSB : une jauge, pas un chiffre. Même géométrie que `Gauge` —
+            libellé, arc **carré** (son viewBox l'est) centré sous les 10 rem du
+            composant, puis la note centrée. Une tuile plate ici ferait grandir
+            la rangée de ~140 px à l'arrivée des données. */}
         <div className="col-span-2 rounded-card border border-border bg-surface p-4 sm:p-5 md:col-span-1">
           <Skeleton className="h-3 w-20" />
-          <Skeleton className="mt-3 h-[1.9rem] w-16 sm:h-[2.3rem]" />
-          <Skeleton className="mt-2.5 h-3 w-40 max-w-full" />
+          <Skeleton className="mx-auto mt-3 aspect-square w-full max-w-[10rem]" />
+          <Skeleton className="mx-auto mt-2.5 h-3 w-40 max-w-full" />
         </div>
 
         {/* Tuile bien-être : pleine largeur, trois mesures côte à côte. Même

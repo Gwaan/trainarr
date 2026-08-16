@@ -15,8 +15,14 @@ un code couleur par type de séance), la **profondeur** et les **rayons**. La
 typographie est **inchangée** : c'est l'identité qui fonctionne.
 
 Toutes les valeurs ci-dessous sortent du validateur dataviz du projet
-(daltonisme simulé Machado 2009, bande de luminosité, chroma, contraste). Aucune
-couleur ne s'ajoute au système sans repasser ce validateur.
+(daltonisme simulé Machado 2009, bande de luminosité, chroma, contraste).
+**Statut du validateur (décidé par Gwen, 16/08/2026) : consultatif, pas
+bloquant.** L'appli est personnelle (Gwen + quelques proches) : les contraintes
+d'accessibilité stricte (daltonisme, seuils ΔE) ne sont pas un gate. On garde
+la palette existante parce qu'elle est cohérente et lisible, pas par
+conformité ; une nouvelle couleur qui sert le design s'ajoute sans repasser le
+validateur. La lisibilité de base (contraste texte, données étiquetées) reste
+de mise — c'est du confort de lecture, pas de la conformité.
 
 ## Tokens (Tailwind v4, `@theme` dans `globals.css`)
 
@@ -84,8 +90,9 @@ vision normale **15,5** (plancher 15) ✓ · contraste ≥ 3:1 contre le rail �
 foncé, clair, foncé : 0,52 · 0,67 · 0,52 · 0,65 · 0,53). Ce n'est pas un
 accident de la sélection, c'est la propriété qui fait tenir la rampe : deux
 zones voisines que la teinte ne sépare plus sous deutéranopie restent séparées
-par la clarté. Toute retouche — même « juste éclaircir Z3 » — casse le zigzag et
-**doit repasser le validateur**.
+par la clarté. Toute retouche — même « juste éclaircir Z3 » — casse le zigzag ;
+si on retouche, le validateur permet de vérifier qu'on ne perd pas la
+lisibilité, mais ce n'est plus un passage obligé.
 
 Le contrat précédent (lightness strictement croissante Z1→Z5, teinte unique)
 est **abandonné** : il produisait une rampe monochrome qui échouait au
@@ -179,8 +186,15 @@ lumineux à l'ouverture.
 
 ## Graphes (courbes FC/allure, charge ATL/CTL/TSB)
 
-Couleurs de séries des panneaux du détail d'activité (un panneau = une série,
-jamais deux axes) : allure = `accent` (indigo), FC = `negative` (#F87171),
+**Direction data-oriented (Gwen, 16/08/2026), façon Runalyze : la
+superposition est la norme, pas l'exception.** Les séries d'une même séance se
+lisent ensemble (FC + allure + altitude sur un même panneau, axes multiples
+autorisés) ; les métriques de charge se combinent (ATL/CTL en aires/courbes
+superposées, TSB en barres sur le même graphe) ; les valeurs instantanées type
+TRIMP s'affichent en **jauge** plutôt qu'en tuile passive. L'ancienne règle
+« un panneau = une série, jamais deux axes » est abandonnée.
+
+Couleurs de séries : allure = `accent` (indigo), FC = `negative` (#F87171),
 altitude = remplissage `fg-faint` ~15 %, cadence = `--color-chart-cadence`
 (#38BDF8, 9,1:1 vs `bg`), foulée = `--color-chart-stride` (#2DD4BF, teal,
 10,4:1 vs `bg` — famille froide distincte de la cadence bleue).

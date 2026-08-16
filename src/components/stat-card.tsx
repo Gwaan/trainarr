@@ -30,6 +30,16 @@ export type StatCardProps = {
   className?: string;
 };
 
+/**
+ * Emprise visuelle d'une tuile d'indicateur.
+ *
+ * Exportée parce que la tuile jauge (`(app)/_components/tsb-gauge.tsx`) occupe
+ * la même case des mêmes grilles : deux chaînes de classes recopiées auraient
+ * fini par diverger côte à côte, dans la même rangée.
+ */
+export const STAT_CARD_SURFACE =
+  "rounded-card border border-border bg-surface p-4 transition-colors duration-150 ease-out hover:border-fg-faint/25 sm:p-5";
+
 const TONE_TEXT: Record<StatTone, string> = {
   default: "text-fg",
   accent: "text-accent",
@@ -55,12 +65,7 @@ export function StatCard({
   const DeltaIcon = delta?.direction === "down" ? ArrowDown : ArrowUp;
 
   return (
-    <article
-      className={cn(
-        "rounded-card border border-border bg-surface p-4 transition-colors duration-150 ease-out hover:border-fg-faint/25 sm:p-5",
-        className,
-      )}
-    >
+    <article className={cn(STAT_CARD_SURFACE, className)}>
       <h3 className="eyebrow flex items-center gap-1.5">
         {label}
         {info}

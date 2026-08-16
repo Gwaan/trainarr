@@ -84,8 +84,9 @@ function LoadPanel({ progression }: { progression: ProgressionDto }) {
         title="Forme, fatigue et fraîcheur"
         meta={<span className="num">{progression.load.length} jours</span>}
       >
-        {/* Pas de ⓘ sur l'en-tête : le panneau trace trois métriques, et
-            chacune porte le sien au-dessus de sa propre courbe. */}
+        {/* Pas de ⓘ sur l'en-tête de la card : le graphe superpose trois
+            métriques et porte lui-même leurs trois fiches, au bout de son
+            titre. */}
         <FitnessCharts load={progression.load} />
       </Panel>
     );

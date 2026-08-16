@@ -432,6 +432,57 @@ describe('getActivityFull', () => {
     expect(full?.effectiveVo2max).toBeGreaterThan(20);
   });
 
+  /**
+   * Le référentiel de charge lit la même table que la séance : le mock rend donc
+   * les mêmes lignes aux deux requêtes, ce qui suffit ici — la première ne
+   * retient que `rows[0]`, la seconde les compte toutes.
+   */
+  function sessions(count: number): Activity[] {
+    return Array.from({ length: count }, (_, index) => ({
+      ...ACTIVITY,
+      id: ACTIVITY.id + index,
+      // Des durées croissantes, donc des TRIMP croissants à FC constante.
+      movingTimeS: 600 * (index + 1),
+    }));
+  }
+
+  it('situe le TRIMP de la séance dans les quartiles des 90 derniers jours', async () => {
+    queryState.rows = { activities: sessions(6), athlete: [ATHLETE] };
+
+    const context = (await getActivityFull(ACTIVITY.id))?.trimpContext;
+
+    expect(context?.sampleSize).toBe(6);
+    // Des quartiles, donc un ordre : p25 ≤ p50 ≤ p75 ≤ max.
+    expect(context?.p25).toBeLessThanOrEqual(context?.p50 ?? 0);
+    expect(context?.p50).toBeLessThanOrEqual(context?.p75 ?? 0);
+    expect(context?.p75).toBeLessThanOrEqual(context?.max ?? 0);
+  });
+
+  it("n'établit pas de référentiel sur quatre séances", async () => {
+    queryState.rows = { activities: sessions(4), athlete: [ATHLETE] };
+
+    expect((await getActivityFull(ACTIVITY.id))?.trimpContext).toBeNull();
+  });
+
+  it('cloisonne le référentiel par athlète, et y garde la séance lue', async () => {
+    queryState.rows = { activities: sessions(6), athlete: [ATHLETE] };
+
+    await getActivityFull(ACTIVITY.id);
+
+    // Deuxième lecture de `activities` : la fenêtre du référentiel. Elle porte
+    // l'athlète de la session, la borne des 90 jours, et l'identifiant de la
+    // séance lue — qui appartient à son propre référentiel, même relue des mois
+    // plus tard.
+    const contextQuery = queryState.queries.filter((query) => query.table === 'activities')[1];
+    const params = render(contextQuery?.where).params;
+    expect(params[0]).toBe(ATHLETE.id);
+    expect(params[2]).toBe(ACTIVITY.id);
+
+    // La borne part de maintenant : le pilote sérialise la date en ISO.
+    const sinceDays = (Date.now() - Date.parse(String(params[1]))) / 86_400_000;
+    expect(sinceDays).toBeCloseTo(90, 3);
+  });
+
   it('garde les graphes et les splits sur un profil incomplet', async () => {
     // Le compte a bien un athlète — sans quoi la séance ne serait pas lisible —
     // mais son profil n'a ni sexe, ni FC de repos, ni FC max.

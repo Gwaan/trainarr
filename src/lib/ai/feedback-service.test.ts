@@ -105,6 +105,9 @@ const ACTIVITY: ActivityFullDto = {
   // des agrégats, pas du modèle d'affichage.
   sessionExecution: null,
   trimp: 112.4,
+  // Le référentiel de charge ne sert que la jauge de l'écran : le prompt du
+  // coach l'ignore, comme la comparaison aux objectifs ci-dessus.
+  trimpContext: null,
   effectiveVo2max: 48.2,
 };
 

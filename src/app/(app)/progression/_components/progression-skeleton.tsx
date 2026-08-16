@@ -46,31 +46,44 @@ export function ProgressionSkeleton() {
 
       <Skeleton className="h-8 w-56" />
 
+      {/* Trois tuiles, mais pas trois fois la même : la fraîcheur TSB est une
+          jauge (cf. `TsbGauge`), et elle occupe la deuxième case. */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-        {[0, 1, 2].map((card) => (
-          <div
-            key={card}
-            className="rounded-card border border-border bg-surface p-4 last:col-span-2 sm:p-5 md:last:col-span-1"
-          >
-            <Skeleton className="h-3 w-24" />
-            <Skeleton className="mt-3 h-[1.9rem] w-20 sm:h-[2.3rem]" />
-            <Skeleton className="mt-2.5 h-3 w-32 max-w-full" />
-          </div>
-        ))}
+        <div className="rounded-card border border-border bg-surface p-4 sm:p-5">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="mt-3 h-[1.9rem] w-20 sm:h-[2.3rem]" />
+          <Skeleton className="mt-2.5 h-3 w-32 max-w-full" />
+        </div>
+
+        {/* Même géométrie que `Gauge` — libellé, arc **carré** (son viewBox
+            l'est) centré sous les 10 rem du composant, puis la note centrée.
+            Une tuile plate ici ferait grandir la rangée de ~140 px à l'arrivée
+            des données. */}
+        <div className="rounded-card border border-border bg-surface p-4 sm:p-5">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="mx-auto mt-3 aspect-square w-full max-w-[10rem]" />
+          <Skeleton className="mx-auto mt-2.5 h-3 w-32 max-w-full" />
+        </div>
+
+        <div className="col-span-2 rounded-card border border-border bg-surface p-4 sm:p-5 md:col-span-1">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="mt-3 h-[1.9rem] w-20 sm:h-[2.3rem]" />
+          <Skeleton className="mt-2.5 h-3 w-32 max-w-full" />
+        </div>
       </div>
 
       <PanelFrame>
         <div className="flex flex-col gap-4 p-4 sm:p-5">
           <Skeleton className="h-4 w-full" />
-          {["h-36 sm:h-44", "h-24 sm:h-28", "h-24 sm:h-28"].map((height, index) => (
-            <div key={index} className="flex flex-col gap-1.5">
-              <Skeleton className="h-3 w-40" />
-              <div className="flex gap-2">
-                <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
-                <Skeleton className={`min-w-0 flex-1 ${height}`} />
-              </div>
+          {/* Un seul panneau depuis que CTL, ATL et TSB se superposent : même
+              hauteur que `LOAD_PANEL`, titre + légende sur une ligne. */}
+          <div className="flex flex-col gap-1.5">
+            <Skeleton className="h-3 w-full" />
+            <div className="flex gap-2">
+              <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
+              <Skeleton className="h-56 min-w-0 flex-1 sm:h-72" />
             </div>
-          ))}
+          </div>
         </div>
       </PanelFrame>
 

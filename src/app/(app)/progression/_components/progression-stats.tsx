@@ -10,8 +10,9 @@ import type {
 
 import { MetricInfo } from "../../_components/metric-info";
 import { MetricPlaceholder } from "../../_components/metric-placeholder";
+import { TsbGauge } from "../../_components/tsb-gauge";
 import { formatLoad, formatVo2max } from "../../_lib/format";
-import { readTsb, toDelta } from "../../_lib/metric-tone";
+import { toDelta } from "../../_lib/metric-tone";
 import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
@@ -42,11 +43,9 @@ export function ProgressionStats({
   vo2maxUnavailable,
   hasProfile,
 }: ProgressionStatsProps) {
-  const tsb = fitness ? readTsb(fitness.tsb) : null;
-
   return (
     <section aria-label="Indicateurs du jour" className="grid grid-cols-2 gap-3 md:grid-cols-3">
-      {fitness && tsb ? (
+      {fitness ? (
         <>
           <StatCard
             label="Forme CTL"
@@ -55,13 +54,7 @@ export function ProgressionStats({
             delta={toDelta(fitness.ctlDelta7d, 0, "warning")}
             note="Charge chronique, lissée sur 42 jours."
           />
-          <StatCard
-            label="Fraîcheur TSB"
-            info={<MetricInfo id="tsb" />}
-            value={formatLoad(fitness.tsb)}
-            tone={tsb.tone}
-            note={tsb.note}
-          />
+          <TsbGauge tsb={fitness.tsb} label="Fraîcheur TSB" />
         </>
       ) : hasProfile ? (
         <MetricPlaceholder

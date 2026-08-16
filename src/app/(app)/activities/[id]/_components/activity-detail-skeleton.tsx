@@ -46,13 +46,26 @@ export function ActivityDetailSkeleton() {
 
       <div className="grid gap-4 lg:grid-cols-5">
         <PanelFrame className="lg:col-span-2">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-4 p-4 sm:grid-cols-3 sm:p-5 lg:grid-cols-2">
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((tile) => (
-              <div key={tile}>
-                <Skeleton className="h-3 w-16" />
-                <Skeleton className="mt-2 h-4 w-20" />
-              </div>
-            ))}
+          <div className="p-4 sm:p-5">
+            {/* Neuf tuiles, pas dix : la charge quitte la grille pour la jauge
+                de pied de panneau dès que l'athlète a de quoi la calibrer, ce
+                qui est le cas courant. */}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-3 lg:grid-cols-2">
+              {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((tile) => (
+                <div key={tile}>
+                  <Skeleton className="h-3 w-16" />
+                  <Skeleton className="mt-2 h-4 w-20" />
+                </div>
+              ))}
+            </div>
+
+            {/* Jauge « Charge de la séance » — même géométrie que `Gauge` :
+                libellé, arc carré centré, note. */}
+            <div className="mt-5 border-t border-border pt-4">
+              <Skeleton className="h-3 w-32" />
+              <Skeleton className="mx-auto mt-3 aspect-square w-full max-w-[10rem] rounded-full" />
+              <Skeleton className="mx-auto mt-2.5 h-3 w-44 max-w-full" />
+            </div>
           </div>
         </PanelFrame>
         <PanelFrame className="lg:col-span-3">
@@ -72,18 +85,17 @@ export function ActivityDetailSkeleton() {
 
       <PanelFrame>
         <div className="flex flex-col gap-4 p-4 sm:p-5">
-          {[
-            "h-36 sm:h-44",
-            "h-36 sm:h-44",
-            "h-24 sm:h-28",
-            "h-24 sm:h-28",
-            "h-24 sm:h-28",
-          ].map((height, index) => (
+          {/* Trois panneaux depuis que les mesures se superposent : allure + FC,
+              altitude en contexte, cadence + foulée. Deux d'entre eux portent un
+              axe droit, donc les trois réservent la gouttière de droite —
+              `hasRightGutter` est global, c'est ce qui les aligne. */}
+          {["h-44 sm:h-60", "h-20 sm:h-24", "h-24 sm:h-32"].map((height, index) => (
             <div key={index} className="flex flex-col gap-1.5">
               <Skeleton className="h-3 w-40" />
               <div className="flex gap-2">
                 <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
                 <Skeleton className={`min-w-0 flex-1 ${height}`} />
+                <Skeleton className="h-3 w-9 shrink-0 sm:w-12" />
               </div>
             </div>
           ))}

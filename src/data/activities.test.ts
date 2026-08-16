@@ -2,14 +2,18 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { computeTrimp } from '@/lib/metrics';
+
 import {
   ACTIVITY_WEEK_PAGE_LIMITS,
+  TRIMP_CONTEXT_MIN_SESSIONS,
   getActivityById,
   groupActivitiesByWeek,
   listActivityWeekPage,
   listRecentActivities,
   toActivityDetailDto,
   toActivitySummaryDto,
+  trimpContextOf,
 } from './activities';
 import type { Activity } from './db/schema';
 
@@ -555,5 +559,76 @@ describe('getActivityById', () => {
 
     await expect(getActivityById(42)).resolves.toBeNull();
     expect(queriesOn('activities')).toEqual([]);
+  });
+});
+
+describe('trimpContextOf', () => {
+  const PROFILE = { sex: 'female', restingHrBpm: 48, maxHrBpm: 190 } as const;
+
+  /** Séance d'une durée donnée, à FC moyenne constante : le TRIMP suit la durée. */
+  const session = (minutes: number, avgHrBpm: number | null = 150) => ({
+    movingTimeS: minutes * 60,
+    avgHrBpm,
+  });
+
+  /** Le TRIMP réel d'une de ces séances, par la formule du projet. */
+  const trimpOf = (minutes: number) =>
+    computeTrimp({ movingTimeS: minutes * 60, avgHrBpm: 150, ...PROFILE });
+
+  it('rend les quartiles des séances récentes', () => {
+    // Cinq séances de 10 à 50 min à la même FC : les TRIMP sont proportionnels
+    // aux durées, et les quartiles tombent pile sur trois d'entre elles.
+    const context = trimpContextOf([10, 20, 30, 40, 50].map((min) => session(min)), PROFILE);
+
+    expect(context?.sampleSize).toBe(5);
+    expect(context?.p25).toBeCloseTo(trimpOf(20) ?? 0, 10);
+    expect(context?.p50).toBeCloseTo(trimpOf(30) ?? 0, 10);
+    expect(context?.p75).toBeCloseTo(trimpOf(40) ?? 0, 10);
+    expect(context?.max).toBeCloseTo(trimpOf(50) ?? 0, 10);
+  });
+
+  it('interpole entre deux séances, comme percentile_cont', () => {
+    // Six séances : la médiane tombe entre la troisième et la quatrième.
+    const context = trimpContextOf(
+      [10, 20, 30, 40, 50, 60].map((min) => session(min)),
+      PROFILE,
+    );
+
+    expect(context?.p50).toBeCloseTo(((trimpOf(30) ?? 0) + (trimpOf(40) ?? 0)) / 2, 10);
+  });
+
+  it("n'invente pas de référentiel sous cinq séances", () => {
+    expect(TRIMP_CONTEXT_MIN_SESSIONS).toBe(5);
+    expect(trimpContextOf([10, 20, 30, 40].map((min) => session(min)), PROFILE)).toBeNull();
+  });
+
+  it('ne compte que les séances dont le TRIMP est calculable', () => {
+    // Quatre séances mesurées et deux sans FC moyenne : le référentiel ne tient
+    // pas. Une séance sans FC n'a pas de charge estimée, elle est écartée.
+    const sessions = [
+      session(10),
+      session(20),
+      session(30),
+      session(40),
+      session(50, null),
+      session(60, null),
+    ];
+
+    expect(trimpContextOf(sessions, PROFILE)).toBeNull();
+    expect(trimpContextOf([...sessions, session(15)], PROFILE)?.sampleSize).toBe(5);
+  });
+
+  it('écarte une charge nulle plutôt que de la compter comme une séance', () => {
+    // FC moyenne sous la FC de repos : la réserve cardiaque est bornée à 0, le
+    // TRIMP vaut 0. C'est une aberration de mesure, pas une séance sans effort.
+    const sessions = [10, 20, 30, 40, 50].map((min) => session(min));
+
+    expect(trimpContextOf([...sessions, session(45, 40)], PROFILE)?.sampleSize).toBe(5);
+  });
+
+  it('ne calcule rien sans le sexe, que la formule de Banister exige', () => {
+    const sessions = [10, 20, 30, 40, 50].map((min) => session(min));
+
+    expect(trimpContextOf(sessions, { ...PROFILE, sex: null })).toBeNull();
   });
 });

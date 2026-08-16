@@ -470,15 +470,3 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
 export function metricSheet(id: MetricSheetId): MetricSheet {
   return METRIC_SHEETS[id];
 }
-
-/**
- * `true` si `value` désigne une fiche existante.
- *
- * Sert aux quelques appelants qui ne tiennent qu'une chaîne : les graphes
- * synchronisés identifient leurs séries par une `key` libre (`"ctl"`, `"pace"`,
- * `"stride"`…), dont une partie seulement a une fiche. Un garde plutôt qu'une
- * assertion — une série sans fiche ne doit pas afficher de ⓘ mort.
- */
-export function isMetricSheetId(value: string): value is MetricSheetId {
-  return value in METRIC_SHEETS;
-}

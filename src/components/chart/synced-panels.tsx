@@ -1,35 +1,18 @@
 "use client";
 
-import {
-  useRef,
-  useState,
-  type PointerEvent,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { type ReactNode, type RefObject } from "react";
 
 import {
   VIEW_H,
   VIEW_W,
   chipSide,
-  clampRatio,
   edgeAnchor,
-  nearestIndex,
-  normalize,
-  type EdgeAnchor,
 } from "@/lib/chart/model";
 import { panelValueAt, type ChartsModel, type PanelModel, type Tick } from "@/lib/chart/series";
 import { cn } from "@/lib/utils";
 
-/** Gouttière des étiquettes d'axe Y — identique sur tous les panneaux, ils s'alignent. */
-const GUTTER = "w-9 shrink-0 sm:w-12";
-
-/** Ancre horizontale d'une étiquette, exprimée en transformation CSS. */
-const ANCHOR_TRANSFORM: Record<EdgeAnchor, string> = {
-  start: "translateX(0)",
-  center: "translateX(-50%)",
-  end: "translateX(-100%)",
-};
+import { ANCHOR_TRANSFORM, GUTTER } from "./geometry";
+import { useScrub } from "./use-scrub";
 
 export type SyncedPanelsProps<P> = {
   model: ChartsModel<P>;
@@ -51,12 +34,12 @@ export type SyncedPanelsProps<P> = {
 };
 
 /**
- * Graphes empilés à survol synchronisé : un panneau par série, un seul axe Y
- * chacun, une abscisse commune — le crosshair traverse tous les panneaux et
+ * Graphes empilés à survol synchronisé, **une série par panneau** : un seul axe
+ * Y chacun, une abscisse commune — le crosshair traverse tous les panneaux et
  * chacun affiche sa valeur au même X.
  *
- * Superposer plusieurs séries sur deux axes Y rendrait toute comparaison
- * arbitraire : les small multiples sont le seul rendu honnête.
+ * Rendu de l'ancien modèle, conservé pour les pages non migrées. Les graphes
+ * qui superposent plusieurs séries passent par `SyncedMultiPanels`.
  */
 export function SyncedPanels<P>({
   model,
@@ -65,38 +48,7 @@ export function SyncedPanels<P>({
   info,
   className,
 }: SyncedPanelsProps<P>) {
-  const [hover, setHover] = useState<number | null>(null);
-  const plotRef = useRef<HTMLDivElement | null>(null);
-  const scrubbing = useRef(false);
-
-  const moveTo = (clientX: number) => {
-    const rect = plotRef.current?.getBoundingClientRect();
-    if (rect === undefined || rect.width === 0) return;
-
-    const ratio = clampRatio((clientX - rect.left) / rect.width);
-    const span = model.xDomain.max - model.xDomain.min;
-    setHover(nearestIndex(model.xs, model.xDomain.min + ratio * span));
-  };
-
-  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    scrubbing.current = true;
-    moveTo(event.clientX);
-  };
-
-  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    // Souris : le survol suffit. Doigt et stylet : seulement pendant l'appui —
-    // `touch-pan-y` laisse le défilement vertical de la page passer.
-    if (event.pointerType === "mouse" || scrubbing.current) moveTo(event.clientX);
-  };
-
-  const stopScrub = (event: PointerEvent<HTMLDivElement>) => {
-    scrubbing.current = false;
-    // Le doigt parti, la lecture reste affichée ; le curseur souris, lui, emporte
-    // le crosshair avec lui.
-    if (event.pointerType === "mouse") setHover(null);
-  };
-
-  const cursorRatio = hover === null ? 0 : normalize(model.xs[hover], model.xDomain);
+  const { hover, cursorRatio, plotRef, handlers } = useScrub(model);
 
   return (
     <>
@@ -106,11 +58,7 @@ export function SyncedPanels<P>({
         role="group"
         aria-label={ariaLabel}
         className={cn("mt-4 flex touch-pan-y flex-col gap-4 select-none", className)}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={stopScrub}
-        onPointerCancel={stopScrub}
-        onPointerLeave={stopScrub}
+        {...handlers}
       >
         {model.panels.map((panel, index) => (
           <ChartPanel
@@ -293,7 +241,14 @@ export function ChartPanel<P>({
 }
 
 /** Graduations de l'abscisse, alignées sous la gouttière des panneaux. */
-export function XAxis({ ticks }: { ticks: readonly Tick[] }) {
+export function XAxis({
+  ticks,
+  rightGutter = false,
+}: {
+  ticks: readonly Tick[];
+  /** Espaceur droit, quand les panneaux réservent une seconde gouttière. */
+  rightGutter?: boolean;
+}) {
   return (
     <div className="flex gap-2">
       <div className={GUTTER} aria-hidden="true" />
@@ -314,6 +269,7 @@ export function XAxis({ ticks }: { ticks: readonly Tick[] }) {
           </span>
         ))}
       </div>
+      {rightGutter ? <div className={GUTTER} aria-hidden="true" /> : null}
     </div>
   );
 }

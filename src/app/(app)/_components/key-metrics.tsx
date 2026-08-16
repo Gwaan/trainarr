@@ -9,13 +9,14 @@ import type {
 } from "@/data/dashboard";
 
 import { formatLoad, formatVo2max } from "../_lib/format";
-import { readTsb, toDelta } from "../_lib/metric-tone";
+import { toDelta } from "../_lib/metric-tone";
 import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
 } from "../_lib/metric-unavailable";
 import { MetricInfo } from "./metric-info";
 import { MetricPlaceholder } from "./metric-placeholder";
+import { TsbGauge } from "./tsb-gauge";
 import { WellnessTile } from "./wellness-tile";
 import type { WellnessTileView } from "../_lib/wellness-view";
 
@@ -43,8 +44,6 @@ export function KeyMetrics({
   wellness,
   hasProfile,
 }: KeyMetricsProps) {
-  const tsb = fitness ? readTsb(fitness.tsb) : null;
-
   /*
    * Sans profil du tout, la carte d'accueil en tête du tableau de bord porte
    * déjà l'invitation : répéter « Profil incomplet » ici ferait doublon. La
@@ -79,7 +78,7 @@ export function KeyMetrics({
         />
       )}
 
-      {fitness && tsb ? (
+      {fitness ? (
         <>
           <StatCard
             label="Fitness CTL"
@@ -87,12 +86,9 @@ export function KeyMetrics({
             value={formatLoad(fitness.ctl)}
             delta={toDelta(fitness.ctlDelta7d, 0, "warning")}
           />
-          <StatCard
+          <TsbGauge
+            tsb={fitness.tsb}
             label="Forme TSB"
-            info={<MetricInfo id="tsb" />}
-            value={formatLoad(fitness.tsb)}
-            tone={tsb.tone}
-            note={tsb.note}
             className={vo2max ? "col-span-2 md:col-span-1" : undefined}
           />
         </>

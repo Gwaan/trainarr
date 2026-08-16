@@ -3,15 +3,16 @@
 import { useMemo, useState } from "react";
 
 import { SegmentedToggle, type SegmentedOption } from "@/components/chart/segmented-toggle";
-import { SyncedPanels } from "@/components/chart/synced-panels";
+import { SyncedMultiPanels } from "@/components/chart/synced-multi-panels";
 import { Panel } from "@/components/panel";
 
 import { MetricInfo } from "../../../_components/metric-info";
-import { isMetricSheetId } from "../../../_lib/metric-sheets";
 import {
   buildActivityChartsModel,
   hasDistanceAxis,
   type ChartPoint,
+  type PanelKey,
+  type SeriesKey,
   type XAxisKind,
 } from "../_lib/chart-series";
 import { formatClock, formatDistanceTick } from "../_lib/format-detail";
@@ -28,9 +29,18 @@ export type ActivityChartsProps = {
 };
 
 /**
- * Graphes empilés de la séance : un panneau par mesure, un seul axe Y chacun,
- * une abscisse commune (distance ou temps) et un survol synchronisé — le
- * crosshair traverse tous les panneaux et chacun affiche sa valeur au même X.
+ * Le panneau qui porte la foulée, et la série elle-même. Typés `PanelKey` et
+ * `SeriesKey` : une clé qui n'existe plus casse la compilation au lieu de faire
+ * disparaître le ⓘ en silence.
+ */
+const STRIDE_PANEL: PanelKey = "cadence-stride";
+const STRIDE_SERIES: SeriesKey = "stride";
+
+/**
+ * Graphes empilés de la séance : trois panneaux — allure et FC superposées à
+ * double axe, altitude en contexte, cadence et foulée superposées — sur une
+ * abscisse commune (distance ou temps), avec un survol synchronisé : le
+ * crosshair traverse tous les panneaux et chacun affiche ses valeurs au même X.
  *
  * Le rendu est partagé (`src/components/chart/`) : cette page choisit l'axe,
  * construit le modèle et écrit le repère du curseur.
@@ -40,11 +50,20 @@ export function ActivityCharts({ points }: ActivityChartsProps) {
   const [xKind, setXKind] = useState<XAxisKind>(canUseDistance ? "distance" : "time");
 
   // Mémoïsation manuelle assumée : le React Compiler n'est pas activé sur ce
-  // projet, et sans elle les chemins SVG de cinq séries de 600 points
-  // seraient reconstruits à chaque mouvement du pointeur.
+  // projet, et sans elle les chemins SVG de toutes les séries de la séance
+  // (600 points chacune) seraient reconstruits à chaque mouvement du pointeur.
   const model = useMemo(() => buildActivityChartsModel(points, xKind), [points, xKind]);
 
   if (model === null) return <NoDetailedData />;
+
+  // La foulée a-t-elle réellement survécu ? Sans capteur, le panneau ne porte
+  // plus que la cadence : un ⓘ « Qu'est-ce que la longueur de foulée ? » y
+  // ouvrirait une fiche sur une courbe absente de l'écran.
+  const hasStride = model.panels.some(
+    (panel) =>
+      panel.key === STRIDE_PANEL &&
+      panel.series.some((series) => series.spec.key === STRIDE_SERIES),
+  );
 
   return (
     <Panel
@@ -60,14 +79,17 @@ export function ActivityCharts({ points }: ActivityChartsProps) {
         ) : null
       }
     >
-      <SyncedPanels
+      <SyncedMultiPanels
         model={model}
         ariaLabel="Graphes synchronisés de la séance"
         header={(hover) => <CursorReadout points={points} hover={hover} />}
-        // Seule la foulée est une grandeur **calculée** parmi ces cinq séries :
-        // allure, FC, altitude et cadence sortent des capteurs. Le garde ne
-        // laisse donc passer qu'elle, et n'a rien à savoir des autres clés.
-        info={(key) => (isMetricSheetId(key) ? <MetricInfo id={key} /> : null)}
+        // Seule la foulée est une grandeur **calculée** parmi les séries de la
+        // page : allure, FC, altitude et cadence sortent des capteurs. Le rendu
+        // ne pose qu'un ⓘ par panneau, au bout du titre — la fiche se raccroche
+        // donc au panneau qui porte la foulée, et son intitulé (« Qu'est-ce que
+        // la longueur de foulée ? ») dit de quelle série il parle, y compris
+        // pour un lecteur d'écran.
+        info={(key) => (hasStride && key === STRIDE_PANEL ? <MetricInfo id="stride" /> : null)}
       />
     </Panel>
   );

@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 
+import { Gauge } from "@/components/chart/gauge";
 import { Panel } from "@/components/panel";
+import type { TrimpContextDto } from "@/data/activities";
 import { cn } from "@/lib/utils";
 import { defaultActivityName } from "@/lib/fit/sport";
 
@@ -16,6 +18,7 @@ import {
   formatFullDateTime,
   formatTrimp,
 } from "../_lib/format-detail";
+import { trimpGaugeView } from "../_lib/trimp-gauge-model";
 
 /** Chiffres de la séance : ce que la page affiche en tête, tel que le DAL le livre. */
 export type ActivitySummaryData = {
@@ -31,6 +34,12 @@ export type ActivitySummaryData = {
   elevationGainM: number | null;
   avgCadenceSpm: number | null;
   trimp: number | null;
+  /**
+   * Les quartiles de charge de l'athlète, quand son historique récent en porte
+   * assez pour en établir. `null` sinon : le TRIMP reste alors une tuile
+   * chiffrée, faute d'échelle à laquelle le rapporter.
+   */
+  trimpContext: TrimpContextDto | null;
   effectiveVo2max: number | null;
 };
 
@@ -74,8 +83,12 @@ type Stat = { label: string; value: string; sheet?: MetricSheetId };
  *
  * Une mesure absente s'affiche en tiret : la tuile reste à sa place — la grille
  * ne doit pas se réorganiser d'une séance à l'autre — et rien n'est approximé.
+ *
+ * Le TRIMP est la seule exception : quand la jauge le montre en pied de
+ * panneau, sa tuile disparaît. Le répéter à deux endroits ne dirait pas deux
+ * fois plus, et la jauge en dit strictement plus.
  */
-function statsOf(activity: ActivitySummaryData): Stat[] {
+function statsOf(activity: ActivitySummaryData, withTrimpTile: boolean): Stat[] {
   return [
     { label: "Distance", value: formatDistance(activity.distanceM) },
     { label: "Durée", value: formatClock(activity.movingTimeS) },
@@ -104,11 +117,15 @@ function statsOf(activity: ActivitySummaryData): Stat[] {
       value:
         activity.avgCadenceSpm === null ? MISSING : formatCadence(activity.avgCadenceSpm),
     },
-    {
-      label: "TRIMP",
-      value: activity.trimp === null ? MISSING : formatTrimp(activity.trimp),
-      sheet: "trimp",
-    },
+    ...(withTrimpTile
+      ? [
+          {
+            label: "TRIMP",
+            value: activity.trimp === null ? MISSING : formatTrimp(activity.trimp),
+            sheet: "trimp",
+          } satisfies Stat,
+        ]
+      : []),
     {
       label: "VO₂max eff.",
       value:
@@ -131,10 +148,12 @@ export function ActivityStatsPanel({
   /** La grille se resserre quand une carte partage la rangée. */
   gridClassName?: string;
 }) {
+  const gauge = trimpGaugeView(activity.trimp, activity.trimpContext);
+
   return (
     <Panel title="Chiffres de la séance" className={className}>
       <dl className={cn("grid grid-cols-2 gap-x-4 gap-y-4", gridClassName)}>
-        {statsOf(activity).map((stat) => (
+        {statsOf(activity, gauge === null).map((stat) => (
           <div key={stat.label} className="min-w-0">
             <dt className="eyebrow flex items-center gap-1.5">
               {stat.label}
@@ -146,6 +165,24 @@ export function ActivityStatsPanel({
           </div>
         ))}
       </dl>
+
+      {/* La jauge ferme le panneau plutôt que d'occuper une case de la grille :
+          un arc dans une tuile de 4 cm serait illisible, et la charge est une
+          synthèse de la séance — elle se lit après les mesures, pas parmi
+          elles. La séparation en filet la sort de la liste sans ouvrir un
+          second panneau, qui déséquilibrerait la rangée de la carte. */}
+      {gauge === null ? null : (
+        <div className="mt-5 border-t border-border pt-4">
+          <Gauge
+            model={gauge.model}
+            value={gauge.value}
+            label="Charge de la séance"
+            info={<MetricInfo id="trimp" />}
+            note={gauge.note}
+            ariaLabel={gauge.ariaLabel}
+          />
+        </div>
+      )}
     </Panel>
   );
 }
