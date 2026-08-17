@@ -85,6 +85,61 @@ describe('estimateVdot', () => {
   ])('renvoie null pour une entrée invalide (%s)', (_label, effort) => {
     expect(estimateVdot(effort)).toBeNull();
   });
+
+  it('compte la distance équivalente de Greif quand le dénivelé est connu', () => {
+    // 10 km, D+ 200 / D− 200 : 10 000 + 2 × 200 − 1 × 200 = 10 200 m équivalents.
+    // Le pendant exact de la correction d'`estimateEffectiveVo2max` — sans elle
+    // ici, le dénivelé entrerait dans le facteur correctif au lieu de s'y
+    // annuler (cf. `./vo2max-correction`).
+    const hilly = {
+      distanceM: 10_000,
+      movingTimeS: 45 * 60,
+      elevation: { gainM: 200, lossM: 200 },
+      elevationCorrection: { ascentCoefM: 2, descentCoefM: -1 },
+    };
+
+    expect(estimateVdot(hilly)).toBeCloseTo(
+      estimateVdot({ distanceM: 10_200, movingTimeS: 45 * 60 })!,
+      10,
+    );
+  });
+
+  it('ne corrige rien sans coefficients, ni sans dénivelé complet', () => {
+    const flat = estimateVdot({ distanceM: 10_000, movingTimeS: 45 * 60 })!;
+    const greif = { ascentCoefM: 2, descentCoefM: -1 };
+
+    // Dénivelé connu mais correction désactivée au profil.
+    expect(
+      estimateVdot({
+        distanceM: 10_000,
+        movingTimeS: 45 * 60,
+        elevation: { gainM: 200, lossM: 200 },
+      }),
+    ).toBeCloseTo(flat, 10);
+    // Un seul sens connu : inconnu n'est pas plat, et la perte ne se déduit pas
+    // du gain.
+    expect(
+      estimateVdot({
+        distanceM: 10_000,
+        movingTimeS: 45 * 60,
+        elevation: { gainM: 200, lossM: null },
+        elevationCorrection: greif,
+      }),
+    ).toBeCloseTo(flat, 10);
+  });
+
+  it('mesure le seuil de 1500 m sur la distance courue, pas sur l’équivalente', () => {
+    // 1 400 m avec 600 m de D+ : Greif compte 2 600 m, le modèle refuse quand
+    // même — une bosse n'allonge pas un effort.
+    expect(
+      estimateVdot({
+        distanceM: 1_400,
+        movingTimeS: 10 * 60,
+        elevation: { gainM: 600, lossM: 0 },
+        elevationCorrection: { ascentCoefM: 2, descentCoefM: -1 },
+      }),
+    ).toBeNull();
+  });
 });
 
 /**

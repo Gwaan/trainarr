@@ -59,7 +59,24 @@ export type ParsedFitActivity = {
   movingTimeS: number;
   /** `total_elapsed_time` de la session, arrondi à la seconde (colonne entière). */
   elapsedTimeS: number;
+  /**
+   * `total_ascent` de la session, `null` si l'appareil ne l'écrit pas — ce qui
+   * est le cas de la montre de l'athlète. Le repli (calcul depuis le flux
+   * d'altitude) n'est **pas** fait ici : le parseur rend ce que le fichier dit,
+   * l'ingestion complète ce qu'il tait (cf. `./ingest`).
+   */
   elevationGainM: number | null;
+  /**
+   * `total_descent` de la session — le champ existe bel et bien dans le profil
+   * FIT, à côté de `total_ascent`, et le SDK Garmin le type
+   * (`SessionMesg.totalDescent`). Même politique : `null` quand il est absent,
+   * et **jamais** déduit du gain (supposer une boucle serait inventer une
+   * donnée).
+   *
+   * La formule de Greif, qui corrige la distance du dénivelé, a besoin des deux
+   * sens : c'est ce qui justifie de le lire et de le persister.
+   */
+  elevationLossM: number | null;
   avgHrBpm: number | null;
   maxHrBpm: number | null;
   /** Pas par minute : la cadence FIT à pied est doublée, celle du vélo non. */
@@ -155,6 +172,7 @@ export function parseFitActivity(buffer: Buffer): ParsedFitActivity {
     movingTimeS: Math.round(movingTimeS),
     elapsedTimeS: Math.round(elapsedTimeS),
     elevationGainM: readNumber(session.totalAscent),
+    elevationLossM: readNumber(session.totalDescent),
     avgHrBpm: readNumber(session.avgHeartRate),
     maxHrBpm: readNumber(session.maxHeartRate),
     avgCadenceSpm: readCadence(session.avgCadence, session.avgFractionalCadence, doubleCadence),

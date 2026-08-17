@@ -112,6 +112,7 @@ async function DashboardContent() {
         fitnessUnavailable={summary.fitnessUnavailable}
         vo2max={summary.vo2max}
         vo2maxUnavailable={summary.vo2maxUnavailable}
+        pendingElevationActivities={summary.pendingElevationActivities}
         // Sans profil, aucun relevé n'a pu être rapatrié : la tuile n'aurait
         // qu'un état vide à montrer, et l'invitation à créer son profil est
         // déjà en tête de page.

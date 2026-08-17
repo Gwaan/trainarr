@@ -14,19 +14,23 @@ import 'server-only';
  */
 
 import { getAthleteProfile, getIntervalsSettings } from '@/data/athlete';
+import { getElevationCorrectionSettings } from '@/data/elevation-correction';
 import { canInvite, listPendingInvitations } from '@/data/invitations';
 import { getLthrSuggestion } from '@/data/lthr-suggestion';
 import { getMaxHrSuggestion } from '@/data/max-hr-suggestion';
 import { countSubscriptions, getPushPreferences } from '@/data/push';
 import { getRestingHrSuggestion } from '@/data/resting-hr-suggestion';
+import { getCurrentVo2maxCorrection } from '@/data/vo2max-correction';
 import { getForecastLocationLabel } from '@/data/weather-forecast';
 import { getAccountSummary } from '@/lib/auth/session';
+import { toCivilDate } from '@/lib/dates/civil';
 import { PUSH_DISABLED_MESSAGES, resolvePushConfig, type PushConfig } from '@/lib/push/config';
 
 import { toLthrSuggestionView } from '../../_lib/lthr-suggestion';
 import { toMaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
 import { toRestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
 
+import { toCorrectionFactorSettings } from './correction-factor-values';
 import { toProfileFormValues } from './form-values';
 import { toIntervalsFormDefaults } from './intervals-values';
 import {
@@ -115,6 +119,8 @@ export async function loadSettingsData(): Promise<SettingsData> {
     maxHrSuggestion,
     restingHrSuggestion,
     lthrSuggestion,
+    elevationCorrection,
+    vo2maxCorrection,
     intervals,
     forecastLocationLabel,
     account,
@@ -126,6 +132,8 @@ export async function loadSettingsData(): Promise<SettingsData> {
       getMaxHrSuggestion(),
       getRestingHrSuggestion(),
       getLthrSuggestion(),
+      getElevationCorrectionSettings(),
+      getCurrentVo2maxCorrection(),
       getIntervalsSettings(),
       getForecastLocationLabel(),
       getAccountSummary(),
@@ -157,6 +165,15 @@ export async function loadSettingsData(): Promise<SettingsData> {
     // La FC seuil en vigueur, lue seule : sans elle, l'athlète n'aurait aucun
     // endroit où voir ce qui ancre ses zones.
     lthrBpm: profile?.lthrBpm ?? null,
+    // Un réglage de calcul, pas une mesure : il n'a pas de proposition à
+    // accepter, et sa place est sous les données physiologiques qu'il pondère.
+    elevationCorrection,
+    // Le second réglage de calcul, sous le premier : le facteur correctif
+    // pondère la même chose que la correction d'altitude — ce que l'appli lit
+    // d'une séance. Le millésime de la course qui le calibre se lit contre le
+    // jour courant, d'où le `toCivilDate` : une course de l'an dernier ne se
+    // date pas comme une course de la semaine.
+    correctionFactor: toCorrectionFactorSettings(vo2maxCorrection, toCivilDate(new Date())),
     intervals: toIntervalsFormDefaults(intervals),
     // Reconstruit champ par champ plutôt que passé tel quel : ce qui part au
     // navigateur est ce qui est écrit ici, et rien de ce que la session

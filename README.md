@@ -134,6 +134,7 @@ environ une minute après sa synchronisation sur intervals.icu.**
 | `pnpm db:generate` | Génère une migration après modification du schéma |
 | `pnpm db:migrate` | Applique les migrations |
 | `pnpm db:backfill:best-segments` | Calcule les meilleurs efforts de l'historique importé avant la table qui les porte |
+| `pnpm db:backfill:elevation` | Calcule le dénivelé (D+ / D−) de l'historique importé avant les colonnes qui le portent |
 
 ### Rattraper les meilleurs efforts
 
@@ -155,6 +156,30 @@ se relance sans risque : ce qui est déjà en base n'est pas recalculé.
 
 Tant qu'il n'a pas tourné, l'écran des records annonce ses valeurs comme
 **provisoires** et indique combien de séances restent à balayer.
+
+### Rattraper le dénivelé
+
+Le dénivelé positif et négatif d'une séance est écrit **à l'import** sur la ligne
+d'activité : depuis le champ `total_ascent` / `total_descent` du fichier FIT
+quand l'appareil les écrit, sinon calculé depuis le flux d'altitude, avec le même
+filtre anti-bruit que les splits kilométriques. Beaucoup de montres n'écrivent
+ni l'un ni l'autre — le résumé d'une séance affichait alors « D+ — » alors que
+ses splits, eux, comptaient les mètres.
+
+```bash
+pnpm db:backfill:elevation   # une fois, après `pnpm db:migrate`
+```
+
+Le script balaie les séances portant un flux d'altitude à qui il manque un des
+deux sens, par lots de 50, en lisant les flux **une séance à la fois**. Il
+journalise sa progression, passe sans broncher sur un flux illisible, et se
+relance sans risque : l'écriture est une complétion (`coalesce`), elle n'écrase
+jamais ce que le fichier avait dit.
+
+Les deux colonnes servent l'affichage du D+ **et** la correction d'altitude de la
+VO₂max (formule de Peter Greif, réglable dans « Réglages › Profil ») : sans
+elles, la correction n'aurait pu s'appliquer qu'au détail d'une séance, jamais à
+la forme sur 30 jours.
 
 > **pnpm uniquement.** Utiliser `pnpm exec` / `pnpm dlx` plutôt que npx.
 

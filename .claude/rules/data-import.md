@@ -338,16 +338,46 @@ des dizaines de mégaoctets de JSONB à chaque affichage, et de faire lire
 `activity_streams` à des modules d'écran qui ne l'ont jamais fait
 (`progression.ts`, `dashboard.ts`).
 
+Le **dénivelé** (`activities.elevation_gain_m`, `elevation_loss_m`) relève du
+même critère, et il a fallu le persister pour une raison de plus : l'agrégat de
+VO₂max (`collectRunVo2max`, `averageVo2max`) travaille sur des lignes
+`activities` légères et ne lit **jamais** `activity_streams`. Sans colonne, la
+correction d'altitude de la VO₂max (formule de Peter Greif, cf.
+`lib/metrics/elevation-correction.ts`) n'aurait pu s'appliquer qu'au détail
+d'une séance, et les deux écrans se seraient contredits. Deux sources, dans cet
+ordre : `total_ascent` / `total_descent` de la session FIT, puis — quand
+l'appareil ne les écrit pas, ce qui est le cas courant — le flux d'altitude,
+balayé par **la fonction qui sert déjà aux splits** (`lib/metrics/elevation.ts`).
+Deux implémentations du même filtre auraient fini par annoncer deux dénivelés
+pour une même séance, ce qui serait pire que le tiret d'origine.
+
+**Le couple D+/D− est indivisible.** La complétion colonne par colonne, qui est
+la règle ailleurs, ne s'applique pas ici : une montée mesurée par l'algorithme
+de l'appareil et une descente mesurée par notre hystérésis ne se comparent pas,
+et Greif les fait pourtant entrer **ensemble** dans une même formule — sur une
+boucle qui revient à son altitude de départ, on persisterait un D+ 45 pour un
+D− 32. Le repli ne remplit donc la paire que si elle est **entièrement** vide ;
+un appareil qui n'écrit qu'un seul sens garde sa valeur, reste sans l'autre, et
+la correction d'altitude ne s'applique simplement pas à cette séance. Perdre la
+correction vaut mieux que la calculer sur une paire dépareillée — et mieux que
+d'écraser une mesure de l'appareil par la nôtre.
+
+Règle générale à en tirer : **des colonnes qui entrent ensemble dans un calcul
+se remplissent ensemble ou pas du tout.** La complétion par champ ne vaut que
+pour des valeurs indépendantes.
+
 Toute colonne calculée à l'ingestion vaut **pour les imports à venir** et laisse
 l'historique déjà en base sans valeur : soit on l'assume (`NULL`, cf. la FC max
-soutenue), soit on livre un rattrapage — `pnpm db:backfill:best-segments`, par
-lots, idempotent, autonome comme `src/data/db/migrate.ts`. Tant qu'il n'est pas
-passé, l'écran doit **dire** que sa lecture est provisoire plutôt que de laisser
-croire à un historique complet.
+soutenue), soit on livre un rattrapage — `pnpm db:backfill:best-segments`,
+`pnpm db:backfill:elevation`, par lots, idempotents, autonomes comme
+`src/data/db/migrate.ts`. Tant qu'il n'est pas passé, l'écran doit **dire** que
+sa lecture est provisoire plutôt que de laisser croire à un historique complet.
 
 **Un rattrapage doit pouvoir finir.** Le compteur qui déclenche cet
 avertissement se lit « il reste des séances à balayer » ; il doit donc pouvoir
-atteindre zéro. Une séance balayée **sans résultat** — flux de distance absent,
+atteindre zéro. (`activities.elevation_scanned_at` est la seconde application de
+cette règle : mêmes causes, même marque, même prédicat partagé entre le DAL et
+le script — cf. `src/data/db/elevation-scope.ts`.) Une séance balayée **sans résultat** — flux de distance absent,
 canal vide d'un import indoor, valeurs non numériques d'un ancien fichier — se
 marque comme balayée (`activities.best_segments_scanned_at`, posée dans la même
 transaction que l'écriture, y compris quand le calcul ne rend rien). Sans cette

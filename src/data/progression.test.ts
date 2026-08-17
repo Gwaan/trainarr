@@ -52,6 +52,7 @@ vi.mock('./db/client', async () => {
   type Table = Parameters<typeof getTableName>[0];
 
   type Chain = PromiseLike<unknown[]> & {
+    leftJoin: () => Chain;
     where: () => Chain;
     orderBy: () => Chain;
     limit: () => Chain;
@@ -60,6 +61,9 @@ vi.mock('./db/client', async () => {
   const chainFor = (table: Table): Chain => {
     const name = getTableName(table);
     const chain: Chain = {
+      // La lecture des courses déclarées joint `activities` pour y prendre la FC
+      // et le dénivelé (cf. `./race-results`).
+      leftJoin: () => chain,
       where: () => chain,
       orderBy: () => chain,
       limit: () => chain,
@@ -149,6 +153,10 @@ const ATHLETE: Athlete = {
   wellnessReadingDay: null,
   pushDailySession: true,
   pushActivityAnalyzed: true,
+  vo2maxElevationCorrection: true,
+  vo2maxAscentCoefM: 2,
+  vo2maxDescentCoefM: -1,
+  vo2maxCorrectionFactor: null,
   pushSuggestions: true,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
@@ -172,6 +180,8 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     maxHrBpm: 158,
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
+    elevationLossM: null,
+    elevationScannedAt: null,
     bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,
@@ -224,6 +234,19 @@ describe('getProgression — base vide', () => {
       volume: [],
       fitnessUnavailable: null,
       vo2maxUnavailable: null,
+      // Sans athlète, aucune course déclarée : le facteur neutre, et la cause.
+      vo2maxCorrection: {
+        factor: 1,
+        source: 'default',
+        manualFactor: null,
+        automaticFactor: 1,
+        unavailable: 'no-race',
+        calibratedOnRaceId: null,
+        races: [],
+      },
+      // Sans athlète, aucune séance : rien qui reste à balayer, donc aucune
+      // lecture provisoire à annoncer.
+      pendingElevationActivities: 0,
       // Sans athlète, aucun relevé bien-être : la fenêtre se réduit au jour même.
       wellness: { from: '2026-08-10', to: '2026-08-10', days: [] },
     });

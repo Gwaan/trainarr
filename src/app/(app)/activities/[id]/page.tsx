@@ -5,6 +5,8 @@ import { connection } from "next/server";
 
 import { getActivityFeedback } from "@/data/activity-feedback";
 import { getActivityWeather } from "@/data/activity-weather";
+import { getRaceResultForActivity } from "@/data/race-results";
+import { isRunning } from "@/data/training-metrics";
 import { getAiAvailability } from "@/lib/ai/availability";
 
 import { requireSession } from "../../_lib/require-session";
@@ -20,11 +22,13 @@ import { DecouplingPanel } from "./_components/decoupling-panel";
 import { DistributionPanel } from "./_components/distribution-panel";
 import { HrZonesPanel } from "./_components/hr-zones-panel";
 import { NoDetailedData } from "./_components/no-detailed-data";
+import { RacePanel } from "./_components/race-panel";
 import { SessionGoalsPanel } from "./_components/session-goals-panel";
 import { WeatherPanel } from "./_components/weather-panel";
 import { parseActivityId } from "./_lib/activity-id";
 import { hrDistributionModel, paceDistributionModel } from "./_lib/distribution-model";
 import { loadActivity } from "./_lib/load-activity";
+import { raceFormValues } from "./_lib/race-model";
 
 type PageProps = { params: Promise<{ id: string }> };
 
@@ -91,9 +95,14 @@ async function ActivityDetail({ params }: PageProps) {
   const id = parseActivityId((await params).id);
   if (id === null) notFound();
 
-  // Deux lectures indépendantes : la séance et sa météo partent ensemble. Le DAL
-  // borne l'une et l'autre à l'athlète de la session.
-  const [full, weather] = await Promise.all([loadActivity(id), getActivityWeather(id)]);
+  // Trois lectures indépendantes : la séance, sa météo et la course qu'on y a
+  // éventuellement déclarée partent ensemble. Le DAL borne les trois à l'athlète
+  // de la session.
+  const [full, weather, declaredRace] = await Promise.all([
+    loadActivity(id),
+    getActivityWeather(id),
+    getRaceResultForActivity(id),
+  ]);
   if (full === null) notFound();
 
   const { detail, charts, splits, hrZones, decoupling, bestSegments } = full;
@@ -102,6 +111,7 @@ async function ActivityDetail({ params }: PageProps) {
     trimp: full.trimp,
     trimpContext: full.trimpContext,
     effectiveVo2max: full.effectiveVo2max,
+    vo2maxCorrectionFactor: full.vo2maxCorrectionFactor,
   };
 
   const path = charts?.latlng ?? null;
@@ -219,6 +229,18 @@ async function ActivityDetail({ params }: PageProps) {
             />
           ) : null}
         </div>
+      ) : null}
+
+      {/* En dernier, et c'est voulu : déclarer une course est une **action**, pas
+          une lecture — elle n'a pas à s'interposer entre les mesures de la
+          séance. Course à pied seulement : le facteur correctif qu'elle calibre
+          ne s'applique qu'à la VO₂max, qui n'existe pas à vélo. */}
+      {isRunning(detail.sportType) ? (
+        <RacePanel
+          activityId={id}
+          declaredRaceId={declaredRace?.id ?? null}
+          values={raceFormValues(detail, declaredRace)}
+        />
       ) : null}
     </>
   );

@@ -61,6 +61,26 @@ export function formatVo2max(value: number): string {
   return formatNumber(value, 1);
 }
 
+/**
+ * Facteur correctif de la VO₂max, écrit comme il se lit : `×1,11`, `×1,128`,
+ * `×1`.
+ *
+ * Trois décimales **au plus**, et les zéros de queue tombent : un facteur
+ * neutre s'écrit « ×1 » et non « ×1,000 », qui laisserait croire à une
+ * précision de mesure là où il n'y a qu'une absence de recalage. Le millième est
+ * la précision retenue pour la saisie manuelle (cf. `data/vo2max-correction`),
+ * c'est donc lui qui plafonne l'affichage — un facteur qui se relirait
+ * autrement qu'il ne s'écrit serait déroutant.
+ *
+ * {@link formatNumber} ne convient pas ici : elle **fixe** le nombre de
+ * décimales, ce qui est le bon comportement pour une allure ou une VO₂max mais
+ * pas pour un multiplicateur. Son signe moins typographique n'a rien à y faire
+ * non plus — un facteur est toujours positif.
+ */
+export function formatCorrectionFactor(factor: number): string {
+  return `×${String(Number(factor.toFixed(3))).replace(".", ",")}`;
+}
+
 /** CTL / ATL / TSB à l'entier, ex. `68`, `−8`. */
 export function formatLoad(value: number): string {
   return formatNumber(value, 0);

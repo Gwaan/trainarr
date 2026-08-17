@@ -26,6 +26,18 @@ function PanelFrame({
  * empilés, kilomètres et zones, distributions, dérive et meilleurs segments)
  * pour qu'aucun bloc ne saute à l'arrivée des données.
  * Toute modification de la mise en page doit être répercutée ici.
+ *
+ * **Deux familles de blocs n'y figurent pas**, pour deux raisons distinctes :
+ *
+ * 1. **les blocs vraiment conditionnels** — la météo, les objectifs de la
+ *    séance, la ligne de recalage de la VO₂max (seulement quand une course est
+ *    déclarée) : ils n'existent pas sur toutes les séances, et les réserver
+ *    ferait sauter la page dans l'autre sens — plus souvent, et vers le haut ;
+ * 2. **le bloc « Course officielle »**, qui n'est pas dans ce cas : la page ne
+ *    le conditionne qu'à `isRunning`, il est donc présent sur la quasi-totalité
+ *    des séances d'une appli de running. S'il n'est pas réservé, c'est qu'il est
+ *    **en fin de page** : ce qui apparaît sous le dernier panneau ne décale
+ *    rien de ce qu'on est en train de lire.
  */
 export function ActivityDetailSkeleton() {
   return (

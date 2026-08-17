@@ -10,6 +10,7 @@ const { mocks } = vi.hoisted(() => ({
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
     saveActivityBestSegments: vi.fn(),
+    recordActivityElevation: vi.fn(),
     hasActivityStreams: vi.fn(),
     linkActivityToPlannedSession: vi.fn(),
     maybeReviewActivePlan: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock('@/data/activities', () => ({
   upsertActivityFromFit: mocks.upsertActivityFromFit,
   saveActivityStreams: mocks.saveActivityStreams,
   saveActivityBestSegments: mocks.saveActivityBestSegments,
+  recordActivityElevation: mocks.recordActivityElevation,
   hasActivityStreams: mocks.hasActivityStreams,
 }));
 
@@ -71,6 +73,7 @@ const PARSED: ParsedFitActivity = {
   movingTimeS: 3_000,
   elapsedTimeS: 3_120,
   elevationGainM: 120,
+  elevationLossM: null,
   avgHrBpm: 149,
   maxHrBpm: 171,
   avgCadenceSpm: 176,
@@ -104,6 +107,21 @@ const RUN_2K: ParsedFitActivity = {
   },
 };
 
+/**
+ * Une séance vallonnée dont la **session ne dit rien du dénivelé** — le cas de
+ * la montre de l'athlète. Le flux d'altitude, lui, porte une bosse de 12 m, une
+ * redescente de 5 m, et du bruit d'altimètre sous le seuil.
+ */
+const HILLY: ParsedFitActivity = {
+  ...PARSED,
+  elevationGainM: null,
+  elevationLossM: null,
+  streams: {
+    time: [0, 1, 2, 3, 4, 5],
+    altitude: [100, 100.4, 99.6, 112, 111.7, 107],
+  },
+};
+
 /** Une séance dont le flux cardiaque tient un plateau, pic de capteur compris. */
 const SUSTAINED: ParsedFitActivity = {
   ...PARSED,
@@ -127,6 +145,7 @@ beforeEach(() => {
   mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'created' });
   mocks.saveActivityStreams.mockResolvedValue(undefined);
   mocks.saveActivityBestSegments.mockResolvedValue(undefined);
+  mocks.recordActivityElevation.mockResolvedValue(undefined);
   mocks.hasActivityStreams.mockResolvedValue(false);
   mocks.linkActivityToPlannedSession.mockResolvedValue(true);
   mocks.maybeReviewActivePlan.mockResolvedValue(undefined);
@@ -298,6 +317,90 @@ describe('ingestFitBuffer', () => {
     });
 
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('meilleurs efforts'));
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('base injoignable'));
+    logged.mockRestore();
+  });
+
+  /*
+   * Le dénivelé : le repli qui rend la donnée que l'appli avait déjà sans
+   * l'afficher. Sa règle de complétion vit dans le DAL ; ce qui se vérifie ici,
+   * c'est **quand** l'ingestion calcule, et sur quoi.
+   */
+  it('calcule le dénivelé depuis le flux quand le fichier ne le porte pas', async () => {
+    mocks.parseFitActivity.mockReturnValue(HILLY);
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    // Le même filtre anti-bruit que les splits : l'oscillation de 40 cm ne
+    // compte pas, la bosse de 12 m et sa redescente de 5 m comptent.
+    expect(mocks.recordActivityElevation).toHaveBeenCalledWith(42, ATHLETE_ID, {
+      gainM: 12,
+      lossM: 5,
+    });
+  });
+
+  it('ne rebalaie pas le flux quand la session porte déjà les deux sens', async () => {
+    // Le DAL garderait de toute façon les valeurs du fichier : autant ne pas
+    // parcourir la série. La marque de balayage, elle, est posée quand même —
+    // d'où l'appel avec `null`.
+    mocks.parseFitActivity.mockReturnValue({ ...HILLY, elevationGainM: 120, elevationLossM: 118 });
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordActivityElevation).toHaveBeenCalledWith(42, ATHLETE_ID, null);
+  });
+
+  it.each([
+    ['sans D−', { elevationGainM: 120, elevationLossM: null }],
+    ['sans D+', { elevationGainM: null, elevationLossM: 118 }],
+  ])(
+    'ne complète pas depuis le flux la paire qu’un appareil a dite à moitié (%s)',
+    async (_label, sides) => {
+      // D+ et D− entrent **ensemble** dans la formule de Greif : les prendre à
+      // deux sources — l'algorithme de la montre d'un côté, notre hystérésis de
+      // 1 m de l'autre — donnerait une paire dépareillée. La séance garde donc
+      // le sens que le fichier dit, l'autre reste `NULL`, et la correction
+      // d'altitude ne s'applique pas : c'est la réponse honnête.
+      mocks.parseFitActivity.mockReturnValue({ ...HILLY, ...sides });
+
+      await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+      expect(mocks.recordActivityElevation).toHaveBeenCalledWith(42, ATHLETE_ID, null);
+    },
+  );
+
+  it('marque quand même la séance balayée sans flux d’altitude', async () => {
+    // Sans cet appel, le rattrapage n'aurait aucun moyen de faire sortir cette
+    // séance de son prédicat : le compteur ne redescendrait jamais à zéro.
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordActivityElevation).toHaveBeenCalledWith(42, ATHLETE_ID, null);
+  });
+
+  it('n’écrit pas le dénivelé d’un doublon dont les séries sont écartées', async () => {
+    // Même règle que la FC max soutenue et les meilleurs efforts : le dénivelé
+    // de repli dérive du flux qu'on vient d'écrire. S'il n'a pas été retenu, la
+    // valeur affichée doit rester accordée aux séries qui sont en base.
+    mocks.upsertActivityFromFit.mockResolvedValue({ activityId: 42, outcome: 'same-session' });
+    mocks.parseFitActivity.mockReturnValue(HILLY);
+    mocks.hasActivityStreams.mockResolvedValue(true);
+
+    await ingestFitBuffer(BUFFER, ATHLETE_ID);
+
+    expect(mocks.recordActivityElevation).not.toHaveBeenCalled();
+  });
+
+  it('journalise un dénivelé en échec sans faire échouer l’import', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.parseFitActivity.mockReturnValue(HILLY);
+    mocks.recordActivityElevation.mockRejectedValue(new Error('base injoignable'));
+
+    await expect(ingestFitBuffer(BUFFER, ATHLETE_ID)).resolves.toEqual({
+      status: 'created',
+      activityId: 42,
+    });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('dénivelé'));
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('base injoignable'));
     logged.mockRestore();
   });

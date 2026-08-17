@@ -109,6 +109,7 @@ const ACTIVITY: ActivityFullDto = {
   // coach l'ignore, comme la comparaison aux objectifs ci-dessus.
   trimpContext: null,
   effectiveVo2max: 48.2,
+  vo2maxCorrectionFactor: null,
 };
 
 const SNAPSHOT: TrainingSnapshotDto = {

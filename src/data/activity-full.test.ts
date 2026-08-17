@@ -58,6 +58,7 @@ vi.mock('./db/client', async () => {
   type Chain = PromiseLike<unknown[]> & {
     where: (clause: unknown) => Chain;
     innerJoin: (table: Table, clause: unknown) => Chain;
+    leftJoin: (table: Table, clause: unknown) => Chain;
     orderBy: () => Chain;
     limit: () => Chain;
   };
@@ -73,6 +74,12 @@ vi.mock('./db/client', async () => {
         return chain;
       },
       innerJoin: (_joined, clause) => {
+        query.join = clause;
+        return chain;
+      },
+      // La lecture des courses déclarées joint `activities` pour y prendre la FC
+      // et le dénivelé (cf. `./race-results`).
+      leftJoin: (_joined, clause) => {
         query.join = clause;
         return chain;
       },
@@ -108,6 +115,10 @@ const ATHLETE: Athlete = {
   wellnessReadingDay: null,
   pushDailySession: true,
   pushActivityAnalyzed: true,
+  vo2maxElevationCorrection: true,
+  vo2maxAscentCoefM: 2,
+  vo2maxDescentCoefM: -1,
+  vo2maxCorrectionFactor: null,
   pushSuggestions: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -132,6 +143,8 @@ const ACTIVITY: Activity = {
   maxHrBpm: 168,
   avgPaceSecPerKm: 250,
   avgCadenceSpm: 172,
+  elevationLossM: null,
+  elevationScannedAt: null,
   bestSegmentsScannedAt: null,
   sustainedMaxHrBpm: null,
   lthrSampleBpm: null,

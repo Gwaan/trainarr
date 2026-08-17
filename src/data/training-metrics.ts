@@ -4,7 +4,9 @@ import { civilDaysBetween, shiftCivilDate, toCivilDate } from '@/lib/dates/civil
 import {
   computeTrimp,
   estimateEffectiveVo2max,
+  type ActivityElevation,
   type DailyTrimp,
+  type ElevationCorrection,
   type LoadPoint,
 } from '@/lib/metrics';
 
@@ -74,6 +76,40 @@ export type Vo2maxUnavailableDto = {
 export const VO2MAX_WINDOW_DAYS = 30;
 
 const CTL_DELTA_DAYS = 7;
+
+/**
+ * Les coefficients de la correction d'altitude tels que le profil les règle,
+ * `null` quand l'athlète l'a désactivée.
+ *
+ * Ils vivent sur la ligne d'athlète (`Athlete`), déjà en main de tous les
+ * appelants d'ici : ce module ne dépend d'aucun autre module du DAL, et ce n'est
+ * pas pour aller y chercher une lecture. Le détail d'une séance, lui, les lit
+ * par `getElevationCorrection` — deux chemins, une seule règle.
+ */
+export function elevationCorrectionOf(profile: Athlete): ElevationCorrection | null {
+  return profile.vo2maxElevationCorrection
+    ? { ascentCoefM: profile.vo2maxAscentCoefM, descentCoefM: profile.vo2maxDescentCoefM }
+    : null;
+}
+
+/**
+ * Le dénivelé **persisté** d'une séance, tel que la correction d'altitude
+ * l'attend.
+ *
+ * Il est lu sur la ligne d'activité et **jamais recalculé depuis les flux** :
+ * ces agrégats travaillent sur des lignes légères et ne lisent pas
+ * `activity_streams` (invariante documentée dans `./progression.ts`). C'est
+ * précisément pourquoi le dénivelé est une colonne — sans elle, la correction
+ * n'aurait pu s'appliquer qu'au détail d'une séance, et la tuile de forme aurait
+ * contredit l'écran de la séance qui l'alimente.
+ *
+ * Une colonne à `null` (dénivelé inconnu) laisse simplement la correction ne pas
+ * s'appliquer : la valeur reste celle d'avant, ce qui n'est pas une correction
+ * nulle.
+ */
+function elevationOf(row: Activity): ActivityElevation {
+  return { gainM: row.elevationGainM, lossM: row.elevationLossM };
+}
 
 /** La VO₂max n'a de sens qu'en course à pied (`Run`, `TrailRun`, `VirtualRun`…). */
 export function isRunning(sportType: string): boolean {
@@ -157,15 +193,27 @@ export function buildFitness(series: readonly LoadPoint[]): FitnessDto | null {
  * portent l'essentiel des aberrations (FC pas encore stabilisée, GPS en ville).
  * S'y ajoutent les garde-fous de `estimateEffectiveVo2max`, qui écarte en amont
  * les efforts trop courts et les valeurs hors de [20, 90].
+ *
+ * **La correction d'altitude et le facteur correctif s'appliquent ici comme au
+ * détail d'une séance** — mêmes coefficients, même dénivelé persisté, même
+ * facteur. Deux traitements différents et les deux écrans se contrediraient : la
+ * tuile de forme n'est que la moyenne des valeurs que chaque séance affiche.
+ *
+ * `correctionFactor` est **exigé**, sans valeur par défaut : un défaut à 1
+ * aurait laissé un appelant oublier de le passer sans que rien ne le signale, et
+ * la contradiction entre écrans serait revenue par cette porte-là. Il vient de
+ * `./vo2max-correction`, qui le calibre sur les courses déclarées.
  */
 export function averageVo2max(
   rows: readonly Activity[],
   profile: Athlete,
   after: string,
   until: string,
+  correctionFactor: number,
 ): number | null {
   let weightedSum = 0;
   let totalWeight = 0;
+  const elevationCorrection = elevationCorrectionOf(profile);
 
   for (const row of rows) {
     if (!isRunning(row.sportType)) continue;
@@ -178,6 +226,9 @@ export function averageVo2max(
       movingTimeS: row.movingTimeS,
       avgHrBpm: row.avgHrBpm,
       maxHrBpm: profile.maxHrBpm,
+      elevation: elevationOf(row),
+      elevationCorrection,
+      correctionFactor,
     });
     if (value === null) continue;
 
@@ -190,19 +241,33 @@ export function averageVo2max(
   return totalWeight > 0 ? weightedSum / totalWeight : null;
 }
 
-/** VO₂max courante (30 j glissants) et son écart aux 30 jours précédents. */
+/**
+ * VO₂max courante (30 j glissants) et son écart aux 30 jours précédents.
+ *
+ * Le facteur correctif s'applique **aux deux fenêtres** : c'est un recalage
+ * individuel, pas un événement daté. L'appliquer à la seule fenêtre courante
+ * afficherait une progression de plusieurs points le jour où une course est
+ * déclarée, ce qui ne serait la progression de personne.
+ */
 export function buildVo2max(
   rows: readonly Activity[],
   profile: Athlete,
   today: string,
+  correctionFactor: number,
 ): Vo2maxDto | null {
   const previousWindowStart = shiftCivilDate(today, -2 * VO2MAX_WINDOW_DAYS);
   const currentWindowStart = shiftCivilDate(today, -VO2MAX_WINDOW_DAYS);
 
-  const current = averageVo2max(rows, profile, currentWindowStart, today);
+  const current = averageVo2max(rows, profile, currentWindowStart, today, correctionFactor);
   if (current === null) return null;
 
-  const previous = averageVo2max(rows, profile, previousWindowStart, currentWindowStart);
+  const previous = averageVo2max(
+    rows,
+    profile,
+    previousWindowStart,
+    currentWindowStart,
+    correctionFactor,
+  );
   return { value: current, delta30d: previous === null ? null : current - previous };
 }
 
@@ -266,8 +331,10 @@ export type RunVo2maxSample = {
 export function collectRunVo2max(
   rows: readonly Activity[],
   profile: Athlete,
+  correctionFactor: number,
 ): RunVo2maxSample[] {
   const samples: RunVo2maxSample[] = [];
+  const elevationCorrection = elevationCorrectionOf(profile);
 
   for (const row of rows) {
     if (!isRunning(row.sportType)) continue;
@@ -277,6 +344,9 @@ export function collectRunVo2max(
       movingTimeS: row.movingTimeS,
       avgHrBpm: row.avgHrBpm,
       maxHrBpm: profile.maxHrBpm,
+      elevation: elevationOf(row),
+      elevationCorrection,
+      correctionFactor,
     });
     if (value === null) continue;
 

@@ -14,6 +14,7 @@ import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
 } from "../_lib/metric-unavailable";
+import { shortPendingElevationNote } from "../_lib/pending-elevation";
 import { MetricInfo } from "./metric-info";
 import { MetricPlaceholder } from "./metric-placeholder";
 import { TsbGauge } from "./tsb-gauge";
@@ -28,6 +29,13 @@ export type KeyMetricsProps = {
   /** Cause réelle de l'absence de VO₂max — non-`null` quand `vo2max` l'est. */
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
   /**
+   * Séances dont le dénivelé reste à établir. Non nul, la tuile de VO₂max est
+   * une lecture **provisoire** et le dit : son écart à 30 jours compare alors
+   * une fenêtre corrigée du dénivelé à une fenêtre qui ne l'est pas (cf.
+   * `_lib/pending-elevation`).
+   */
+  pendingElevationActivities: number;
+  /**
    * Les dernières mesures de la montre. `null` sans profil : la grille se
    * réduit alors à ce que l'onboarding permet de dire.
    */
@@ -41,6 +49,7 @@ export function KeyMetrics({
   fitnessUnavailable,
   vo2max,
   vo2maxUnavailable,
+  pendingElevationActivities,
   wellness,
   hasProfile,
 }: KeyMetricsProps) {
@@ -66,6 +75,11 @@ export function KeyMetrics({
           info={<MetricInfo id="vo2max" />}
           value={formatVo2max(vo2max.value)}
           delta={toDelta(vo2max.delta30d, 1, "negative")}
+          /* La seule note de cette grille, et elle ne s'affiche que lorsqu'il y
+             a un doute à lever : le rattrapage du dénivelé n'a pas fini de
+             passer, donc la valeur et surtout son écart mêlent deux lectures.
+             La phrase complète, avec la commande, vit sur « Progression ». */
+          note={shortPendingElevationNote(pendingElevationActivities) ?? undefined}
           className={fitness ? undefined : vo2maxSpan}
         />
       ) : (

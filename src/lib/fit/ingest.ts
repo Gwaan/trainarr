@@ -2,6 +2,7 @@ import 'server-only';
 
 import {
   hasActivityStreams,
+  recordActivityElevation,
   saveActivityBestSegments,
   saveActivityStreams,
   upsertActivityFromFit,
@@ -13,7 +14,7 @@ import { linkActivityToPlannedSession } from '@/data/plan-reconciliation';
 import { isRunning } from '@/data/training-metrics';
 import { maybeApplyFitnessTest } from '@/lib/ai/fitness-test-service';
 import { maybeReviewActivePlan } from '@/lib/ai/review-service';
-import { computeBestSegments, sustainedMaxHrBpm } from '@/lib/metrics';
+import { computeBestSegments, elevationChange, sustainedMaxHrBpm } from '@/lib/metrics';
 import { notifyActivityAnalyzed } from '@/lib/push/notices';
 import { recordActivityWeather } from '@/lib/weather/service';
 
@@ -127,6 +128,62 @@ async function recordBestSegments(
   } catch (error) {
     const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
     console.error(`[fit] activité ${activityId} : meilleurs efforts non enregistrés — ${reason}`);
+  }
+}
+
+/**
+ * Établit le **dénivelé** de la séance depuis son flux d'altitude, quand le
+ * fichier ne le dit pas lui-même.
+ *
+ * ## Pourquoi ce repli existe
+ *
+ * `session.total_ascent` et `session.total_descent` sont les champs canoniques,
+ * et le parseur les lit. La montre de l'athlète n'en écrit aucun : le résumé
+ * d'une séance affichait donc « D+ — » pendant que ses splits — calculés depuis
+ * le flux, eux — annonçaient +9, +1 et +22 m. L'appli avait la donnée et
+ * montrait un tiret.
+ *
+ * Le repli utilise **exactement le même filtre** que `computeSplits` — une
+ * fonction unique dans `lib/metrics/elevation.ts`, pas deux implémentations
+ * d'accord par hasard. Sans quoi le résumé et le tableau des splits auraient pu
+ * annoncer deux dénivelés différents pour la même séance, ce qui serait pire que
+ * le tiret d'origine.
+ *
+ * **Complétion, jamais écrasement, et la paire d'un seul tenant** : ce que le
+ * fichier dit prime, et le repli ne remplit la paire (D+, D−) que si elle est
+ * **entièrement** vide — cf. `elevationWrite` (`src/data/db/elevation-scope.ts`),
+ * qui porte la justification. Un appareil qui écrit `total_ascent` sans
+ * `total_descent` garde donc son D+ et reste sans D− : la correction d'altitude
+ * ne s'appliquera pas à cette séance, ce qui vaut mieux qu'une paire dont
+ * chaque sens sort d'un filtre différent.
+ *
+ * Et l'appel a lieu **même quand rien n'est calculable** — sans flux, ou avec un
+ * flux d'une seule mesure : il pose alors la seule marque de balayage, qui fait
+ * sortir la séance du prédicat de rattrapage. Un rattrapage doit pouvoir finir.
+ *
+ * **Jamais une condition de l'import**, comme le rapprochement, le seuil, la
+ * météo et les meilleurs efforts : une séance dont le dénivelé n'est pas écrit
+ * reste une séance valide, et elle ne doit pas repartir en `failed/` pour ça.
+ * Le prochain passage du rattrapage (`pnpm db:backfill:elevation`) la ramassera.
+ * L'échec se journalise avec son motif.
+ */
+async function recordElevation(
+  activityId: number,
+  athleteId: number,
+  parsed: ParsedFitActivity,
+): Promise<void> {
+  // Inutile de balayer le flux dès que la session dit **un** des deux sens :
+  // l'écriture est atomique par paire, elle refuserait le calcul de toute façon
+  // (une paire à moitié dite par le fichier lui reste acquise). Autant ne pas
+  // parcourir la série. Il reste à poser la marque — d'où l'appel, avec `null`.
+  const fileKnowsASide = parsed.elevationGainM !== null || parsed.elevationLossM !== null;
+  const change = fileKnowsASide ? null : elevationChange(parsed.streams.altitude ?? []);
+
+  try {
+    await recordActivityElevation(activityId, athleteId, change);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name} : ${error.message}` : String(error);
+    console.error(`[fit] activité ${activityId} : dénivelé non enregistré — ${reason}`);
   }
 }
 
@@ -313,6 +370,12 @@ export async function ingestFitBuffer(buffer: Buffer, athleteId: number): Promis
       sustainedMaxHrBpm(parsed.streams.heartrate ?? [], parsed.streams.time ?? []),
     );
     await recordBestSegments(activityId, athleteId, parsed);
+    // Sous la même condition, et pour la même raison : le dénivelé de repli
+    // dérive du flux d'altitude qu'on vient d'écrire. Un fichier dont on n'a pas
+    // retenu les séries (doublon venu d'une autre source) n'a pas non plus à
+    // décider du D+ de la séance — la valeur affichée resterait alors accordée
+    // aux splits, qui sont calculés sur les séries en base.
+    await recordElevation(activityId, athleteId, parsed);
   }
 
   await linkToPlannedSession(activityId, athleteId);

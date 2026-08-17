@@ -5,7 +5,11 @@ import { and, desc, eq, getTableColumns, isNull, or } from 'drizzle-orm';
 import { isoWeekEnd, isoWeekNumber, shiftCivilDate, toCivilDate } from '@/lib/dates/civil';
 import { computeLoadSeries, type LoadPoint } from '@/lib/metrics';
 
-import { toActivitySummaryDto, type ActivitySummaryDto } from './activities';
+import {
+  countPendingElevation,
+  toActivitySummaryDto,
+  type ActivitySummaryDto,
+} from './activities';
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, plannedSessions, plans, type PlannedSession } from './db/schema';
@@ -16,6 +20,7 @@ import {
   selectRestingHrSuggestion,
   type RestingHrSuggestionDto,
 } from './resting-hr-suggestion';
+import { getVo2maxCorrection } from './vo2max-correction';
 import { getWeatherForecast, type WeatherForecastDto } from './weather-forecast';
 import {
   emptyWellnessSummary,
@@ -92,6 +97,21 @@ export type DashboardSummary = {
   fitnessUnavailable: FitnessUnavailableDto | null;
   vo2max: Vo2maxDto | null;
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /**
+   * Nombre de séances dont le **dénivelé** reste à établir (cf.
+   * `countPendingElevation`). Tant qu'il est non nul, la tuile de VO₂max — sa
+   * valeur comme son écart à 30 jours — est une lecture **provisoire**, et la
+   * tuile le dit.
+   *
+   * Ici pour la même raison que sur « Progression », mais l'enjeu porte surtout
+   * sur l'**écart** : entre la migration des colonnes de dénivelé et le passage
+   * de `pnpm db:backfill:elevation`, les 30 derniers jours portent la correction
+   * d'altitude et les 30 précédents ne la portent pas. Le « +1,3 » affiché est
+   * alors un artefact d'ingestion, pas une progression — et c'est ce chiffre-là
+   * que l'athlète lit en premier, sur le seul écran qu'elle ouvre sans rien
+   * chercher.
+   */
+  pendingElevationActivities: number;
   loadWeeks: LoadWeekDto[];
   todaySession: PlannedSessionDto | null;
   /**
@@ -171,6 +191,8 @@ const EMPTY_SUMMARY: Omit<DashboardSummary, 'today' | 'wellness'> = {
   fitnessUnavailable: null,
   vo2max: null,
   vo2maxUnavailable: null,
+  // Sans athlète, aucune séance : rien qui reste à balayer.
+  pendingElevationActivities: 0,
   loadWeeks: [],
   todaySession: null,
   // Sans athlète, il n'y a ni séance ni lieu : la prévision n'a rien à dire.
@@ -291,6 +313,8 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     wellness,
     restingHrSuggestion,
     lthrSuggestion,
+    vo2maxCorrection,
+    pendingElevationActivities,
   ] = await Promise.all([
     // Historique complet : la CTL est une moyenne mobile sur 42 jours, et une
     // ligne d'activité est légère (les séries temporelles vivent à part).
@@ -320,13 +344,20 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     // Idem — et sa fenêtre porte sur des instants d'activité, pas sur des jours
     // civils : elle prend l'horloge, pas le `today` de la page.
     selectLthrSuggestion(profile),
+    // Le facteur correctif calibré sur les courses déclarées. Lu ici et passé
+    // plus bas : la tuile de forme doit porter **le même** recalage que le
+    // détail de chaque séance qui l'alimente.
+    getVo2maxCorrection(profile.id),
+    // Un `count(*)` sous le prédicat du rattrapage : la tuile de VO₂max n'est
+    // comparable à elle-même dans le temps que s'il est nul.
+    countPendingElevation(profile.id),
   ]);
 
   const daily = buildDailyTrimp(activityRows, profile, today);
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
 
   const fitness = buildFitness(loadSeries);
-  const vo2max = buildVo2max(activityRows, profile, today);
+  const vo2max = buildVo2max(activityRows, profile, today, vo2maxCorrection.factor);
 
   return {
     athleteName: profile.displayName,
@@ -336,6 +367,7 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
       : buildFitnessUnavailable(activityRows, profile, today),
     vo2max,
     vo2maxUnavailable: vo2max ? null : buildVo2maxUnavailable(activityRows, profile, today),
+    pendingElevationActivities,
     loadWeeks: buildLoadWeeks(loadSeries, today),
     todaySession,
     today,

@@ -7,6 +7,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { SettingsSectionsData } from "../_lib/settings-values";
 
 import { AccountPanel } from "./account-panel";
+import { CorrectionFactorPanel } from "./correction-factor-panel";
+import { ElevationCorrectionPanel } from "./elevation-correction-panel";
 import { ForecastLocationPanel } from "./forecast-location-panel";
 import { IntervalsPanel } from "./intervals-panel";
 import { InvitationsPanel } from "./invitations-panel";
@@ -79,14 +81,29 @@ export function SettingsTabs({ data }: SettingsTabsProps) {
       {/* `mode="edit"` : ce composant n'est monté que lorsqu'un profil existe —
           la création, elle, reste l'écran plein de `/profile`. */}
       <TabsContent value="profile" active={current === "profile"}>
-        <ProfileForm
-          mode="edit"
-          values={data.profile}
-          maxHrSuggestion={data.maxHrSuggestion}
-          restingHrSuggestion={data.restingHrSuggestion}
-          lthrSuggestion={data.lthrSuggestion}
-          lthrBpm={data.lthrBpm}
-        />
+        <div className="flex flex-col gap-4 sm:gap-5">
+          <ProfileForm
+            mode="edit"
+            values={data.profile}
+            maxHrSuggestion={data.maxHrSuggestion}
+            restingHrSuggestion={data.restingHrSuggestion}
+            lthrSuggestion={data.lthrSuggestion}
+            lthrBpm={data.lthrBpm}
+          />
+          {/* Sous le profil physiologique, et pas dans un onglet à part : ce
+              réglage pondère la même chose que la FC max au-dessus — ce que
+              l'appli lit d'une séance. */}
+          <ElevationCorrectionPanel
+            enabled={data.elevationCorrection.enabled}
+            ascentCoefM={data.elevationCorrection.ascentCoefM}
+            descentCoefM={data.elevationCorrection.descentCoefM}
+          />
+          {/* Sous la correction d'altitude, et pour la même raison : les deux
+              pondèrent la VO₂max lue sur une séance, et l'ordre est celui du
+              calcul — la distance est corrigée du dénivelé, puis le résultat
+              est recalé sur les courses. */}
+          <CorrectionFactorPanel settings={data.correctionFactor} />
+        </div>
       </TabsContent>
 
       {/* Les invitations sont une affaire de compte, pas de profil physiologique

@@ -17,6 +17,7 @@ import { db } from './db/client';
 import { activities, type Activity, type Athlete, type AthleteSex } from './db/schema';
 import { getActivePlanWithSessions, planEndExclusive, type PlanSessionDto } from './plans';
 import { buildDailyTrimp, buildFitness, buildVo2max, isRunning } from './training-metrics';
+import { getVo2maxCorrection } from './vo2max-correction';
 import { listWellnessDays } from './wellness';
 
 /**
@@ -505,15 +506,21 @@ export async function getTrainingSnapshot(
   const profile = athleteId === null ? null : await getAthleteById(athleteId);
   if (!profile) return emptySnapshot(today);
 
-  const rows = await db
-    .select()
-    .from(activities)
-    .where(eq(activities.athleteId, profile.id))
-    .orderBy(desc(activities.startedAt));
+  const [rows, vo2maxCorrection] = await Promise.all([
+    db
+      .select()
+      .from(activities)
+      .where(eq(activities.athleteId, profile.id))
+      .orderBy(desc(activities.startedAt)),
+    // Le coach doit lire la **même** VO₂max que les écrans, recalage compris :
+    // deux nombres différents pour la même grandeur rendraient ses conseils
+    // incompréhensibles à qui les confronte au tableau de bord.
+    getVo2maxCorrection(profile.id),
+  ]);
 
   const daily = buildDailyTrimp(rows, profile, today);
   const fitness = buildFitness(daily.length > 0 ? computeLoadSeries(daily) : []);
-  const vo2max = buildVo2max(rows, profile, today);
+  const vo2max = buildVo2max(rows, profile, today, vo2maxCorrection.factor);
 
   return {
     today,

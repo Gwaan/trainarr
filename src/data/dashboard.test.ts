@@ -156,6 +156,10 @@ const ATHLETE: Athlete = {
   wellnessReadingDay: null,
   pushDailySession: true,
   pushActivityAnalyzed: true,
+  vo2maxElevationCorrection: true,
+  vo2maxAscentCoefM: 2,
+  vo2maxDescentCoefM: -1,
+  vo2maxCorrectionFactor: null,
   pushSuggestions: true,
   createdAt: new Date('2026-01-01T10:00:00.000Z'),
   updatedAt: new Date('2026-08-01T10:00:00.000Z'),
@@ -179,6 +183,8 @@ function makeActivity(overrides: Partial<Activity> & { startedAt: Date }): Activ
     maxHrBpm: 158,
     avgPaceSecPerKm: 360,
     avgCadenceSpm: 86,
+    elevationLossM: null,
+    elevationScannedAt: null,
     bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,
@@ -237,6 +243,9 @@ describe('getDashboardSummary — base vide', () => {
       fitnessUnavailable: null,
       vo2max: null,
       vo2maxUnavailable: null,
+      // Sans athlète, aucune séance : rien qui reste à balayer, donc aucune
+      // lecture provisoire à annoncer.
+      pendingElevationActivities: 0,
       loadWeeks: [],
       todaySession: null,
       // Le jour courant est rendu même sans athlète : c'est lui qui datera
@@ -470,7 +479,7 @@ describe('getDashboardSummary — VO₂max', () => {
     expect(summary.vo2max).toEqual({ value: 40, delta30d: null });
   });
 
-  it('transmet la FC de la séance et la FC max du profil à l’estimation', async () => {
+  it('transmet la FC de la séance, la FC max du profil et le dénivelé à l’estimation', async () => {
     queryState.rows.athlete = [ATHLETE];
     queryState.rows.activities = [
       makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), avgHrBpm: 151 }),
@@ -478,12 +487,37 @@ describe('getDashboardSummary — VO₂max', () => {
 
     await getDashboardSummary();
 
+    // Le dénivelé vient des **colonnes persistées** de la ligne d'activité, pas
+    // d'une relecture des flux : cet agrégat ne lit jamais `activity_streams`.
+    // Les coefficients, eux, viennent du profil — désactivée, la correction se
+    // transmettrait à `null`.
     expect(estimateEffectiveVo2max).toHaveBeenCalledWith({
       distanceM: 10_000,
       movingTimeS: 3_600,
       avgHrBpm: 151,
       maxHrBpm: 188,
+      elevation: { gainM: 50, lossM: null },
+      elevationCorrection: { ascentCoefM: 2, descentCoefM: -1 },
+      // Aucune course déclarée : le facteur neutre, transmis explicitement — la
+      // tuile doit porter le **même** recalage que le détail des séances.
+      correctionFactor: 1,
     });
+  });
+
+  it('transmet une correction nulle quand l’athlète l’a désactivée', async () => {
+    // `null` et pas des coefficients à zéro : « ne corrige pas » est un ordre,
+    // pas une correction d'amplitude nulle — et c'est le seul contrat que
+    // `estimateEffectiveVo2max` connaît.
+    queryState.rows.athlete = [{ ...ATHLETE, vo2maxElevationCorrection: false }];
+    queryState.rows.activities = [
+      makeActivity({ startedAt: new Date('2026-08-01T09:00:00.000Z'), avgHrBpm: 151 }),
+    ];
+
+    await getDashboardSummary();
+
+    expect(estimateEffectiveVo2max).toHaveBeenCalledWith(
+      expect.objectContaining({ elevationCorrection: null }),
+    );
   });
 
   it('écarte de la moyenne les courses sans fréquence cardiaque', async () => {

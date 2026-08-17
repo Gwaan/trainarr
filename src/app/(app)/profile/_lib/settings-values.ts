@@ -11,6 +11,10 @@
  * masquée. Et le lieu des prévisions n'y est qu'un nom, jamais un point.
  */
 
+import type { ElevationCorrectionSettings } from '@/data/elevation-correction';
+
+import type { CorrectionFactorSettings } from './correction-factor-values';
+
 import type { LthrSuggestionView } from '../../_lib/lthr-suggestion';
 import type { MaxHrSuggestionView } from '../../_lib/max-hr-suggestion';
 import type { RestingHrSuggestionView } from '../../_lib/resting-hr-suggestion';
@@ -54,6 +58,19 @@ export type SettingsSectionsData = {
    * saisissent.
    */
   lthrBpm: number | null;
+  /**
+   * La correction d'altitude de la VO₂max : activée ou non, et les deux
+   * coefficients de Greif. Trois réglages `NOT NULL` en base — il y a toujours
+   * une réponse, d'où l'absence de `null` ici.
+   */
+  elevationCorrection: ElevationCorrectionSettings;
+  /**
+   * Le facteur correctif : celui qui est imposé (chaîne vide = automatique),
+   * celui que les courses donnent, et sur quoi il est calibré. Trois chaînes
+   * prêtes à afficher — jamais le détail des courses, qui se lit sur la page
+   * « Progression ».
+   */
+  correctionFactor: CorrectionFactorSettings;
   intervals: IntervalsFormDefaults;
   /**
    * Le **nom** du lieu fixé pour les prévisions, `null` en mode automatique.

@@ -48,14 +48,13 @@
  *    la relation %FCmax ↔ %VO2max, mais ce n'est pas la formule de Swain :
  *    inutile d'aller chercher celle-ci, elle donnerait d'autres valeurs.
  *
- * ## Ce que nous ne reprenons pas
+ * ## Ce que nous reprenons, depuis
  *
- * - **Le facteur correctif de Runalyze** (`VO2maxCorrectionFactorCalculation`,
+ * - **Le facteur correctif individuel** (`VO2maxCorrectionFactorCalculation`,
  *   `RaceresultRepository::getEffectiveVO2maxCorrectionFactor`) vaut
- *   `max(VO2max_par_le_temps / VO2max_par_la_FC)` sur les meilleures courses
- *   déclarées, et **1.0 en l'absence de course déclarée**. Trainarr n'a pas
- *   encore de notion de course : le facteur serait 1.0 chez Runalyze aussi. Rien
- *   n'est donc appliqué.
+ *   `max(VO2max_par_le_temps / VO2max_par_la_FC)` sur les courses déclarées, et
+ *   **1.0 en l'absence de course déclarée**. Il se calcule dans
+ *   `./vo2max-correction` et arrive ici par {@link EffectiveVo2maxInput}.
  *
  *   **Le sens de l'écart n'est pas celui qu'on croit.** Une version antérieure
  *   de ce commentaire annonçait un facteur « souvent 0.85–0.95 », donc des
@@ -66,9 +65,10 @@
  *   et le facteur calibré sur les courses dépasse 1. Le facteur corrige un biais
  *   individuel, il ne va pas systématiquement dans un sens.
  *
- *   Tant qu'aucune course n'est déclarée dans Trainarr, la valeur rendue ici est
- *   donc une estimation **non recalée**, et non une estimation neutre. C'est le
- *   prix à payer pour ne rien inventer, mais il faut le dire à qui compare.
+ *   Tant qu'aucune course n'est déclarée, la valeur rendue ici reste donc une
+ *   estimation **non recalée**, et non une estimation neutre — l'écran doit le
+ *   dire à qui compare.
+ *
  * - **La correction par le dénivelé** (`VO2maxCalculator::…WithElevation`).
  *
  *   ⚠️ Ce commentaire a longtemps affirmé que Runalyze la laissait désactivée
@@ -85,6 +85,12 @@
  *   trail — Runalyze écarte d'ailleurs les courses de trail de sa forme par
  *   défaut, ce que nous ne faisons pas non plus.
  *
+ *   Elle est appliquée ici depuis, avec les mêmes défauts, réglables au profil.
+ *   Le calcul de la distance corrigée vit dans `./elevation-correction` ; la
+ *   règle de non-invention qui l'accompagne est la seule chose à retenir de plus :
+ *   **dénivelé inconnu ⇒ aucune correction**, et la valeur rendue est alors celle
+ *   d'avant — ce qui n'est pas la même chose qu'une correction calculée à zéro.
+ *
  * ## Écart assumé sur un coefficient
  *
  * Runalyze écrit `-4.6 + 0.182253·v + …` là où Daniels & Gilbert publient
@@ -92,6 +98,11 @@
  * `./vdot`) : l'écart est de l'ordre de 0.0015 ml/kg/min, sans portée pratique.
  */
 
+import {
+  correctedDistanceM,
+  type ActivityElevation,
+  type ElevationCorrection,
+} from './elevation-correction';
 import {
   MAX_PLAUSIBLE_VO2MAX,
   MIN_EFFORT_DISTANCE_M,
@@ -107,7 +118,53 @@ export type EffectiveVo2maxInput = {
   avgHrBpm: number | null;
   /** FC max de l'athlète — donnée de profil, sans laquelle rien n'est calculable. */
   maxHrBpm: number | null;
+  /**
+   * Dénivelé de la séance, tel qu'il est persisté sur la ligne d'activité.
+   *
+   * **Facultatif, et `null` veut dire « inconnu »** — pas « plat ». Absent ou
+   * incomplet, la correction d'altitude ne s'applique simplement pas : le
+   * résultat est celui d'avant qu'elle existe. Un appelant qui ne connaît pas le
+   * dénivelé n'a donc rien à fabriquer pour appeler cette fonction.
+   */
+  elevation?: ActivityElevation | null;
+  /**
+   * Les coefficients de Greif réglés au profil, `null` quand l'athlète a
+   * désactivé la correction. Absent = pas de correction, comme `null`.
+   */
+  elevationCorrection?: ElevationCorrection | null;
+  /**
+   * **Facteur correctif individuel**, calibré sur les courses déclarées (cf.
+   * `./vo2max-correction`). Absent, `null` ou inexploitable = 1, c'est-à-dire
+   * l'estimation non recalée.
+   *
+   * Il est appliqué **après** le contrôle de plausibilité — cf.
+   * {@link estimateEffectiveVo2max}, qui porte la justification.
+   */
+  correctionFactor?: number | null;
 };
+
+/**
+ * Facteur correctif neutre : l'estimation non recalée. C'est ce qu'applique un
+ * athlète sans course déclarée — chez Runalyze aussi.
+ *
+ * Il vit ici, et non dans `./vo2max-correction`, pour que ce module n'ait
+ * aucune dépendance vers celui qui le calcule (lequel, lui, appelle
+ * {@link estimateEffectiveVo2max} pour établir son dénominateur).
+ */
+export const NEUTRAL_VO2MAX_CORRECTION_FACTOR = 1;
+
+/**
+ * Le facteur réellement applicable. Une valeur absente, nulle, non finie ou
+ * négative retombe sur le neutre : ce module ne fabrique pas de correction, et
+ * un appelant qui n'en a pas n'a rien à construire pour l'appeler. Les bornes
+ * de plausibilité, elles, sont posées à la source (`./vo2max-correction`) —
+ * les répéter ici les ferait diverger.
+ */
+function usableCorrectionFactor(factor: number | null | undefined): number {
+  return typeof factor === 'number' && Number.isFinite(factor) && factor > 0
+    ? factor
+    : NEUTRAL_VO2MAX_CORRECTION_FACTOR;
+}
 
 /**
  * Plage de rapports FC moyenne / FC max exploitables.
@@ -137,7 +194,30 @@ function velocityFractionAtHrRatio(hrRatio: number): number {
  *  - le rapport FC moyenne / FC max sort de [0.5, 1] (données aberrantes) ;
  *  - la distance ou la durée est invalide, ou l'effort trop court pour être
  *    représentatif (< 1500 m ou < 4 min) ;
- *  - le résultat sort de la plage physiologiquement plausible [20, 90].
+ *  - la **mesure** sort de la plage physiologiquement plausible [20, 90].
+ *
+ * **Le facteur correctif s'applique après ce dernier contrôle**, et c'est un
+ * choix. La plage [20, 90] juge la *mesure* — « ces entrées produisent-elles
+ * quelque chose qui ressemble à un coureur ? » — pas la physiologie de
+ * l'athlète après recalage. La tester sur la valeur corrigée ferait disparaître
+ * des séances parfaitement lisibles au seul motif qu'une calibration
+ * individuelle les a poussées d'un ou deux points au-dessus de 90 : la séance
+ * quitterait le graphe *et* la moyenne à 30 jours, ce qui est strictement pire
+ * que d'afficher une valeur haute. La borne du facteur (cf.
+ * `./vo2max-correction`) suffit à empêcher l'emballement : au pire, une mesure
+ * validée à 90 ressort à 126, jamais à 270.
+ *
+ * Corollaire assumé : la valeur rendue peut sortir de [20, 90] quand un facteur
+ * est appliqué. Elle n'est alors pas re-bornée — un plateau artificiel à 90 se
+ * lirait comme un capteur bloqué.
+ *
+ * **La correction d'altitude, quand elle s'applique, porte sur la distance
+ * seule** (cf. `./elevation-correction`) : c'est une distance équivalente, pas
+ * un effort supplémentaire. Les seuils de représentativité (1500 m) restent
+ * mesurés sur la distance **réellement courue** — c'est elle qui dit si la
+ * séance est assez longue pour porter une estimation, et 900 m de côte ne
+ * deviennent pas un effort représentatif parce que la formule les compte comme
+ * 2 000 m de plat.
  */
 export function estimateEffectiveVo2max(input: EffectiveVo2maxInput): number | null {
   const { distanceM, movingTimeS, avgHrBpm, maxHrBpm } = input;
@@ -155,14 +235,23 @@ export function estimateEffectiveVo2max(input: EffectiveVo2maxInput): number | n
   const hrRatio = avgHrBpm / maxHrBpm;
   if (hrRatio < MIN_HR_RATIO || hrRatio > MAX_HR_RATIO) return null;
 
+  // Distance équivalente au plat (Greif), quand le dénivelé est connu **et** que
+  // la correction est activée. `null` = elle ne s'applique pas, et la distance
+  // réelle sert alors telle quelle : c'est la valeur d'avant la correction, pas
+  // une correction nulle.
+  const flatDistanceM =
+    correctedDistanceM(distanceM, input.elevation ?? null, input.elevationCorrection ?? null) ??
+    distanceM;
+
   // Allure tenue, puis allure extrapolée à 100 % de vVO2max : c'est là qu'agit
   // la correction par la FC, avant le passage au coût en oxygène.
-  const velocityMPerMin = distanceM / durationMin;
+  const velocityMPerMin = flatDistanceM / durationMin;
   const velocityAtVo2max = velocityMPerMin / velocityFractionAtHrRatio(hrRatio);
 
   const vo2max = oxygenCostAtVelocity(velocityAtVo2max);
   if (!Number.isFinite(vo2max)) return null;
+  // Sur la valeur **brute** : c'est la mesure qu'on juge, pas le recalage.
   if (vo2max < MIN_PLAUSIBLE_VO2MAX || vo2max > MAX_PLAUSIBLE_VO2MAX) return null;
 
-  return vo2max;
+  return vo2max * usableCorrectionFactor(input.correctionFactor);
 }

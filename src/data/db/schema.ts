@@ -249,6 +249,56 @@ export const athlete = pgTable('athlete', {
    * juste au-dessus : c'est un réglage de compte, une seule ligne, et rien n'y a
    * de cycle de vie propre.
    */
+  /**
+   * **Correction d'altitude de la VO₂max effective** — les trois réglages de la
+   * formule de Peter Greif, alignés sur ceux de Runalyze (« Paramètres ›
+   * Calculs › Adapter suivant le dénivelé »).
+   *
+   * `true` par défaut, comme chez Runalyze, dont l'écran affiche « Défaut :
+   * oui » : c'est le comportement de référence auquel les valeurs de Trainarr
+   * sont comparées, et diverger silencieusement du modèle qu'on transcrit
+   * n'aurait aucun sens. La constante `VO2MAX_USE_CORRECTION_FOR_ELEVATION =
+   * false` lue dans la branche `support/4.3.x` du dépôt ne décrit pas le
+   * comportement servi aujourd'hui (relevé sur une installation réelle le
+   * 17/08/2026).
+   *
+   * `NOT NULL` avec défaut : ce sont des réglages, pas des mesures — il y a
+   * toujours une réponse, et l'absence de saisie est le défaut de Runalyze, pas
+   * un trou. C'est exactement le raisonnement des trois interrupteurs de
+   * notifications juste en dessous.
+   *
+   * Elles vivent sur `athlete` parce qu'elles gouvernent un calcul qui se
+   * recalcule **à la lecture** : les changer relit rétroactivement tout
+   * l'historique, sans rattrapage à lancer. Le dénivelé, lui, est persisté sur
+   * `activities` — c'est une mesure du fichier, pas un réglage.
+   */
+  vo2maxElevationCorrection: boolean('vo2max_elevation_correction').notNull().default(true),
+  /** Mètres de distance ajoutés par mètre monté. Défaut de Runalyze : `+2`. */
+  vo2maxAscentCoefM: real('vo2max_ascent_coef_m').notNull().default(2),
+  /** Mètres de distance ajoutés par mètre descendu — **négatif**. Défaut : `−1`. */
+  vo2maxDescentCoefM: real('vo2max_descent_coef_m').notNull().default(-1),
+  /**
+   * **Facteur correctif manuel de la VO₂max effective.** `NULL` = automatique,
+   * c'est-à-dire calibré sur les courses déclarées ({@link raceResults}).
+   *
+   * Nullable, et c'est tout le contrat : Runalyze présente le même réglage sous
+   * la forme d'un champ vide (« Facteur de correction manuel »), et un champ
+   * vide y veut dire « laisse le calcul faire ». Une colonne `NOT NULL DEFAULT
+   * 1` n'aurait pas su distinguer « je n'ai rien réglé » de « j'impose 1,0 »,
+   * or la seconde intention neutralise volontairement la calibration
+   * automatique et doit pouvoir s'exprimer.
+   *
+   * Elle vit sur `athlete` pour la même raison que les trois colonnes de
+   * correction d'altitude au-dessus : c'est un réglage qui gouverne un calcul
+   * fait **à la lecture**. Le facteur automatique, lui, n'est stocké nulle
+   * part — il se recalcule depuis `race_results` à chaque affichage, sans quoi
+   * déclarer une course laisserait l'historique sur l'ancienne calibration.
+   *
+   * Les bornes admises sont celles du module de calcul
+   * (`lib/metrics/vo2max-correction.ts`) et sont vérifiées par le DAL : pas de
+   * `CHECK` ici, comme pour les autres réglages physiologiques de cette table.
+   */
+  vo2maxCorrectionFactor: real('vo2max_correction_factor'),
   pushDailySession: boolean('push_daily_session').notNull().default(true),
   pushActivityAnalyzed: boolean('push_activity_analyzed').notNull().default(true),
   pushSuggestions: boolean('push_suggestions').notNull().default(true),
@@ -306,7 +356,48 @@ export const activities = pgTable(
     distanceM: real('distance_m').notNull(),
     movingTimeS: integer('moving_time_s').notNull(),
     elapsedTimeS: integer('elapsed_time_s').notNull(),
+    /**
+     * Dénivelé **positif** de la séance, en mètres. `NULL` quand il est
+     * inconnu — jamais zéro, qui se lirait « terrain plat mesuré ».
+     *
+     * Deux sources, dans cet ordre : le champ `total_ascent` de la session FIT
+     * quand l'appareil l'écrit, sinon le **flux d'altitude**, balayé avec le
+     * filtre anti-bruit de `src/lib/metrics/elevation.ts` (cf.
+     * `recordActivityElevation`). Le repli n'est pas un luxe : la montre de
+     * l'athlète n'écrit ni `total_ascent` ni `total_descent`, si bien que le
+     * résumé d'une séance affichait « D+ — » pendant que ses splits — calculés
+     * depuis le flux, eux — annonçaient +9, +1 et +22 m.
+     *
+     * Le filtre est **exactement le même** que celui des splits : c'est une
+     * fonction unique, pas deux implémentations d'accord par hasard.
+     */
     elevationGainM: real('elevation_gain_m'),
+    /**
+     * Dénivelé **négatif** de la séance, en mètres et en **amplitude positive**.
+     * Mêmes sources et mêmes règles que `elevation_gain_m` juste au-dessus.
+     *
+     * Il existe pour la correction d'altitude de la VO₂max (formule de Peter
+     * Greif, cf. `src/lib/metrics/elevation-correction.ts`), qui a besoin des
+     * deux sens. Il n'est **jamais** déduit du gain : supposer une boucle serait
+     * inventer une donnée, et une sortie point à point n'y revient pas.
+     */
+    elevationLossM: real('elevation_loss_m'),
+    /**
+     * Instant du dernier **balayage** du dénivelé de cette séance — `NULL` tant
+     * qu'aucun n'a eu lieu.
+     *
+     * Même rôle, et même raison d'être, que `best_segments_scanned_at` plus bas :
+     * « on a regardé », pas « il y a un résultat ». Une séance peut être balayée
+     * sans que rien ne s'écrive — flux d'altitude entièrement `null`, canal non
+     * numérique d'un import ancien, une seule mesure exploitable. Sans marque,
+     * le prédicat du rattrapage (`pnpm db:backfill:elevation`) la
+     * resélectionnerait à chaque passage, indéfiniment.
+     *
+     * Posée par les **deux** écrivains — l'ingestion (`recordActivityElevation`)
+     * et le rattrapage — dans la même écriture que les deux colonnes, y compris
+     * quand celles-ci ne reçoivent rien.
+     */
+    elevationScannedAt: timestamp('elevation_scanned_at', { withTimezone: true }),
     avgHrBpm: integer('avg_hr_bpm'),
     maxHrBpm: integer('max_hr_bpm'),
     /**
@@ -922,6 +1013,96 @@ export const wellnessDays = pgTable(
      * derniers jours.
      */
     primaryKey({ columns: [table.athleteId, table.day] }),
+  ],
+);
+
+/**
+ * Une **course déclarée** : une épreuve courue, avec son chrono officiel.
+ *
+ * ## Pourquoi cette table existe
+ *
+ * Elle porte la calibration du **facteur correctif de la VO₂max effective**
+ * (`lib/metrics/vo2max-correction.ts`, transcrit de
+ * `RaceresultRepository::getEffectiveVO2maxCorrectionFactor`) : le facteur vaut
+ * `max(VO₂max_par_le_temps / VO₂max_par_la_FC)` sur les courses déclarées, et
+ * **1,0 en l'absence de course**. Sans notion de course, Trainarr lisait donc
+ * une VO₂max structurellement non recalée — d'un facteur mesuré à 1,11 sur
+ * l'athlète de référence.
+ *
+ * Elle a une seconde valeur, indépendante du calcul : un historique de courses
+ * n'existait nulle part dans l'application.
+ *
+ * ## Le chrono de la puce, pas celui de la montre
+ *
+ * `distance_m` et `time_s` sont les valeurs **officielles**, saisies par
+ * l'athlète, et **ce sont elles qui font foi pour le calcul** — numérateur
+ * (Daniels & Gilbert sur le chrono) comme dénominateur (méthode Runalyze sur la
+ * FC). Une montre coupe un virage, se déclenche tard, mesure 5,12 km sur un
+ * 5 km homologué : recopier ses valeurs ferait entrer deux mesures différentes
+ * de la même course dans un rapport censé n'exprimer qu'un biais cardiaque.
+ * Le formulaire les pré-remplit depuis l'activité, l'athlète les corrige, et
+ * rien ne les réécrit ensuite.
+ *
+ * ## Le lien vers l'activité est facultatif, et il apporte une seule chose
+ *
+ * Une course peut avoir été courue sans montre (aucune activité), et une
+ * activité peut être déclarée course après coup. Quand le lien existe, il sert
+ * à lire **la FC moyenne et le dénivelé** de la séance — deux mesures que le
+ * bulletin d'arrivée ne porte pas et que personne ne saisit à la main. Sans
+ * lien, ou sans FC sur la séance liée, la course reste une course mais ne
+ * calibre rien : il n'y a pas de dénominateur, et on n'en approxime pas un.
+ *
+ * `ON DELETE SET NULL` : la course est une **déclaration de l'athlète**, elle
+ * ne dérive pas de l'activité et n'a pas à disparaître avec un import supprimé.
+ * Elle perd alors sa FC, donc son pouvoir de calibration — ce qui est la
+ * conséquence honnête, pas une perte de donnée saisie.
+ */
+export const raceResults = pgTable(
+  'race_results',
+  {
+    id: serial('id').primaryKey(),
+    athleteId: integer('athlete_id')
+      .notNull()
+      .references(() => athlete.id),
+    /**
+     * Jour civil de l'épreuve, dans le fuseau de l'athlète.
+     *
+     * Une **date**, et non un instant : une course se date au jour du dossard.
+     * L'heure de départ, quand elle est connue, vit sur l'activité liée.
+     */
+    racedOn: date('raced_on').notNull(),
+    /** Distance **officielle** de l'épreuve, en mètres. Fait foi pour le calcul. */
+    distanceM: real('distance_m').notNull(),
+    /** Chrono **officiel**, en secondes (temps de puce). Fait foi pour le calcul. */
+    timeS: integer('time_s').notNull(),
+    /** Nom de l'épreuve, facultatif — « Marathon de Bordeaux ». */
+    name: text('name'),
+    /** La séance qui l'a enregistrée, quand il y en a une (cf. l'en-tête). */
+    activityId: integer('activity_id').references(() => activities.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    /**
+     * Chemin d'accès de la seule lecture qui existe : « les courses de cet
+     * athlète, de la plus récente à la plus ancienne ». La plus récente est
+     * alors la première ligne de l'intervalle, sans requête dédiée.
+     */
+    index('race_results_athlete_raced_on_idx').on(table.athleteId, table.racedOn),
+    /**
+     * Une activité ne porte **qu'une** course. C'est ce qui fait de la
+     * déclaration depuis une séance un geste idempotent : la seconde
+     * soumission corrige la première au lieu d'empiler deux dossards sur la
+     * même sortie, et c'est cet index qui porte la garantie (l'écriture est un
+     * `ON CONFLICT DO UPDATE` sur cette colonne).
+     *
+     * Postgres autorise plusieurs `NULL` dans un index unique : les courses
+     * sans activité ne se collisionnent pas entre elles, ce qui est exactement
+     * ce qu'on veut — rien ne distingue deux courses courues sans montre.
+     */
+    uniqueIndex('race_results_activity_unique').on(table.activityId),
   ],
 );
 
@@ -1860,6 +2041,9 @@ export type NewWeatherForecast = InferInsertModel<typeof weatherForecasts>;
 
 export type WellnessDay = InferSelectModel<typeof wellnessDays>;
 export type NewWellnessDay = InferInsertModel<typeof wellnessDays>;
+
+export type RaceResult = InferSelectModel<typeof raceResults>;
+export type NewRaceResult = InferInsertModel<typeof raceResults>;
 
 export type Plan = InferSelectModel<typeof plans>;
 export type NewPlan = InferInsertModel<typeof plans>;

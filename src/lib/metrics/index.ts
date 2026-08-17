@@ -32,7 +32,39 @@ export {
   type RacePrediction,
 } from './race-prediction';
 export { computeMonotonySeries, type MonotonyPoint } from './monotony';
-export { estimateEffectiveVo2max, type EffectiveVo2maxInput } from './vo2max';
+export {
+  NEUTRAL_VO2MAX_CORRECTION_FACTOR,
+  estimateEffectiveVo2max,
+  type EffectiveVo2maxInput,
+} from './vo2max';
+export {
+  VO2MAX_CORRECTION_FACTOR_BOUNDS,
+  computeVo2maxCorrection,
+  isPlausibleCorrectionFactor,
+  type AutomaticVo2maxCorrection,
+  type RaceCalibration,
+  type RaceCalibrationInput,
+  type RaceCalibrationStatus,
+  type Vo2maxCorrection,
+  type Vo2maxCorrectionInput,
+  type Vo2maxCorrectionUnavailable,
+} from './vo2max-correction';
+export {
+  ELEVATION_NOISE_THRESHOLD_M,
+  elevationChange,
+  elevationMoves,
+  type ElevationChange,
+  type ElevationMove,
+} from './elevation';
+export {
+  ASCENT_COEF_BOUNDS,
+  DEFAULT_ASCENT_COEF_M,
+  DEFAULT_DESCENT_COEF_M,
+  DESCENT_COEF_BOUNDS,
+  correctedDistanceM,
+  type ActivityElevation,
+  type ElevationCorrection,
+} from './elevation-correction';
 export { paceSecPerKm } from './pace';
 export { deriveVelocity } from './velocity';
 export { smoothPace } from './pace-smoothing';

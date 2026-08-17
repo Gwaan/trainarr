@@ -23,6 +23,7 @@ import { PersonalBestsPanel } from "./_components/personal-bests-panel";
 import { ProgressionSkeleton } from "./_components/progression-skeleton";
 import { ProgressionStats } from "./_components/progression-stats";
 import { RacePredictionsPanel } from "./_components/race-predictions-panel";
+import { RacesPanel } from "./_components/races-panel";
 import { Vo2maxChart } from "./_components/vo2max-chart";
 import { WellnessPanel } from "./_components/wellness-panel";
 import {
@@ -32,6 +33,7 @@ import {
   summarizeVolume,
 } from "./_lib/bucket-charts";
 import { formatFullDay } from "./_lib/date-axis";
+import { formatCorrectionFactor } from "./_lib/race-results-model";
 import { hasNoWellnessMeasure } from "./_lib/wellness-series";
 import { RANGE_PARAM, parseRangeParam, toProgressionRange } from "./_lib/range";
 import { MetricInfo } from "../_components/metric-info";
@@ -40,6 +42,7 @@ import {
   describeVo2maxUnavailable,
   type MetricUnavailableCopy,
 } from "../_lib/metric-unavailable";
+import { describePendingElevation } from "../_lib/pending-elevation";
 import { requireSession } from "../_lib/require-session";
 
 export const metadata: Metadata = {
@@ -152,20 +155,63 @@ function MonotonyPanel({ progression }: { progression: ProgressionDto }) {
 }
 
 function Vo2maxPanel({ progression }: { progression: ProgressionDto }) {
-  return (
-    <Panel
-      title="VO₂max effective (ml/kg/min)"
-      info={<MetricInfo id="vo2max" />}
-      meta={<span>tendance 30 jours</span>}
-      padded={progression.vo2max !== null}
-    >
-      {progression.vo2max ? (
-        <Vo2maxChart points={progression.vo2max.points} trend={progression.vo2max.trend} />
-      ) : (
+  const { vo2maxCorrection } = progression;
+  const pendingElevation = describePendingElevation(progression.pendingElevationActivities);
+
+  /* Le facteur est annoncé **sur le panneau qu'il multiplie**, et le panneau
+     « Courses déclarées » juste en dessous dit d'où il sort. Un « ×1,11 » posé
+     seul serait inexploitable ; ici il se lit en deux temps, sans répéter la
+     même phrase à deux endroits. */
+  const meta = (
+    <>
+      <span>tendance 30 jours</span>
+      <span className="num text-fg-muted">
+        {vo2maxCorrection.source === "default"
+          ? "non recalée"
+          : formatCorrectionFactor(vo2maxCorrection.factor)}
+      </span>
+    </>
+  );
+
+  // Sans courbe, l'état vide dit déjà ce qui manque — et il se centre sur la
+  // hauteur du panneau, donc il en est l'unique enfant. Y accoler la note du
+  // rattrapage ferait concourir deux explications, dont une qui parle d'un nuage
+  // que personne ne voit.
+  if (progression.vo2max === null) {
+    return (
+      <Panel
+        title="VO₂max effective (ml/kg/min)"
+        info={<MetricInfo id="vo2max" />}
+        meta={meta}
+        padded={false}
+      >
         <MetricEmptyState
           icon={Gauge}
           {...describeVo2maxUnavailable(progression.vo2maxUnavailable)}
         />
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="VO₂max effective (ml/kg/min)"
+      info={<MetricInfo id="vo2max" />}
+      meta={meta}
+      padded={false}
+    >
+      <div className="p-4 sm:p-5">
+        <Vo2maxChart points={progression.vo2max.points} trend={progression.vo2max.trend} />
+      </div>
+
+      {/* Non facultatif, exactement comme la note des records : tant que le
+          rattrapage n'est pas passé, ce nuage mêle des séances corrigées du
+          dénivelé et d'autres qui ne le sont pas, et l'écart à 30 jours compare
+          les deux. Le tracer sans le dire serait faux. */}
+      {pendingElevation === null ? null : (
+        <p className="border-t border-border px-4 py-3 text-[0.78rem] leading-relaxed text-fg-faint sm:px-5">
+          {pendingElevation}
+        </p>
       )}
     </Panel>
   );
@@ -297,6 +343,7 @@ async function ProgressionContent({ searchParams }: PageProps) {
         vo2max={progression.current.vo2max}
         fitnessUnavailable={progression.fitnessUnavailable}
         vo2maxUnavailable={progression.vo2maxUnavailable}
+        pendingElevationActivities={progression.pendingElevationActivities}
         hasProfile={progression.hasProfile}
       />
 
@@ -306,6 +353,11 @@ async function ProgressionContent({ searchParams }: PageProps) {
           par la façon dont elle alterne. */}
       <MonotonyPanel progression={progression} />
       <Vo2maxPanel progression={progression} />
+      {/* Collé sous la VO₂max, et pas rangé avec les records : c'est ce tableau
+          qui explique le facteur affiché juste au-dessus, et il faut pouvoir
+          lire les deux d'un seul regard. Il ouvre du même coup la famille des
+          « chronos réels », que les prédictions prolongent. */}
+      <RacesPanel correction={progression.vo2maxCorrection} today={progression.to} />
       {/* Sous la VO₂max, dont elle est le pendant honnête : la tuile dit une
           estimation d'après la FC, ce tableau dit ce qu'un chrono réellement
           couru implique. */}

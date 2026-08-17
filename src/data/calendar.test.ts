@@ -168,6 +168,8 @@ function activityRow(overrides: Partial<Activity> = {}): Activity {
     maxHrBpm: 161,
     avgPaceSecPerKm: 332.5,
     avgCadenceSpm: 86,
+    elevationLossM: null,
+    elevationScannedAt: null,
     bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,

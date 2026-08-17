@@ -15,7 +15,7 @@
  * |----------------------|---------------------------------------------------------------|
  * | ctl / atl / tsb      | `lib/metrics/load.ts`, `data/training-metrics.ts`, `_lib/metric-tone.ts` |
  * | trimp                | `lib/metrics/trimp.ts`, `data/training-metrics.ts`            |
- * | vo2max               | `lib/metrics/vo2max.ts`, `lib/metrics/vdot.ts`, `data/training-metrics.ts` |
+ * | vo2max               | `lib/metrics/vo2max.ts`, `lib/metrics/vo2max-correction.ts`, `lib/metrics/vdot.ts`, `data/training-metrics.ts` |
  * | vdot                 | `lib/metrics/vdot.ts`, `lib/metrics/fitness-test.ts`          |
  * | decoupling / ef      | `lib/metrics/decoupling.ts`, `activities/[id]/_lib/decoupling-model.ts` |
  * | hr-zones             | `lib/metrics/hr-zones.ts`, `lib/metrics/lthr.ts`, `lib/metrics/series.ts` |
@@ -191,17 +191,24 @@ export const METRIC_SHEETS: Record<MetricSheetId, MetricSheet> = {
       "Elle monte quand tu cours plus vite à fréquence cardiaque égale — c'est exactement la grandeur que le calcul lit, et c'est un bon résumé du travail aérobie.",
       "Une seule sortie basse ne dit rien. Une courbe de tendance qui baisse plusieurs semaines de suite, si — fatigue accumulée, maladie, ou FC max de profil devenue fausse.",
       "Elle ne remplace pas un chrono : pour caler tes allures d'entraînement, c'est le chrono de référence du plan qui fait foi, pas ce nombre.",
+      "Déclarer une course la recale. Tant que tu n'en as déclaré aucune, l'estimation reste celle de ta fréquence cardiaque seule, et l'écart avec la réalité peut aller dans les deux sens.",
     ],
     computed: [
       "Méthode de Runalyze, relevée dans son code source. Trois temps : le rapport FC moyenne ÷ FC max de profil donne la fraction de vitesse soutenue, exp((rapport − 1,00466) ÷ 0,68725) ; l'allure tenue est extrapolée à 100 % de cette vitesse ; le coût en oxygène de Daniels & Gilbert est appliqué à la vitesse extrapolée, VO2 = −4,60 + 0,182258·v + 0,000104·v² (v en m/min).",
       "La correction porte sur la **vitesse**, pas sur la VO2 — c'est ce qui rend le calcul valable sur un footing et non seulement sur une performance maximale.",
       "Une séance ne compte que si tout est réuni : c'est une course à pied, au moins 1 500 m et 4 min, une FC moyenne enregistrée, une FC max au profil, un rapport FC moyenne / FC max entre 0,5 et 1, et un résultat entre 20 et 90 ml/kg/min. Sinon rien n'est produit — jamais d'approximation.",
+      "La distance est d'abord **corrigée du dénivelé** (formule de Peter Greif, comme Runalyze) : +2 m de distance équivalente par mètre monté, −1 m par mètre descendu, réglable dans « Réglages › Profil ». Sur un footing de 2 910 m à 32 m de D+, cela vaut environ un demi-point ; en trail, bien davantage.",
+      "La correction ne s'applique **que si les deux sens du dénivelé sont connus** pour la séance (D+ et D−). Sinon la distance réelle est utilisée telle quelle — ce qui n'est pas la même chose qu'une correction nulle : un dénivelé inconnu n'est pas un terrain plat, et rien n'est deviné.",
+      "Le résultat est ensuite multiplié par un **facteur correctif individuel**, calibré sur tes courses déclarées : pour chacune, Trainarr compare la VO₂max que ton chrono implique (Daniels & Gilbert, qui suppose un effort maximal — ce qu'est une course) à celle que ta fréquence cardiaque laissait lire, et retient le plus grand des rapports. Sans course déclarée, le facteur vaut 1,0 et l'estimation n'est pas recalée. C'est la méthode de Runalyze, et c'est ce qui explique l'essentiel de l'écart avec lui.",
+      "Les deux VO₂max comparées reçoivent **le même dénivelé corrigé** : c'est ce qui fait sortir le terrain du rapport, qui ne parle alors que de ton profil cardiaque. Ne corriger qu'un des deux côtés tirait le facteur d'autant plus bas que la course était vallonnée — 0,82 au lieu de 0,85 sur un trail de 21 km à 600 m de D+, soit plus d'un point de VO₂max.",
+      "Le facteur est **borné à [0,70 ; 1,40]** : au-delà, ce n'est plus un biais physiologique mais une mesure fausse (ceinture qui a décroché, chrono mal saisi), et la course est **écartée** du calcul plutôt que ramenée à la borne — puisque c'est le maximum qui l'emporte, une course aberrante dominerait sinon toutes les autres. Tu peux imposer un facteur à la main dans « Réglages › Profil » ; un champ vide y veut dire « automatique ».",
+      "Le facteur s'applique **après** le contrôle de plausibilité, jamais avant : une séance dont la mesure brute tient dans 20-90 reste affichée même si le recalage la pousse au-dessus de 90. La faire disparaître du graphe et de la moyenne pour cette seule raison serait pire que d'afficher une valeur haute.",
       "La valeur affichée en tuile est la moyenne des courses des 30 derniers jours, **pondérée par le temps de déplacement** : une sortie d'une heure pèse cinq fois plus qu'une sortie de douze minutes.",
       "La variation affichée est l'écart avec la même moyenne calculée sur les 30 jours précédents.",
       "Sur la page Progression, le nuage donne une estimation par course et la courbe est cette même moyenne glissante à 30 jours, recalculée jour par jour.",
     ],
     caveat:
-      "C'est une estimation d'après ta fréquence cardiaque et ton allure, pas une mesure de laboratoire : aucun masque, aucun échange gazeux. Elle dépend entièrement de la FC max que tu as saisie — une FC max trop haute tire l'estimation vers le bas, et l'inverse. Trainarr n'applique ni le facteur correctif de Runalyze, qui recale l'estimation sur des courses réelles déclarées, ni sa correction de dénivelé : faute de courses de référence, les valeurs peuvent lire un peu haut.",
+      "C'est une estimation d'après ta fréquence cardiaque et ton allure, pas une mesure de laboratoire : aucun masque, aucun échange gazeux. Elle dépend entièrement de la FC max que tu as saisie — une FC max trop haute tire l'estimation vers le bas, et l'inverse. Le facteur correctif ne corrige pas cette erreur-là : il est lui-même calculé avec ta FC max. Et il ne vaut que ce que valent tes courses déclarées — une seule course, courue en gestion ou par 30 °C, recale tout l'historique sur elle. La page « Progression » dit toujours laquelle sert de référence.",
   },
 
   vdot: {

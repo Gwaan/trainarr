@@ -17,12 +17,19 @@ import {
   describeFitnessUnavailable,
   describeVo2maxUnavailable,
 } from "../../_lib/metric-unavailable";
+import { vo2maxTileNote } from "../../_lib/pending-elevation";
 
 export type ProgressionStatsProps = {
   fitness: FitnessDto | null;
   vo2max: Vo2maxDto | null;
   fitnessUnavailable: FitnessUnavailableDto | null;
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /**
+   * Séances dont le dénivelé reste à établir : tant qu'il y en a, la valeur
+   * **et** son écart à 30 jours sont une lecture provisoire (cf.
+   * `_lib/pending-elevation`).
+   */
+  pendingElevationActivities: number;
   /** `false` quand aucun athlète n'existe encore : l'onboarding n'a pas eu lieu. */
   hasProfile: boolean;
 };
@@ -41,6 +48,7 @@ export function ProgressionStats({
   vo2max,
   fitnessUnavailable,
   vo2maxUnavailable,
+  pendingElevationActivities,
   hasProfile,
 }: ProgressionStatsProps) {
   return (
@@ -71,7 +79,7 @@ export function ProgressionStats({
           info={<MetricInfo id="vo2max" />}
           value={formatVo2max(vo2max.value)}
           delta={toDelta(vo2max.delta30d, 1, "negative")}
-          note="Moyenne des 30 derniers jours."
+          note={vo2maxTileNote(pendingElevationActivities, "Moyenne des 30 derniers jours.")}
           className="col-span-2 md:col-span-1"
         />
       ) : (

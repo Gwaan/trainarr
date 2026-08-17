@@ -2,6 +2,7 @@ import 'server-only';
 
 import {
   and,
+  count,
   desc,
   eq,
   getTableColumns,
@@ -36,7 +37,9 @@ import {
   strideSeries,
   type BestSegment,
   type Decoupling,
+  type ActivityElevation,
   type DistributionBin,
+  type ElevationChange,
   type SeriesSample,
   type SessionExecution,
   type Sex,
@@ -45,6 +48,7 @@ import {
 import { getAthleteProfileById, getCurrentAthleteId } from './athlete';
 import { bestSegmentsScanMark, toBestSegmentRows } from './db/best-segments-scope';
 import { db } from './db/client';
+import { elevationWrite, pendingElevationWhere } from './db/elevation-scope';
 import { uniqueViolationConstraint } from './db/errors';
 import {
   ACTIVITIES_SESSION_UNIQUE_INDEX,
@@ -58,6 +62,8 @@ import {
   type ActivityStreamType,
   type NewActivityStream,
 } from './db/schema';
+import { getElevationCorrection } from './elevation-correction';
+import { getVo2maxCorrection } from './vo2max-correction';
 import { isRunning } from './training-metrics';
 
 /**
@@ -559,6 +565,17 @@ export type ActivityFullDto = {
   trimpContext: TrimpContextDto | null;
   /** Course à pied uniquement. */
   effectiveVo2max: number | null;
+  /**
+   * Le **facteur correctif** qui a multiplié `effectiveVo2max`, `null` quand il
+   * n'y a rien à dire — pas de VO₂max sur cette séance, ou facteur neutre.
+   *
+   * Il est ici pour que l'écran puisse annoncer que la valeur est recalée : une
+   * VO₂max corrigée sans mention du recalage laisserait comparer deux nombres
+   * qui ne se comparent pas (le sien d'hier, celui d'une autre application).
+   * Sa justification complète — quelle course, quelles deux VO₂max — vit sur la
+   * page « Progression », qui est aussi l'endroit où l'historique se lit.
+   */
+  vo2maxCorrectionFactor: number | null;
 };
 
 /*
@@ -874,8 +891,16 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   // aucune frontière de fuseau n'a d'incidence sur des quartiles.
   const contextSince = new Date(Date.now() - TRIMP_CONTEXT_DAYS * 24 * 60 * 60 * 1000);
 
-  const [activityRows, streamRows, profile, plannedRows, contextRows, storedSegmentRows] =
-    await Promise.all([
+  const [
+    activityRows,
+    streamRows,
+    profile,
+    elevationCorrection,
+    vo2maxCorrection,
+    plannedRows,
+    contextRows,
+    storedSegmentRows,
+  ] = await Promise.all([
       db
         .select()
         .from(activities)
@@ -890,6 +915,14 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
         )
         .where(eq(activityStreams.activityId, id)),
       getAthleteProfileById(athleteId),
+      // Les coefficients de la correction d'altitude, `null` si elle est
+      // désactivée. Lus à part du profil : le DTO de profil est celui du
+      // formulaire physiologique, ces trois colonnes n'y ont rien à faire.
+      getElevationCorrection(athleteId),
+      // Le facteur correctif calibré sur les courses déclarées, lu **par le
+      // même point d'entrée** que l'agrégat sur 30 jours : c'est ce qui garantit
+      // que la tuile de forme reste la moyenne des valeurs affichées ici.
+      getVo2maxCorrection(athleteId),
       // La séance du plan que cette activité réalise, s'il y en a une. Les
       // colonnes strictement nécessaires à la comparaison : le déroulé et ce qui
       // en tient lieu sur les séances historiques.
@@ -993,12 +1026,25 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
   const trimpContext =
     trimp === null || profile === null ? null : trimpContextOf(contextRows, profile);
 
+  // La correction d'altitude entre ici **avec le même dénivelé et les mêmes
+  // coefficients** que l'agrégat sur 30 jours (`collectRunVo2max`) : les deux
+  // écrans lisent les colonnes persistées de la ligne d'activité, pas deux
+  // sources différentes. Un dénivelé `null` (inconnu) laisse la valeur telle
+  // qu'elle était avant la correction — ce n'est pas une correction nulle.
+  const elevation: ActivityElevation = {
+    gainM: row.elevationGainM,
+    lossM: row.elevationLossM,
+  };
+
   const effectiveVo2max = running
     ? estimateEffectiveVo2max({
         distanceM: row.distanceM,
         movingTimeS: row.movingTimeS,
         avgHrBpm: row.avgHrBpm,
         maxHrBpm,
+        elevation,
+        elevationCorrection,
+        correctionFactor: vo2maxCorrection.factor,
       })
     : null;
 
@@ -1096,6 +1142,12 @@ export async function getActivityFull(id: number): Promise<ActivityFullDto | nul
     trimp,
     trimpContext,
     effectiveVo2max,
+    // `null` plutôt que `1` quand rien n'est recalé : l'écran n'a alors aucune
+    // mention à faire, et « ×1 » se lirait comme une correction appliquée.
+    vo2maxCorrectionFactor:
+      effectiveVo2max === null || vo2maxCorrection.factor === 1
+        ? null
+        : vo2maxCorrection.factor,
   };
 }
 
@@ -1270,10 +1322,107 @@ export async function saveActivityBestSegments(
   });
 }
 
+/**
+ * Écrit le **dénivelé** calculé depuis le flux d'altitude, et marque la séance
+ * comme balayée.
+ *
+ * ## Pourquoi une colonne, et pas un calcul à la lecture
+ *
+ * Le dépôt recalcule presque tout à chaque lecture, pour qu'une correction du
+ * profil relise rétroactivement l'historique. Le dénivelé échappe à la règle par
+ * le critère qui l'accompagne : **il ne dépend d'aucune donnée de profil** —
+ * c'est une mesure d'altimètre, lue dans le fichier et dans lui seul. Le figer
+ * ne peut donc pas devenir incohérent avec un réglage.
+ *
+ * Ce que la persistance achète est décisif ici : l'agrégat de VO₂max
+ * (`collectRunVo2max`, `averageVo2max`) travaille sur des **lignes `activities`
+ * légères** et ne lit jamais `activity_streams` — invariante documentée dans
+ * `progression.ts`. Sans colonne, la correction d'altitude n'aurait pu
+ * s'appliquer qu'au détail d'une séance, et les deux écrans se seraient
+ * contredits.
+ *
+ * ## Complétion, jamais écrasement — et la paire d'un seul tenant
+ *
+ * `elevationWrite` conditionne l'écriture à une paire (D+, D−) **entièrement**
+ * vide : ce qui est déjà en base — typiquement le `total_ascent` de la session
+ * FIT, quand l'appareil l'écrit — reste prioritaire, et un seul sens connu
+ * suffit à réserver la paire à sa source. Le calcul depuis le flux est un
+ * **repli**, pas une seconde opinion, et surtout pas la moitié d'une paire dont
+ * l'autre moitié sortirait d'un autre filtre (cf. `./db/elevation-scope`).
+ *
+ * `change` à `null` (aucune altitude exploitable) est un appel parfaitement
+ * valide : il ne pose que la marque. C'est même le cas qui justifie qu'elle
+ * existe — sans elle, ces séances-là resteraient sélectionnées par le rattrapage
+ * à chaque passage.
+ *
+ * **L'athlète est un paramètre**, comme pour l'ingestion qui l'appelle : elle
+ * tourne dans le watcher, hors requête, il n'y a pas de session à interroger.
+ *
+ * @throws {ActivityNotFoundError} si l'activité n'est pas celle de l'athlète
+ * (ou n'existe pas : les deux cas ne se distinguent pas).
+ */
+export async function recordActivityElevation(
+  activityId: number,
+  athleteId: number,
+  change: ElevationChange | null,
+): Promise<void> {
+  if (!(await ownsActivity(activityId, athleteId))) throw new ActivityNotFoundError();
+
+  // Une seule instruction : les deux colonnes et la marque sont écrites ensemble
+  // ou pas du tout, sans transaction à ouvrir pour ça.
+  await db
+    .update(activities)
+    .set(elevationWrite(change, new Date()))
+    .where(eq(activities.id, activityId));
+}
+
+/**
+ * Combien de séances de cet athlète attendent encore que leur dénivelé soit
+ * établi — le compteur qui rend la lecture de la VO₂max **provisoire**.
+ *
+ * ## Pourquoi ce compte doit atteindre les écrans
+ *
+ * `elevation_gain_m` / `elevation_loss_m` n'existent que depuis leur migration :
+ * les séances importées avant, tant que `pnpm db:backfill:elevation` n'est pas
+ * passé, n'en portent pas — et la correction d'altitude de la VO₂max ne
+ * s'applique donc pas à elles. Entre les deux, la page « Progression » trace un
+ * nuage où les séances récentes sont corrigées et l'historique ne l'est pas :
+ * **deux grandeurs sur le même graphe**. Pire, l'écart à 30 jours compare une
+ * fenêtre corrigée à une fenêtre qui ne l'est pas, et affiche comme progression
+ * un artefact d'ingestion.
+ *
+ * C'est la règle du dépôt (`.claude/rules/data-import.md`) : tant qu'un
+ * rattrapage n'est pas passé, l'écran doit **dire** que sa lecture est
+ * provisoire. Le précédent est `pendingActivities` des meilleurs efforts
+ * (`./personal-bests`), et l'enjeu est ici plus grand — là-bas une colonne
+ * restait vide, ici deux nombres de nature différente se retrouvent sur le même
+ * axe.
+ *
+ * Le prédicat est **celui du script de rattrapage** (`./db/elevation-scope`) :
+ * si les deux divergeaient, ce compteur n'atteindrait jamais zéro et l'écran
+ * réclamerait la commande à perpétuité.
+ *
+ * **L'athlète est un paramètre** : les appelants (tableau de bord, progression)
+ * l'ont déjà résolu, et ne le redéduisent pas.
+ */
+export async function countPendingElevation(athleteId: number): Promise<number> {
+  const rows = await db
+    .select({ value: count() })
+    .from(activities)
+    .where(pendingElevationWhere(athleteId));
+
+  return rows[0]?.value ?? 0;
+}
+
 /** Colonnes nullables qu'un redépôt du même fichier peut venir combler. */
 type CompletableColumns = Pick<
   Activity,
-  'elevationGainM' | 'avgHrBpm' | 'maxHrBpm' | 'avgPaceSecPerKm' | 'avgCadenceSpm'
+  | 'elevationGainM'
+  | 'elevationLossM'
+  | 'avgHrBpm'
+  | 'maxHrBpm'
+  | 'avgPaceSecPerKm'
+  | 'avgCadenceSpm'
 >;
 
 /**
@@ -1313,6 +1462,9 @@ export function completableFields(
   if (existing.elevationGainM === null && incoming.elevationGainM !== null) {
     completion.elevationGainM = incoming.elevationGainM;
   }
+  if (existing.elevationLossM === null && incoming.elevationLossM !== null) {
+    completion.elevationLossM = incoming.elevationLossM;
+  }
   if (existing.avgHrBpm === null && incoming.avgHrBpm !== null) {
     completion.avgHrBpm = incoming.avgHrBpm;
   }
@@ -1347,6 +1499,7 @@ function fitColumns(parsed: ParsedFitActivity) {
     movingTimeS: parsed.movingTimeS,
     elapsedTimeS: parsed.elapsedTimeS,
     elevationGainM: parsed.elevationGainM,
+    elevationLossM: parsed.elevationLossM,
     avgHrBpm: toIntegerBpm(parsed.avgHrBpm),
     maxHrBpm: toIntegerBpm(parsed.maxHrBpm),
     avgPaceSecPerKm: paceSecPerKm(parsed.distanceM, parsed.movingTimeS),
@@ -1364,6 +1517,7 @@ function fitColumns(parsed: ParsedFitActivity) {
  */
 const FIT_HASH_CONFLICT_SET = {
   elevationGainM: sql`coalesce(${activities.elevationGainM}, excluded.elevation_gain_m)`,
+  elevationLossM: sql`coalesce(${activities.elevationLossM}, excluded.elevation_loss_m)`,
   avgHrBpm: sql`coalesce(${activities.avgHrBpm}, excluded.avg_hr_bpm)`,
   maxHrBpm: sql`coalesce(${activities.maxHrBpm}, excluded.max_hr_bpm)`,
   avgPaceSecPerKm: sql`coalesce(${activities.avgPaceSecPerKm}, excluded.avg_pace_sec_per_km)`,

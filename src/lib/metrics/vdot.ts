@@ -18,9 +18,46 @@
  *
  * La seconde moitié du module inverse ces régressions pour produire la table
  * d'allures d'entraînement E/M/T/I/R à partir d'un chrono de course.
+ *
+ * ## La correction d'altitude s'applique ici aussi
+ *
+ * `estimateVdot` accepte le dénivelé et les coefficients de Greif, exactement
+ * comme `estimateEffectiveVo2max` (`./vo2max`) — c'est le pendant du couple
+ * `estimateVO2maxWithElevation` / `estimateVO2maxByHeartRateWithElevation` de
+ * Runalyze. Ce n'est pas une commodité : le facteur correctif individuel
+ * (`./vo2max-correction`) est le **rapport** de ces deux estimations, et un
+ * terrain corrigé d'un seul côté du rapport n'y disparaît pas — il s'y invite.
+ * Corrigé des deux côtés, il se simplifie, et le rapport ne parle plus que du
+ * biais cardiaque, ce qui est son unique objet.
+ *
+ * Le seuil de représentativité, lui, continue de juger la distance
+ * **réellement courue** : 1 400 m de côte ne deviennent pas un effort
+ * représentatif parce que Greif les compte 2 600.
  */
 
-export type EffortInput = { distanceM: number; movingTimeS: number };
+import {
+  correctedDistanceM,
+  type ActivityElevation,
+  type ElevationCorrection,
+} from './elevation-correction';
+
+export type EffortInput = {
+  distanceM: number;
+  movingTimeS: number;
+  /**
+   * Dénivelé de l'effort, tel qu'il est persisté sur la ligne d'activité.
+   *
+   * **Facultatif, et `null` veut dire « inconnu »** — pas « plat ». Absent ou
+   * incomplet, la correction d'altitude ne s'applique simplement pas : le
+   * résultat est celui d'avant qu'elle existe.
+   */
+  elevation?: ActivityElevation | null;
+  /**
+   * Les coefficients de Greif réglés au profil, `null` quand l'athlète a
+   * désactivé la correction. Absent = pas de correction, comme `null`.
+   */
+  elevationCorrection?: ElevationCorrection | null;
+};
 
 /**
  * Bornes de validité du modèle. En deçà, la performance est dominée par la
@@ -68,6 +105,14 @@ export function sustainableFractionOverDuration(durationMin: number): number {
  * l'effort est hors du domaine de validité du modèle (< 1500 m ou < 4 min), si
  * les entrées sont nulles, négatives ou non finies, ou si le VDOT obtenu sort de
  * la plage plausible.
+ *
+ * **La correction d'altitude, quand elle s'applique, porte sur la distance
+ * seule** (cf. `./elevation-correction`) : c'est une distance équivalente au
+ * plat, pas un effort supplémentaire. Le seuil de représentativité (1500 m)
+ * reste mesuré sur la distance **réellement courue** — c'est elle qui dit si
+ * l'effort est assez long pour porter une estimation. La durée, elle, n'est pas
+ * touchée : la seconde régression déduit l'intensité du temps passé, et ce temps
+ * est celui qu'on a couru, corrigé ou non.
  */
 export function estimateVdot(effort: EffortInput): number | null {
   const { distanceM, movingTimeS } = effort;
@@ -79,7 +124,15 @@ export function estimateVdot(effort: EffortInput): number | null {
   const durationMin = movingTimeS / 60;
   if (durationMin < MIN_EFFORT_DURATION_MIN) return null;
 
-  const velocityMPerMin = distanceM / durationMin;
+  // Distance équivalente au plat (Greif), quand le dénivelé est connu **et** que
+  // la correction est activée. `null` = elle ne s'applique pas, et la distance
+  // réelle sert alors telle quelle : c'est la valeur d'avant la correction, pas
+  // une correction nulle.
+  const flatDistanceM =
+    correctedDistanceM(distanceM, effort.elevation ?? null, effort.elevationCorrection ?? null) ??
+    distanceM;
+
+  const velocityMPerMin = flatDistanceM / durationMin;
   const vdot =
     oxygenCostAtVelocity(velocityMPerMin) / sustainableFractionOverDuration(durationMin);
 

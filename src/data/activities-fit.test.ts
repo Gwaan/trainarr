@@ -88,6 +88,7 @@ const PARSED: ParsedFitActivity = {
   movingTimeS: 3_000,
   elapsedTimeS: 3_120,
   elevationGainM: 120.5,
+  elevationLossM: null,
   avgHrBpm: 148.6,
   maxHrBpm: 171.2,
   avgCadenceSpm: 176.4,
@@ -115,6 +116,8 @@ function existingRow(overrides: Partial<Activity> = {}): Activity {
     lthrSampleSource: null,
     avgPaceSecPerKm: null,
     avgCadenceSpm: null,
+    elevationLossM: null,
+    elevationScannedAt: null,
     bestSegmentsScannedAt: null,
     createdAt: new Date('2026-08-02T08:00:00.000Z'),
     ...overrides,
@@ -156,6 +159,7 @@ beforeEach(() => {
 describe('completableFields', () => {
   const incoming = {
     elevationGainM: 120,
+    elevationLossM: null,
     avgHrBpm: 149,
     maxHrBpm: 171,
     avgPaceSecPerKm: 300,
@@ -178,6 +182,7 @@ describe('completableFields', () => {
   it('laisse le trou ouvert si le FIT n’a pas la donnée non plus', () => {
     const empty = {
       elevationGainM: null,
+      elevationLossM: null,
       avgHrBpm: null,
       maxHrBpm: null,
       avgPaceSecPerKm: null,
@@ -208,6 +213,7 @@ describe('upsertActivityFromFit', () => {
       movingTimeS: 3_000,
       elapsedTimeS: 3_120,
       elevationGainM: 120.5,
+      elevationLossM: null,
       // Colonnes entières : les moyennes du FIT sont arrondies.
       avgHrBpm: 149,
       maxHrBpm: 171,
@@ -232,6 +238,7 @@ describe('upsertActivityFromFit', () => {
       'avgHrBpm',
       'avgPaceSecPerKm',
       'elevationGainM',
+      'elevationLossM',
       'maxHrBpm',
     ]);
   });
@@ -250,6 +257,7 @@ describe('upsertActivityFromFit', () => {
       [
         existingRow({
           elevationGainM: 120.5,
+          elevationLossM: null,
           avgHrBpm: 149,
           maxHrBpm: 171,
           avgPaceSecPerKm: 300,

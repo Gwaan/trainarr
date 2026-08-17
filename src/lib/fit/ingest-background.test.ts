@@ -135,6 +135,10 @@ const { activitiesDal } = vi.hoisted(() => ({
     upsertActivityFromFit: vi.fn(),
     saveActivityStreams: vi.fn(),
     hasActivityStreams: vi.fn(),
+    // Doublé pour que le post-traitement du dénivelé ne parte pas en erreur
+    // rattrapée : ce fichier éprouve la transmission de l'athlète, pas la
+    // tolérance aux pannes (qui a ses propres tests dans `ingest.test.ts`).
+    recordActivityElevation: vi.fn(),
     // `recordSustainedMaxHr`, lui, tourne pour de vrai : c'est un `UPDATE` de
     // plus qui doit porter l'athlète du fichier. Il n'a besoin que de l'erreur.
     ActivityNotFoundError: class ActivityNotFoundError extends Error {},
@@ -181,6 +185,7 @@ const PARSED: ParsedFitActivity = {
   movingTimeS: 1_800,
   elapsedTimeS: 1_820,
   elevationGainM: 20,
+  elevationLossM: null,
   avgHrBpm: 168,
   maxHrBpm: 182,
   avgCadenceSpm: 180,

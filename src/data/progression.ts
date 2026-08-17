@@ -19,9 +19,15 @@ import {
   type MonotonyPoint,
 } from '@/lib/metrics';
 
+import { countPendingElevation } from './activities';
 import { getCurrentAthlete } from './athlete';
 import { db } from './db/client';
 import { activities, type Activity } from './db/schema';
+import {
+  NEUTRAL_VO2MAX_CORRECTION,
+  getVo2maxCorrection,
+  type Vo2maxCorrectionDto,
+} from './vo2max-correction';
 import { listWellnessDays, type WellnessDayDto } from './wellness';
 import {
   VO2MAX_WINDOW_DAYS,
@@ -150,6 +156,37 @@ export type ProgressionDto = {
    * couvre les deux.
    */
   vo2maxUnavailable: Vo2maxUnavailableDto | null;
+  /**
+   * Le **facteur correctif** appliqué aux VO₂max de cette page, son origine, et
+   * l'historique des courses qui le calibrent.
+   *
+   * Il est ici plutôt que dans une lecture à part parce qu'il n'est pas
+   * seulement une donnée d'affichage : c'est lui qui a multiplié
+   * {@link ProgressionDto.vo2max} et {@link ProgressionDto.current}. Les montrer
+   * sans lui, ou lui sans eux, laisserait un écran expliquer un chiffre qu'un
+   * autre appel aurait pu calculer autrement.
+   *
+   * **Indépendant du filtre de période**, comme les records : une course de l'an
+   * dernier calibre toujours, et le facteur ne change pas parce qu'on regarde
+   * trois mois.
+   */
+  vo2maxCorrection: Vo2maxCorrectionDto;
+  /**
+   * Nombre de séances dont le **dénivelé** reste à établir (cf.
+   * `countPendingElevation`). Tant qu'il est non nul, tout ce que cette page dit
+   * de la VO₂max est **provisoire**, et l'écran doit le dire.
+   *
+   * Ce n'est pas une coquetterie : entre la migration qui a créé les colonnes de
+   * dénivelé et le passage de `pnpm db:backfill:elevation`, les séances récentes
+   * portent la correction d'altitude et l'historique ne la porte pas. Le nuage
+   * mêle alors deux grandeurs sur le même axe, et l'écart à 30 jours compare une
+   * fenêtre corrigée à une fenêtre qui ne l'est pas — soit un artefact
+   * d'ingestion affiché comme une progression.
+   *
+   * **Indépendant du filtre de période**, comme les records : le rattrapage
+   * porte sur tout l'historique, pas sur la fenêtre regardée.
+   */
+  pendingElevationActivities: number;
   /**
    * Les tendances de bien-être, sur une fenêtre **fixe** de
    * {@link WELLNESS_TREND_DAYS} jours.
@@ -420,6 +457,10 @@ function emptyProgression(range: ProgressionRange, today: string): ProgressionDt
     // Sans athlète, il n'y a pas de cause à expliquer : c'est l'onboarding qui parle.
     fitnessUnavailable: null,
     vo2maxUnavailable: null,
+    // Sans athlète, il n'y a ni course déclarée ni réglage : le neutre.
+    vo2maxCorrection: NEUTRAL_VO2MAX_CORRECTION,
+    // Sans athlète, aucune séance : rien qui reste à balayer.
+    pendingElevationActivities: 0,
     // Sans athlète, aucun relevé bien-être n'a jamais été rapatrié.
     wellness: { from: today, to: today, days: [] },
   };
@@ -457,20 +498,28 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
 
   const wellnessFrom = shiftCivilDate(today, -(WELLNESS_TREND_DAYS - 1));
 
-  const [rows, wellnessRows] = await Promise.all([
+  const [rows, wellnessRows, vo2maxCorrection, pendingElevationActivities] = await Promise.all([
     db
       .select()
       .from(activities)
       .where(eq(activities.athleteId, profile.id))
       .orderBy(desc(activities.startedAt)),
     listWellnessDays(profile.id, wellnessFrom, today),
+    // Le facteur correctif, calibré sur les courses déclarées. La page l'affiche
+    // *et* l'applique : le nuage de points, la courbe de tendance et la tuile
+    // passent par le même nombre que le détail de chaque séance.
+    getVo2maxCorrection(profile.id),
+    // Un `count(*)` sous le prédicat du rattrapage : ce que la page affiche de
+    // la VO₂max n'est comparable dans le temps que s'il est nul, et le lire ici
+    // évite à l'écran de le supposer.
+    countPendingElevation(profile.id),
   ]);
 
   const daily = buildDailyTrimp(rows, profile, today);
   const loadSeries = daily.length > 0 ? computeLoadSeries(daily) : [];
   const monotonySeries = daily.length > 0 ? computeMonotonySeries(daily) : [];
   const fitness = buildFitness(loadSeries);
-  const currentVo2max = buildVo2max(rows, profile, today);
+  const currentVo2max = buildVo2max(rows, profile, today, vo2maxCorrection.factor);
 
   const firstDay = firstActivityDay(rows, today);
   const from =
@@ -485,7 +534,7 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
   const buckets =
     firstDay === null ? [] : buildBuckets(firstDay > from ? firstDay : from, today, bucketKind);
 
-  const samples = collectRunVo2max(rows, profile);
+  const samples = collectRunVo2max(rows, profile, vo2maxCorrection.factor);
   const points = samples
     .filter((sample) => sample.date >= from && sample.date <= today)
     .map(({ date, value }) => ({ date, value }));
@@ -507,6 +556,8 @@ export async function getProgression(range: ProgressionRange): Promise<Progressi
     vo2maxUnavailable: currentVo2max
       ? null
       : buildVo2maxUnavailable(rows, profile, today),
+    vo2maxCorrection,
+    pendingElevationActivities,
     wellness: { from: wellnessFrom, to: today, days: wellnessRows },
   };
 }

@@ -43,6 +43,7 @@ type SessionInput = {
   totalTimerTime?: number | null;
   totalDistance?: number | null;
   totalAscent?: number;
+  totalDescent?: number;
   avgHeartRate?: number;
   maxHeartRate?: number;
   avgCadence?: number;
@@ -65,6 +66,7 @@ const DEFAULT_SESSION: SessionInput = {
   totalTimerTime: 600,
   totalDistance: 1000,
   totalAscent: 12,
+  totalDescent: 9,
   avgHeartRate: 152,
   maxHeartRate: 171,
   avgCadence: 87,
@@ -215,6 +217,7 @@ describe('parseFitActivity — fichier nominal', () => {
       movingTimeS: 600,
       elapsedTimeS: 620,
       elevationGainM: 12,
+      elevationLossM: 9,
       avgHrBpm: 152,
       maxHrBpm: 171,
     });
@@ -337,11 +340,29 @@ describe('parseFitActivity — capteurs absents', () => {
   });
 
   it('laisse le dénivelé à null quand la session ne le porte pas', () => {
+    // Le cas de la montre de l'athlète : ni `total_ascent` ni `total_descent`.
+    // Le parseur ne devine rien — c'est l'ingestion qui calcule le repli depuis
+    // le flux d'altitude, et elle seule.
     const parsed = parseFitActivity(
-      buildFit({ sessions: [{ ...DEFAULT_SESSION, totalAscent: undefined }] }),
+      buildFit({
+        sessions: [{ ...DEFAULT_SESSION, totalAscent: undefined, totalDescent: undefined }],
+      }),
     );
 
     expect(parsed.elevationGainM).toBeNull();
+    expect(parsed.elevationLossM).toBeNull();
+  });
+
+  it('lit les deux sens indépendamment l’un de l’autre', () => {
+    // `total_descent` existe bel et bien dans le profil FIT, à côté de
+    // `total_ascent`. Un appareil peut n'écrire que l'un des deux : la perte
+    // n'est jamais déduite du gain.
+    const parsed = parseFitActivity(
+      buildFit({ sessions: [{ ...DEFAULT_SESSION, totalDescent: undefined }] }),
+    );
+
+    expect(parsed.elevationGainM).toBe(12);
+    expect(parsed.elevationLossM).toBeNull();
   });
 });
 

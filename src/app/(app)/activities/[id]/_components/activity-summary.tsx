@@ -9,7 +9,13 @@ import { defaultActivityName } from "@/lib/fit/sport";
 
 import { MetricInfo } from "../../../_components/metric-info";
 import type { MetricSheetId } from "../../../_lib/metric-sheets";
-import { formatDistance, formatHeartRate, formatPace, formatVo2max } from "../../../_lib/format";
+import {
+  formatCorrectionFactor,
+  formatDistance,
+  formatHeartRate,
+  formatPace,
+  formatVo2max,
+} from "../../../_lib/format";
 import {
   MISSING,
   formatCadence,
@@ -41,6 +47,11 @@ export type ActivitySummaryData = {
    */
   trimpContext: TrimpContextDto | null;
   effectiveVo2max: number | null;
+  /**
+   * Le facteur correctif qui a multiplié la VO₂max de cette séance, `null`
+   * quand il n'y a rien à dire (pas de VO₂max, ou aucun recalage).
+   */
+  vo2maxCorrectionFactor: number | null;
 };
 
 /** En-tête : d'où l'on vient, quand la séance a eu lieu, comment elle s'appelle. */
@@ -165,6 +176,28 @@ export function ActivityStatsPanel({
           </div>
         ))}
       </dl>
+
+      {/* Le recalage est **dit**, pas seulement appliqué : sans cette ligne, la
+          valeur ci-dessus se comparerait à celle d'hier ou à celle d'une autre
+          application sans qu'on sache qu'un facteur les sépare. Le détail —
+          quelle course, quelles deux VO₂max — est sur « Progression », où
+          l'historique des courses se lit ; le répéter sur chaque séance
+          alourdirait dix écrans pour la même phrase. */}
+      {activity.vo2maxCorrectionFactor === null ? null : (
+        <p className="mt-4 text-[0.76rem] leading-relaxed text-fg-faint">
+          VO₂max recalée{" "}
+          <span className="num text-fg-muted">
+            {formatCorrectionFactor(activity.vo2maxCorrectionFactor)}
+          </span>{" "}
+          sur tes courses déclarées.{" "}
+          <Link
+            href="/progression"
+            className="rounded-button text-fg-muted underline-offset-2 transition-colors duration-150 ease-out hover:text-accent"
+          >
+            Voir sur quelle course
+          </Link>
+        </p>
+      )}
 
       {/* La jauge ferme le panneau plutôt que d'occuper une case de la grille :
           un arc dans une tuile de 4 cm serait illisible, et la charge est une

@@ -85,6 +85,7 @@ vi.mock('./db/client', async () => {
   type Table = Parameters<typeof getTableName>[0];
 
   type SelectChain = PromiseLike<unknown[]> & {
+    leftJoin: () => SelectChain;
     where: (clause: SQL) => SelectChain;
     orderBy: () => SelectChain;
     limit: () => SelectChain;
@@ -92,6 +93,8 @@ vi.mock('./db/client', async () => {
 
   const selectChain = (name: string): SelectChain => {
     const chain: SelectChain = {
+      // La lecture des courses déclarées joint `activities` (cf. `./race-results`).
+      leftJoin: () => chain,
       where: (clause) => {
         dbState.selects.push({ table: name, where: clause });
         return chain;
@@ -142,6 +145,10 @@ const ATHLETE_ROW: Athlete = {
   wellnessReadingDay: null,
   pushDailySession: true,
   pushActivityAnalyzed: true,
+  vo2maxElevationCorrection: true,
+  vo2maxAscentCoefM: 2,
+  vo2maxDescentCoefM: -1,
+  vo2maxCorrectionFactor: null,
   pushSuggestions: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -163,6 +170,8 @@ function run(overrides: Partial<Activity> & { startedAt: Date }): Activity {
     maxHrBpm: 168,
     avgPaceSecPerKm: 300,
     avgCadenceSpm: 172,
+    elevationLossM: null,
+    elevationScannedAt: null,
     bestSegmentsScannedAt: null,
     sustainedMaxHrBpm: null,
     lthrSampleBpm: null,

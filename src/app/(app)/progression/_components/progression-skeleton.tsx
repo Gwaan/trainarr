@@ -185,6 +185,20 @@ export function ProgressionSkeleton() {
         </div>
       </PanelFrame>
 
+      {/* Courses déclarées : le tableau, puis le pied qui explique le facteur
+          correctif (un titre court et deux à trois phrases en `text-[0.78rem]
+          leading-relaxed`, soit quatre lignes sur mobile et deux sur large).
+          Le nombre de lignes n'est pas connu d'avance — trois est la géométrie
+          d'un athlète qui a commencé à déclarer ses courses, et l'état vide,
+          lui, occupe à peu près la même hauteur. */}
+      <PanelFrame>
+        <TableFrame rows={3} />
+        <div className="border-t border-border px-4 py-3 sm:px-5">
+          <Skeleton className="h-3 w-40" />
+          <TextLines className="mt-2" mobile={4} wide={2} lineClass="h-3" />
+        </div>
+      </PanelFrame>
+
       {/* Chronos prévus : quatre distances, puis le pied qui porte l'ancre et
           la réserve de fiabilité. Trois paragraphes, pas deux lignes — la ligne
           « Chrono de référence », la phrase de source (avec sa note de

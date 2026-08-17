@@ -218,3 +218,161 @@ describe('estimateEffectiveVo2max', () => {
     expect(estimateEffectiveVo2max(input)).toBeNull();
   });
 });
+
+/**
+ * Correction d'altitude (Greif), branchée sur la distance.
+ *
+ * La séance de référence est celle qui a motivé tout ce travail : 2 910 m en
+ * 19:57 à 158 bpm pour une FC max de 195, courue en boucle avec 32 m de D+ (donc
+ * autant de D−). Sans correction elle vaut 34,6 ; Runalyze, qui l'applique par
+ * défaut, en donne 35,1.
+ */
+describe('estimateEffectiveVo2max — correction d’altitude', () => {
+  const REFERENCE = {
+    distanceM: 2_910,
+    movingTimeS: 1_197,
+    avgHrBpm: 158,
+    maxHrBpm: 195,
+  } as const;
+
+  const GREIF = { ascentCoefM: 2, descentCoefM: -1 };
+
+  it('rend la valeur non corrigée quand rien n’est fourni', () => {
+    // Le comportement d'avant la correction, inchangé pour tout appelant qui ne
+    // sait rien du dénivelé.
+    expect(estimateEffectiveVo2max(REFERENCE)).toBeCloseTo(34.57, 2);
+  });
+
+  it('retrouve la valeur de Runalyze sur la séance de référence', () => {
+    // 2 910 + 2×32 − 1×32 = 2 942 m équivalents ; v100 passe de 193,55 à
+    // 195,68 m/min.
+    expect(
+      estimateEffectiveVo2max({
+        ...REFERENCE,
+        elevation: { gainM: 32, lossM: 32 },
+        elevationCorrection: GREIF,
+      }),
+    ).toBeCloseTo(35.05, 2);
+  });
+
+  it('ne corrige pas quand un des deux sens du dénivelé manque', () => {
+    // Et surtout : la valeur reste **celle d'avant**, pas une correction nulle.
+    expect(
+      estimateEffectiveVo2max({
+        ...REFERENCE,
+        elevation: { gainM: 32, lossM: null },
+        elevationCorrection: GREIF,
+      }),
+    ).toBeCloseTo(34.57, 2);
+  });
+
+  it('ne corrige pas quand l’athlète a désactivé le réglage', () => {
+    expect(
+      estimateEffectiveVo2max({
+        ...REFERENCE,
+        elevation: { gainM: 32, lossM: 32 },
+        elevationCorrection: null,
+      }),
+    ).toBeCloseTo(34.57, 2);
+  });
+
+  it('mesure le seuil de représentativité sur la distance réellement courue', () => {
+    // 1 400 m de côte deviendraient 2 000 m corrigés — mais c'est bien 1 400 m
+    // qui ont été courus, et l'effort reste trop court pour porter une
+    // estimation. La correction ne doit pas servir de passe-droit.
+    expect(
+      estimateEffectiveVo2max({
+        distanceM: 1_400,
+        movingTimeS: 600,
+        avgHrBpm: 158,
+        maxHrBpm: 195,
+        elevation: { gainM: 300, lossM: 0 },
+        elevationCorrection: GREIF,
+      }),
+    ).toBeNull();
+  });
+});
+
+/**
+ * Facteur correctif individuel, et **l'ordre** dans lequel il intervient.
+ *
+ * Le calcul du facteur lui-même vit dans `./vo2max-correction` ; ce qui se
+ * vérifie ici, c'est son application : après le contrôle de plausibilité, pas
+ * avant.
+ */
+describe('estimateEffectiveVo2max — facteur correctif', () => {
+  const REFERENCE = {
+    distanceM: 2_910,
+    movingTimeS: 1_197,
+    avgHrBpm: 158,
+    maxHrBpm: 195,
+  } as const;
+
+  it('multiplie la valeur estimée', () => {
+    // 34,57 × 1,128 — le rapport mesuré entre Trainarr et Runalyze sur cette
+    // séance, une fois la correction d'altitude mise de côté.
+    expect(
+      estimateEffectiveVo2max({ ...REFERENCE, correctionFactor: 1.128 }),
+    ).toBeCloseTo(34.57 * 1.128, 2);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['nul', 0],
+    ['négatif', -1.1],
+    ['NaN', Number.NaN],
+  ])('rend la valeur non recalée quand le facteur est %s', (_label, correctionFactor) => {
+    expect(estimateEffectiveVo2max({ ...REFERENCE, correctionFactor })).toBeCloseTo(34.57, 2);
+  });
+
+  it('s’applique après le contrôle de plausibilité, jamais avant', () => {
+    /*
+     * Le cas qui décide de l'ordre : une mesure valide tout en haut de la
+     * plage. 10 km en 35:00 à 150 bpm pour une FC max de 200 (v = 285,71 ;
+     * fraction = 0,6903550 ; v100 = 413,86) donne ≈ 88,6 — dans [20, 90], donc
+     * une séance parfaitement lisible. Corrigée d'un facteur crédible, elle
+     * dépasse 90.
+     *
+     * Testée sur la valeur corrigée, la borne rendrait `null` : la séance
+     * disparaîtrait du graphe **et** de la moyenne à 30 jours au seul motif
+     * qu'une calibration individuelle l'a poussée d'un point. C'est pire que
+     * d'afficher une valeur haute — d'où l'ordre retenu.
+     */
+    const effort = {
+      distanceM: 10_000,
+      movingTimeS: 2_100,
+      avgHrBpm: 150,
+      maxHrBpm: 200,
+    } as const;
+
+    const raw = estimateEffectiveVo2max(effort);
+    expect(raw).not.toBeNull();
+    expect(raw!).toBeGreaterThan(85);
+    expect(raw!).toBeLessThan(90);
+
+    const corrected = estimateEffectiveVo2max({ ...effort, correctionFactor: 1.128 });
+    expect(corrected).not.toBeNull();
+    expect(corrected!).toBeGreaterThan(90);
+    expect(corrected!).toBeCloseTo(raw! * 1.128, 6);
+  });
+
+  it('ne repêche pas une mesure aberrante qu’un facteur ramènerait dans la plage', () => {
+    /*
+     * L'ordre a une contrepartie, et elle est voulue : une mesure hors plage
+     * reste écartée même si le facteur l'y ramènerait. 10 km en 33:00 à 150 bpm
+     * pour 200 de FC max donne ≈ 95,4 — refusé —, et 0,7 × 95,4 ≈ 66,8 serait
+     * pourtant dans la plage. Ce qui est jugé, c'est la mesure : le recalage ne
+     * rend pas crédible une donnée qui ne l'était pas.
+     */
+    const effort = {
+      distanceM: 10_000,
+      movingTimeS: 1_980,
+      avgHrBpm: 150,
+      maxHrBpm: 200,
+    } as const;
+
+    expect(estimateEffectiveVo2max(effort)).toBeNull();
+    expect(estimateEffectiveVo2max({ ...effort, correctionFactor: 0.7 })).toBeNull();
+  });
+});

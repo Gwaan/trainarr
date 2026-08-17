@@ -97,6 +97,33 @@ export function SettingsTabsSkeleton() {
         <Skeleton className="h-3.5 w-72 max-w-full" />
       </div>
 
+      {/* Correction d'altitude : un paragraphe, un bandeau de méthode, une case
+          et deux coefficients côte à côte, puis le bouton — puis le facteur
+          correctif, bâti sur le même patron avec un seul champ. Les deux
+          panneaux suivent le profil dans l'onglet « Profil ». */}
+      <PanelSkeleton titleWidth="w-36">
+        <Skeleton className="h-14 w-full" />
+        <Skeleton className="h-16 w-full" />
+        <div className="flex flex-col gap-4 sm:flex-row sm:gap-5">
+          {[0, 1].map((coefficient) => (
+            <div key={coefficient} className="flex-1">
+              <Skeleton className="h-3.5 w-28" />
+              <Skeleton className="mt-2 h-3 w-full" />
+              <Skeleton className="mt-3 h-11 w-full" />
+            </div>
+          ))}
+        </div>
+        <Skeleton className="h-11 w-full sm:w-32" />
+      </PanelSkeleton>
+
+      <PanelSkeleton titleWidth="w-48">
+        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-16 w-full" />
+        <FieldSkeleton inputClassName="w-full sm:w-40" />
+        <Skeleton className="h-11 w-full sm:w-32" />
+      </PanelSkeleton>
+
+
       <span className="sr-only">Chargement des réglages…</span>
     </div>
   );

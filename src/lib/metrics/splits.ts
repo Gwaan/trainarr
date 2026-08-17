@@ -8,6 +8,7 @@
  * mal réglé, appuis manuels), pas des kilomètres.
  */
 
+import { elevationMoves } from './elevation';
 import { cappedSampleDurationsS, sampleDurationCapS, weightedMean } from './series';
 
 export type Split = {
@@ -47,19 +48,6 @@ export const FULL_SPLIT_TOLERANCE_M = 0.5;
 export function isPartialSplit(distanceM: number): boolean {
   return distanceM < METERS_PER_KM - FULL_SPLIT_TOLERANCE_M;
 }
-
-/**
- * Seuil d'hystérésis du dénivelé positif, en mètres.
- *
- * L'altimètre barométrique d'une montre oscille de quelques dizaines de
- * centimètres au repos. Sommer naïvement toutes les variations positives d'un
- * 10 km parfaitement plat produit plusieurs dizaines de mètres de D+ fantôme.
- * On ne comptabilise donc une montée que lorsque l'altitude dépasse d'au moins
- * 1 m le dernier repère retenu, et on ne redescend le repère que sur une baisse
- * d'au moins 1 m : le bruit de faible amplitude est filtré, une vraie bosse de
- * 3 m est conservée.
- */
-const ELEVATION_NOISE_THRESHOLD_M = 1;
 
 /**
  * Temps au franchissement d'une borne, par interpolation linéaire entre les deux
@@ -124,7 +112,8 @@ function crossingTimeS(
  *   moyenne à un comptage de points dès que la cadence de la ceinture changeait
  *   en cours de split. `null` sans stream de FC, ou si aucun point du split n'en
  *   porte une mesure.
- * - `elevationGainM` : gain positif filtré (cf. `ELEVATION_NOISE_THRESHOLD_M`).
+ * - `elevationGainM` : gain positif filtré (cf. `ELEVATION_NOISE_THRESHOLD_M`
+ *   dans `./elevation`, partagé avec le dénivelé total persisté en base).
  *   Le filtre court d'un bout à l'autre de la partie découpée et attribue chaque
  *   gain au split de l'échantillon courant : découper l'hystérésis par split
  *   perdrait les montées à cheval sur une borne. `null` sans stream d'altitude.
@@ -361,7 +350,20 @@ function recordedTimeS(
   return total;
 }
 
-/** D+ filtré, attribué au split de l'échantillon où la montée est constatée. */
+/**
+ * D+ filtré, attribué au split de l'échantillon où la montée est constatée.
+ *
+ * Le filtre lui-même vit dans `./elevation` — **la même fonction** que celle qui
+ * calcule le dénivelé total écrit en base à l'ingestion. Deux implémentations
+ * auraient fini par diverger, et le résumé d'une séance aurait annoncé un D+ que
+ * la somme de ses splits contredit.
+ *
+ * Le balayage court d'un bout à l'autre de la partie découpée (`from` → `until`)
+ * sans réinitialiser son repère à chaque borne : découper l'hystérésis par split
+ * perdrait les montées à cheval sur un kilomètre. Seules les variations
+ * **positives** alimentent un split — les descentes ne servent ici qu'à déplacer
+ * le repère, ce dont `elevationMoves` s'est déjà chargé.
+ */
 function elevationGainPerSplit(
   altitude: readonly (number | null)[],
   bounds: readonly number[],
@@ -377,26 +379,12 @@ function elevationGainPerSplit(
 ): number[] {
   const gains: number[] = new Array<number>(splitCount).fill(0);
 
-  let reference: number | null = null;
+  // Les variations sont rendues par index croissant : un curseur monotone suffit
+  // à les répartir, exactement comme le balayage index par index qu'il remplace.
   let split = 0;
-
-  for (let index = from; index < until; index += 1) {
-    while (split < splitCount - 1 && index >= bounds[split + 1]) split += 1;
-
-    const value = altitude[index];
-    if (value === null || !Number.isFinite(value)) continue;
-
-    if (reference === null) {
-      reference = value;
-      continue;
-    }
-
-    if (value - reference >= ELEVATION_NOISE_THRESHOLD_M) {
-      gains[split] += value - reference;
-      reference = value;
-    } else if (reference - value >= ELEVATION_NOISE_THRESHOLD_M) {
-      reference = value;
-    }
+  for (const move of elevationMoves(altitude, from, until)) {
+    while (split < splitCount - 1 && move.index >= bounds[split + 1]) split += 1;
+    if (move.deltaM > 0) gains[split] += move.deltaM;
   }
 
   return gains;

@@ -112,33 +112,11 @@ export const REFERENCE_DISTANCE_CHOICES: readonly {
 export const DEFAULT_REFERENCE_DISTANCE: ReferenceDistance = "10k";
 
 /**
- * `mm:ss` ou `hh:mm:ss` — le masque du champ chrono.
- *
- * Les minutes et les secondes restent sous 60 : « 90:00 » pour un semi est une
- * saisie ambiguë (90 minutes ? 90 secondes ?), mieux vaut la refuser tout de
- * suite que d'en deviner une.
+ * Les deux conversions du chrono vivent avec son masque de saisie, dans
+ * `(app)/_lib/race-time.ts` : la déclaration d'une course, sur une autre route,
+ * s'en sert aussi. Réexportées ici, où tous leurs appelants les cherchent.
  */
-const RACE_TIME_SHAPE = /^(?:(\d{1,2}):)?([0-5]?\d):([0-5]\d)$/;
-
-/** Le chrono saisi, en secondes, ou `null` si ce n'en est pas un. */
-export function parseRaceTimeSeconds(input: string): number | null {
-  const match = RACE_TIME_SHAPE.exec(input.trim());
-  if (match === null) return null;
-
-  const [, hours, minutes, seconds] = match;
-  const hoursPart = hours === undefined ? 0 : Number(hours) * 3_600;
-  return hoursPart + Number(minutes) * 60 + Number(seconds);
-}
-
-/** Le chemin inverse : `2_910` → `48:30`, `6_720` → `1:52:00`. */
-export function formatRaceTimeSeconds(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3_600);
-  const minutes = Math.floor((total % 3_600) / 60);
-  const rest = String(total % 60).padStart(2, "0");
-
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
-}
+export { formatRaceTimeSeconds, parseRaceTimeSeconds } from "../../_lib/race-time";
 
 /** La distance de référence correspondant à cette chaîne, `null` si elle n'en désigne aucune. */
 export function asReferenceDistance(value: string): ReferenceDistance | null {
