@@ -69,9 +69,21 @@
  *   Tant qu'aucune course n'est déclarée dans Trainarr, la valeur rendue ici est
  *   donc une estimation **non recalée**, et non une estimation neutre. C'est le
  *   prix à payer pour ne rien inventer, mais il faut le dire à qui compare.
- * - **La correction par le dénivelé** (`VO2maxCalculator::…WithElevation`), que
- *   Runalyze laisse désactivée par défaut (`VO2MAX_USE_CORRECTION_FOR_ELEVATION`
- *   = `false`).
+ * - **La correction par le dénivelé** (`VO2maxCalculator::…WithElevation`).
+ *
+ *   ⚠️ Ce commentaire a longtemps affirmé que Runalyze la laissait désactivée
+ *   par défaut (`VO2MAX_USE_CORRECTION_FOR_ELEVATION = false`). **C'est faux sur
+ *   les versions actuelles** : l'écran « Paramètres › Calculs » de Runalyze
+ *   affiche « Adapter suivant le dénivelé — Défaut : oui », avec la formule de
+ *   Peter Greif et ses deux réglages par défaut, `+2 m` de distance par mètre
+ *   monté et `−1 m` par mètre descendu (relevé sur une installation réelle le
+ *   17/08/2026). La constante lue dans la branche `support/4.3.x` ne décrit pas
+ *   le comportement servi aujourd'hui.
+ *
+ *   Effet mesuré sur la séance du 15/08/2026 (2 910 m, 32 m de D+, boucle) :
+ *   34,6 → 35,1, soit un demi-point. Modeste sur du plat, il ne l'est plus en
+ *   trail — Runalyze écarte d'ailleurs les courses de trail de sa forme par
+ *   défaut, ce que nous ne faisons pas non plus.
  *
  * ## Écart assumé sur un coefficient
  *
