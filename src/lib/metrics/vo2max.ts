@@ -55,9 +55,20 @@
  *   `max(VO2max_par_le_temps / VO2max_par_la_FC)` sur les meilleures courses
  *   déclarées, et **1.0 en l'absence de course déclarée**. Trainarr n'a pas
  *   encore de notion de course : le facteur serait 1.0 chez Runalyze aussi. Rien
- *   n'est donc appliqué. En pratique ce facteur vaut souvent 0.85–0.95, ce qui
- *   veut dire que nos valeurs peuvent lire un peu haut tant qu'aucune course
- *   n'est enregistrée — mieux vaut ça qu'un abattement inventé.
+ *   n'est donc appliqué.
+ *
+ *   **Le sens de l'écart n'est pas celui qu'on croit.** Une version antérieure
+ *   de ce commentaire annonçait un facteur « souvent 0.85–0.95 », donc des
+ *   valeurs qui liraient un peu haut. Confronté aux données (séance du
+ *   15/08/2026 : 2 910 m en 19:57 à 158 bpm pour une FC max de 195 → 34,6 ici,
+ *   39 chez Runalyze, rapport **1,128**), c'est l'inverse : chez un athlète dont
+ *   la FC tourne haut pour l'effort produit, l'estimation par la FC **sous-lit**,
+ *   et le facteur calibré sur les courses dépasse 1. Le facteur corrige un biais
+ *   individuel, il ne va pas systématiquement dans un sens.
+ *
+ *   Tant qu'aucune course n'est déclarée dans Trainarr, la valeur rendue ici est
+ *   donc une estimation **non recalée**, et non une estimation neutre. C'est le
+ *   prix à payer pour ne rien inventer, mais il faut le dire à qui compare.
  * - **La correction par le dénivelé** (`VO2maxCalculator::…WithElevation`), que
  *   Runalyze laisse désactivée par défaut (`VO2MAX_USE_CORRECTION_FOR_ELEVATION`
  *   = `false`).
