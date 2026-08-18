@@ -136,6 +136,31 @@ environ une minute après sa synchronisation sur intervals.icu.**
 | `pnpm db:backfill:best-segments` | Calcule les meilleurs efforts de l'historique importé avant la table qui les porte |
 | `pnpm db:backfill:elevation` | Calcule le dénivelé (D+ / D−) de l'historique importé avant les colonnes qui le portent |
 
+### Où lancer les commandes de base
+
+Les entrées `pnpm db:*` du tableau ci-dessus supposent une **base joignable
+depuis la machine** et un `DATABASE_URL` dans `.env.local`. C'est le cas en
+développement, pas sur le serveur : Postgres n'y écoute que sur le réseau
+Docker, sous le nom d'hôte `db`.
+
+**Les migrations n'ont pas à être lancées à la main en production.** Le service
+`migrate` de `docker-compose.yml` les applique à chaque déploiement, et le
+serveur ne démarre qu'après son succès (`service_completed_successfully`) : une
+migration en échec bloque la livraison au lieu de servir l'appli sur une base
+incohérente.
+
+**Les rattrapages, eux, se lancent une fois, à la main**, dans ce même service —
+c'est le seul qui porte à la fois `tsx`, les sources et l'accès au réseau de la
+base :
+
+```bash
+docker compose run --rm migrate node_modules/.bin/tsx scripts/backfill-elevation.ts
+docker compose run --rm migrate node_modules/.bin/tsx scripts/backfill-best-segments.ts
+```
+
+`--rm` parce que ce sont des one-shot : le container sort quand le balayage est
+fini. Les deux scripts sont idempotents, une relance ne coûte qu'un scan.
+
 ### Rattraper les meilleurs efforts
 
 Les meilleurs efforts d'une séance (400 m, 1 km, mile, 5 km, 10 km, semi) sont
@@ -173,8 +198,11 @@ pnpm db:backfill:elevation   # une fois, après `pnpm db:migrate`
 Le script balaie les séances portant un flux d'altitude à qui il manque un des
 deux sens, par lots de 50, en lisant les flux **une séance à la fois**. Il
 journalise sa progression, passe sans broncher sur un flux illisible, et se
-relance sans risque : l'écriture est une complétion (`coalesce`), elle n'écrase
-jamais ce que le fichier avait dit.
+relance sans risque : l'écriture ne remplit la paire que si elle est
+**entièrement** vide, et n'écrase jamais ce que le fichier avait dit. Une montre
+qui n'écrit qu'un seul des deux sens garde donc sa valeur et reste sans l'autre —
+mélanger sa montée et notre descente ferait entrer deux filtres différents dans
+une même formule.
 
 Les deux colonnes servent l'affichage du D+ **et** la correction d'altitude de la
 VO₂max (formule de Peter Greif, réglable dans « Réglages › Profil ») : sans

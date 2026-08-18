@@ -32,7 +32,14 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY drizzle ./drizzle
-COPY src/data/db/migrate.ts ./src/data/db/migrate.ts
+COPY tsconfig.json ./
+# `src` en entier, et non les seuls fichiers de `migrate.ts` : ce stage sert
+# aussi aux rattrapages de `scripts/`, qui remontent dans `src/data/db/` et
+# `src/lib/metrics/`. Énumérer leurs imports ici les casserait au premier
+# refactor, en production et pas au build. Ce ne sont que des sources, jamais
+# déployées — l'image est jetée quand le container one-shot sort.
+COPY src ./src
+COPY scripts ./scripts
 # Binaire appelé directement plutôt que via `pnpm exec` : corepack tenterait de
 # télécharger pnpm au démarrage du container, ce qui suppose un accès réseau.
 CMD ["node_modules/.bin/tsx", "src/data/db/migrate.ts"]
